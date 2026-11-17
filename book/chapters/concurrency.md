@@ -42,6 +42,26 @@ bounds check rather than a write into a neighbour. `pool::split_mut(data, grain,
 
 {{example:pool-split-mut}}
 
+`pool::zip2(a, b, grain, f)`, `pool::zip3` and `pool::zip4` run one parallel loop over several
+columns at once - the shape of an ECS system, positions updated from velocities. Every slice is cut
+at the same indices into pieces of at most `grain` elements, and `f` gets the k-th piece of each, so
+`p[i]` and `v[i]` in the callback are the same row. The slices must be equal in length (checked once,
+as the call runs: `parallel_for_zip: slice argument 2 has length 4, which is not the first
+slice's`); the exclusive ones are written, the shared ones read by every worker, and as with
+`split_mut` the pieces depend only on the length and the grain. Each argument takes its loan at the
+call, so the same vector cannot be passed twice with one `&mut`, and the callback cannot capture any
+of them. The builtin underneath, `parallel_for_zip(grain, f, s1, .., sn)`, takes one to four slices.
+
+```grl
+pool::zip3(&mut pos[0: n], &vel[0: n], &mut life[0: n], 4096,
+    |p: &mut [f32], v: &[f32], l: &mut [u32]| -> unit {
+        for i in p.len() {
+            p[i] = p[i] + v[i] * dt;
+            l[i] = l[i] - 1;
+        }
+    });
+```
+
 `left, right := split_at_mut(s, mid)` cuts one exclusive slice into its two halves, `s[0: mid]` and
 `s[mid: len]`, and checks `mid <= s.len()` as it runs. Both halves can be used, written and passed on
 at once - each is a disjoint piece of the same loan, which is how divide-and-conquer code (a parallel

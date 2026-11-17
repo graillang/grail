@@ -25,6 +25,23 @@
   compiler and GRAIL_JOBS=1, in user-space instructions: hello no-op build 0.235G -> 0.008G, hello
   check 0.310G -> 0.058G, hello build 0.453G -> 0.140G. `grail cache prune` drops `fp/`, `inputs/`
   and `tool-id/` whole.
+- **Short floats print without big integers.** A double whose shortest form has at most 15 digits
+  and lies in [1e-7, 1e22) (`0.25`, `1.037`, `123.5`) is printed from a candidate checked exactly
+  with one correctly rounded operation (Clinger), with the same text as before; longer ones still
+  go through Burger & Dybvig. Decimal-shaped values print about twice as fast (LLVM 729M -> 384M
+  instructions for 6,000 of them).
+- Parallel loops over several columns: `parallel_for_zip(grain, f, s1, .., s4)` and
+  `pool::zip2/zip3/zip4` with generic callable bounds (simd-layout-parallel-loops.md 4.2). One split,
+  the same index range of every slice per piece, equal lengths checked once, a piece per worker;
+  same-vector-twice, captured arguments and `FnMut` callbacks are the ordinary refusals.
+
+- **More small functions are inlined, and dispatch wrappers too.** The inliner filed a candidate
+  under the first label of its body, which in a build with error locations is a statement's site
+  label, not the function's symbol, so most small leaves were never matched to their calls. They are
+  now filed under their symbol. A body whose only call is the last thing it does (`rt_alloc` picking
+  `rt_alloc_unlocked` or `rt_alloc_shared`) is inlined as its test and the call it makes. Measured
+  (callgrind, one worker, minimum of five): a join 2911 -> 2888 instructions, a spawn 1757 -> 1741,
+  fib(20) by nested join -0.24%. An inlined wrapper is not a frame of its own in a backtrace.
 - Fixed: `grail fmt` could break a long expression inside `<<` or `>>` (each is two `<`/`>` tokens),
   or start a continuation line with `<`, and the output then read as a generic argument list and no
   longer parsed. A wrapped line now never starts with `<` or `>`.
@@ -43,7 +60,6 @@
   writes interfaces records its bodies now; `tools/test-cli.mjs` checks a program using each lib/
   module.
 - The internal assembler takes `.previous`.
-
 - **Integer map keys hash in registers.** `hash::Hash` has a defaulted `table_hash`, the SipHash-1-3
   value a map uses (the default streams through `hash`, as before); the integer types give it as
   `hash::word_hash`, the same value computed straight-line with no hasher state in memory. User
@@ -68,6 +84,11 @@
   step, writes one with no escapes in one append, and skips the whitespace call when the next byte
   is not whitespace. bench/json.grl: Grail-LLVM 4.48G -> 3.15G instructions (Rust 1.64G),
   Grail-native 14.3G -> 9.8G.
+- **Native backend: float elements go straight to and from SSE registers.** A float loaded through
+  a general register (`movq (%rax),%rax; movq %rax,%xmm8`) is `movsd (%rax),%xmm8`, and a store the
+  same way back; the internal assembler encodes `movsd`, and AArch64 and RISC-V translate it to
+  `ldr`/`str` and `fld`/`fsd`. nbody executes 7% fewer instructions.
+
 - **Raw address offsets.** In an `unsafe module`, the address operand of `raw_load`/`raw_store`
   and their narrow forms written as `p + k` with a literal `k` has no overflow check and is folded
   into the load's addressing (`movq 16(%rax),%rax`); other integer arithmetic there still follows
@@ -395,6 +416,19 @@
   thread instead of moving (`callback_pins_task`: 181 of 200 calls came back on another thread
   before, none now). While it waits, that worker runs nothing else; handing the worker's queue to a
   spare thread is the next step of stage 6.
+- Fixed: **`grail check` (and a default build) of a program with a compile-time value needed a C
+  compiler, or failed.** A probe is now assembled in process and linked with the build's linker, and
+  a module of a separate build - which reads the runtime as an interface - gives its probe the
+  runtime's sources. A value the batch probe cannot compute is computed by its own probe before the
+  interfaces are written, so `check` and `build` report the same error for it (it was an internal
+  "no type" error in a separate build). Module-binding guards in a probe are defined once (the
+  internal assembler has no `.comm`).
+
+- A table static can be a vector literal of constant expressions - `static K: u64[] = u64[0x428a2f98,
+  0x71374491];` - baked with no compile-time probe. The compiler's own sources hold only such
+  constant-tier values (`ci.mjs lint` refuses a run-tier one there, which would compile the whole
+  compiler in a probe on every cold build). The runtime gains `raw_sites`, the site-table helper
+  called by name, ahead of its first use at the next reseed.
 
 - The landing queue's build host runs the aarch64 legs under the patched qemu-aarch64:
   `tools/land-remote.sh` builds it there with `tools/qemu/build.sh` before starting the legs, and

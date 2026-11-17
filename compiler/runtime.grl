@@ -486,6 +486,13 @@ fn rt_fail_body(kind: u64, a: u64, b: u64, buf: u64, n: u64) -> u64 {
         at = rt_fail_put(buf, at, view("mutex poisoned: its holder failed"));
     } else if kind == 18 {
         at = rt_fail_put(buf, at, view("a parallel split needs a grain of at least one element"));
+    } else if kind == 19 {
+        // parallel_for_zip: argument `a` (counting from 1) is `b` elements long, the first one is not.
+        at = rt_fail_put(buf, at, view("parallel_for_zip: slice argument "));
+        at = rt_fail_num(buf, at, a);
+        at = rt_fail_put(buf, at, view(" has length "));
+        at = rt_fail_num(buf, at, b);
+        at = rt_fail_put(buf, at, view(", which is not the first slice's"));
     } else {
         at = rt_fail_put(buf, at, view("the program aborted"));
     }
@@ -4745,12 +4752,17 @@ fn rt_job_split(d: u64, lo: u64, hi: u64, kind: u64) -> u64 {
         if kind == 0 {
             return rt_job_map_leaf(d, lo);
         }
+        if kind == 2 {
+            return rt_job_zip_leaf(d, lo);
+        }
         return rt_job_chunk_leaf(d, lo);
     }
     mid := lo + (hi - lo) / 2;
     mut r = 0;
     if kind == 0 {
         r = rt_job_fork(rt_job_split_map, d, mid, hi);
+    } else if kind == 2 {
+        r = rt_job_fork(rt_job_split_zip, d, mid, hi);
     } else {
         r = rt_job_fork(rt_job_split_chunks, d, mid, hi);
     }
@@ -4762,6 +4774,87 @@ fn rt_job_split_map(d: u64, lo: u64, hi: u64) -> u64 {
 }
 fn rt_job_split_chunks(d: u64, lo: u64, hi: u64) -> u64 {
     return rt_job_split(d, lo, hi, 1);
+}
+fn rt_job_split_zip(d: u64, lo: u64, hi: u64) -> u64 {
+    return rt_job_split(d, lo, hi, 2);
+}
+// Zip descriptor (a job record used as storage, docs/design/simd-layout-parallel-loops.md 4.2):
+//   0 adapter   8 callback   16 environment   24 slices {view, width} pairs   40 count   48 grain
+//   56 number of slices
+// Leaf (d, k) covers [k * grain, min(count, k * grain + grain)) of every slice: one fresh view per
+// slice over the same index range, handed to the callback through the compiler's adapter
+// (zip_adapter), which takes one block {callback, environment, view 1 .. view n} and calls the
+// callback with the views as its arguments. The callback owns and frees each view, as a slice
+// parameter always is; the block is freed here.
+fn rt_job_zip_leaf(d: u64, k: u64) -> u64 {
+    n := raw_load(d + 40);
+    grain := raw_load(d + 48);
+    start := k * grain;
+    if n <= start {
+        return 0;
+    }
+    mut stop = start + grain;
+    if n < stop {
+        stop = n;
+    }
+    count := raw_load(d + 56);
+    pairs := raw_load(d + 24);
+    block := rt_alloc((2 + count) * 8);
+    raw_store(block, raw_load(d + 8));
+    raw_store(block + 8, raw_load(d + 16));
+    mut i = 0;
+    while i < count {
+        src := raw_load(pairs + i * 16);
+        width := raw_load(pairs + i * 16 + 8);
+        slot := rt_view_record();
+        raw_store(slot, raw_load(src) + start * width);
+        raw_store(slot + 8, stop - start);
+        raw_store(block + 16 + i * 8, slot);
+        i += 1;
+    }
+    raw_call2(raw_load(d), block, 0);
+    rt_free(block);
+    return stop - start;
+}
+// parallel_for_zip: `count` slices (an array of {view, width} pairs at `pairs`), all the same length
+// - checked here, once - cut into pieces of `grain` elements; piece k is the same index range of
+// every slice. As for rt_parallel_split the split is constructed from (n, grain) alone and the
+// pieces must cover n exactly. The caller holds every slice's loan until this returns.
+fn rt_parallel_zip(pairs: u64, count: u64, grain: u64, adapter: u64, f: u64, env: u64) -> u64 {
+    n := rt_len(raw_load(pairs));
+    mut i = 1;
+    while i < count {
+        m := rt_len(raw_load(pairs + i * 16));
+        if m != n {
+            rt_fail(19, i + 1, m);
+        }
+        i += 1;
+    }
+    if n == 0 {
+        return 0;
+    }
+    if grain == 0 {
+        rt_fail(18, 0, 0);
+    }
+    leaves := (n + grain - 1) / grain;
+    rt_jobs_sched();
+    d := rt_job_new();
+    raw_atomic_store(d + 32, 3);
+    raw_store(d, adapter);
+    raw_store(d + 8, f);
+    raw_store(d + 16, env);
+    raw_store(d + 24, pairs);
+    raw_store(d + 40, n);
+    raw_store(d + 48, grain);
+    raw_store(d + 56, count);
+    rt_region_enter();
+    covered := rt_job_split(d, 0, leaves, 2);
+    rt_region_leave();
+    if covered != n {
+        rt_abort();
+    }
+    rt_job_release(d);
+    return 0;
 }
 // Results land in their input slots, so the order of `out` is the input order whatever order the
 // leaves finish in. Every fork is joined before this returns, so no worker can still write into
@@ -8725,10 +8818,175 @@ fn rt_fmt_f64(acc: u64, v: u64) -> u64 {
             e = exponent - 1075;
         }
     }
+    if rt_fmt_short_fast(acc, v & 9223372036854775807) {
+        return 0;
+    }
     return rt_fmt_shortest(acc, f, e, eneg, (fraction == 0) & (1 < exponent));
 }
 // Burger & Dybvig digit generation for value = f * 2^(+/-e); `boundary` marks a power of two
 // whose lower neighbour is closer (the gap below is half the gap above).
+// Digits d1..dn of the value 0.d1..dn * 10^(+/-k), written positionally (kneg: the exponent is -k).
+fn rt_fmt_place(acc: u64, digits: u64, k: u64, kneg: u64) -> u64 {
+    n := rt_len(digits);
+    if kneg + (k == 0) {
+        rt_pushb(acc, 48);
+        rt_pushb(acc, 46);
+        mut z = 0;
+        if kneg {
+            z = k;
+        }
+        mut i = 0;
+        while i < z {
+            rt_pushb(acc, 48);
+            i += 1;
+        }
+        i = 0;
+        while i < n {
+            rt_pushb(acc, 48 + rt_at(digits, i));
+            i += 1;
+        }
+    } else {
+        mut i = 0;
+        while i < n {
+            if i == k {
+                rt_pushb(acc, 46);
+            }
+            rt_pushb(acc, 48 + rt_at(digits, i));
+            i += 1;
+        }
+        while i < k {
+            rt_pushb(acc, 48);
+            i += 1;
+        }
+    }
+    return 0;
+}
+// The shortest digits of a positive finite double without big integers, when there are at most 15
+// of them and the value lies in [1e-7, 1e22): a candidate D * 10^q with D < 2^53 and |q| <= 22 is
+// converted back in one correctly rounded operation (Clinger), so it is checked exactly; it is used
+// only when neither D - 1 nor D + 1 also reads back as the value, so it is the one Burger & Dybvig
+// would produce. Returns 0 when it did not decide (the caller runs the exact algorithm).
+fn rt_fmt_short_fast(acc: u64, a: u64) -> u64 {
+    one := rt_f64_pow2(0);
+    ten := raw_f64_from_i64(10);
+    if raw_flt(a, raw_fdiv(one, raw_f64_from_i64(10000000))) {
+        return 0;
+    }
+    // e = floor(log10(a)), never below the truth (it may be one above for a < 1).
+    mut e = 0;
+    mut eneg = 0;
+    if raw_flt(a, one) {
+        eneg = 1;
+        e = 1;
+        mut p = ten;
+        while raw_flt(raw_fmul(a, p), one) {
+            e += 1;
+            p = raw_fmul(p, ten);
+        }
+    } else {
+        mut t = one;
+        while (e < 22) & (raw_flt(raw_fmul(t, ten), a) + raw_feq(raw_fmul(t, ten), a)) {
+            t = raw_fmul(t, ten);
+            e += 1;
+        }
+        if e >= 22 {
+            return 0;
+        }
+    }
+    mut digits = 1;
+    while digits < 16 {
+        // q = e - digits + 1, the power of ten of the last digit.
+        mut q = 0;
+        mut qneg = 0;
+        if eneg {
+            q = e + digits - 1;
+            qneg = 1;
+        } else {
+            if e + 1 < digits {
+                q = digits - 1 - e;
+                qneg = 1;
+            } else {
+                q = e + 1 - digits;
+            }
+        }
+        if 22 < q {
+            if qneg {
+                return 0;
+            }
+            digits += 1;
+            continue;
+        }
+        mut pq = one;
+        mut j = 0;
+        while j < q {
+            pq = raw_fmul(pq, ten);
+            j += 1;
+        }
+        mut scaled = 0;
+        if qneg {
+            scaled = raw_fmul(a, pq);
+        } else {
+            scaled = raw_fdiv(a, pq);
+        }
+        d := raw_i64_from_f64(raw_fadd(scaled, rt_f64_pow2_neg1()));
+        if (d != 0) & (d < 9007199254740992) {
+            if rt_fmt_back(d, pq, qneg) == a {
+                if (rt_fmt_back(d - 1, pq, qneg) != a) & (rt_fmt_back(d + 1, pq, qneg) != a) {
+                    // The digits of d, most significant first, and the place of the point.
+                    list := rt_new();
+                    mut n = 0;
+                    mut r = d;
+                    while r != 0 {
+                        n += 1;
+                        r = r / 10;
+                    }
+                    mut i = 0;
+                    while i < n {
+                        rt_push(list, 0);
+                        i += 1;
+                    }
+                    r = d;
+                    i = n;
+                    while 0 < i {
+                        i -= 1;
+                        raw_store(raw_load(list) + i * 8, r % 10);
+                        r = r / 10;
+                    }
+                    // value = 0.digits * 10^(n + q) with q signed by qneg.
+                    mut k = 0;
+                    mut kneg = 0;
+                    if qneg {
+                        if q < n {
+                            k = n - q;
+                        } else {
+                            k = q - n;
+                            kneg = k != 0;
+                        }
+                    } else {
+                        k = n + q;
+                    }
+                    rt_fmt_place(acc, list, k, kneg);
+                    rt_drop_seq(list);
+                    return 1;
+                }
+                return 0;
+            }
+        }
+        digits += 1;
+    }
+    return 0;
+}
+// d * 10^q (qneg: d / 10^q), one correctly rounded operation, as bits.
+fn rt_fmt_back(d: u64, pq: u64, qneg: u64) -> u64 {
+    x := raw_f64_from_i64(d);
+    if qneg {
+        return raw_fdiv(x, pq);
+    }
+    return raw_fmul(x, pq);
+}
+fn rt_f64_pow2_neg1() -> u64 {
+    return 4602678819172646912;
+}
 fn rt_fmt_shortest(acc: u64, f: u64, e: u64, eneg: u64, boundary: u64) -> u64 {
     even := (f & 1) == 0;
     r := rt_big(f);
@@ -8827,38 +9085,7 @@ fn rt_fmt_shortest(acc: u64, f: u64, e: u64, eneg: u64, boundary: u64) -> u64 {
         }
         break;
     }
-    n := rt_len(digits);
-    if kneg + (k == 0) {
-        rt_pushb(acc, 48);
-        rt_pushb(acc, 46);
-        mut z = 0;
-        if kneg {
-            z = k;
-        }
-        mut i = 0;
-        while i < z {
-            rt_pushb(acc, 48);
-            i += 1;
-        }
-        i = 0;
-        while i < n {
-            rt_pushb(acc, 48 + rt_at(digits, i));
-            i += 1;
-        }
-    } else {
-        mut i = 0;
-        while i < n {
-            if i == k {
-                rt_pushb(acc, 46);
-            }
-            rt_pushb(acc, 48 + rt_at(digits, i));
-            i += 1;
-        }
-        while i < k {
-            rt_pushb(acc, 48);
-            i += 1;
-        }
-    }
+    rt_fmt_place(acc, digits, k, kneg);
     rt_drop_seq(digits);
     rt_free(r);
     rt_free(s);
