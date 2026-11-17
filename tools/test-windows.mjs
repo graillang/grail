@@ -1,6 +1,7 @@
 // Cross-build regression checks for the Windows x86-64 backend. Static checks always run and
 // inspect the emitted assembly, the COFF object and the PE image; when Wine is installed the same
 // cases also execute, so the Windows OS layer is covered by real stdout and exit codes.
+import { assertNoDuplicateKeys } from './case-keys.mjs';
 import { readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -76,6 +77,7 @@ export async function check(compiler) {
   for (const name of Object.values(runtimeImports).flat()) {
     assert.ok(runtimeDeclared.some(d => d.name === name), `windows.mjs lists runtime import ${name} that os-windows.grl does not declare`);
   }
+  assertNoDuplicateKeys(join(root, 'tests/windows-cases.json'));
   const cases = JSON.parse(readFileSync(join(root, 'tests/windows-cases.json'), 'utf8'));
   const work = join(root, '.work/windows-tests');
   const wine = wineAvailable();

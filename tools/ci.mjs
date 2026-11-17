@@ -2,6 +2,7 @@
 // Cross-platform CI driver. Compiler-free commands (matrix, plan, lint) run
 // everywhere; build/test/package/sign use the host compiler and report a
 // distinct exit code when a lane is blocked or a tool is missing.
+import { duplicateKeys } from './case-keys.mjs';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
@@ -475,6 +476,13 @@ function lint() {
   }
 
   const check = (name, ok, detail = '') => checks.push({ name, ok, detail });
+  // Case files: an object that names a key twice is two cases fused by a merge (JSON.parse would
+  // keep only the second's values, and the first would never run).
+  for (const file of readdirSync('tests').filter(name => name.endsWith('-cases.json'))) {
+    const found = duplicateKeys(readFileSync(join('tests', file), 'utf8'));
+    check(`tests/${file} has no object with a repeated key`, found.length === 0,
+      found.map(({ line, key, names }) => `line ${line}: "${key}" twice (cases ${names.join(', ')})`).join('; '));
+  }
   // A textual merge can append the same case twice (both branches added it), and the runner would
   // then run it twice under one name: every case name is unique.
   {

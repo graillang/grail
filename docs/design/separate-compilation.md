@@ -1266,6 +1266,27 @@ part of the compiler's own module), so `llvm-compile` admits parts against three
 `MemAvailable` as well as the jobserver: a build fits a 16 GB machine by running fewer parts at
 once rather than being killed. The ThinLTO link stays under 0.9 GB at 8 backend jobs.
 
+### Cross-module calls are declared with the callee's own signature
+
+The LLVM lifter types a body by its signature fact (its argument words, and two result words when
+it returns a pair), so `bytes::load_u64` is `define i64 @f_bytes_load_u64(i64, i64)`. A run that
+calls it from another module had no fact for it and declared the uniform six-words-in,
+two-words-out form: the call links (the registers are the same) but LLVM, ThinLTO included, never
+inlines a call whose type differs from the definition's, so no cross-module call was ever inlined
+in a release build. The defining run now records what its lowering defined every lifted body with
+(`llvm::Lowered.sig_names`/`sig_codes`, after the address-taken and wrong-fact exclusions) in a
+`signatures` record of its interface (tag 22; for the runtime, in `runtime.facts`), written again
+after lowering; a run that reads it declares and calls those bodies with exactly that type
+(`fact_imported_signature`). Like the effect facts, the record is not surface: a body edit that
+changes a code reruns nothing, and a stale code only costs the inline, since every form is the same
+calls at the machine level. Interface format 13.
+
+`tools/release-signature-test.mjs` is the guard: it builds std-heavy programs per module with
+`--release` and fails on any declaration that disagrees with another module's definition (51
+declarations across hashmap, json, strings, iterchain and bintrees). Measured, release, callgrind:
+`bench/hashmap.grl` 803.5M -> 742.2M instructions; a loop over `bytes::load_u64` 46.1M -> 33.9M;
+xxhash with `read64` through `load_u64` 1.200G -> 1.121G.
+
 ### The frame constant, which was a latent miscompile
 
 The per-unit change found a real defect that had nothing to do with caching. A function's frame
