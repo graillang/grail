@@ -1,5 +1,8 @@
 ## Unreleased
 
+- **`host::chmod(path, mode)`**: sets a file's permission bits, 0 or a positive errno (fchmodat on
+  Linux, chmod on macOS, and 0 on Windows, which has no bits to set). The build store will use it to
+  give a restored executable image its mode without a shell, once the bootstrap seed knows it.
 - **`grail build` and `grail check` start no helper process to hash or file the build store**, and an
   unchanged program is decided from file stamps. Every `sha256sum`, `sh -c`, `mv` and `cp` the store
   ran (about 70 per small build) is now in-process: the store's digest is `store_hash` (XXH64 under
