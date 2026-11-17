@@ -518,6 +518,32 @@ by default until step 6). What designing step 4 showed, for whoever takes it:
   that reads it; passed to a callee that pushes it; returned (boxed) and pushed; each of the four
   holders with the source frame gone before the holder is read; the allocator-balance check on all.
 
+*As built, on main (2026-11-17).*
+- **3a** (6111f47): plain records live in frame words (`frame_alloc`, the kind-3 aggregate fact with
+  a word count); a move copies them (`move_value`, assignment); holders that outlive the statement
+  box on store (enum payloads, closure captures, Mutex, dyn cells, task items, raw-pointer words)
+  and free their box (`holder_drop`); a plain record's own drop frees nothing.
+- **3c** (618d8ef, b75814d): a plain result of at most two words returns in rax:rdx; a larger one
+  is written to frame words the caller passes as a trailing argument after the declared ones
+  (`call_dest`; the callee keeps it in the slot after its parameters, `begin_result_dest`), and the
+  address comes back in rax. A trailing argument rather than argument 0 (the convention first agreed
+  with call_abi) leaves closure environments, the dyn receiver and the spill record unchanged.
+- **Runtime adapters** (19789c5, ea22e51): the runtime keeps one word of what it calls, so
+  parallel_map, tasks and jobs run `result_adapter` thunks that box the result; plain task items
+  are boxed at spawn and freed by the adapter; parallel_map hands inline items over by address.
+- **5a** (61486a2): an enum whose every payload is one non-owning word is two frame words
+  {tag, payload} (`small_enum`), returned in rax:rdx; `pop()`, `?` and matches build and read it in
+  place. `while let Some(x) = v.pop()` over 10M u64: 0.653 s to 0.156 s.
+- **3e** (queued): a sub-word field of a Grail record is accessed as its word (`word_refs`); aos on
+  LLVM 0.333 s to 0.223 s. What remains against clang on aosu is the descriptor hoist (inttoptr
+  element stores defeat alias analysis, so len/data reload and the bounds check stays), handed to
+  /root/simd_layout_design.
+- **3b** deferred: once 3d makes small records copy, passing the caller's words needs the callee to
+  copy a parameter it writes. **3d** waits for `affine(ty)` (stage 4 step 1). **Stage 7** (packed
+  layout) waits for stage 4, which rewrites the same layout functions.
+- Allocations, check syn1000 on the self-built compiler: 5.36 M (pre-1b 5.85 M), instructions
+  8.34 G (9.91 G). A seed-built dev compiler still has the old layout inside; measure stage2.
+
 Verification per sub-step (the director's load rule): `bun tools/test-selfhost.mjs`, a filtered
 corpus (`unboxed-|record|struct|tuple|closure|mutex|task|dyn|ffi|c-array`, counts reported), test-ffi
 for 3b/3c, interface-test for 3c; callgrind counts after 3a and 3d. Each sub-step is one commit
