@@ -19270,5 +19270,24 @@
     "name": "simd-nan-bits-canonical",
     "source": "fn main() {\n    zero: f32 = 0.0;\n    v := f32x4::new(zero / zero, 1.5, -(zero / zero), -2.0);\n    mut r = u32[0, 0, 0, 0];\n    v.bits().store(&mut r[:], 0);\n    println(\"{} {} {} {}\", r[0], r[1], r[2], r[3]);\n    w := f64x2::splat(0.0);\n    m := f64x2::new(1.0, 0.0) / w;\n    mut q = i64[0, 0];\n    (m - m).bits().store(&mut q[:], 0);\n    println(\"{} {}\", q[0], q[1]);\n}\n",
     "stdout": "2143289344 1069547520 2143289344 3221225472\n9221120237041090560 9221120237041090560\n"
+  },
+  {
+    "name": "interface-generic-method-through-bound",
+    "note": "an interface method generic over a callable parameter (`fn fold<A, G: FnMut(A, Self::Item) -> A>`, a default body) called through a bound `I: Seq` (was `generic argument shape mismatch`: the specialisation's binding of `I` met the implementation's concrete `Self`)",
+    "source": "interface Seq {\n    type Item;\n    fn next(self: &mut Self) -> Self::Item?;\n    fn fold<A, G: FnMut(A, Self::Item) -> A>(self: Self, init: A, g: G) -> A {\n        mut it = self;\n        mut acc = init;\n        mut f = g;\n        while let Some(x) = it.next() { acc = f(acc, x); }\n        return acc;\n    }\n}\nstruct Count { n: u64, end: u64 }\nimpl Seq for Count {\n    type Item = u64;\n    fn next(self: &mut Self) -> u64? { if self.n == self.end { return None; } self.n += 1; return Some(self.n); }\n}\nfn total<I: Seq<Item = u64>>(it: I) -> u64 { return it.fold(0, |a: u64, x: u64| -> u64 a + x); }\nfn main() {\n    c := Count { n: 0, end: 4 };\n    println(c.fold(0, |a: u64, x: u64| -> u64 a + x));\n    println(total(Count { n: 0, end: 4 }));\n}\n",
+    "stdout": "10\n10\n"
+  },
+  {
+    "name": "interface-generic-method-override-through-bound",
+    "note": "an adapter overriding that method and calling its inner iterator's through `I: Seq` with a closure over `I::Item` (internal iteration, the shape Map/Filter.fold need)",
+    "source": "interface Seq {\n    type Item;\n    fn next(self: &mut Self) -> Self::Item?;\n    fn fold<A, G: FnMut(A, Self::Item) -> A>(self: Self, init: A, g: G) -> A {\n        mut it = self;\n        mut acc = init;\n        mut f = g;\n        while let Some(x) = it.next() { acc = f(acc, x); }\n        return acc;\n    }\n}\nstruct Count { n: u64, end: u64 }\nimpl Seq for Count {\n    type Item = u64;\n    fn next(self: &mut Self) -> u64? { if self.n == self.end { return None; } self.n += 1; return Some(self.n); }\n}\nstruct MapS<I, U, F> { it: I, f: F }\nimpl<I: Seq, U, F: FnMut(I::Item) -> U> Seq for MapS<I, U, F> {\n    type Item = U;\n    fn next(self: &mut Self) -> U? {\n        match self.it.next() {\n            Some(x) => { g := &mut self.f; return Some(g(x)); },\n            None => { return None; }\n        }\n    }\n    fn fold<A, G: FnMut(A, U) -> A>(self: Self, init: A, g: G) -> A {\n        mut h = g;\n        mut m = self.f;\n        return self.it.fold(init, |a: A, x: I::Item| -> A h(a, m(x)));\n    }\n}\nfn map_s<I: Seq, U, F: FnMut(I::Item) -> U>(it: I, f: F) -> MapS<I, U, F> { return MapS { it: it, f: f }; }\nfn total<I: Seq<Item = u64>>(it: I) -> u64 { return it.fold(0, |a: u64, x: u64| -> u64 a + x); }\nfn main() {\n    k := 3;\n    t := map_s(Count { n: 0, end: 4 }, |x: u64| -> u64 x * k);\n    println(t.fold(0, |a: u64, x: u64| -> u64 a + x));\n    mut u = map_s(Count { n: 0, end: 3 }, |x: u64| -> u64 x + 100);\n    println(u.next()!);\n    println(total(map_s(Count { n: 0, end: 4 }, |x: u64| -> u64 x * 2)));\n}\n",
+    "stdout": "30\n101\n20\n"
+  },
+  {
+    "name": "interface-generic-method-through-bound-mismatch",
+    "note": "...a closure that does not fit the method's callable bound is still refused through the bound",
+    "source": "interface Seq {\n    type Item;\n    fn next(self: &mut Self) -> Self::Item?;\n    fn fold<A, G: FnMut(A, Self::Item) -> A>(self: Self, init: A, g: G) -> A {\n        mut it = self;\n        mut acc = init;\n        mut f = g;\n        while let Some(x) = it.next() { acc = f(acc, x); }\n        return acc;\n    }\n}\nstruct Count { n: u64, end: u64 }\nimpl Seq for Count {\n    type Item = u64;\n    fn next(self: &mut Self) -> u64? { if self.n == self.end { return None; } self.n += 1; return Some(self.n); }\n}\nfn total<I: Seq<Item = u64>>(it: I) -> u64 { return it.fold(0, |a: u64, x: u64| -> bool a > x); }\nfn main() { println(total(Count { n: 0, end: 4 })); }\n",
+    "reject": true,
+    "diagnostic": "callable bound"
   }
 ]

@@ -10545,22 +10545,33 @@ fn rt_seq_repeat(a: u64, count: u64) -> u64 {
 // an integer's low 32 bits are stored) and decodes what they return, so they only move 32-bit units.
 // len and cap count elements. Ordering and equality compare the 32-bit units unsigned, which orders
 // exactly as the words the same values occupy in a word vector.
+// A push of a 4-byte element, as rt_push for words: the common case - room in the buffer - is a
+// store and a length bump, small enough for the LLVM backend to inline at every push (a `_slow`
+// function is never inlined, so growing stays out of it).
 fn rt_push4(s: u64, v: u64) -> u64 {
     n := raw_load(wrapping_add(s, 8));
-    cap := raw_load(wrapping_add(s, 16));
-    if n == cap {
-        mut capacity = cap * 2;
-        if capacity == 0 {
-            capacity = 8;
-        }
-        if 288230376151711744 < capacity {
-            rt_abort();
-        }
-        ptr := rt_grow(raw_load(s), n * 4, capacity * 4);
-        raw_store(s, ptr);
-        raw_store(wrapping_add(s, 16), capacity);
+    if n == raw_load(wrapping_add(s, 16)) {
+        return rt_push4_slow(s, v);
     }
     raw_store32(wrapping_add(raw_load(s), wrapping_mul(n, 4)), v);
+    raw_store(wrapping_add(s, 8), wrapping_add(n, 1));
+    return 0;
+}
+// Doubling, from 8 elements, then the push.
+fn rt_push4_slow(s: u64, v: u64) -> u64 {
+    n := raw_load(wrapping_add(s, 8));
+    cap := raw_load(wrapping_add(s, 16));
+    mut capacity = cap * 2;
+    if capacity == 0 {
+        capacity = 8;
+    }
+    if 288230376151711744 < capacity {
+        rt_abort();
+    }
+    ptr := rt_grow(raw_load(s), n * 4, capacity * 4);
+    raw_store(s, ptr);
+    raw_store(wrapping_add(s, 16), capacity);
+    raw_store32(wrapping_add(ptr, wrapping_mul(n, 4)), v);
     raw_store(wrapping_add(s, 8), n + 1);
     return 0;
 }
