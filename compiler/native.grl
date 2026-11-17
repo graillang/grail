@@ -1192,6 +1192,30 @@ struct C {
     reg_types: u64[],
     // The bodies applied from units, for the optimiser (ir::Known).
     known: ir::Known,
+    // The module's body record (dr_load, dr_fast): what the last run of this module applied for each
+    // body, so a body whose text did not move is applied again before its signature is read. `dr`
+    // is the record read at the start of the bodies pass, `dw` the one this run writes.
+    dr_on: u64,
+    dr_at: u64,
+    dr_file: u64[],
+    dr_off: u64[],
+    dr_end: u64[],
+    dr_count: u64[],
+    dr_col: u64[],
+    dr_ord: u64[],
+    dr_hash: u8[][],
+    dr_unit: u8[][],
+    dr_name: u8[][],
+    dr_regs: u8[][],
+    // The context each body was compiled in (c.module: a module, `.impl_N`, `.inherent_N`): one
+    // source text is several functions when it is a default method or a method of a generic type.
+    dr_ctx: u8[][],
+    dw: u8[],
+    dw_n: u64,
+    dr_key: u8[],
+    dr_ct: u64,
+    // Bodies applied from the record in this run (GRAIL_DEBUG reports it).
+    dr_hits: u64,
     // Armed (par_start) but not forked yet: the walk forks when par_decide finds the rest worth it,
     // over the source still ahead of it (par_fork).
     par_armed: u64,
@@ -20618,6 +20642,222 @@ fn par_end<a>(c: (&a mut C)) -> unit {
     exchange(&mut c.par_on, 0);
     return ();
 }
+// ---- the module's body record ---------------------------------------------------------------
+//
+// A run of a module that is a store run (fn_on) files, at the end of its bodies pass, one record of
+// every body it put into the run as a unit: where the body's text is (file, byte span, its token
+// count, the column it starts at), its ordinal among the unit's functions, the unit it is in, the
+// unit's name in the store and its registrations. The record's key is the compiler, the flags, the
+// declaration surface (every declaration and signature of the run, no body) and the input paths.
+// The next run of the module with the same key reads it, and a body whose bytes are the bytes the
+// record names - same place, same column, same ordinal - has the same unit key as before (the key
+// is that text, the surface, the flags and the compiler), so its unit is applied before the
+// signature is even parsed, and the body's tokens are skipped. A check applies the registrations
+// from the record and reads nothing; a build loads the unit's text. Anything else - a moved body,
+// a missing unit, a record that does not read - takes the ordinary path.
+// (docs/design/incremental-compilation.md, "Reusing a module's run")
+fn dr_key_now<a>(c: (&a mut C), files: u64) -> u8[] {
+    mut key = copy_bytes(view("grail-declrec 2\ncompiler "));
+    push_bytes(&mut key, view(c.fn_id));
+    push_bytes(&mut key, view("\nflags "));
+    push_bytes(&mut key, view(c.fn_flags));
+    push_bytes(&mut key, view("\nsurface "));
+    push_bytes(&mut key, view(c.fn_surface));
+    mut i = 2;
+    while i < files {
+        push_bytes(&mut key, view("\ninput "));
+        push_bytes(&mut key, view(input_path(&c, i)));
+        i += 1;
+    }
+    key.push(10);
+    return key;
+}
+fn dr_load<a>(c: (&a mut C), files: u64) -> unit {
+    exchange(&mut c.dr_on, 0);
+    exchange(&mut c.dw, u8[]);
+    exchange(&mut c.dw_n, 0);
+    if !fn_on(&c) || (c.fn_dir.len() == 0) || (c.fn_surface.len() == 0) || (c.validating != 0) {
+        return ();
+    }
+    key := dr_key_now(&mut c, files);
+    exchange(&mut c.dr_key, key.copy());
+    mut name = copy_bytes(view("dr-"));
+    push_bytes(&mut name, view(fncache::hash(view(key))));
+    u := fncache::load_checked(view(c.fn_dir), view(name));
+    if (u.key.len() == 0) || !same(view(u.key), view(key)) {
+        return ();
+    }
+    mut r = fncache::Read { data: u.text.copy(), at: 0, ok: 1 };
+    n := fncache::rv(&mut r);
+    for k in n {
+        c.dr_file.push(fncache::rv(&mut r));
+        c.dr_off.push(fncache::rv(&mut r));
+        c.dr_end.push(fncache::rv(&mut r));
+        c.dr_count.push(fncache::rv(&mut r));
+        c.dr_col.push(fncache::rv(&mut r));
+        c.dr_ord.push(fncache::rv(&mut r));
+        c.dr_hash.push(fncache::rs(&mut r));
+        c.dr_unit.push(fncache::rs(&mut r));
+        c.dr_name.push(fncache::rs(&mut r));
+        c.dr_regs.push(fncache::rs(&mut r));
+        c.dr_ctx.push(fncache::rs(&mut r));
+        if r.ok == 0 {
+            break;
+        }
+    }
+    if (r.ok == 0) || (r.at != r.data.len()) {
+        exchange(&mut c.dr_file, u64[]);
+        exchange(&mut c.dr_off, u64[]);
+        return ();
+    }
+    // In source order (file, then byte): a default method's bodies are noted when the defaults are
+    // replayed, after the files. Insertion sort - the notes are nearly in order already.
+    n2 := c.dr_off.len();
+    mut i = 1;
+    while i < n2 {
+        mut j = i;
+        while (0 < j) && ((c.dr_file[j] < c.dr_file[j - 1]) || ((c.dr_file[j] == c.dr_file[j - 1]) && (c.dr_off[j] < c.dr_off[j - 1]))) {
+            dr_swap(&mut c, j);
+            j -= 1;
+        }
+        i += 1;
+    }
+    exchange(&mut c.dr_at, 0);
+    exchange(&mut c.dr_on, 1);
+    return ();
+}
+// Entries j - 1 and j change places.
+fn dr_swap<a>(c: (&a mut C), j: u64) -> unit {
+    c.dr_file.swap(j - 1, j);
+    c.dr_off.swap(j - 1, j);
+    c.dr_end.swap(j - 1, j);
+    c.dr_count.swap(j - 1, j);
+    c.dr_col.swap(j - 1, j);
+    c.dr_ord.swap(j - 1, j);
+    c.dr_hash.swap(j - 1, j);
+    c.dr_unit.swap(j - 1, j);
+    c.dr_name.swap(j - 1, j);
+    c.dr_regs.swap(j - 1, j);
+    c.dr_ctx.swap(j - 1, j);
+    return ();
+}
+// The body at token `position` (its `fn`) was put into the run as the unit `name`: one entry.
+fn dr_note<a, b, d>(c: (&a mut C), position: u64, end: u64, ord: u64, unit: &b [u8], name: &d [u8], regs: &d [u8]) -> unit {
+    if (c.fn_dir.len() == 0) || (c.current_spec != 0) || (c.validating != 0) || (c.par_me != 0) || (c.toks.len() <= end) {
+        return ();
+    }
+    from := c.toks[position].start;
+    to := c.toks[end].end;
+    iface_wv(&mut c.dw, c.file);
+    iface_wv(&mut c.dw, from);
+    iface_wv(&mut c.dw, to);
+    iface_wv(&mut c.dw, end - position + 1);
+    iface_wv(&mut c.dw, c.toks[position].col);
+    iface_wv(&mut c.dw, ord);
+    iface_ws(&mut c.dw, view(fncache::hash(c.src[from: to])));
+    iface_ws(&mut c.dw, unit);
+    iface_ws(&mut c.dw, name);
+    iface_ws(&mut c.dw, regs);
+    iface_ws(&mut c.dw, view(c.module));
+    c.dw_n = c.dw_n + 1;
+    return ();
+}
+// File this run's record. Not when a compile-time call ran: a declaration whose value came from a
+// function body could change with that body while the surface reads the same.
+fn dr_save<a>(c: (&a mut C)) -> unit {
+    if (host::env(view("GRAIL_DEBUG")).len() != 0) & (c.par_me == 0) {
+        mut line = copy_bytes(view("grail: body record: "));
+        decimal(&mut line, c.dr_hits);
+        push_bytes(&mut line, view(" bodies applied from it, "));
+        decimal(&mut line, c.dw_n);
+        push_bytes(&mut line, view(" noted\n"));
+        host::print(view(line));
+    }
+    if (c.dr_key.len() == 0) || (c.dw_n == 0) || (c.dr_ct != 0) || (c.par_me != 0) {
+        return ();
+    }
+    mut text = u8[];
+    iface_wv(&mut text, c.dw_n);
+    text.append(view(c.dw));
+    mut name = copy_bytes(view("dr-"));
+    push_bytes(&mut name, view(fncache::hash(view(c.dr_key))));
+    u := fncache::Unit { key: c.dr_key.copy(), text: text, facts: u8[], regs: u8[] };
+    fncache::save(view(c.fn_dir), view(name), &u);
+    return ();
+}
+// The fast path: the body whose `fn` is token `position`, if the record has it unmoved. Returns
+// true when the body was applied and skipped.
+fn dr_fast<a>(c: (&a mut C), position: u64, claim_alloc: u64, claim_panic: u64, claim_block: u64) -> bool {
+    if position >= c.toks.len() {
+        return false;
+    }
+    from := c.toks[position].start;
+    // Entries are in source order. The next entry of this file whose text is this body's text, in this
+    // context, at this column and ordinal, is this body - wherever the file put it: an edit above it
+    // moves its bytes, not its text. Entries passed over belong to bodies that are gone or changed.
+    mut k = c.dr_at;
+    while (k < c.dr_off.len()) && (c.dr_file[k] < c.file) {
+        k += 1;
+    }
+    mut found = c.dr_off.len();
+    mut text_hash = u8[];
+    mut last = 0;
+    mut tried_count = 0;
+    while (k < c.dr_off.len()) && (c.dr_file[k] == c.file) {
+        count := c.dr_count[k];
+        if (count != 0) && (position + count - 1 < c.toks.len()) && (c.toks[position].col == c.dr_col[k]) && same(view(c.dr_ctx[k]), view(c.module)) {
+            if (tried_count != count) || (text_hash.len() == 0) {
+                end_at := c.toks[position + count - 1].end;
+                text_hash = fncache::hash(c.src[from: end_at]);
+                tried_count = count;
+            }
+            if same(view(text_hash), view(c.dr_hash[k])) {
+                found = k;
+                last = position + count - 1;
+                break;
+            }
+        }
+        k += 1;
+    }
+    if found == c.dr_off.len() {
+        return false;
+    }
+    k = found;
+    // The function's labels spell its ordinal, which the unit's text was made with.
+    if scope_next(&c) != c.dr_ord[k] {
+        return false;
+    }
+    exchange(&mut c.dr_at, k + 1);
+    mut readable = 1;
+    rbytes := c.dr_regs[k].copy();
+    regs := fn_regs_read(&mut c, view(rbytes), &mut readable);
+    if readable == 0 {
+        return false;
+    }
+    mut u = fncache::Unit { key: c.dr_name[k].copy(), text: u8[], facts: u8[], regs: rbytes.copy() };
+    if c.check_only == 0 {
+        // A build needs the text: the unit itself, as filed (a check unit has none and is a miss).
+        u = fncache::load(view(c.fn_dir), view(c.dr_name[k]));
+        if u.key.len() == 0 {
+            return false;
+        }
+    }
+    unit := c.dr_unit[k].copy();
+    // The specialisations its registrations ask for are this module's requests, as func makes them
+    // (`body_module` is the asker: their bodies go into its part).
+    asker := c.module.copy();
+    exchange(&mut c.body_module, asker);
+    part(&mut c, view(unit));
+    line := c.toks[position].line;
+    ord := scope_next(&c);
+    fn_apply(&mut c, &u, &regs, line, position, claim_alloc, claim_panic, claim_block);
+    c.fn_hits = c.fn_hits + 1;
+    c.dr_hits = c.dr_hits + 1;
+    name := c.dr_name[k].copy();
+    dr_note(&mut c, position, last, ord, view(unit), view(name), view(rbytes));
+    exchange(&mut c.pos, last + 1);
+    return true;
+}
 fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     // A body's synthesised declarations (closure environments) are not the function's to hide.
     exchange(&mut c.decl_public, 1);
@@ -20650,6 +20890,11 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     claimed_alloc := exchange(&mut c.fx_pending_alloc, 0);
     claimed_panic := exchange(&mut c.fx_pending_panic, 0);
     claimed_block := exchange(&mut c.fx_pending_block, 0);
+    if (pass == 3) & (c.dr_on != 0) & (c.current_spec == 0) & (c.validating == 0) & (c.par_on == 0) & (unsafe_fn == 0) {
+        if dr_fast(&mut c, position, claimed_alloc, claimed_panic, claimed_block) {
+            return ();
+        }
+    }
     mut name = ident(&mut c);
     c.cur_name = name.copy();
     c.cur_file = c.file;
@@ -21173,12 +21418,16 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                         }
                         // The first body of a part opens it; the unit's text starts after that.
                         part(&mut c, view(unit));
+                        hit_ord := scope_next(&c);
                         // The signature's parameter facts were recorded on the way here, and the
                         // unit's facts hold them already: without this a replayed body carries them
                         // twice, its facts digest differs from a fresh emission's, and the
                         // optimiser's memo (optimize.grl one_body) misses for every unchanged body.
                         llvm::facts_truncate(&mut c.facts, fact_mark);
                         fn_apply(&mut c, &hit, &regs, fn_line, position, claimed_alloc, claimed_panic, claimed_block);
+                        hit_name := fncache::hash(view(key));
+                        hit_regs := hit.regs.copy();
+                        dr_note(&mut c, position, end, hit_ord, view(unit), view(hit_name), view(hit_regs));
                         if par_outcome == 1 {
                             c.fn_filed = c.fn_filed + 1;
                         } else {
@@ -21645,7 +21894,11 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             if (c.validating == 0) & (k != 0) & (k <= c.fnext.len()) {
                 c.fnext[k - 1] = c.fnext[k - 1] - 1;
             }
+            made_ord := scope_next(&c);
             fn_apply(&mut c, &produced, &regs, fn_line, position, claimed_alloc, claimed_panic, claimed_block);
+            made_name := fncache::hash(view(produced.key));
+            made_regs := produced.regs.copy();
+            dr_note(&mut c, position, end, made_ord, view(unit), view(made_name), view(made_regs));
         } else {
             c.fn_kept = c.fn_kept + 1;
         }
@@ -23829,6 +24082,8 @@ fn ct_call_type<a>(c: (&a mut C), k: u64) -> u64 {
 // The result type of the function a run-tier call names (`f(...)` or `m::f(...)` read in `module`),
 // or NO_TYPE when no such function is known.
 fn ct_call_result<a, b>(c: (&a mut C), module: &b [u8], text: &b [u8]) -> u64 {
+    // A value computed by a function body: this run files no body record (dr_save).
+    exchange(&mut c.dr_ct, 1);
     toks := lexer::tokenize(text);
     if toks.len() == 0 {
         return NO_TYPE;
@@ -60023,6 +60278,24 @@ pub fn main() -> u64 {
         reg_blobs: u8[][],
         reg_types: u64[],
         known: ir::no_known(),
+        dr_on: 0,
+        dr_at: 0,
+        dr_file: u64[],
+        dr_off: u64[],
+        dr_end: u64[],
+        dr_count: u64[],
+        dr_col: u64[],
+        dr_ord: u64[],
+        dr_hash: u8[][],
+        dr_unit: u8[][],
+        dr_name: u8[][],
+        dr_regs: u8[][],
+        dr_ctx: u8[][],
+        dw: u8[],
+        dw_n: 0,
+        dr_key: u8[],
+        dr_ct: 0,
+        dr_hits: 0,
         par_armed: 0,
         par_t0: 0,
         par_p0: 0,
@@ -60631,6 +60904,7 @@ pub fn main() -> u64 {
             jobs::phase(view("declarations"));
             r4_compute(&mut c);
             par_start(&mut c, n);
+            dr_load(&mut c, n);
             // From the bodies on, a check writes no text (`quiet`): its units are check units, with
             // the registrations and no text (fn_unit_of), as cargo's metadata is to its rlib.
             if c.check_only != 0 {
@@ -60665,6 +60939,7 @@ pub fn main() -> u64 {
             }
             jobs::phase(view("bodies"));
             par_end(&mut c);
+            dr_save(&mut c);
             jobs::phase(view("bodies-workers-collected"));
         }
         // The definition sweep for the interfaces read above, once every module's names exist.
