@@ -2,7 +2,7 @@
 // linker against a freestanding C shim, so these tests exercise the real C ABI
 // (argument registers, result register, symbol naming) instead of a stub.
 import { spawnSync } from 'node:child_process';
-import { readFileSync, writeFileSync, mkdirSync, rmSync, copyFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, rmSync, copyFileSync, existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import assert from 'node:assert/strict';
 import { root, hostTarget, targets, targetName, buildCompiler, compileProgram, execute, runner, compilerSources, crossSysroot } from './native.mjs';
@@ -363,7 +363,9 @@ for (const target of selected) {
     const source = join(directory, `${name}.grl`);
     copyFileSync(join(root, `tests/ffi/${name}.grl`), source);
     const executable = compileProgram(compiler, [source, ...modules.map(m => join(root, m))], directory, { target, name });
-    const assembly = readFileSync(join(directory, `${name}.s`), 'utf8');
+    // On the LLVM backend a lifted caller's C call is in the IR module, not the native text.
+    const lifted = existsSync(join(directory, `${name}.s.ll`)) ? readFileSync(join(directory, `${name}.s.ll`), 'utf8') : '';
+    const assembly = readFileSync(join(directory, `${name}.s`), 'utf8') + lifted.split('\n').filter(l => / call [^@]*@"/.test(l)).map(l => `call ${l.match(/@"([^"]+)"/)[1]}`).join('\n') + '\n';
     const notes = assembly.split('\n').filter(line => line.startsWith('// grail-link: '));
     const expectedNotes = Array.isArray(linkNote) ? linkNote : [linkNote];
     assert.deepEqual(notes, expectedNotes, `${target}/${name}: unexpected link notes ${notes}`);
@@ -402,3 +404,12 @@ for (const target of selected) {
 
 const skipped = linkedOnly ? ` (${linkedOnly} linked but not executed: no cross emulator installed)` : '';
 console.log(`ffi: ${executed} linked and executed, ${linkedOnly} linked only, ${crossCompiled} cross-compiled only${skipped}`);
+// The same fixtures on the LLVM backend (x86-64 host, with --verify-facts): lifted C calls are typed
+// per the SysV classification (byval records by eightbyte, MEMORY records `ptr byval`), so every
+// shape here is also a check of the lifter's calls. The child run is this file with the backend set.
+if (!process.env.GRAIL_BACKEND && hostTarget === 'x86_64' && selected.includes('x86_64')) {
+  const leg = spawnSync(process.execPath, [process.argv[1], 'x86_64'], {
+    env: { ...process.env, GRAIL_BACKEND: 'llvm', GRAIL_VERIFY_FACTS: '1' }, stdio: 'inherit', timeout: 1_800_000,
+  });
+  assert.equal(leg.status, 0, 'ffi: the LLVM leg failed');
+}

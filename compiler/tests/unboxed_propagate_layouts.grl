@@ -1,0 +1,52 @@
+// `?` from a union laid out one way into a function returning a union laid out another: an inline
+// three-word `u64 | Bad` (Bad a small enum) into a boxed `string | Bad`, and into an inline one of a
+// different size. The failure is rebuilt in the result's layout (borg's json reader hit this).
+enum Bad {
+    End(u64),
+    Char(u64)
+}
+fn hex(text: &[u8], at: u64) -> u64 | Bad {
+    if at >= text.len() {
+        return Bad::End(at);
+    }
+    b := u64(text[at]);
+    if (b < 48) || (b > 57) {
+        return Bad::Char(at);
+    }
+    return b - 48;
+}
+fn word(text: &[u8], at: u64) -> string | Bad {
+    d := hex(text, at)?;
+    mut out = "d";
+    out.append(format("{}", d));
+    return out;
+}
+fn pair(text: &[u8], at: u64) -> bool | Bad {
+    d := hex(text, at)?;
+    return d > 4;
+}
+fn show(r: string | Bad) {
+    match r {
+        string(s) => { println(s); },
+        Bad(e) => {
+            match e {
+                End(n) => { println("end {}", n); },
+                Char(n) => { println("char {}", n); },
+            }
+        },
+    }
+}
+fn main() {
+    t := u8[55, 120];
+    show(word(&t, 0));
+    show(word(&t, 1));
+    show(word(&t, 2));
+    match pair(&t, 0) {
+        bool(b) => { println(b); },
+        Bad(e) => { println("bad"); },
+    }
+    match pair(&t, 1) {
+        bool(b) => { println(b); },
+        Bad(e) => { println("bad"); },
+    }
+}
