@@ -4148,6 +4148,13 @@ fn f_host_cond_wait(c: u64, p: u64, until: u64, flags: u64) -> u64 {
     return rt_wait_answer(r, flags);
 }
 fn f_host_cond_notify(c: u64, all: u64) -> u64 {
+    // Nobody waiting: nothing to do, and no queue lock. Sound because a waiter links itself under
+    // the queue lock BEFORE it releases the mutex (f_host_cond_wait), and the notifier changed the
+    // state under that mutex after taking it: the link is visible here, or the waiter will still see
+    // the new state when it looks again.
+    if rt_q_head(c) == 0 {
+        return 0;
+    }
     rt_q_lock(c);
     while true {
         h := rt_q_pop(c);
