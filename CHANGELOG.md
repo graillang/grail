@@ -1,5 +1,8 @@
 ## Unreleased
 
+- **`split` and `lines` scan eight bytes per step** with `bytes::find_byte`, so `strings` now uses
+  the `bytes` module (a program that lists its modules adds `lib/bytes.grl`). bench/strings.grl:
+  Grail-LLVM 4.53G -> 3.63G instructions, 0.37 s (Rust 3.23G); Grail-native 13.7G -> 12.1G.
 - **`bytes::copy_back(v, distance, length)`**: the LZ77 match copy, appending `length` bytes copied
   from `distance` back (overlap allowed, as DEFLATE and zstd require), a word at a time when the
   distance is at least eight. Inflate and zstd use it instead of a push per byte: the 20 MB zstd

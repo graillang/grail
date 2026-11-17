@@ -2,6 +2,7 @@ module strings;
 use core;
 use iter;
 use float;
+use bytes;
 
 // Byte-oriented text helpers, as methods on `[u8]` (any byte text: a byte vector, a string, a view
 // or a slice reads the same way). A value receiver is viewed for the call, so `bytes.find(x)` and
@@ -274,13 +275,15 @@ impl [u8] {
         mut out = (&a [u8])[];
         n := self.len();
         mut start: u64 = 0;
-        for i in n {
-            if self[i] == sep {
-                out.push(self[start: i]);
-                start = i + 1;
+        // Eight bytes per step to each separator (bytes::find_byte).
+        while true {
+            at := bytes::find_byte(self, start, sep);
+            out.push(self[start: at]);
+            if at == n {
+                return out;
             }
+            start = at + 1;
         }
-        out.push(self[start: n]);
         return out;
     }
     // `split` with each piece copied out.
@@ -329,18 +332,14 @@ impl [u8] {
         mut out = (&a [u8])[];
         n := self.len();
         mut start: u64 = 0;
-        for i in n {
-            if self[i] == 10 {
-                mut end = i;
-                if (end > start) && (self[end - 1] == 13) {
-                    end -= 1;
-                }
-                out.push(self[start: end]);
-                start = i + 1;
+        while start < n {
+            at := bytes::find_byte(self, start, 10);
+            mut end = at;
+            if (at < n) && (end > start) && (self[end - 1] == 13) {
+                end -= 1;
             }
-        }
-        if start < n {
-            out.push(self[start: n]);
+            out.push(self[start: end]);
+            start = at + 1;
         }
         return out;
     }
