@@ -1,5 +1,9 @@
 ## Unreleased
 
+- png unfilters the common layout through addresses (`bytes::data_addr`, new) into an image sized
+  once, under the length guard that already bounds every row, instead of a push and a checked index
+  per byte. The 4K png: Grail-LLVM 6.44G -> 5.50G instructions (0.71 -> 0.61 s; stb_image 0.41 s),
+  Grail-native 17.7G -> 16.8G.
 - zstd's backward bit reader keeps a 64-bit window and reloads it about once per sequence instead
   of assembling a word on every read: the 20 MB archive 11.9G -> 11.75G instructions on Grail-LLVM.
 - **Inflate refills its bit buffer a word at a time** (`bytes::load_u64`, a new unaligned
