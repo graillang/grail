@@ -18937,6 +18937,10 @@ fn fn_regs_decode<a, b, d>(c: (&a mut C), data: &b [u8], ok: (&d mut u64)) -> Fn
         } else if kind == 3 {
             data := iface_rs(&mut p);
             out.push(FnReg { kind: 3, template: 0, types: u64[], data: data });
+        } else if kind == 4 {
+            // A result adapter the body names (result_adapter): its shape code.
+            code := iface_rv(&mut p);
+            out.push(FnReg { kind: 4, template: code, types: u64[], data: u8[] });
         } else {
             exchange(ok, 0);
             return out;
@@ -19079,6 +19083,8 @@ fn fn_apply<a, b, d>(c: (&a mut C), u: (&b fncache::Unit), regs: (&d FnReg[]), l
             drop_symbol_known(&mut c, types[0]);
         } else if kind == 3 {
             fx_unit_replay(&mut c, view(regs[i].data), text_at, at, claim_alloc, claim_panic);
+        } else if kind == 4 {
+            box_thunk_add(&mut c, template);
         } else {
             specialize(&mut c, template, &types);
         }
@@ -34609,16 +34615,23 @@ fn result_adapter<a>(c: (&a mut C), kind: u64, args: u64, words: u64) -> u8[] {
     name.push(95);
     decimal(&mut name, words);
     code := (kind * 16 + args) * 65536 + words;
-    mut known = false;
+    // Every naming is a registration of the body's unit: the adapters are emitted once, after the
+    // bodies, for the shapes the run's bodies named - a replayed body names its own again.
+    if c.fn_rec != 0 {
+        c.fn_regs.push(4);
+        iface_wv(&mut c.fn_regs, code);
+    }
+    box_thunk_add(&mut c, code);
+    return name;
+}
+fn box_thunk_add<a>(c: (&a mut C), code: u64) -> unit {
     for i in c.box_thunks.len() {
         if c.box_thunks[i] == code {
-            known = true;
+            return ();
         }
     }
-    if !known {
-        c.box_thunks.push(code);
-    }
-    return name;
+    c.box_thunks.push(code);
+    return ();
 }
 // The adapter rt_parallel_zip calls per piece: %rdi is a block {callback, environment, view 1 ..
 // view n}; the callback is called with the environment first when it is a closure (the closure ABI:
