@@ -4378,15 +4378,28 @@ fn rt_job_map_leaf(d: u64, k: u64) -> u64 {
     if n < stop {
         stop = n;
     }
+    iw := raw_load(d + 64);
+    rw := raw_load(d + 72);
     mut i = start;
     while i < stop {
+        mut item = 0;
+        if iw == 0 {
+            item = raw_load(items + i * 8);
+        } else {
+            item = items + i * iw;
+        }
         mut r = 0;
         if env == 0 {
-            r = raw_call2(f, raw_load(items + i * 8), context);
+            r = raw_call2(f, item, context);
         } else {
-            r = raw_call3(f, env, raw_load(items + i * 8), context);
+            r = raw_call3(f, env, item, context);
         }
-        raw_store(out + i * 8, r);
+        if rw == 0 {
+            raw_store(out + i * 8, r);
+        } else {
+            rt_copy_bytes(out + i * rw, r, rw);
+            rt_free(r);
+        }
         i += 1;
     }
     return stop - start;
@@ -4422,12 +4435,25 @@ fn rt_job_split_chunks(d: u64, lo: u64, hi: u64) -> u64 {
 // leaves finish in. Every fork is joined before this returns, so no worker can still write into
 // `out` (or read `items`) afterwards; that is the whole structured-join contract.
 fn rt_parallel_map(items: u64, context: u64, f: u64, env: u64) -> u64 {
+    return rt_parallel_mapw(items, context, f, env, 0, 0);
+}
+// parallel_map over inline elements or into inline results (docs/design/unboxed-values.md): `iw` is
+// the width in bytes of an inline item (each call is handed the item's address, which is the
+// record), `rw` of an inline result (each call returns a box, copied into place and freed); 0 is a
+// word either way.
+fn rt_parallel_mapw(items: u64, context: u64, f: u64, env: u64, iw: u64, rw: u64) -> u64 {
     n := rt_len(items);
     out := rt_new();
-    mut i = 0;
-    while i < n {
-        rt_push(out, 0);
-        i += 1;
+    if rw == 0 {
+        mut i = 0;
+        while i < n {
+            rt_push(out, 0);
+            i += 1;
+        }
+    } else if n != 0 {
+        raw_store(out, rt_grow(0, 0, wrapping_mul(n, rw)));
+        raw_store(wrapping_add(out, 8), n);
+        raw_store(wrapping_add(out, 16), n);
     }
     if n == 0 {
         rt_drop_seq(items);
@@ -4450,6 +4476,8 @@ fn rt_parallel_map(items: u64, context: u64, f: u64, env: u64) -> u64 {
     raw_store(d + 40, raw_load(out));
     raw_store(d + 48, n);
     raw_store(d + 56, chunk);
+    raw_store(d + 64, iw);
+    raw_store(d + 72, rw);
     rt_region_enter();
     written := rt_job_split(d, 0, leaves, 0);
     rt_region_leave();

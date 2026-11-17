@@ -561,6 +561,8 @@ struct C {
     // unboxed-values.md, stage 1b): the value is that interior address, which no one may own, so
     // a move or an owner of it first copies the words into a box of its own (materialise).
     interior: u64[],
+    // The result adapters this object needs (box_result_thunk): closure * 4 + words.
+    box_thunks: u64[],
     // Per type id: 0 not yet known, else 1 + (1 if the type is a plain record) + (2 if it is a
     // record that stores a plain record inline).
     layout_memo: u64[],
@@ -24885,21 +24887,6 @@ fn flat_push<a>(c: (&a mut C), elem: u64) -> string {
     }
     return "rt_pushw";
 }
-// The runtime calls a task's, a job's and parallel_map's function itself and keeps one word of its
-// result, and parallel_map hands each call one word of its vector: a plain record is neither one
-// word nor a pointer it may keep (it comes back in two registers, and a vector of them is inline).
-// Until those calls go through an adapter (docs/design/unboxed-values.md, stage 3c), such a program
-// is refused rather than miscompiled.
-fn refuse_framed_through_runtime<a, b>(c: (&a mut C), ty: u64, what: &b [u8]) -> unit {
-    if (c.raw == 0) & framed(&mut c, ty) {
-        mut msg = copy_bytes(what);
-        push_bytes(&mut msg, view(" cannot be a plain record yet (`"));
-        push_bytes(&mut msg, view(source_type_name(&mut c, ty)));
-        push_bytes(&mut msg, view("`): return or pass it boxed, for example as a one-element vector"));
-        fail(&mut c, view(msg));
-    }
-    return ();
-}
 // Whether `ty` is a plain record, which lives in the frame (docs/design/unboxed-values.md, stage 3a):
 // its value is the address of frame words, its drop frees nothing, and a holder that keeps it past
 // the statement boxes it.
@@ -29373,6 +29360,86 @@ fn fn_value_decl<a>(c: (&a mut C)) -> u64 {
 // The adapter every function-as-closure calls: %rdi addresses the slot holding the object; the
 // function's own arguments follow in %rsi.. (Fn types take at most five), so they shift down one
 // register and the target is called; its result returns unchanged.
+// The adapter the runtime calls in place of a function whose plain result (one or two words) comes
+// back in rax:rdx, where the runtime keeps one word: it calls the function and returns a box of the
+// words. `closure` 1: the environment word addresses the slot holding the closure object, whose word
+// 0 is the code, and the arguments pass unchanged; 0: it addresses a cell holding the function, and
+// the arguments shift down one register. One per shape, shared by every caller.
+fn box_result_thunk<a>(c: (&a mut C), closure: bool, words: u64) -> u8[] {
+    mut name = copy_bytes(view("grail_box_result_"));
+    if closure {
+        name.push(99);
+    } else {
+        name.push(102);
+    }
+    decimal(&mut name, words);
+    code := u64(closure) * 4 + words;
+    mut known = false;
+    for i in c.box_thunks.len() {
+        if c.box_thunks[i] == code {
+            known = true;
+        }
+    }
+    if !known {
+        c.box_thunks.push(code);
+    }
+    return name;
+}
+// The task form of box_result_thunk: the item is a cell {function, item}; it is freed once unpacked.
+fn task_result_thunk<a>(c: (&a mut C), words: u64) -> u8[] {
+    mut name = copy_bytes(view("grail_box_result_t"));
+    decimal(&mut name, words);
+    code := 8 + words;
+    mut known = false;
+    for i in c.box_thunks.len() {
+        if c.box_thunks[i] == code {
+            known = true;
+        }
+    }
+    if !known {
+        c.box_thunks.push(code);
+    }
+    return name;
+}
+fn emit_box_thunks<a>(c: (&a mut C)) -> unit {
+    if c.box_thunks.len() == 0 {
+        return ();
+    }
+    o(&mut c, view(".text\n"));
+    for i in c.box_thunks.len() {
+        code := c.box_thunks[i];
+        if code >= 8 {
+            name := task_result_thunk(&mut c, code - 8);
+            weak_def(&mut c);
+            push_bytes(&mut c.out, view(name));
+            c.out.push(10);
+            push_bytes(&mut c.out, view(name));
+            o(&mut c, view(":\npushq %rbp\nmovq %rsp,%rbp\nsubq $32,%rsp\nmovq %rdi,-24(%rbp)\nmovq (%rdi),%rax\nmovq 8(%rdi),%rdi\n"));
+            o(&mut c, view("call *%rax\nmovq %rax,-16(%rbp)\nmovq %rdx,-8(%rbp)\nmovq -24(%rbp),%rdi\ncall rt_free\n"));
+            o(&mut c, view("leaq -16(%rbp),%rdi\nmovq $"));
+            on(&mut c, (code - 8) * 8);
+            o(&mut c, view(",%rsi\ncall rt_flat_box\nleave\nret\n"));
+            continue;
+        }
+        closure := code >= 4;
+        words := code % 4;
+        name := box_result_thunk(&mut c, closure, words);
+        weak_def(&mut c);
+        push_bytes(&mut c.out, view(name));
+        c.out.push(10);
+        push_bytes(&mut c.out, view(name));
+        o(&mut c, view(":\npushq %rbp\nmovq %rsp,%rbp\nsubq $16,%rsp\nmovq (%rdi),%rax\n"));
+        if closure {
+            o(&mut c, view("movq (%rax),%rax\n"));
+        } else {
+            o(&mut c, view("movq %rsi,%rdi\nmovq %rdx,%rsi\nmovq %rcx,%rdx\n"));
+        }
+        o(&mut c, view("call *%rax\nmovq %rax,-16(%rbp)\nmovq %rdx,-8(%rbp)\nleaq -16(%rbp),%rdi\nmovq $"));
+        on(&mut c, words * 8);
+        o(&mut c, view(",%rsi\ncall rt_flat_box\nleave\nret\n"));
+    }
+    return ();
+}
 fn emit_fn_thunk<a>(c: (&a mut C)) -> unit {
     if c.fn_thunk_used == 0 {
         return ();
@@ -32528,8 +32595,6 @@ fn parallel_map_builtin<a>(c: (&a mut C), items: Val) -> Val {
     if contains_borrow(&mut c, result, 0) {
         fail(&mut c, view("parallel_map result cannot contain borrows"));
     }
-    refuse_framed_through_runtime(&mut c, result, view("a parallel_map result"));
-    refuse_framed_through_runtime(&mut c, item, view("a parallel_map item"));
     if contains_task(&mut c, result, 0) || contains_task(&mut c, item, 0) {
         fail(&mut c, view("parallel_map cannot move Task or job handles between threads"));
     }
@@ -32568,9 +32633,34 @@ fn parallel_map_builtin<a>(c: (&a mut C), items: Val) -> Val {
     if c.raw == 0 {
         move_out(&mut c, items);
     }
-    mut pargs = three(list, context.t, target);
-    pargs.push(env);
-    slot := invoke(&mut c, view("rt_parallel_map"), pargs);
+    // Inline items are handed over by address; an inline result comes back boxed - a plain one of
+    // up to two words through an adapter (box_result_thunk), a larger one boxed by its own return.
+    iw := flat_bytes(&mut c, item);
+    mut rw = 0;
+    mut fn_target = target;
+    mut fn_env = env;
+    if (c.raw == 0) & (flat_bytes(&mut c, result) != 0) {
+        rw = flat_bytes(&mut c, result);
+        if framed(&mut c, result) && (record_words(&mut c, base_type(&mut c, result)) <= 2) {
+            words := record_words(&mut c, base_type(&mut c, result));
+            if !closure {
+                // The adapter takes the target from a cell its environment word points at.
+                fn_env = frame_alloc(&mut c, 1);
+                get(&mut c, fn_env, view("%rcx"));
+                get(&mut c, target, view("%rax"));
+                o(&mut c, view("movq %rax,(%rcx)\n"));
+            }
+            o(&mut c, view("leaq "));
+            push_bytes(&mut c.out, view(box_result_thunk(&mut c, closure, words)));
+            o(&mut c, view("(%rip),%rax\n"));
+            fn_target = save(&mut c);
+        }
+    }
+    mut pargs = three(list, context.t, fn_target);
+    pargs.push(fn_env);
+    pargs.push(imm(&mut c, iw));
+    pargs.push(imm(&mut c, rw));
+    slot := invoke(&mut c, view("rt_parallel_mapw"), pargs);
     ty := intern(&mut c, 6, result);
     observe(&mut c, context.t);
     release_temporary(&mut c, input);
@@ -32865,7 +32955,6 @@ fn parallel_spawn_builtin<a>(c: (&a mut C), callee: Val) -> Val {
     if contains_borrow(&mut c, result, 0) {
         fail(&mut c, view("a job result cannot contain borrows: the job owns what it returns"));
     }
-    refuse_framed_through_runtime(&mut c, result, view("a pool job's result"));
     // A closure whose type cannot show what it borrows (a call-scoped parameter forwarded by a
     // wrapper) still holds loans: the job takes them over, so the handle cannot outlive them
     // (docs/design/closure-bounds.md, 2.10). A wrapper that waits before returning is fine.
@@ -32901,6 +32990,20 @@ fn parallel_spawn_builtin<a>(c: (&a mut C), callee: Val) -> Val {
             move_out(&mut c, function);
         }
         box = apply(&mut c, view("rt_job_box"), one(object));
+    }
+    if (c.raw == 0) & framed(&mut c, result) {
+        words := record_words(&mut c, base_type(&mut c, result));
+        if words <= 2 {
+            if !closure {
+                fail(&mut c, view("a pool job of a named function cannot return a plain record of one or two words yet: write the job as a closure"));
+            }
+            // The runtime keeps one word of a job's result: the job runs the adapter, which reads the
+            // closure's code from its box as the closure ABI does and returns the result boxed.
+            o(&mut c, view("leaq "));
+            push_bytes(&mut c.out, view(box_result_thunk(&mut c, true, words)));
+            o(&mut c, view("(%rip),%rax\n"));
+            target = save(&mut c);
+        }
     }
     mut pargs = two(target, box);
     slot := invoke(&mut c, view("rt_parallel_spawn"), pargs);
@@ -32967,6 +33070,9 @@ fn parallel_join_builtin<a>(c: (&a mut C), handle: Val) -> Val {
         move_out(&mut c, handle);
     }
     slot := invoke(&mut c, view("rt_job_wait"), one(value));
+    if framed(&mut c, result) {
+        c.boxed.push(slot);
+    }
     return own(&mut c, slot, result);
 }
 fn contains_task<a>(c: (&a mut C), ty: u64, depth: u64) -> bool {
@@ -33113,10 +33219,26 @@ fn spawn_builtin<a>(c: (&a mut C), scope: Val) -> Val {
     }
     require_sendable_owned(&mut c, item.ty, view("spawned item"));
     require_sendable_owned(&mut c, result, view("spawned result"));
-    refuse_framed_through_runtime(&mut c, result, view("a spawned task's result"));
-    value := item.t;
+    mut value = item.t;
     if c.raw == 0 {
         move_out(&mut c, item);
+    }
+    mut entry = f.t;
+    if (c.raw == 0) & framed(&mut c, result) {
+        words := record_words(&mut c, base_type(&mut c, result));
+        if words <= 2 {
+            // The runtime keeps one word of a task's result: the task runs an adapter, whose item is
+            // a cell {function, item} it unpacks, and which returns the result boxed.
+            sz := imm(&mut c, 2);
+            cell := invoke(&mut c, view("rt_rec"), one(sz));
+            rec_store(&mut c, cell, 0, f.t);
+            rec_store(&mut c, cell, 1, value);
+            value = cell;
+            o(&mut c, view("leaq "));
+            push_bytes(&mut c.out, view(task_result_thunk(&mut c, words)));
+            o(&mut c, view("(%rip),%rax\n"));
+            entry = save(&mut c);
+        }
     }
     arity := imm(&mut c, count);
     mut dropper = imm(&mut c, 0);
@@ -33128,7 +33250,7 @@ fn spawn_builtin<a>(c: (&a mut C), scope: Val) -> Val {
     }
     mut args = u64[];
     args.push(sv.t);
-    args.push(f.t);
+    args.push(entry);
     args.push(value);
     args.push(arity);
     args.push(dropper);
@@ -33150,6 +33272,10 @@ fn join_builtin<a>(c: (&a mut C), handle: Val) -> Val {
         move_out(&mut c, handle);
     }
     slot := invoke(&mut c, view("rt_task_join"), one(value));
+    if framed(&mut c, result) {
+        // A task's plain result is its box (task_result_thunk or a boxed return).
+        c.boxed.push(slot);
+    }
     return own(&mut c, slot, result);
 }
 // `try_join(t) -> R |? TaskFailure`: the join that contains. It never aborts for a failed task; the
@@ -45474,7 +45600,7 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
                     call_out(&mut c, view("rt_job_wait"));
                     if needs_drop(&mut c, arg) {
                         o(&mut c, view("movq %rax,%rdi\n"));
-                        drop_call(&mut c, arg);
+                        holder_drop(&mut c, arg);
                     }
                 }
                 if kind == 20 {
@@ -50782,6 +50908,7 @@ pub fn main() -> u64 {
         ffi_fixed: 0,
         caddr: u64[],
         interior: u64[],
+        box_thunks: u64[],
         layout_memo: u64[],
         layout_offsets: u64[][],
         export_fret: 0,
@@ -51703,6 +51830,7 @@ pub fn main() -> u64 {
     }
     jobs::phase(view("closures"));
     emit_fn_thunk(&mut c);
+    emit_box_thunks(&mut c);
     emit_drops(&mut c);
     jobs::phase(view("drop-helpers"));
     // A drop helper can be the first thing to ask for a generic `Drop` implementation's
