@@ -101,6 +101,37 @@ pub fn split_mut<T:Send>(data: (&mut [T]), grain: u64 where grain > 0, f: Fn<Sha
     parallel_split(data, grain, f);
 }
 
+// split_mut with each piece's first index: f(base, piece), where piece[i] is data[base + i] - for
+// reading a captured table at the same rows, or writing per-piece results into a vector indexed by
+// base / grain (docs/design/simd-layout-parallel-loops.md 4.2). The pieces are split_mut's.
+pub fn chunks_mut_at<T:Send>(data: (&mut [T]), grain: u64 where grain > 0, f: Fn<Share>(u64, (&mut [T]))->unit) -> unit {
+    parallel_split(data, grain, f);
+}
+
+// A read-only reduction over a slice: `leaf` per piece of at most `grain` elements, the results
+// folded by `merge` in index order from `zero` - merge(...merge(merge(zero, r0), r1)..., rk). The
+// pieces and the fold depend on (length, grain) alone, so a floating-point sum is the same bits on
+// any number of workers (decision D4).
+pub fn reduce_chunks<T:Share, R:Send+Owned>(data: (&[T]), grain: u64 where grain > 0, zero: R, leaf: Fn<Share>((&[T]))->R, merge: Fn<Share>(R,R)->R) -> R {
+    return reduce<R>(data.len(), grain, zero, |lo: u64, hi: u64| -> R leaf(&data[lo: hi]), merge);
+}
+
+// Several columns in one split (docs/design/simd-layout-parallel-loops.md 4.2): every slice is cut at
+// the same indices into pieces of at most `grain` elements, and f gets the k-th piece of each - so
+// `p[i]` and `v[i]` in the callback are the same element of the same row. The slices must be equal
+// in length (checked once, as the call runs); the pieces depend on (length, grain) alone. Writes go
+// through the `&mut` slices, each an exclusive loan of its whole vector for the call, so the same
+// vector cannot be passed twice and the callback cannot capture any of them.
+pub fn zip2<A:Send, B:Share, F:Fn<Share>((&mut [A]), (&[B]))->unit>(a: (&mut [A]), b: (&[B]), grain: u64 where grain > 0, f: F) -> unit {
+    parallel_for_zip(grain, f, a, b);
+}
+pub fn zip3<A:Send, B:Share, C:Send, F:Fn<Share>((&mut [A]), (&[B]), (&mut [C]))->unit>(a: (&mut [A]), b: (&[B]), c: (&mut [C]), grain: u64 where grain > 0, f: F) -> unit {
+    parallel_for_zip(grain, f, a, b, c);
+}
+pub fn zip4<A:Send, B:Share, C:Share, D:Send, F:Fn<Share>((&mut [A]), (&[B]), (&[C]), (&mut [D]))->unit>(a: (&mut [A]), b: (&[B]), c: (&[C]), d: (&mut [D]), grain: u64 where grain > 0, f: F) -> unit {
+    parallel_for_zip(grain, f, a, b, c, d);
+}
+
 // The index ranges [0, n) in pieces of at most `grain`: f(lo, hi) for each piece, results in piece
 // order. For loops whose body reads shared data and builds a result per piece.
 pub fn range<U:Send+Owned>(n:u64,grain:u64 where grain > 0,f:Fn<Share>(u64,u64)->U)->U[]{

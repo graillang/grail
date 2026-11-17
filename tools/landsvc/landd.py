@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import signal
 """Grail landing service: one daemon lands queued branches on main through the fast gate.
 
 Requests are files in requests/ (written by land.sh). The daemon takes up to TRAIN of the oldest,
@@ -8,7 +9,7 @@ once, and on green fast-forwards main and each branch. A branch that does not me
 its conflicting files. A red train is retried one branch at a time, so one bad branch cannot block
 the others. Results go to results/<branch>.txt and ../grail-land-logs/landings.txt.
 """
-import os, sys, time, subprocess, fcntl, shutil, re, glob, tempfile, json
+import os, shlex, sys, time, subprocess, fcntl, shutil, re, glob, tempfile, json
 
 SVC = os.path.dirname(os.path.abspath(__file__))
 REQ = os.path.join(SVC, 'requests'); RES = os.path.join(SVC, 'results')
@@ -21,12 +22,29 @@ TRAIN = int(os.environ.get('GRAIL_LAND_TRAIN', '8'))
 # The owner's rule (2026-11-17): land, then fix forward. Before landing only the build and the self-host
 # fixed point run (a compiler that cannot build itself blocks every fix); the full suites run after
 # the landing, on main, in post mode (`landd.py --post`), and failures go to their branch's owner.
+LEG_LIMIT = int(os.environ.get('GRAIL_LAND_LEG_LIMIT', str(150 * 60)))
 FAST = os.environ.get('GRAIL_LAND_FULL', '') == ''
 SUITES = ['test-cli', 'interface-test', 'cache-test', 'split-test', 'test-ffi', 'abundance-test', 'borg-test', 'lsp-test']
 
-def sh(cmd, cwd=Q, env=None, check=False, capture=True):
-    r = subprocess.run(cmd, cwd=cwd, env=env, shell=isinstance(cmd, str), text=True,
-                       stdout=subprocess.PIPE if capture else None, stderr=subprocess.STDOUT if capture else None)
+def sh(cmd, cwd=Q, env=None, check=False, capture=True, limit=None):
+    if limit is None:
+        r = subprocess.run(cmd, cwd=cwd, env=env, shell=isinstance(cmd, str), text=True,
+                           stdout=subprocess.PIPE if capture else None, stderr=subprocess.STDOUT if capture else None)
+    else:
+        # A suite retry runs in its own process group, killed whole past `limit` seconds, and anything it
+        # left behind is killed with it.
+        # Output goes to a file, not a pipe, so a leftover process holding it open cannot stretch the wait.
+        with tempfile.TemporaryFile('w+') as f:
+            p = subprocess.Popen(cmd, cwd=cwd, env=env, shell=isinstance(cmd, str), text=True, start_new_session=True,
+                                 stdout=f if capture else None, stderr=subprocess.STDOUT if capture else None)
+            try: code = p.wait(timeout=limit)
+            except subprocess.TimeoutExpired: code = -9
+            try: os.killpg(p.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError): pass
+            p.wait()
+            out = None
+            if capture: f.seek(0); out = f.read()
+        r = subprocess.CompletedProcess(cmd, code, out, None)
     if check and r.returncode != 0:
         raise RuntimeError(f'{cmd}: {r.stdout}')
     return r
@@ -111,7 +129,7 @@ def gate(out, stamp):
         d = tempfile.mkdtemp(prefix='landcache-')
         e = dict(env, GRAIL_CACHE_DIR=d)
         f = open(f'{out}/{name}.log', 'w')
-        return name, subprocess.Popen(cmd, cwd=Q, env=e, stdout=f, stderr=subprocess.STDOUT, shell=True), f
+        return name, subprocess.Popen(cmd, cwd=Q, env=e, stdout=f, stderr=subprocess.STDOUT, shell=True, start_new_session=True), f
     # The suites come from the tree being gated (tools/landsvc/suites.txt: one `name command...` per
     # line), so a branch that adds a suite lands its fix and its gate leg together.
     suites = []
@@ -127,8 +145,18 @@ def gate(out, stamp):
     # The suites run alongside the corpus: agents' processes are at nice 10 while a landing runs.
     for n, c in suites: legs.append(start(n, c))
     codes = {}
+    # Every leg runs in its own process group: a leg that outlives LEG_LIMIT is killed whole, and
+    # whatever a finished leg left behind (a compiler orphaned when its driver was killed) goes with it.
+    deadline = time.time() + LEG_LIMIT
     for name, p, f in legs:
-        codes[name] = p.wait(); f.write(f'exit={codes[name]}\n'); f.close()
+        try:
+            codes[name] = p.wait(timeout=max(1, deadline - time.time()))
+        except subprocess.TimeoutExpired:
+            codes[name] = -9; notes.append(f'FAIL: {name}: still running after {LEG_LIMIT // 60} min (killed)')
+        try: os.killpg(p.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError): pass
+        p.wait()
+        f.write(f'exit={codes[name]}\n'); f.close()
     ks = known_lines(Q)
     def known(s): return any(k in s for k in ks)
     ok = True
@@ -140,7 +168,7 @@ def gate(out, stamp):
             notes.append(f'FAIL: x86 shard {i} ended without a verdict'); ok = False
     if fails:
         flt = '^(' + '|'.join(re.escape(c) for c in sorted(fails)) + ')$'
-        r = sh(f'GRAIL_CACHE_DIR=$(mktemp -d) GRAIL_TEST_FILTER=\'{flt}\' bun tools/test-native.mjs x86_64 > {out}/x86_retry.log 2>&1', env=env)
+        r = sh(f'GRAIL_CACHE_DIR=$(mktemp -d) GRAIL_TEST_FILTER=\'{flt}\' bun tools/test-native.mjs x86_64 > {out}/x86_retry.log 2>&1', env=env, limit=LEG_LIMIT)
         txt = open(f'{out}/x86_retry.log').read()
         for c in sorted(fails):
             if re.search(rf'^FAIL {re.escape(c)}\b', txt, re.M):
@@ -151,7 +179,7 @@ def gate(out, stamp):
     for n in ['selfhost'] + [n for n, _ in suites]:
         if codes[n] == 0: continue
         cmd = retry_cmd[n]
-        r = sh(f'GRAIL_CACHE_DIR=$(mktemp -d) {cmd} > {out}/{n}.retry.log 2>&1', env=env)
+        r = sh(f'GRAIL_CACHE_DIR=$(mktemp -d) {cmd} > {out}/{n}.retry.log 2>&1', env=env, limit=LEG_LIMIT)
         if r.returncode == 0: notes.append(f'flake (passed alone): {n}'); continue
         lines = [l for l in open(f'{out}/{n}.retry.log') if re.match(r'^(FAIL|error)', l)][:20]
         unknown = [l.strip() for l in lines if not known(l)]
@@ -166,12 +194,15 @@ def remote_legs(C, stamp):
     if not REMOTE: return 'no remote'
     # One batch at a time: a newer main supersedes the emulated legs still running for an older one
     # (every landing starting its own batch put 13 batches on the 8-core box at once).
-    stop_old = ('for s in $(ps -eo sid,args | awk \'/land-remote.sh [0-9-]+ --detached/ {print $1}\' | sort -u); '
-                'do pkill -TERM -s $s; done; ')
+    # Each batch's legs share the launcher's session: stop every session that runs a dated leg
+    # (agents' own legs, named <agent>/<leg>, are left alone). Emulated legs compile with one job each,
+    # since forked optimiser workers per leg put hundreds of processes on the 8-core box.
+    stop_old = ("for s in $(ps -eo sid=,args= | awk '/run-leg[.]sh 20[0-9]+-[0-9]+[/]/ {print $1}' | sort -u); "
+                "do pkill -TERM -s $s; done; sleep 3; export GRAIL_JOBS=1; ")
     script = (stop_old + 'cd /srv/grail/w && git fetch -q origin && git checkout -q -f origin/main && '
               f'if [ -f tools/land-remote.sh ]; then bash tools/land-remote.sh {stamp}; else mkdir -p /srv/grail/logs/{stamp} && '
               f'for t in aarch64 riscv64; do for i in 1 2 3; do GRAIL_LEG_COMPILER=/srv/grail/grail-main nohup setsid /srv/grail/run-leg.sh {stamp}/${{t}}_$i env GRAIL_TEST_SHARD=$i/3 bun tools/test-native.mjs $t --jobs 2 >/dev/null 2>&1 & done; done; fi')
-    r = sh(f'git push -q {REMOTE}:/srv/grail/repo.git HEAD:refs/heads/main && rsync -az {C} {REMOTE}:/srv/grail/grail-main && ssh -o BatchMode=yes {REMOTE} {json.dumps(script)}')
+    r = sh(f'git push -q {REMOTE}:/srv/grail/repo.git HEAD:refs/heads/main && rsync -az {C} {REMOTE}:/srv/grail/grail-main && ssh -o BatchMode=yes {REMOTE} {shlex.quote(script)}')
     return 'emulated legs started' if r.returncode == 0 else 'could not start the emulated legs: ' + r.stdout[-200:]
 
 def run_once():

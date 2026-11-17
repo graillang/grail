@@ -429,6 +429,75 @@ instructions with units, 111.0 G without (dev compiler). The units cannot remove
 assembler's own share: an edited build still regenerates and optimises the whole module's text,
 and spends a quarter of its time writing the interface (`iface_sorted`, routed to the front end).
 
+### Windows (COFF), in progress
+
+The in-process assembler covers Linux ELF on x86-64, AArch64 and RISC-V. Windows x86-64 still
+assembles with clang. The work to change that, in order, each step landable on its own:
+
+State (landed on main): steps 1-3. The COFF writer (`compiler/coff.grl`), x86 COFF fixups,
+`.def`/`.scl`/`.type`/`.endef`, `.seh_*` to `.xdata`/`.pdata`, `call/jmp *mem`, `movdqu`, weak externals;
+`grail asm --target windows-x86_64`; `asm-oracle --target windows-x86_64` compares through llvm-readobj
+(offsets and string-table placement excluded); the Windows hello object (640 KB) and
+`tests/asm/directives-windows-x86_64.s` are identical to clang's. Step 5 is in: non-debug Windows x86-64
+builds assemble in-process (`assemble_object` target 3, `compile_mode`, `tools/native.mjs` and
+`tools/windows.mjs assemble`; C shims and CodeView text still go to clang), checked against clang with
+GRAIL_ASM_ORACLE=1 in `windows.mjs check`. Step 4 is in too: `.cv_*` and `.secrel32`/`.secidx` in `.debug$S`, as LLVM's CodeViewContext writes
+them (the Windows debug hello, 8083 line rows, is identical to clang's), so Windows x86-64 assembles
+without clang in every build; only C shims still use it, as a C compiler.
+The hooks step 5 used: in `native.grl assemble_object` add `c.plat` Windows → `asm_x86::assemble_for(3, ...)`;
+in `cli.grl compile_mode` let `internal` include `windows-x86_64` (the assemble prefix gets `--target
+windows-x86_64`); in `tools/native.mjs assemble` the same; then `tools/windows.mjs` under wine on that path,
+and delete clang for that target as for Linux.
+
+1. **Directive survey** (done). The Windows stream (hello, `--target windows-x86_64`) uses, besides
+   the ELF subset: `.def NAME` / `.scl 2` / `.type 32` / `.endef` (a function symbol's storage class
+   and type); `.seh_proc`, `.seh_pushreg %rbp`, `.seh_setframe %rbp, 0`, `.seh_stackalloc N`,
+   `.seh_endprologue`, `.seh_endproc` on every function; sections `NAME$a/$b/$z,"dr"` (grail_sites
+   and grail_funcs, bracketed by `__start_`/`__stop_` labels) and `.rdata`. Debug builds add CodeView:
+   `.cv_file`, `.cv_func_id`, `.cv_loc`, `.cv_linetable`, `.cv_filechecksums`, `.cv_stringtable`,
+   `.secrel32`, `.secidx`, label differences in `.short`/`.long`, in `.debug$S`.
+2. **COFF writer** (`compiler/coff.grl`): the file header, section table (names longer than 8
+   bytes as `/offset` into the string table), raw data, relocations (`ADDR64`, `REL32` with LLVM's
+   addend folding, `ADDR32NB` for .pdata, `SECREL`/`SECTION` for CodeView), the symbol table
+   with each section's static symbol and its aux record (length, relocation count, JamCRC checksum
+   of the contents, number), external/static functions with type 0x20. Oracle: `asm-oracle
+   --target windows-x86_64` against `clang --target=x86_64-pc-windows-msvc -c`.
+3. **Unwind**: `.xdata` UNWIND_INFO per function from the `.seh_*` directives (version 1, prologue
+   size, codes for PUSH_NONVOL rbp, SET_FPREG, ALLOC_SMALL/LARGE, frame register rbp) and `.pdata`
+   RUNTIME_FUNCTION triples (begin, end, unwind info; `ADDR32NB` relocations), in LLVM's order.
+4. **CodeView**: the `.cv_*` directives' `.debug$S` subsections (file checksums, string table,
+   line tables per function) as LLVM's CodeViewContext writes them.
+5. In-process path for the Windows target in `assemble_object` and the driver, the windows leg
+   (tools/windows.mjs under wine) on it, then delete the clang requirement as for Linux.
+
+### macOS (Mach-O), in progress
+
+The last target that still assembles with clang. The survey of the macOS arm64 hello (`--target
+macos-aarch64`, 6.5 MB of text, the same runtime as Linux through `darwinify`):
+
+- Instructions: the AArch64 subset `asm_a64.grl` already encodes, plus nothing new.
+- Directives: `.build_version macos, 11, 0`, `.section __DATA,__bss`, `.pushsection __TEXT,__const`,
+  `.weak_definition`, `.space`, and the ELF subset otherwise.
+- Operand modifiers: `sym@PAGE` / `sym@PAGEOFF` in place of `:lo12:`.
+- clang's object: one unnamed LC_SEGMENT_64 with `__TEXT,__text` (attributes 0x80000400 pure
+  instructions + some instructions), `__TEXT,__const` twice?, `__DATA,__const`, `__DATA,__bss`
+  (zerofill); LC_BUILD_VERSION; LC_SYMTAB; LC_DYSYMTAB. Relocations: ARM64_RELOC_PAGE21 /
+  PAGEOFF12 (with a preceding ARM64_RELOC_ADDEND for a nonzero addend), BRANCH26 for calls to
+  undefined symbols, UNSIGNED for data words; local labels resolved in place; no section-relative
+  relocation for temporaries (Mach-O keeps `L`-prefixed names out of the symbol table but relocates
+  against the section by number, r_extern = 0).
+
+Plan, each step against clang through `asm-oracle --target macos-aarch64` (llvm-readobj's view, as
+for COFF; no Mac is needed to compare objects):
+1. `compiler/macho.grl`: the header, LC_SEGMENT_64 with its sections, LC_BUILD_VERSION, LC_SYMTAB,
+   LC_DYSYMTAB (locals, externals, undefined in that order, each sorted by name), the relocation
+   records (r_address, symbolnum, pcrel, length, extern, type), string table.
+2. `asm_x86` target 4: the A64 encoder with Mach-O sections, `@PAGE`/`@PAGEOFF`, the Darwin
+   directives; resolution rules above.
+3. Compact unwind (`__LD,__compact_unwind`) if the compiler starts emitting `.cfi_*` for macOS;
+   today it emits none, and clang adds none.
+4. In-process path for `macos-aarch64`, then `macos-x86_64` (the x86 encoder with X86_64_RELOC_*).
+
 ## The order of the remaining work
 
 2. *(done: see above.)* What is left of it is `grail check` reading interfaces from the store.

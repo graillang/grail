@@ -1,0 +1,44 @@
+// bytes::find_byte against a byte-at-a-time search: every start in texts of every length up to 40,
+// as whole vectors and as slices at every offset (so word reads start unaligned), for a byte that
+// occurs, one that does not, and byte 0 (whose has-zero test the shifted-in tail bytes would fool).
+use bytes;
+
+fn naive<a>(s: &a [u8], from: u64, b: u64) -> u64 {
+    mut i = from;
+    while i < s.len() {
+        if u64(s[i]) == b {
+            return i;
+        }
+        i += 1;
+    }
+    return s.len();
+}
+
+fn main() {
+    mut checks = 0;
+    mut text = u8[];
+    for i in 48 {
+        // Mostly letters, a newline every seventh byte, a zero every eleventh.
+        if i % 7 == 3 {
+            text.push(10);
+        } else if i % 11 == 5 {
+            text.push(0);
+        } else {
+            text.push(u8(97 + i % 26));
+        }
+    }
+    wanted := u64[10, 0, 122, 255];
+    for off in 8 {
+        for len in 41 {
+            piece := view(text)[off..off + len];
+            for from in len + 2 {
+                for w in wanted.len() {
+                    b := wanted[w];
+                    assert(bytes::find_byte(piece, from, b) == naive(piece, from, b));
+                    checks += 1;
+                }
+            }
+        }
+    }
+    println(format("bytes ok {}", checks));
+}
