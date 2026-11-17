@@ -1,5 +1,12 @@
 ## Unreleased
 
+- **Maps hash one-word keys with a keyed multiply mix instead of SipHash-1-3.** Integer, float and
+  other one-word keys hash in about eight instructions instead of sixty, keyed by the map's two seed
+  words (one mixed into the value, one as a secret odd multiplier), the same construction as the
+  seeded word hashes of Go's and Zig's tables. `bench/hashmap` falls from 0.71 to 0.46 billion
+  instructions and from 99 to 75 ms against C's 67 ms. It is not a cryptographic hash: `hash::hash`
+  still returns SipHash-1-3 and `hash::hasher` is still SipHash-2-4, and multi-word keys (strings,
+  records) still stream through SipHash-1-3.
 - A program whose `main` takes the argument view and is run without one now prints `usage: PROGRAM NAME`
   on stderr, with the parameter's declared name, before exiting 2. It used to exit 2 silently.
 - The SIMD benchmarks (`bench/simd_dot`, `simd_mat4`, `simd_aos`) take `check` for a three-round run that
