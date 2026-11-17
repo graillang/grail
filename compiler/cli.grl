@@ -2144,13 +2144,33 @@ fn llvm_compile_command<a>(args: (&a u8[][])) -> u64 {
     suffix := cat(view("u"), view(decimal(xxhash::hash64(view(input), 0))));
     mut pids = u64[];
     mut objects = u8[][];
+    mut compiled = u8[][];
+    mut destinations = u8[][];
+    parts_store := path_join(view(cache_base()), view("llvm-parts"));
+    cache_mkdirs(view(parts_store));
     for k in plan.count {
         mut name = copy(view(input));
         push_bytes(&mut name, view("."));
         push_bytes(&mut name, view(decimal(k)));
         part := cat(view(name), view(".ll"));
         object := cat(view(name), view(".o"));
-        host::write_file(view(part), view(llvm::split_part(view(text), &plan, k, view(suffix))));
+        part_text := llvm::split_part(view(text), &plan, k, view(suffix));
+        // A part's object is stored under the digest of its text and the compile command, so a
+        // rebuild after an edit compiles only the parts whose functions changed.
+        mut keyed = u8[];
+        for c in clang.len() {
+            push_bytes(&mut keyed, view(item(&clang, c)));
+            keyed.push(0);
+        }
+        push_bytes(&mut keyed, view(part_text));
+        stored := path_join(view(parts_store), view(cat(view(decimal(xxhash::hash64(view(keyed), 0))), view(".o"))));
+        if host::exists(view(stored)) != 0 {
+            objects.push(stored);
+            continue;
+        }
+        host::write_file(view(part), view(part_text));
+        compiled.push(object.copy());
+        destinations.push(stored);
         mut run = u8[][];
         for c in clang.len() {
             run.push(item(&clang, c));
@@ -2172,6 +2192,14 @@ fn llvm_compile_command<a>(args: (&a u8[][])) -> u64 {
     if bad != 0 {
         say(view("grail: clang -O2 failed on a part of the LLVM module"));
         return 1;
+    }
+    // Into the store: copied under a name of this process's, then renamed, so a reader never sees a
+    // half-written object.
+    for q in compiled.len() {
+        bytes := host::read_file(view(item(&compiled, q)));
+        pending := cat(view(item(&destinations, q)), view(cat(view(".tmp"), view(decimal(host::now_ms())))));
+        host::write_file(view(pending), view(bytes));
+        host::rename(view(pending), view(item(&destinations, q)));
     }
     mut link = u8[][tool(view("GRAIL_LINKER"), view("ld.lld")), copy(view("-m")), copy(view(emulation)), copy(view("-r"))];
     for k in objects.len() {
