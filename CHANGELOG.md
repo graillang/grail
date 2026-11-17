@@ -13,10 +13,21 @@
   and calls to Grail's own functions no longer trip the vector-register guard meant for C calls.
   tools/test-facts.mjs checks that a blocking-extern caller is lifted.
 
+- `grail check` no longer builds the list of SIMD type names for every identifier it reads: names
+  that cannot be one (wrong length, first letter or `x` position) are rejected first. This was 7% of
+  checking a large program since the SIMD types arrived.
 - The optimiser parses each distinct instruction line once per compile and replays the record for
   its repeats (a label operand is numbered again, the frame-slot bookkeeping redone): byte-identical
   output, 2.6% fewer instructions for a 4000-function file. The plan for taking the remaining text
   hops out of the dev backend is docs/design/in-memory-ir.md.
+- **The inliner reaches further: copies inside copies, promoted registers, a 32-line cap.** A copy
+  of a small wrapper keeps the call it makes last (`rt_new` calling `rt_alloc`); that call is now
+  expanded too, three levels deep, since nothing of the copy is live across it. A small leaf whose
+  values the optimiser put in callee-saved registers (`rt_block_bin`, `rt_job_deque`) is no longer
+  refused: its copy keeps them in free scratch registers. The size cap is 32 lines, up from 24.
+  Measured (callgrind, one worker, minimum of five), against main: a join 2742 -> 2652 instructions,
+  a spawn 1631 -> 1583, fib(20) by nested join -1.7%. The compiler's own text is 4.0% larger and
+  it compiles 0.85% faster.
 - **The optimiser's liveness is linear in a function's length.** The register and frame-slot
   liveness behind dead-store removal, prologue zeroing and register colouring looked at every
   candidate slot on every line of every round; each line's effect is now worked out once per pass
@@ -120,11 +131,6 @@
   writes interfaces records its bodies now; `tools/test-cli.mjs` checks a program using each lib/
   module.
 - The internal assembler takes `.previous`.
-- **Integer map keys hash in registers.** `hash::Hash` has a defaulted `table_hash`, the SipHash-1-3
-  value a map uses (the default streams through `hash`, as before); the integer types give it as
-  `hash::word_hash`, the same value computed straight-line with no hasher state in memory. User
-  `Hash` impls need no change. bench/hashmap.grl: Grail-LLVM 0.88G -> 0.77G instructions and 0.30
-  -> 0.27 s user (Rust 0.64G, 0.21 s), Grail-native 3.21G -> 2.69G.
 - **Fix: every closure expression is a type of its own.** Two closure literals with the same
   signature and environment shape compared equal inside a generic type, so `k = keep(|| ..)` could
   replace a `Keep<F>` built from another literal; calls through it then ran the first literal's body
