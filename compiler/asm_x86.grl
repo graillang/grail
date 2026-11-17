@@ -1034,7 +1034,6 @@ fn data<a>(o: (&a mut A), width: u64) {
 }
 
 fn string<a>(o: (&a mut A), zero: bool) {
-    map_to(&mut o, 2);
     expect(&mut o, '"');
     while (o.at < o.le) && (peek(&o) != '"') {
         mut c = peek(&o);
@@ -1222,8 +1221,10 @@ fn directive<a>(o: (&a mut A), id: u64) {
         o.sym_bind[sym] = 2;
         note_attr(&mut o, sym);
     } else if id == 9 {
+        map_to(&mut o, 2);
         string(&mut o, true);
     } else if id == 20 {
+        map_to(&mut o, 2);
         string(&mut o, false);
     } else if id == 10 {
         section_line(&mut o);
@@ -1282,6 +1283,7 @@ fn directive<a>(o: (&a mut A), id: u64) {
         o.loc_pending = 1;
     } else if id == 23 {
         take_loc(&mut o);
+        map_to(&mut o, 2);
         loop {
             n := number(&mut o);
             uleb(&mut o.buf, n);
@@ -2195,29 +2197,39 @@ fn line_table<a, b, c>(o: (&a mut A), pre: (&b u64[]), r_sec: (&c mut u64[]), r_
     // into the buffer for the switches and out again after.
     keep := o.cur;
     o.buf = exchange(&mut o.sec_data[keep], u8[]);
-    ls := view(".debug_line_str");
-    section(&mut o, ls, 0, ls.len(), 1, 0x30, 1);
-    str_sec := o.cur;
-    o.sec_entsize[str_sec] = 1;
+    // In LLVM's order: .debug_line, then the strings it names.
     l := view(".debug_line");
     section(&mut o, l, 0, l.len(), 1, 0, 1);
+    map_to(&mut o, 2);
     line_sec := o.cur;
+    ls := view(".debug_line_str");
+    section(&mut o, ls, 0, ls.len(), 1, 0x30, 1);
+    map_to(&mut o, 2);
+    str_sec := o.cur;
+    o.sec_entsize[str_sec] = 1;
     switch_to(&mut o, keep);
     back := exchange(&mut o.buf, u8[]);
     exchange(&mut o.sec_data[keep], back);
     o.sec_data[str_sec] = strs;
     o.sec_data[line_sec] = out;
+    // R_X86_64_32 / R_X86_64_64, or AArch64's ABS32 / ABS64.
+    mut t32 = 10;
+    mut t64 = 1;
+    if o.target == 1 {
+        t32 = 258;
+        t64 = 257;
+    }
     for i in str_fields.len() {
         r_sec.push(line_sec);
         r_off.push(str_fields[i]);
-        r_type.push(10);
+        r_type.push(t32);
         r_sym.push(o.sec_sym[str_sec]);
         r_add.push(str_values[i]);
     }
     if o.ln_pos.len() != 0 {
         r_sec.push(line_sec);
         r_off.push(set_at);
-        r_type.push(1);
+        r_type.push(t64);
         r_sym.push(o.sec_sym[0]);
         r_add.push(final_text(pre, o.ln_pos[0], o.ln_k[0]));
     }

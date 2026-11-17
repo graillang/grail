@@ -200,8 +200,8 @@ export function assemble(source, executable, target = hostTarget, linkArgs = [],
   const object = `${executable}.${process.pid}.o`;
   const stable = `${executable}.o`;
   const flags = target === 'riscv64' ? ['-march=rv64imafd', '-mabi=lp64d'] : [];
-  if (target === 'x86_64' && internalAssembler && !process.env.GRAIL_ASSEMBLER && process.env.GRAIL_ASSEMBLER_INTERNAL !== '0') {
-    command([internalAssembler, 'asm', source, '-o', object]);
+  if ((target === 'x86_64' || target === 'aarch64') && internalAssembler && !process.env.GRAIL_ASSEMBLER && process.env.GRAIL_ASSEMBLER_INTERNAL !== '0') {
+    command([internalAssembler, 'asm', ...(target === 'aarch64' ? ['--target', 'aarch64'] : []), source, '-o', object]);
     if (process.env.GRAIL_ASM_ORACLE === '1') {
       // The oracle (tools/asm-oracle.mjs): clang's object from the same text must be the same.
       const reference = `${object}.clang.o`;
