@@ -1,5 +1,11 @@
 ## Unreleased
 
+- **png and inflate decode faster.** Inflate's length and distance tables were vector literals
+  built on every match; they are static text indexed in place. png unfilters the common layout
+  (whole-byte samples, no channel added) straight into the image with one loop per filter type,
+  instead of five filter tests per byte, a fresh vector per row and a byte-by-byte copy. A 4096x4096
+  RGBA texture: Grail-LLVM 41.1G -> 8.1G instructions (3.65 -> 0.91 s; libpng 0.40 s, the runtime's
+  division fix included), Grail-native 107G -> 21.4G.
 - **zstd decodes with fewer allocations and a word-at-a-time bit reader.** The sequence-code tables
   were vector literals built on every lookup (four per sequence) and the backward bit reader took
   one bit per step; the tables are static text indexed in place and the reader assembles whole
