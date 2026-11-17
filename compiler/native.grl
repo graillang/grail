@@ -846,6 +846,15 @@ struct C {
     // 1 while an assignment's target path is read: its last field is written directly (and its
     // predicate owed there), not lent out, so `field_path` records it instead of refusing the loan.
     ref_assign_target: u64,
+    // The loop-invariant pass (docs/design/refinements.md, "Loop invariants"): the facts a `while`
+    // body's writes would kill are kept while the body is compiled, and checked where the body ends.
+    // `pv_spec_open` is the `{` of the body being compiled under them, `pv_spec_cands` the facts kept,
+    // `pv_spec_failed`/`pv_spec_dropped` pair each body with a kept fact it broke: the function is
+    // compiled again without keeping that one.
+    pv_spec_open: u64,
+    pv_spec_cands: Atom[],
+    pv_spec_failed: u64[],
+    pv_spec_dropped: Atom[],
     // `--report-checks`: the checks left in the program's own functions, as the site table met
     // them, printed after the build (report_checks_print).
     report_checks: u64,
@@ -10573,6 +10582,32 @@ fn pv_ir_wrote<a, b>(c: (&a mut C), name: &b [u8]) -> unit {
         return ();
     }
     c.pv_kill_log.push(copy_bytes(view(name)));
+    // What the name tied together survives it: from `X == A + p` and `X == B + q`, with X a term of
+    // the name and A, B not, `A == B + (q - p)`. Sorting a pair of vectors by swapping them keeps
+    // `v.len == n` through `tmp.len == v.len` this way.
+    mut ties_t = u8[][];
+    mut ties_x = u8[][];
+    mut ties_k = i64[];
+    for i in c.pv_facts.len() {
+        x := &c.pv_facts[i];
+        if x.rel != 2 {
+            continue;
+        }
+        am := pv_mentions(view(x.a), view(name));
+        bm := pv_mentions(view(x.b), view(name));
+        if am & !bm & (x.b.len() != 0) {
+            // a == b + k: the name's term a is b + k.
+            ties_x.push(x.a.copy());
+            ties_t.push(x.b.copy());
+            ties_k.push(x.k);
+        }
+        if bm & !am {
+            // a == b + k: the name's term b is a - k.
+            ties_x.push(x.b.copy());
+            ties_t.push(x.a.copy());
+            ties_k.push(0 - x.k);
+        }
+    }
     mut keep = u64[];
     for i in c.pv_facts.len() {
         x := &c.pv_facts[i];
@@ -10580,6 +10615,19 @@ fn pv_ir_wrote<a, b>(c: (&a mut C), name: &b [u8]) -> unit {
         keep.push(u64(!hit));
     }
     pv_ir_keep(&mut c, &keep);
+    for i in ties_t.len() {
+        for j in i + 1..ties_t.len() {
+            if !same(view(ties_x[i]), view(ties_x[j])) || same(view(ties_t[i]), view(ties_t[j])) {
+                continue;
+            }
+            // X == Ti + ki and X == Tj + kj: Ti == Tj + (kj - ki).
+            mut bad = 0;
+            k := pv_k_sum(ties_k[j], 0 - ties_k[i], &mut bad);
+            if bad == 0 {
+                pv_add(&mut c.pv_facts, 2, view(ties_t[i]), view(ties_t[j]), k);
+            }
+        }
+    }
     return ();
 }
 // The pure tests a predicate may use: spelled like a method call, but they read their receiver and
@@ -10677,6 +10725,125 @@ fn pv_caps_kill<a>(c: (&a mut C)) -> unit {
 // the second iteration a fact that held at the loop's entry no longer holds there. So every name the
 // body assigns, mutably borrows or method-calls is killed here, before the body's block opens; the
 // guard's own facts are added by the block that follows, and are true at every iteration.
+// The loop-invariant pass, at the end of a `while` body compiled under kept facts: each must hold
+// again where the body falls through to the guard. A body that cannot fall through (it ends in a
+// `return` or a `break`) keeps them for free. One that fails marks the loop, and the function is
+// compiled again with the kill (c.retry); the bytes of this attempt are discarded.
+fn pv_spec_check<a>(c: (&a mut C), brace: u64) -> unit {
+    if c.terminated != 0 {
+        return ();
+    }
+    mut facts = Atom[];
+    pv_ir_read(&mut c, &mut facts);
+    // Every kept fact that does not hold again is dropped for this loop, and the function is
+    // compiled again under the others; the dropped list only grows, so this ends.
+    mut any = false;
+    for i in c.pv_spec_cands.len() {
+        x := &c.pv_spec_cands[i];
+        if !pv_holds(&facts, x.rel, view(x.a), view(x.b), x.k) {
+            c.pv_spec_failed.push(brace);
+            c.pv_spec_dropped.push(copy_atom_value(&x));
+            any = true;
+        }
+    }
+    if any {
+        exchange(&mut c.retry, 1);
+    }
+    return ();
+}
+// Whether the tokens of a body hold a `continue`: a second way back to the guard, which the check
+// at the body's end does not see. Such a loop is not compiled under kept facts.
+fn pv_has_continue<a>(c: (&a mut C), open: u64, end: u64) -> bool {
+    mut i = open + 1;
+    while i < end {
+        if (kind_at(&mut c, i) == 1) && is_at(&mut c, i, view("continue")) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+// `if X > B { X = B; }` with no `else`, `X` a name and `B` a term that does not mention it: either
+// way `X <= B` after it - the branch made it so, and its negation said so.
+fn pv_clamp<a>(c: (&a mut C), cond_at: u64, cond_end: u64) -> unit {
+    if !pv_ir_live(&c) || (cond_end < cond_at + 3) || (kind_at(&mut c, cond_at) != 1) || (kind_at(&mut c, cond_at + 1) != 62) {
+        return ();
+    }
+    x := tok_text(&mut c, cond_at);
+    b := pv_span_term(&mut c, cond_at + 2, cond_end);
+    if (b.len() == 0) || pv_mentions(view(b), view(x)) {
+        return ();
+    }
+    blen := cond_end - cond_at - 2;
+    at := cond_end;
+    if (kind_at(&mut c, at) != 123) || !same(view(tok_text(&mut c, at + 1)), view(x)) || (kind_at(&mut c, at + 2) != 61) {
+        return ();
+    }
+    for i in blen {
+        if !same(view(tok_text(&mut c, at + 3 + i)), view(tok_text(&mut c, cond_at + 2 + i))) {
+            return ();
+        }
+    }
+    if (kind_at(&mut c, at + 3 + blen) != 59) || (kind_at(&mut c, at + 4 + blen) != 125) {
+        return ();
+    }
+    if (kind_at(&mut c, at + 5 + blen) == 1) && is_at(&mut c, at + 5 + blen, view("else")) {
+        return ();
+    }
+    pv_add(&mut c.pv_facts, 1, view(x), view(b), 0);
+    return ();
+}
+// Whether a body holds a `break` of its own loop (or of an inner one: counted conservatively).
+fn pv_has_break<a>(c: (&a mut C), open: u64, end: u64) -> bool {
+    mut i = open + 1;
+    while i < end {
+        if (kind_at(&mut c, i) == 1) && is_at(&mut c, i, view("break")) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+// The kill of a `while` loop under the invariant pass: what the kill removes is put back as the
+// candidates the body's end must re-establish, unless this body failed that before.
+fn pv_loop_kill_spec<a>(c: (&a mut C), open: u64, end: u64) -> unit {
+    if !pv_ir_live(&c) {
+        return ();
+    }
+    if pv_has_continue(&mut c, open, end) {
+        pv_loop_kill(&mut c, open, end);
+        return ();
+    }
+    mut before = Atom[];
+    pv_ir_read(&mut c, &mut before);
+    pv_loop_kill(&mut c, open, end);
+    mut after = Atom[];
+    pv_ir_read(&mut c, &mut after);
+    mut cands = Atom[];
+    for i in before.len() {
+        x := &before[i];
+        if (x.rel > 2) || pv_holds(&after, x.rel, view(x.a), view(x.b), x.k) {
+            continue;
+        }
+        // A fact this loop's body broke on an earlier attempt is not kept again.
+        mut dropped = false;
+        for d in c.pv_spec_failed.len() {
+            y := &c.pv_spec_dropped[d];
+            if (c.pv_spec_failed[d] == open) && (y.rel == x.rel) && (y.k == x.k) && same(view(y.a), view(x.a)) && same(view(y.b), view(x.b)) {
+                dropped = true;
+            }
+        }
+        if !dropped {
+            cands.push(copy_atom_value(&x));
+        }
+    }
+    for i in cands.len() {
+        pv_add(&mut c.pv_facts, cands[i].rel, view(cands[i].a), view(cands[i].b), cands[i].k);
+    }
+    exchange(&mut c.pv_spec_cands, cands);
+    exchange(&mut c.pv_spec_open, open);
+    return ();
+}
 fn pv_loop_kill<a>(c: (&a mut C), open: u64, end: u64) -> unit {
     if !pv_ir_live(&c) {
         return ();
@@ -10794,6 +10961,18 @@ fn pv_ir_value<a, b>(c: (&a mut C), name: &b [u8], lo: u64, hi: u64) -> unit {
         return ();
     }
     pv_bind_bounds(&mut c, view(name), lo, hi);
+    // `x := y` and `x := y.copy()` with `y` a vector local: the two have one length.
+    if (kind_at(&mut c, lo) == 1) && ((hi == lo + 1) || ((hi == lo + 5) && (kind_at(&mut c, lo + 1) == 46) && is_at(&mut c, lo + 2, view("copy")) && (kind_at(&mut c, lo + 3) == 40))) {
+        src := tok_text(&mut c, lo);
+        l := find_local(&mut c, view(src));
+        if (l != 0) && (ty_kind(&mut c, local_ty(&mut c, l - 1)) == 6) && !same(view(src), view(name)) {
+            mut a = copy_bytes(view(name));
+            push_bytes(&mut a, view(".len"));
+            mut b = src.copy();
+            push_bytes(&mut b, view(".len"));
+            pv_add(&mut c.pv_facts, 2, view(a), view(b), 0);
+        }
+    }
     // `v := T[]`: an empty vector, whose length a counted push loop then states (pv_push_loop).
     if (hi == lo + 3) & (kind_at(&mut c, lo) == 1) & (kind_at(&mut c, lo + 1) == 91) & (kind_at(&mut c, lo + 2) == 93) {
         mut len = copy_bytes(view(name));
@@ -32082,6 +32261,15 @@ fn pv_span_bound<a>(c: (&a mut C), facts: (&a Atom[]), lo: u64, hi: u64, exact: 
             return -1;
         }
         i = i + used;
+        // `t / L`: at most the bound of `t` divided by the literal.
+        if (i + 1 < hi) && (kind_at(&mut c, i) == 47) {
+            d := tok_text(&mut c, i + 1);
+            if !pv_digits(view(d)) || (pv_number(view(d)) == 0) || exact {
+                return -1;
+            }
+            m = m / pv_number(view(d));
+            i = i + 2;
+        }
         while (i < hi) && (kind_at(&mut c, i) == 42) {
             mut u2 = 0;
             t2 := pv_term(&mut c, i + 1, &mut u2);
@@ -42633,7 +42821,10 @@ fn pattern_loop<a, b>(
     // before the guard is compiled: a call in it is proved, and a constant in it is settled, only
     // from facts that hold at every evaluation.
     loop_at := pv_loop_mark(&c);
-    pv_loop_kill(&mut c, open, loopend);
+    old_spec_open := c.pv_spec_open;
+    old_spec_cands := exchange(&mut c.pv_spec_cands, Atom[]);
+    exchange(&mut c.pv_spec_open, 0);
+    pv_loop_kill_spec(&mut c, open, loopend);
     mark(&mut c, head);
     mut nomatch = 0;
     mut scrutinee = 0;
@@ -42717,6 +42908,15 @@ fn pattern_loop<a, b>(
     entry := ownership::snapshot(&c.check);
     exchange(&mut c.terminated, 0);
     block(&mut c);
+    // The kept facts hold at every evaluation of the guard (the check at the body's end saw them
+    // hold again), and with no `break` the guard is the only way out: they hold after the loop.
+    // The body's own writes took them out of the list while it was compiled, so they go back here.
+    kept := exchange(&mut c.pv_spec_cands, old_spec_cands);
+    mut restore = Atom[];
+    if (c.pv_spec_open == open) && (c.retry == 0) && !pv_has_break(&mut c, open, loopend) {
+        restore = kept;
+    }
+    exchange(&mut c.pv_spec_open, old_spec_open);
     pv_loop_facts(&mut c, &loop_at, head);
     // The pattern's binding ends with each iteration, before the jump back: release it first, so
     // neither the backedge check nor the state the loop exits with still holds this iteration's
@@ -42764,6 +42964,9 @@ fn pattern_loop<a, b>(
         exchange(&mut c.terminated, 1);
     }
     pv_ir_close(&mut c);
+    for i in restore.len() {
+        pv_add(&mut c.pv_facts, restore[i].rel, view(restore[i].a), view(restore[i].b), restore[i].k);
+    }
     return ();
 }
 // Built-in methods on string / bytes / views. Results are new values; `string` input gives `string`.
@@ -46849,8 +47052,11 @@ fn pv_index_ok<a>(c: (&a mut C), bracket: u64, lo: u64, hi: u64, base: u64) -> b
     }
     mut off: i64 = 0;
     at := lo + used;
+    mut facts = Atom[];
+    pv_ir_read(&mut c, &mut facts);
     if at != hi {
-        if (kind_at(&mut c, at) != 43) || (at + 2 != hi) {
+        sign := kind_at(&mut c, at);
+        if ((sign != 43) && (sign != 45)) || (at + 2 != hi) {
             return false;
         }
         lit := tok_text(&mut c, at + 1);
@@ -46858,9 +47064,14 @@ fn pv_index_ok<a>(c: (&a mut C), bracket: u64, lo: u64, hi: u64, base: u64) -> b
             return false;
         }
         off = pv_number(view(lit));
+        if sign == 45 {
+            // `t - c` is the integer it looks like only where `c <= t` (NW-); otherwise it wraps.
+            if !pv_implies(&facts, 1, view(lit), view(term), 0) {
+                return false;
+            }
+            off = 0 - off;
+        }
     }
-    mut facts = Atom[];
-    pv_ir_read(&mut c, &mut facts);
     mut len = name.copy();
     push_bytes(&mut len, view(".len"));
     return pv_implies(&facts, 0, view(term), view(len), 0 - off);
@@ -47767,6 +47978,7 @@ fn block<a>(c: (&a mut C)) -> unit {
     end := block_end(&mut c, c.pos);
     oldend := c.scope_end;
     exchange(&mut c.scope_end, end);
+    brace := c.pos;
     expect(&mut c, view("{"));
     // One scope of facts per block: what a condition or an arm's pattern stated for it holds here,
     // and a binding's shadowing of a name it mentions ends with it (docs/design/refinements.md).
@@ -47775,6 +47987,9 @@ fn block<a>(c: (&a mut C)) -> unit {
     mut owners = c.resources.len();
     while !is(&mut c, view("}")) {
         stmt(&mut c);
+    }
+    if (c.pv_spec_open != 0) && (c.pv_spec_open == brace) {
+        pv_spec_check(&mut c, brace);
     }
     advance(&mut c);
     cleanup(&mut c, owners);
@@ -50775,6 +50990,7 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
         }
         exchange(&mut c.terminated, yt & nt);
         mark(&mut c, end);
+        pv_clamp(&mut c, cond_at, cond_end);
         return ();
     }
     if statement_builtin(&mut c, view("drop")) {
@@ -50960,11 +51176,25 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
             }
             record_ty = shape;
         }
+        op_at := c.pos;
         assignment_tail(&mut c, l, id, ty, target, u64[through, fieldty, assigned_d, assigned_k, assigned_base, assigned_rty], view(field_name), record_ty);
         // `x = e` writes the binding; `x.f = e` writes a field of what `x` owns, which is not a fact
         // about `x`'s own value.
         if through == 0 {
             pv_ir_wrote(&mut c, view(written));
+            // Then `x = e` states what a binding `x := e` states, when `e` does not read `x` (its
+            // old value is gone): `v = tmp` gives `v.len == tmp.len`.
+            if (kind_at(&mut c, op_at) == 61) && (c.pv_on != 0) && (op_at + 2 < c.pos) {
+                mut reads = false;
+                for t in op_at + 1..c.pos - 1 {
+                    if (kind_at(&mut c, t) == 1) && same(view(tok_text(&mut c, t)), view(written)) {
+                        reads = true;
+                    }
+                }
+                if !reads {
+                    pv_ir_value(&mut c, view(written), op_at + 1, c.pos - 1);
+                }
+            }
         }
         return ();
     }
@@ -58099,6 +58329,10 @@ pub fn main() -> u64 {
         pv_arith_ok: 0,
         addr_arg: 0,
         ref_assign_target: 0,
+        pv_spec_open: 0,
+        pv_spec_cands: Atom[],
+        pv_spec_failed: u64[],
+        pv_spec_dropped: Atom[],
         report_checks: 0,
         checks_report: u8[],
         checks_count: 0,

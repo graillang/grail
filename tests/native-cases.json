@@ -10963,7 +10963,7 @@
       "--strict-refinements"
     ],
     "diagnostic": [
-      "cannot prove the refinement `i == 0`",
+      "the refinement `i == 0` is false at this call",
       "input.grl:9:"
     ],
     "targets": [
@@ -10974,7 +10974,7 @@
     "backends": [
       "native"
     ],
-    "note": "an assignment ends every fact about the name it writes; the first call is proved, the second is not"
+    "note": "an assignment ends every fact about the name it writes, and `i = 5` states what it writes: the first call is proved, the second is disproved (a compile error in every mode)"
   },
   {
     "name": "refinement-loop-mut-borrow-kills-fact",
@@ -18500,5 +18500,68 @@
       "x86_64"
     ],
     "note": "every SIMD type name (S1 and S2) is recognised as one: is_simd_name rejects by shape before it looks a name up in its table, and the table is the one list of names"
+  },
+  {
+    "name": "bce-loop-invariant-swap",
+    "source": "fn last(n0: u64) -> u64 {\n    n: u64 := 8;\n    mut v = u64[];\n    for i in n {\n        v.push(i + n0);\n    }\n    mut tmp = v.copy();\n    mut w: u64 = 1;\n    while w < n {\n        mut s = v;\n        v = tmp;\n        tmp = s;\n        w = w * 2;\n    }\n    return v[n - 1] + tmp[n / 2];\n}\nfn main() {\n    println(last(0));\n}\n",
+    "stdout": "11\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "asmAbsent": [
+      {
+        "in": "f_main_last",
+        "text": "movq $1,%rdx\ncall rt_trap"
+      },
+      {
+        "in": "f_main_last",
+        "text": "call rt_slot\n"
+      }
+    ],
+    "note": "the loop-invariant pass: `v.len == n` and `tmp.len == v.len` are killed by the swap in the body, kept under check, and hold again where the body ends (the swap re-establishes them through `s`); so they hold after the loop and both reads are proved"
+  },
+  {
+    "name": "bce-loop-invariant-broken-kept",
+    "source": "fn last(n0: u64) -> u64 {\n    n: u64 := 8;\n    mut v = u64[];\n    for i in n {\n        v.push(i + n0);\n    }\n    mut w: u64 = 1;\n    while w < n {\n        v.pop()!;\n        w = w * 2;\n    }\n    return v[n - 1];\n}\nfn main() {\n    println(last(0));\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "",
+    "stderr": [
+      "out of bounds"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "a body that pops breaks `v.len == n`: the check at its end fails, the function is compiled again with the kill, and the read keeps its check, which fires"
+  },
+  {
+    "name": "bce-clamp-bound",
+    "source": "fn get(v: &u64[], i: u64) -> u64 {\n    n := v.len();\n    mut hi = i + 2;\n    if hi > n {\n        hi = n;\n    }\n    mut s: u64 = 0;\n    mut k: u64 = 0;\n    while k < hi {\n        s = s + v[k];\n        k += 1;\n    }\n    return s;\n}\nfn main() {\n    v := u64[1, 2, 3];\n    println(get(&v, 5));\n    println(get(&v, 0));\n}\n",
+    "stdout": "6\n3\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "asmAbsent": [
+      {
+        "in": "f_main_get",
+        "text": "movq $1,%rdx\ncall rt_trap"
+      },
+      {
+        "in": "f_main_get",
+        "text": "call rt_slot\n"
+      }
+    ],
+    "note": "`if hi > n { hi = n; }` leaves `hi <= n` either way, so `v[k]` under `k < hi` is proved"
   }
 ]
