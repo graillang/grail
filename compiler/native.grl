@@ -38143,7 +38143,10 @@ fn int_binary<a>(c: (&a mut C), k: u64, left: u64, right: u64, ty: u64) -> Val {
     // Sized integers are canonical (sign-extended) words, so most operations are emitted inline.
     bits := ty_arg(&mut c, ty);
     signed := ty_mode(&mut c, ty);
-    checked := c.overflow != 0 || c.raw != 0;
+    // Raw (`unsafe module`) code follows the build's overflow mode like all other code; code that
+    // must wrap says so with the wrapping_* operations, and code that must check uses explicit
+    // checked ones.
+    checked := c.overflow != 0;
     if is_comparison(k) {
         if signed != 0 {
             msb := imm(&mut c, 9223372036854775808);
@@ -43938,7 +43941,7 @@ fn propagate<a>(c: (&a mut C), v: Val, unwrap: u64) -> Val {
 fn binary<a>(c: (&a mut C), k: u64, left: u64, right: u64) -> u64 {
     if k == 267 {
         mut f = "rt_pow";
-        if (c.overflow == 0) & (c.raw == 0) {
+        if c.overflow == 0 {
             f = "rt_wrapping_pow";
             fx_would_trap(&mut c, view("rt_pow"));
         }
@@ -43976,7 +43979,7 @@ fn binary<a>(c: (&a mut C), k: u64, left: u64, right: u64) -> u64 {
                 mark(&mut c, ok);
             }
         } else {
-            if (c.overflow != 0) || (c.raw != 0) {
+            if c.overflow != 0 {
                 ok := label(&mut c);
                 jump(&mut c, view("jnc"), ok);
                 site_kind(&mut c, 2);
@@ -43994,7 +43997,7 @@ fn binary<a>(c: (&a mut C), k: u64, left: u64, right: u64) -> u64 {
         o(&mut c, view("orq %rcx,%rax\n"));
     }
     if (k == 271) || (k == 272) {
-        if (c.overflow != 0) || (c.raw != 0) {
+        if c.overflow != 0 {
             limit := imm(&mut c, 63);
             get(&mut c, right, view("%rcx"));
             get(&mut c, limit, view("%rax"));

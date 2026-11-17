@@ -49,6 +49,13 @@
   refused, and a reader through a shared reference or a non-`mut` binding gets it as a fact. A name
   that is not a field of the record is still refused at the struct. Strict mode proves literals; a
   single-field write it cannot prove, and says to rebuild the record.
+- **Raw code follows the build's overflow mode, and the release compiler wraps.** Arithmetic in an
+  `unsafe module` used to be checked whatever the build asked for; it now traps in a checked build
+  and wraps in a wrapping one (`--release`, `--overflow=wrap`) like all other code. Code that must
+  wrap says so with `wrapping_*`, as the runtime's address arithmetic does. `tools/native.mjs
+  release` lowers the compiler with `--overflow=wrap`, as every release build does, so the release
+  compiler no longer checks after nearly every address addition. `GRAIL_COMMAND_TIMEOUT` raises
+  tools/native.mjs's per-step time limit on a loaded host.
 
 - AArch64 and RV64 native code drops moves that move nothing (call ABI S7): the word machine's
   result register is x9 (t0) and its first argument x0 (a0), and moves go through the scratch x10
