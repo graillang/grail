@@ -1,0 +1,61 @@
+// Plain records kept by the holders that outlive the statement that built them - an enum payload, a
+// closure capture, a Mutex payload, a dyn cell, a returned value - where the frame the record was
+// built in has returned before the holder is read. The end-of-main leak check is the balance check.
+interface Area {
+    fn area(self: &Self) -> u64;
+}
+struct P {
+    x: u64,
+    y: u64,
+    z: u64
+}
+impl Area for P {
+    fn area(self: &Self) -> u64 {
+        return self.x * self.y + self.z;
+    }
+}
+fn make(i: u64) -> P {
+    p := P { x: i, y: i + 1, z: i + 2 };
+    return p;
+}
+fn some(i: u64) -> P? {
+    return Some(P { x: i, y: i * 2, z: i * 3 });
+}
+fn capture(i: u64) -> Fn(u64) -> u64 {
+    p := P { x: i, y: 10, z: 100 };
+    return |k: u64| -> u64 p.x + p.y + p.z + k;
+}
+fn locked(i: u64) -> Mutex<P> {
+    return Mutex::new(P { x: i, y: i, z: i });
+}
+fn boxed(i: u64) -> dyn Area {
+    return P { x: i, y: 3, z: 1 };
+}
+fn bump<a>(p: (&a mut P), k: u64) -> u64 {
+    p.x = p.x + k;
+    return p.x + p.y + p.z;
+}
+fn main() -> u64 {
+    a := make(1);
+    println("{} {} {}", a.x, a.y, a.z);
+    match some(2) {
+        Some(q) => { println("{} {} {}", q.x, q.y, q.z); },
+        None => {},
+    }
+    o := some(3);
+    println(o!.z);
+    f := capture(4);
+    println(f(1) + f(2));
+    m := locked(5);
+    println(m.lock_with(10, bump));
+    println(m.lock_with(1, bump));
+    d := boxed(6);
+    println(d.area());
+    mut held = P[];
+    for i in 3 {
+        held.push(make(i));
+    }
+    last := held.pop()!;
+    println("{} {}", last.z, held.len());
+    return 0;
+}

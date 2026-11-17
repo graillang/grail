@@ -324,3 +324,132 @@ fn local_value<a, T>(ctx: (&a Ctx), cell: *mut T) -> (&a mut T) {
         return cell.as_mut();
     }
 }
+
+// ---- threads that borrow: thread::scope ----------------------------------------------------------
+//
+//     thread::scope(|t| -> u64 {
+//         a := t.spawn(|| -> u64 left.len());          // borrows `left`, `right` from the caller
+//         b := t.spawn(|| -> u64 { right[0] = 9; return 1; });
+//         return a.join() + b.join();
+//     })
+//
+// A thread spawned in a scope may borrow what outlives the scope - the closure is
+// `FnMut<Send, s>`, and `s` is the scope's region - because `scope` does not return until every
+// thread it started has ended, joined or not. The checker keeps the rest true
+// (docs/design/closure-bounds.md 7.1): two spawns of one `&mut x` conflict, the body cannot touch
+// what a spawn borrowed until the scope ends, and a `ScopedThread<s, U>` cannot leave the body.
+// Siblings finish whatever happens; the first failure that nobody took with `join` is re-raised
+// when the scope ends, after the last thread has been joined.
+//
+// The scope owns every thread record and releases them all at its end; a handle only marks its
+// record as taken, so a handle that is never dropped (an Rc cycle) still leaves nothing running.
+// Neither type is transferable or shareable: both stay on the thread that runs the scope.
+pub struct Threads<s> {
+    records: u64[],
+    tie: (FnMut<s>() -> u64)[]
+}
+pub struct ScopedThread<s, U> {
+    record: u64,
+    tie: (FnMut<s>() -> U)[]
+}
+// Record word 120 (the refusal word, unused once a thread runs): 1 when a handle took the outcome.
+fn mark_taken(rec: u64) -> unit {
+    unsafe {
+        ptr_from_addr(u64, rec + 120).write(1);
+    }
+}
+fn taken(rec: u64) -> bool {
+    unsafe {
+        return ptr_from_addr(u64, rec + 120).read() == 1;
+    }
+}
+impl<s, U> Drop for ScopedThread<s, U> {
+    fn drop(self: &mut ScopedThread<s, U>) {
+        rec := self.record;
+        if (rec != 0) && !taken(rec) {
+            unsafe {
+                if host::thread_wait(rec) == 0 {
+                    // Joined by its drop: the result goes; a failure stays for the scope to raise.
+                    v := ptr_from_addr(U, rec + 80).read();
+                    drop(v);
+                    mark_taken(rec);
+                }
+            }
+        }
+    }
+}
+impl<s> Threads<s> {
+    pub fn spawn<U: Send + Owned>(self: (&mut Self), f: FnMut<Send, s>() -> U) -> ScopedThread<s, U> {
+        mut body = f;
+        mut rec = 0;
+        unsafe {
+            rec = thread_spawn_raw(|| -> unit {
+                me := host::thread_self();
+                r := run_scoped<U>(&mut body);
+                unsafe {
+                    // A scoped thread is never detached: the result always waits for its handle.
+                    host::thread_keep(me);
+                    ptr_from_addr(U, me + 80).write(r);
+                }
+            });
+            why := host::thread_start(rec);
+            if why != 0 {
+                // Nothing to borrow-check about a thread that did not start: report it as a failure.
+                task_fail(view("thread::scope could not start a thread"));
+            }
+        }
+        self.records.push(rec);
+        return ScopedThread { record: rec, tie: [] };
+    }
+}
+fn run_scoped<a, s, U>(body: (&a mut FnMut<Send, s>() -> U)) -> U {
+    return body();
+}
+pub fn scope<s, R: Owned>(body: FnMut<s>((&mut Threads<s>)) -> R) -> R {
+    mut t = Threads { records: u64[], tie: [] };
+    mut run = body;
+    r := run(&mut t);
+    // Every thread ends before this returns; the first untaken failure is raised after the last.
+    mut first = 0;
+    for i in t.records.len() {
+        rec := t.records[i];
+        unsafe {
+            kind := host::thread_wait(rec);
+            if (kind != 0) && !taken(rec) {
+                if first == 0 {
+                    first = rec;
+                } else {
+                    host::thread_forget_failure(rec);
+                }
+            }
+            if rec != first {
+                host::thread_release(rec);
+            }
+        }
+    }
+    if first != 0 {
+        unsafe {
+            host::thread_refail(first);
+        }
+    }
+    return r;
+}
+// Wait for a scoped thread and take its result; a failure is raised here (and not again at the
+// scope's end).
+// (A method, because `thread::join` already names the join of a `Thread<R>`: no overloading.)
+impl<s, U> ScopedThread<s, U> {
+    pub fn join(self: ScopedThread<s, U>) -> U {
+        return join_scoped(self);
+    }
+}
+fn join_scoped<s, U>(h: ScopedThread<s, U>) -> U {
+    rec := h.record;
+    // Taken first: the handle's drop at the end of this function then has nothing to do.
+    mark_taken(rec);
+    unsafe {
+        if host::thread_wait(rec) != 0 {
+            host::thread_reraise(rec);
+        }
+        return ptr_from_addr(U, rec + 80).read();
+    }
+}
