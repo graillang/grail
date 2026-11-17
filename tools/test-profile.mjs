@@ -154,6 +154,18 @@ try {
   assert.ok(hot.share > 50, `the hot function share is only ${hot.share}%:\n${text}`);
   assert.match(text, /^\s+\d+\s+[\d.]+%\s+hot\s+main$/m, 'the hot row must be symbolised by module');
 
+  // --callers: each sample carries its return addresses, and the report says who called the hot
+  // function and how much time each function holds with its callees.
+  const withCallers = ok([compiler, 'profile', '--callers', '--rate', rate, '--', binary], { cwd: work, env }).stdout;
+  assert.match(withCallers, /inclusive: samples with the function anywhere on the stack/, `no inclusive table:\n${withCallers}`);
+  const inclusive = withCallers.slice(withCallers.indexOf('inclusive:'));
+  assert.match(inclusive, /^\s+\d+\s+[\d.]+%\s+main\s+main$/m, `main must hold the hot loop inclusively:\n${withCallers}`);
+  const callersOfHot = withCallers.slice(withCallers.indexOf('    hot ('));
+  assert.ok(withCallers.includes('    hot ('), `no caller list for the hot function:\n${withCallers}`);
+  assert.match(callersOfHot.split('\n').slice(0, 4).join('\n'), /main\s+main/, `the hot function's caller must be main:\n${withCallers}`);
+  // Without the flag the report is the leaf table alone.
+  assert.ok(!text.includes('inclusive:'), 'a profile without --callers must not carry the caller view');
+
   // Samples outside every known symbol must be shown, never dropped: without a symbol table the
   // whole profile falls into [unknown] and the total stays the same.
   const strip = spawnSync('sh', ['-c', 'command -v llvm-strip || command -v strip'], { encoding: 'utf8' });

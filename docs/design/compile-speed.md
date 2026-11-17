@@ -13,14 +13,12 @@ refinement that needs the callee's code, an inferred signature) puts a floor und
 parallel builds that no later work can remove. Effects already obey it (the `effects` row of an
 interface file); new features are reviewed against it.
 
-One place breaks the rule today, and it is written down so it is not mistaken for a design: **a
-program in which any function claims `@no_alloc` or `@no_panic` is built in one compiler run**
-(`effects_claimed` in `compiler/cli.grl`), because the proof walks every body the claim can reach,
-the runtime's included. Interface files already carry an `effects` row per claimed function, so
-the fix is for a per-module run to check a call against the callee's row and for the runtime's
-functions to have rows of their own. Until then an effect claim opts a whole program out of the
-build store, which is also why the standard library does not claim effects yet: one attribute in
-`lib/` would take every program that uses that module off the fast path.
+Effect claims used to break it: a program in which any function claimed `@no_alloc` or `@no_panic`
+was built in one compiler run, because the proof walked every body the claim could reach. Now each
+run proves its claims against the summaries of the functions it calls - computed facts carried in
+every interface, and `runtime.facts` for the runtime (`docs/design/effects.md`, *Summaries*) - so a
+claiming program builds per module and through the store like any other, and the standard library
+claims effects where its bodies earn them.
 
 ## The benchmark
 
@@ -340,6 +338,31 @@ Go is the fastest builder of the large programs (2.1 s for syn4000, against Grai
 - **syn1000 and syn4000 builds after an edit, 1.09x cargo's.** The unit layer replays every
   unchanged body, but the back end's whole-stream work and the assembler still run over the whole
   module (see "An edit to one function compiles one function").
+### Bodies in parallel, and one jobserver for the build
+
+A module's function bodies are compiled by forked workers into units and applied in source order
+by the parent (`docs/design/incremental-compilation.md`, "Parallel bodies"); `grail check` the same
+way, its units carrying only registrations. One GNU-make-style jobserver per build bounds module
+runs, optimiser workers and body workers together. Integer conversions are in line: a widening is
+no code at all, on every target and backend, and a narrowing a compare and a branch.
+
+Best of three on a shared host (load average 20-40), before = 723c743, after = this pass:
+
+| | `GRAIL_JOBS=1` before | after | default before | after |
+| --- | --- | --- | --- | --- |
+| self-compile | 24.3 s | 24.8 s | 14.0 s | 11.4 s |
+| self `--check` | 10.7 s | 8.3 s | 7.5 s | 3.7 s |
+| syn4000 `grail check` | 7.4 s | 5.5 s | 5.9 s | 4.1 s |
+| syn4000 `grail build --no-cache` | 16.7 s | 14.1 s | 10.6 s | 11.0 s |
+| 24-module cold `grail build --cache` | | | 10.9-12.8 s | 10.0-12.9 s |
+
+At `GRAIL_JOBS=1` the gain is the in-line conversions alone (`rt_int_cast` was 8 % of the
+compiler's profile; 0.3 % now). At the default the self-check halves; the self-compile gains less
+because its back end - the optimiser's whole-stream passes and the assembler - is now most of it,
+and syn4000's build is one module whose optimiser workers already used the machine. The 24-module
+cold build is within noise: its modules are small enough that each runs in one process, and 24
+of them already fill 24 processors. FNV-1a over 64 MiB eight times (`bench/fnv.grl`): 3.71 s to
+0.84 s; the instructions of its 1 MiB variant, by valgrind, 1.11 G to 0.25 G.
 
 ### Parallel bodies, measured against the rivals
 

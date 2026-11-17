@@ -6,6 +6,11 @@
   small vectors and records; prints the rate per worker count. Build and run it directly.
 - `alloc_handoff.grl`: allocator hand-off - pool workers allocate, the main thread frees. Build and
   run it directly. Both are explained, with numbers, in `docs/design/allocator.md`.
+- `atomics.grl`: one uncontended load, store, fetch_add, swap and compare_exchange on an
+  `Atomic<u64>`, a Mutex round trip, 24 jobs on one fetch_add and an SPSC ring of release stores and
+  acquire loads (`atomics all`); `atomics OP:N` runs one op N times, for callgrind at two N. The
+  numbers before and after the inline `atom.*` ops are in `docs/design/concurrency-stages-5-7.md`,
+  "Stage 7: as built".
 - `ffi_call.grl` / `ffi_call.c`: the cost of a foreign call - 10M calls of libc's `labs`, best of
   five rounds, and the same loop without the call, so `ffi_call_only` is the call alone. The C twin
   is built with `-fno-builtin`, so its `labs` is a real call through the PLT as Grail's is. The bar:
