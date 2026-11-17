@@ -1532,6 +1532,9 @@ fn rt_spawn_redirect(paths: u64, argv: u64, envp: u64, out_fd: u64, err_fd: u64)
     if started == 0 {
         result = wrapping_sub(0, rt_win_errno());
     } else {
+        if rt_win_env_has_parent(envp) {
+            rt_win_kill_with_us(raw_load(info));
+        }
         raw_win32(CloseHandle, raw_load(info + 8)); // the thread handle is not needed
         result = raw_load(info); // the process handle: the child's id
     }
@@ -1542,6 +1545,46 @@ fn rt_spawn_redirect(paths: u64, argv: u64, envp: u64, out_fd: u64, err_fd: u64)
         rt_free(block);
     }
     return result;
+}
+// A child started with GRAIL_PARENT=<pid> in its environment - a `grail build` driver's module run
+// (os-linux.grl, rt_parent_watch) - dies with this process. Windows has no parent-death signal: the
+// child joins a job object marked JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, whose handle is never closed
+// here, so the system closes it - and kills what is in it - when this process ends, however it ends.
+fn rt_win_kill_with_us(process: u64) -> u64 {
+    job := raw_win32(CreateJobObjectW, 0, 0);
+    if job == 0 {
+        return 0;
+    }
+    // JOBOBJECT_EXTENDED_LIMIT_INFORMATION (144 bytes): BasicLimitInformation.LimitFlags at 16.
+    limits := rt_alloc(144);
+    mut i = 0;
+    while i < 144 {
+        raw_store(limits + i, 0);
+        i += 8;
+    }
+    raw_store(limits + 16, 8192); // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    raw_win32(SetInformationJobObject, job, 9, limits, 144); // JobObjectExtendedLimitInformation
+    rt_free(limits);
+    raw_win32(AssignProcessToJobObject, job, process);
+    return 0;
+}
+// Whether a NUL-terminated UTF-8 environment table holds `GRAIL_PARENT=`.
+fn rt_win_env_has_parent(envp: u64) -> bool {
+    if envp == 0 {
+        return false;
+    }
+    mut ep = envp;
+    while raw_load(ep) != 0 {
+        p := raw_load(ep);
+        if (raw_byte(p) == 71) & (raw_byte(p + 1) == 82) & (raw_byte(p + 2) == 65) & (raw_byte(p + 3) == 73)
+            & (raw_byte(p + 4) == 76) & (raw_byte(p + 5) == 95) & (raw_byte(p + 6) == 80) & (raw_byte(p + 7) == 65)
+            & (raw_byte(p + 8) == 82) & (raw_byte(p + 9) == 69) & (raw_byte(p + 10) == 78) & (raw_byte(p + 11) == 84)
+            & (raw_byte(p + 12) == 61) {
+            return true;
+        }
+        ep = ep + 8;
+    }
+    return false;
 }
 // CreatePipe: two inheritable handles, because a child only inherits what its STARTUPINFO names when
 // the handle itself allows it. Fills the caller's two-word pair with the read and the write end.

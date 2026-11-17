@@ -113,6 +113,29 @@ table, so hashmap fell from 22x the fewest instructions to 3.5x), and what remai
 
 {{perf:engine#provenance}}
 
+## Parallel loops
+
+The `ecs` program above, run on several cores: the same million entities and hundred frames, the
+update split across workers each frame, at 1, 4 and 8 workers. Grail uses `pool::zip3` over the
+position and velocity columns, one call per axis, in pieces of 16,384 entities; C uses OpenMP
+(`parallel for schedule(static)`), Rust uses rayon (`par_iter_mut().zip(..)` over all six columns,
+pieces of at least 16,384), Go one goroutine per core, and Zig one `std.Thread` per core. The
+others fuse the six columns into one loop, the usual way to write it in each; Grail's library has a
+zip of at most four columns, hence one call per axis. Each entity's arithmetic is independent and
+the final sum is serial, so every program prints the serial checksum at any worker count, and the
+tool checks that it does.
+
+A parallel loop is about time, so this chart is wall time, best of several runs, with every runtime
+told the same number of threads. It needs a machine doing nothing else, and the figures charted
+until the next quiet window were taken on a shared one: read the instruction table under it for
+what each runtime does, and the chart only for the shape.
+
+{{perf:parallel#release}}
+
+{{perf:parallel#instructions|cpu}}
+
+{{perf:parallel#provenance}}
+
 ## Abundance: the engine itself
 
 The programs above are written for comparison; Abundance's port is the engine this language is
@@ -183,8 +206,9 @@ three places, with their causes from profiles of the compiler on these programs:
   checked again, at about half the cold cost, where `cargo check` re-checks only what changed.
 - **A cold build** (1.6x Go). The optimiser is a third of the build and re-reads the front end's
   instruction text (about 18 %), and the assembler reads the optimiser's text again. A cold build of
-  the 104,000-line program also grew from 38 to 53 billion instructions between two recent commits
-  of the compiler; that regression is being traced.
+  the 104,000-line program grew from 38 to 53 billion instructions when the release compiler was
+  first built in parts (the runtime's small accessors stopped being inlined across them), and fell
+  to 35 billion once the parts were built with ThinLTO; the chart is that compiler.
 
 {{perf:compile#compile-go-check}}
 

@@ -399,7 +399,11 @@ argument) and splits as `rt_parallel_split` does, from (n, grain) alone (`rt_job
 `rt_job_zip_leaf`). The runtime cannot call with more than three arguments (it is compiled by the
 seed too), so the leaf calls a compiler-emitted adapter `grail_zip_adapter_<closure>_<n>` with one
 block {callback, environment, views}, which loads the views into argument registers. The
-`v.len == p.len` entry fact waits on /root/prover_wrap. Cases: `parallel-for-zip-*`, `pool-zip-*`,
+`v.len == p.len` entry fact (as /root/prover_wrap advised): `parallel_zip_builtin` marks the
+`Closure` record of a literal written as its argument (`entry_eq`), and `emit_closures` queues
+`pk.len == p0.len` as pending facts for the body's first block. Closure bodies were not proved at all
+before; `emit_closures` now runs `pv_begin`/`pv_end` around the body (no refined parameters, so no
+seeded facts). A closure value passed through a variable gets no fact. Cases: `parallel-for-zip-*`, `pool-zip-*`,
 `reject-parallel-for-zip-*`.
 
 Two smaller additions with the same construction:

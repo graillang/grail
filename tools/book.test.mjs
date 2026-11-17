@@ -138,7 +138,7 @@ test('the Performance chapter renders every committed result file', () => {
   const chapter = book.chapters.find(c => c.slug === 'performance');
   expect(chapter).toBeDefined();
   const text = readFileSync(sourcePath(chapter.source), 'utf8');
-  for (const name of ['bench-rivals', 'engine', 'abundance', 'compile', 'sched-rivals']) {
+  for (const name of ['bench-rivals', 'engine', 'parallel', 'abundance', 'compile', 'sched-rivals']) {
     expect(existsSync(join(root, 'bench/results', `${name}.json`))).toBe(true);
     expect(text).toContain(`{{perf:${name}`);
   }
