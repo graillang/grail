@@ -462,6 +462,13 @@ function lint() {
   }
 
   const check = (name, ok, detail = '') => checks.push({ name, ok, detail });
+  // A textual merge can append the same case twice (both branches added it), and the runner would
+  // then run it twice under one name: every case name is unique.
+  {
+    const names = JSON.parse(readFileSync(join(root, 'tests/native-cases.json'), 'utf8')).map(c => c.name);
+    const twice = [...new Set(names.filter((n, i) => names.indexOf(n) !== i))];
+    check('every native case name is unique', twice.length === 0, twice.slice(0, 5).join(', '));
+  }
   let version = null;
   try { version = readVersion(); check('VERSION is semver', true, version); } catch (error) { check('VERSION is semver', false, error.message); }
   const ids = PLATFORMS.map(platform => platform.id);
