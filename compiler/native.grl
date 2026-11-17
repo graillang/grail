@@ -23205,6 +23205,24 @@ fn ct_probe_exec<a, b, d, e>(c: (&a mut C), probe: &b [u8], text: &d [u8], key: 
         value_tmp := path_cat(view(path_cat(view(dir), view(tag))), view(".value"));
         host::write_file(view(probe_src), view(probe));
         self := host::exe_path();
+        // The runtime, the platform module and the standard library are the same in every probe:
+        // they are compiled once into a base object with their interfaces (ct_probe_base), and a
+        // probe compiles only itself and the program's own sources against them.
+        mut user_files = u8[][];
+        mut base_files = u8[][];
+        for i in files.len() {
+            if ct_std_path(view(files[i])) {
+                base_files.push(files[i].copy());
+            } else {
+                user_files.push(files[i].copy());
+            }
+        }
+        mut base_mods = u8[][];
+        base_dir := ct_probe_base(&mut c, view(self), &base_files, &mut base_mods, soft);
+        if base_dir.len() == 0 {
+            exchange(status_out, 1);
+            return u8[];
+        }
         mut cmd = ct_shell_quote(view(self));
         mut opt = 1;
         while opt < offset + 1 {
@@ -23223,10 +23241,14 @@ fn ct_probe_exec<a, b, d, e>(c: (&a mut C), probe: &b [u8], text: &d [u8], key: 
             }
             opt += 1;
         }
-        // Probes share a function cache of their own: the runtime and the standard library are most
-        // of a probe's compile and are the same in every probe (comptime-speed.md); a probe never
-        // replays a normal compile's bodies, whose static reads are compiled differently.
-        push_bytes(&mut cmd, view(" --fn-cache .work/comptime/fn --fn-cache-quiet"));
+        push_bytes(&mut cmd, view(" --use "));
+        push_bytes(&mut cmd, view(ct_shell_quote(view(path_cat(view(base_dir), view("/if"))))));
+        push_bytes(&mut cmd, view(" --use-named"));
+        for m in base_mods.len() {
+            push_bytes(&mut cmd, view(" --use-module "));
+            push_bytes(&mut cmd, view(base_mods[m]));
+        }
+        push_bytes(&mut cmd, view(" --separate"));
         // Assembled in process (`--object`), as a build is: a probe needs no C toolchain, only the
         // linker a build uses.
         push_bytes(&mut cmd, view(" --target x86_64 --object "));
@@ -23235,9 +23257,9 @@ fn ct_probe_exec<a, b, d, e>(c: (&a mut C), probe: &b [u8], text: &d [u8], key: 
         push_bytes(&mut cmd, view(ct_shell_quote(view(probe_s))));
         cmd.push(32);
         push_bytes(&mut cmd, view(ct_shell_quote(view(probe_src))));
-        for i in files.len() {
+        for i in user_files.len() {
             cmd.push(32);
-            push_bytes(&mut cmd, view(ct_shell_quote(view(files[i]))));
+            push_bytes(&mut cmd, view(ct_shell_quote(view(user_files[i]))));
         }
         mut pending = host::env(view("GRAIL_COMPTIME_PENDING"));
         if key.len() != 0 {
@@ -23297,7 +23319,7 @@ fn ct_probe_exec<a, b, d, e>(c: (&a mut C), probe: &b [u8], text: &d [u8], key: 
         if ld.len() == 0 {
             ld = copy_bytes(view("ld.lld"));
         }
-        mut link = u8[][ld, copy_bytes(view("-m")), copy_bytes(view("elf_x86_64")), copy_bytes(view("-static")), probe_o.copy(), copy_bytes(view("-o")), probe_exe.copy()];
+        mut link = u8[][ld, copy_bytes(view("-m")), copy_bytes(view("elf_x86_64")), copy_bytes(view("-static")), probe_o.copy(), path_cat(view(base_dir), view("/base.o")), copy_bytes(view("-o")), probe_exe.copy()];
         if host::command(link) != 0 {
             if soft != 0 {
                 exchange(status_out, 1);
@@ -23922,6 +23944,126 @@ fn ct_batch<a>(c: (&a mut C)) -> unit {
         c.ct_done.push(CtDone { key: results[r].key.copy(), res: CTRes { ty: results[r].res.ty, value: results[r].res.value, text: results[r].res.text.copy() } });
     }
     return ();
+}
+// Whether a path is the runtime's, a platform module's or the standard library's.
+fn ct_std_path<a>(path: &a [u8]) -> bool {
+    if in_std_dir(path) != 0 {
+        return true;
+    }
+    mut cut = 0;
+    for i in path.len() {
+        if (path[i] == 47) || (path[i] == 92) {
+            cut = i + 1;
+        }
+    }
+    base := slice_bytes(path, cut, path.len());
+    return same(view(base), view("runtime.grl")) || same(view(base), view("os-linux.grl")) || same(view(base), view("os-windows.grl")) || same(view(base), view("darwin.grl"));
+}
+// The probes' base: the runtime, the platform module and the standard library modules `files`
+// names, compiled once (separately, no entry) into `.work/comptime/base/<key>/base.o` with their
+// interfaces in `if/`. The key is the compiler, the options and every file's contents, so a base is
+// reused until one of them changes. Answers the directory, or empty (with the failure reported,
+// unless `soft`); `mods` gets the modules that have an interface, for `--use-module`.
+fn ct_probe_base<a, b>(c: (&a mut C), self: &b [u8], files: (&a u8[][]), mods: (&a mut u8[][]), soft: u64) -> u8[] {
+    mut keyed = copy_bytes(view("grail-probe-base 1\n"));
+    push_bytes(&mut keyed, self);
+    keyed.push(10);
+    // The compiler as the function cache names a hand-run one: its path, size and time.
+    parts := host::stat(self, 1);
+    if 5 < parts.len() {
+        decimal(&mut keyed, parts[2]);
+        keyed.push(32);
+        decimal(&mut keyed, parts[4]);
+        keyed.push(46);
+        decimal(&mut keyed, parts[5]);
+    }
+    keyed.push(10);
+    mut flags = u8[];
+    offset := c.arg_offset;
+    mut opt = 1;
+    while opt < offset + 1 {
+        a := host::arg(opt);
+        if starts_with(view(a), view("--overflow=")) {
+            flags.push(32);
+            push_bytes(&mut flags, view(a));
+        } else if same(view(a), view("--module-root")) {
+            flags.push(32);
+            push_bytes(&mut flags, view("--module-root"));
+            flags.push(32);
+            push_bytes(&mut flags, view(ct_shell_quote(view(host::arg(opt + 1)))));
+            opt += 1;
+        }
+        opt += 1;
+    }
+    push_bytes(&mut keyed, view(flags));
+    for i in files.len() {
+        push_bytes(&mut keyed, view(files[i]));
+        keyed.push(10);
+        push_bytes(&mut keyed, view(fncache::hash(view(host::read_file(view(files[i]))))));
+        keyed.push(10);
+    }
+    digest := iface_digest(&keyed);
+    mut dir = copy_bytes(view(".work/comptime/base/"));
+    for i in 24 {
+        dir.push(digest[i]);
+    }
+    ifdir := path_cat(view(dir), view("/if"));
+    object := path_cat(view(dir), view("/base.o"));
+    if host::exists(view(object)) == 0 {
+        // Built in a directory of its own and renamed into place, so two compiles that build the same
+        // base at once never see half of one.
+        mut tmp = dir.copy();
+        push_bytes(&mut tmp, view(".tmp"));
+        decimal(&mut tmp, host::now_ms());
+        host::command(u8[][copy_bytes(view("rm")), copy_bytes(view("-rf")), tmp.copy()]);
+        host::command(u8[][copy_bytes(view("mkdir")), copy_bytes(view("-p")), path_cat(view(tmp), view("/if"))]);
+        mut cmd = ct_shell_quote(self);
+        push_bytes(&mut cmd, view(flags));
+        push_bytes(&mut cmd, view(" --target x86_64 --emit-interface "));
+        push_bytes(&mut cmd, view(ct_shell_quote(view(path_cat(view(tmp), view("/if"))))));
+        push_bytes(&mut cmd, view(" --separate --no-entry --object "));
+        push_bytes(&mut cmd, view(ct_shell_quote(view(path_cat(view(tmp), view("/base.o"))))));
+        cmd.push(32);
+        push_bytes(&mut cmd, view(ct_shell_quote(view(path_cat(view(tmp), view("/base.s"))))));
+        for i in files.len() {
+            cmd.push(32);
+            push_bytes(&mut cmd, view(ct_shell_quote(view(files[i]))));
+        }
+        if soft != 0 {
+            push_bytes(&mut cmd, view(" > /dev/null 2>&1"));
+        }
+        mut sh = u8[][copy_bytes(view("sh")), copy_bytes(view("-c")), cmd];
+        if host::command(sh) != 0 {
+            if soft == 0 {
+                fail(&mut c, view("compile-time values: compiling the runtime and the standard library for the probes failed (the errors above)"));
+            }
+            return u8[];
+        }
+        host::command(u8[][copy_bytes(view("mkdir")), copy_bytes(view("-p")), copy_bytes(view(".work/comptime/base"))]);
+        mut mv = u8[][copy_bytes(view("mv")), copy_bytes(view("-T")), tmp.copy(), dir.copy()];
+        if host::command(mv) != 0 {
+            // Another compile put the same base in place first: use it, drop ours.
+            host::command(u8[][copy_bytes(view("rm")), copy_bytes(view("-rf")), tmp.copy()]);
+        }
+    }
+    // The standard library modules: one interface each, named by the file (the runtime has none).
+    for i in files.len() {
+        f := files[i].copy();
+        mut cut = 0;
+        for j in f.len() {
+            if f[j] == 47 {
+                cut = j + 1;
+            }
+        }
+        n := slice_bytes(view(f), cut, f.len());
+        if (in_std_dir(view(f)) != 0) && (n.len() > 4) {
+            m := slice_bytes(view(n), 0, n.len() - 4);
+            if host::exists(view(path_cat(view(ifdir), view(path_cat(view("/"), view(path_cat(view(m), view(".iface")))))))) != 0 {
+                mods.push(m);
+            }
+        }
+    }
+    return dir;
 }
 fn run_tier<a, b, d, e>(c: (&a mut C), module: &b [u8], text: &d [u8], key: &e [u8]) -> CTRes {
     if key.len() != 0 {
