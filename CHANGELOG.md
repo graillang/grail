@@ -1,5 +1,7 @@
 ## Unreleased
 
+- A program whose `main` takes the argument view and is run without one now prints `usage: PROGRAM NAME`
+  on stderr, with the parameter's declared name, before exiting 2. It used to exit 2 silently.
 - The SIMD benchmarks (`bench/simd_dot`, `simd_mat4`, `simd_aos`) take `check` for a three-round run that
   prints only the result, and the corpus pins those results on every target and backend. A
   benchmark run with no argument exits 2, as every `main(arg: &[u8])` program does.

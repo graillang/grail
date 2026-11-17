@@ -61306,6 +61306,11 @@ pub fn main() -> u64 {
     count := f.count;
     result := f.ret;
     first := f.first;
+    // The entry parameter's source name, for the usage line when the argument is missing.
+    mut entry_param = copy_bytes(view("ARG"));
+    if 0 < f.pnames.len() {
+        entry_param = f.pnames[0].copy();
+    }
     entry_file := f.file;
     entry_pos := f.pos;
     named_main := same(view(name), view("main"));
@@ -61406,6 +61411,25 @@ pub fn main() -> u64 {
         ok := label(&mut c);
         o(&mut c, view("cmpq $2,%rdi\n"));
         jump(&mut c, view("je"), ok);
+        // The entry takes one argument and the command line gave another count: say so on stderr,
+        // `usage: PROGRAM NAME` with the parameter's own name, then exit 2 as before. The two pieces
+        // around the program name are bytes in .rodata, written with the runtime's plain writers.
+        mut tail = copy_bytes(view(" "));
+        push_bytes(&mut tail, view(entry_param));
+        tail.push(10);
+        o(&mut c, view(".pushsection .rodata\nrt_entry_usage_head:\n.byte 117,115,97,103,101,58,32\nrt_entry_usage_tail:\n.byte "));
+        for i in tail.len() {
+            if i != 0 {
+                o(&mut c, view(","));
+            }
+            on(&mut c, tail[i]);
+        }
+        o(&mut c, view("\n.popsection\n"));
+        o(&mut c, view("movl $2,%edi\nleaq rt_entry_usage_head(%rip),%rsi\nmovl $7,%edx\ncall rt_write_all\n"));
+        o(&mut c, view("xorl %edi,%edi\ncall f_host_arg\nmovq %rax,%rsi\nmovl $2,%edi\ncall rt_write_text\n"));
+        o(&mut c, view("movl $2,%edi\nleaq rt_entry_usage_tail(%rip),%rsi\nmovq $"));
+        on(&mut c, tail.len());
+        o(&mut c, view(",%rdx\ncall rt_write_all\n"));
         emit_exit(&mut c, view("movl $2,%edi\n"));
         mark(&mut c, ok);
         o(
