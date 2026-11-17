@@ -253,7 +253,9 @@ const OUTPUT_CAP = 256 * 1024;
 export function runCompiler(compiler, args, cwd, timeout) {
   return new Promise(done => {
     let settled = false;
-    const child = spawn(compiler, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, GRAIL_HOME: root } });
+    // Its own process group: `grail check` spawns per-module compiles, and a timeout has to kill them too
+    // (killing only the driver left a hung module compile running as an orphan).
+    const child = spawn(compiler, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, GRAIL_HOME: root }, detached: true });
     let output = '';
     const collect = chunk => {
       if (output.length < OUTPUT_CAP) output += chunk.toString('utf8');
@@ -261,7 +263,7 @@ export function runCompiler(compiler, args, cwd, timeout) {
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill('SIGKILL');
+      try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); }
     }, timeout);
     child.stdout.on('data', collect);
     child.stderr.on('data', collect);
