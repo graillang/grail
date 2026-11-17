@@ -1,5 +1,10 @@
 ## Unreleased
 
+- **Faster iteration over owned vectors.** `iter::of(v)` and the consuming `vecs` methods (`map`,
+  `fold`, `filter`, `filter_map`, `flat_map`, `for_each`, `reduce`, ...) no longer copy the vector
+  into a reversed one by popping and pushing every element (an option allocated per element, twice):
+  they reverse it in place and take elements with `pop()!`. `v.reverse()` itself is a two-pointer
+  loop instead of a bounds-checked swap call per pair (about 10x).
 - **The atomics family.** `Atomic<T>` now holds `u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`,
   `i64` or `bool`. Each width wraps at its own size, and `fetch_min`/`fetch_max` are signed for
   `i*` types.
