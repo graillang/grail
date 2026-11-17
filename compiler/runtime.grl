@@ -5901,12 +5901,6 @@ fn rt_job_help(w: u64, r: u64) -> u64 {
     raw_store(t + 152, raw_load(t + 152) - 281474976710656);
     return 0;
 }
-// An address inside the calling frame, which is where the stack is now.
-fn rt_frame() -> u64 {
-    mut here = 0;
-    p := &mut here;
-    return p;
-}
 // May this waiter run another job on top of its own frames? This is the one place that decides.
 //   - Only on a worker: a thread that is not one takes back its own forks and nothing else.
 //   - Only with room: at least an eighth of the stack left above the guard page. The job that would
@@ -5924,7 +5918,12 @@ fn rt_job_may_help(w: u64) -> u64 {
     }
     base := raw_load(t + 8);
     if base != 0 {
-        if rt_frame() < base + 4096 + raw_load(t + 16) / 8 {
+        // Where the stack is now: the address of a word of this frame, compared while the word is
+        // live. (A helper returning the address of its own local hands back a dead pointer, which
+        // the LLVM build may fold to anything - and did, so the guard never refused.)
+        mut probe = base;
+        at := &mut probe;
+        if at < raw_load(at) + 4096 + raw_load(t + 16) / 8 {
             return 0;
         }
     }
@@ -6510,6 +6509,25 @@ fn rt_background_wait_us() -> u64 {
         i += 1;
     }
     return oldest;
+}
+// host::stack_left(): how many bytes of the current green task's stack are left below the caller
+// (above the guard page), or 0 off a task. For code that recurses deeply and wants to stop, or to
+// fork instead, before it runs into the guard page.
+fn f_host_stack_left() -> u64 {
+    t := rt_current();
+    if t == 0 {
+        return 0;
+    }
+    base := raw_load(t + 8);
+    if base == 0 {
+        return 0;
+    }
+    mut probe = base + 4096;
+    at := &mut probe;
+    if at < raw_load(at) {
+        return 0;
+    }
+    return at - raw_load(at);
 }
 fn f_host_background_wait_us() -> u64 {
     return rt_background_wait_us();

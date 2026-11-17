@@ -1,5 +1,12 @@
 ## Unreleased
 
+- `host::stack_left()`: the bytes left on the current green task's stack above its guard page (0 off
+  a task), for recursive code that wants to stop or fork before it overflows.
+- The scheduler's "enough stack left to help" check read the address of a helper's dead local,
+  which the LLVM build may fold to anything; it compares a live one now
+  (`sched-help-stops-when-the-stack-is-low` passes under both backends; its depth is now measured
+  with `host::stack_left()` instead of being tuned to native frame sizes).
+
 - **Typed iterator adapters: `iter::over(v).map(..).filter(..).fold(..)`.** `iter::VecIter<T>`,
   `iter::Map<I, U, F>` and `iter::Filter<I, F>` implement `Iterator` with each callback held by its
   own closure type, so a chain is one nested type, specialised and called directly, with no
