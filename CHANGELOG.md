@@ -5,6 +5,31 @@
   candidate slot on every line of every round; each line's effect is now worked out once per pass
   and read through a slot-to-candidate table. The output is byte-identical; compiling the compiler
   takes 20% fewer instructions, and a cold `grail build` of a 1000-function file 5.7% fewer.
+- **`grail cache warm [--target T]`** checks and builds every standard module into the build store,
+  as rustup ships libstd: a project's first check then compiles only its own modules. The installers
+  run it (not under DESTDIR), and compile-perf's template store is now a warmed one. Dev compiler,
+  GRAIL_JOBS=1, a project's first check: bench/iterchain.grl 0.84G -> 0.24G, hashmap 0.72G -> 0.21G,
+  json 1.33G -> 0.20G.
+- A module run of a store build no longer re-hashes every interface it loads to check its trailer:
+  the driver passes `--use-vouched`, because each one was written by a run of that build or restored
+  from a blob whose bytes matched its content digest. Interfaces from a user's `--use DIR` or
+  `--interface DIR` keep the check. An edited bench/iterchain.grl check: 0.267G -> 0.234G.
+- **SIMD S2.**
+  - New types: `u8x16`, `u8x32`, `u32x4`, `u32x8`, `i64x2`, `i64x4` and the masks `m8x16`, `m8x32`.
+    Unsigned lanes compare, order and widen as unsigned.
+  - `shuffle` and `shuffle2` take literal lane indices.
+  - `to_f32`, and `to_i32`, which truncates, saturates and turns NaN into 0.
+  - `bits` and `T::from_bits` reinterpret lanes.
+  - `load_aligned` and `store_aligned` check the address and stop with it if it is misaligned.
+  - With the LLVM backend, a 4x4 matrix product and an array-of-structs to struct-of-arrays
+    transpose run as the same loops as C with SSE2 intrinsics: 1.04x and 1.17x C's instructions,
+    the same time within the machine's noise.
+- Fixed: the release compiler could be built by an older release compiler's LLVM backend and
+  accepted although it miscompiled its own assembler (programs printed stray zero bytes). The
+  release build now always lowers with the current native compiler, and accepts the result only
+  when it compiles the compiler to the same text and the same objects as the native build and its
+  programs pass a corpus slice (hello, strings, alloc, thread, sched).
+
 - **`host::chmod(path, mode)`**: sets a file's permission bits, 0 or a positive errno (fchmodat on
   Linux, chmod on macOS, and 0 on Windows, which has no bits to set). The build store will use it to
   give a restored executable image its mode without a shell, once the bootstrap seed knows it.
@@ -17,7 +42,8 @@
   build reads no source, the compiler's `--print-inputs` answer is remembered under the stamps of
   what it read (`inputs/`), and a tool's `--version` is asked once per binary (`tool-id/`). A module
   run with in-process assembly is one process, not a `grail unit-build` wrapper and the compiler.
-  `host::read_file` reads straight into its result instead of pushing byte by byte. With the dev
+  `host::read_file` reads straight into its result instead of pushing byte by byte, sized from the
+  file's own size. With the dev
   compiler and GRAIL_JOBS=1, in user-space instructions: hello no-op build 0.235G -> 0.008G, hello
   check 0.310G -> 0.058G, hello build 0.453G -> 0.140G. `grail cache prune` drops `fp/`, `inputs/`
   and `tool-id/` whole.
@@ -84,6 +110,10 @@
   a general register (`movq (%rax),%rax; movq %rax,%xmm8`) is `movsd (%rax),%xmm8`, and a store the
   same way back; the internal assembler encodes `movsd`, and AArch64 and RISC-V translate it to
   `ldr`/`str` and `fld`/`fsd`. nbody executes 7% fewer instructions.
+- **Native backend: fixed-size array elements are addressed directly.** An element access reads its
+  base and index from the registers that hold them instead of copies in `%rdi`/`%rsi`, and a load
+  of the element takes the scaled address as its operand (`movsd (%r12,%rbx,8),%xmm9`) instead of
+  computing it with `leaq` first. nbody executes another 10% fewer instructions.
 
 - **Raw address offsets.** In an `unsafe module`, the address operand of `raw_load`/`raw_store`
   and their narrow forms written as `p + k` with a literal `k` has no overflow check and is folded

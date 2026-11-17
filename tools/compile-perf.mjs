@@ -1,11 +1,12 @@
 // The compile-speed guard of the landing gate (tools/landsvc/suites.txt): user-space instructions of
 // `grail check` on hello world and on the scaling program at N = 1000 and 4000 (compile-bench's
 // `scalingProgram`), single process (GRAIL_JOBS=1), with the tree's compiler. Each check starts from
-// a copy of a store that one hello-world check filled - the runtime, platform and core modules, which
-// a toolchain ships ready - so a figure is a project's first check, as compile-rivals measures it.
-// And of `grail build` on syn1000: cold (from a store one hello-world build filled), and again after
-// a one-function edit (the first `% 1000` of work500 becomes `% 1001`), which is what the function
-// store and the optimiser's memo exist for: an unchanged body is neither compiled nor optimised again.
+// a copy of a store `grail cache warm` filled - the runtime, platform and every standard module, which
+// a toolchain ships ready (the installer runs it) - so a figure is a project's first check, as
+// compile-rivals measures it.
+// And of `grail build` on syn1000 from the same store: cold, and again after a one-function edit
+// (the first `% 1000` of work500 becomes `% 1001`), which is what the function store and the
+// optimiser's memo exist for: an unchanged body is neither compiled nor optimised again.
 // Instructions, not seconds: they do not move with the machine's load.
 //   bun tools/compile-perf.mjs            fail when a check figure is more than 10% above the committed
 //                                         baseline (bench/results/compile-perf.json), a build figure
@@ -38,11 +39,12 @@ const programs = {
   syn1000: scalingProgram(1000),
   syn4000: scalingProgram(4000),
 };
-// The toolchain's own modules, checked once into a template store.
+// The toolchain's own modules - runtime, platform and standard library - checked and built once into
+// a template store.
 const template = join(work, 'template');
 mkdirSync(template, { recursive: true });
 writeFileSync(join(template, 'main.grl'), 'fn main() {\n    println("template");\n}\n');
-measure([compiler, 'check', 'main.grl'], { cwd: template, env: { ...process.env, GRAIL_JOBS: '1', GRAIL_CACHE_DIR: join(template, 'store') } });
+measure([compiler, 'cache', 'warm'], { cwd: template, env: { ...process.env, GRAIL_CACHE_DIR: join(template, 'store') } });
 const figures = {};
 for (const [name, text] of Object.entries(programs)) {
   const dir = join(work, name);
@@ -58,18 +60,13 @@ for (const [name, text] of Object.entries(programs)) {
   figures[name] = m.instructions;
   console.log(`${name.padEnd(8)} ${(m.instructions / 1e9).toFixed(3)} G instructions, ${text.split('\n').length} lines`);
 }
-// The builds: a template store holding the toolchain's modules built once, then syn1000 cold and
-// after the edit, in one directory, so the second build has the first one's store.
-const buildTemplate = join(work, 'build-template');
-mkdirSync(buildTemplate, { recursive: true });
-writeFileSync(join(buildTemplate, 'main.grl'), 'fn main() {\n    println("template");\n}\n');
-measure([compiler, 'build', 'main.grl'], { cwd: buildTemplate, env: { ...process.env, GRAIL_JOBS: '1', GRAIL_CACHE_DIR: join(buildTemplate, 'store') } });
+// The builds: syn1000 cold and after the edit, in one directory, so the second build has the first
+// one's store.
 {
   const dir = join(work, 'build-syn1000');
   mkdirSync(dir, { recursive: true });
   const text = programs.syn1000;
-  writeFileSync(join(dir, 'main.grl'), text);
-  cpSync(join(buildTemplate, 'store'), join(dir, 'store'), { recursive: true });
+  cpSync(join(template, 'store'), join(dir, 'store'), { recursive: true });
   const env = { ...process.env, GRAIL_JOBS: '1', GRAIL_CACHE_DIR: join(dir, 'store') };
   const at = text.indexOf('% 1000', text.search(/fn work500\(/));
   const edited = text.slice(0, at) + '% 1001' + text.slice(at + 6);
