@@ -17416,11 +17416,18 @@ fn par_start<a>(c: (&a mut C), files: u64) -> unit {
     if (jobs::count() < 2) & (host::env(view("GRAIL_BODY_SLICE")).len() == 0) {
         return ();
     }
+    // The size of each input, from the file system: reloading every file to measure it cost a
+    // tokenisation of the whole program per run.
     mut sizes = u64[];
     mut i = 2;
     while i < files {
-        load_file(&mut c, i);
-        sizes.push(c.src.len());
+        parts := host::stat(view(input_path(&c, i)), 1);
+        if 2 < parts.len() {
+            sizes.push(parts[2]);
+        } else {
+            load_file(&mut c, i);
+            sizes.push(c.src.len());
+        }
         i += 1;
     }
     if c.fn_surface.len() == 0 {
@@ -18194,7 +18201,10 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             par_unit = par_take(&mut c, owner, c.file, at_off, &mut par_outcome);
         }
     }
-    if fn_open(&mut c, view(unit)) {
+    // With no store, a unit is only something a worker hands this process; for a body this process
+    // compiles itself there is nothing to key or to file.
+    own_only := (c.fn_dir.len() == 0) & (c.par_me == 0) & (par_unit.key.len() == 0);
+    if fn_open(&mut c, view(unit)) & !own_only {
         // The symbol the label will spell: `body_label` is the one spelling both `func_directive`
         // and the label use, so a unit's key names exactly the symbol its bytes define.
         fn_symbol := body_label(&c, view(m), view(name), view(export_symbol), export);
@@ -18498,9 +18508,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             c.lnext[part_lunit - 1] = part_label;
             c.rnext[part_lunit - 1] = part_ref;
         }
-        while out_mark < c.out.len() {
-            c.out.pop()!;
-        }
+        c.out.truncate(out_mark);
         // Facts describe the text just discarded, so they go with it.
         llvm::facts_truncate(&mut c.facts, fact_mark);
         edge_mark := c.fx_edge_mark;
@@ -18588,9 +18596,12 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                 par_record(&mut c, at_off, 1, &produced);
                 par_mine = 0;
             }
-            while apply_mark < c.out.len() {
-                c.out.pop()!;
+            // A worker's own output is thrown away: what it made is the unit just recorded, and
+            // taking the body back out to put it in again would be work for nothing.
+            if c.par_me != 0 {
+                return ();
             }
+            c.out.truncate(apply_mark);
             llvm::facts_truncate(&mut c.facts, fact_mark);
             while fn_drop_mark < c.drop_refs.len() {
                 c.drop_refs.pop()!;
@@ -27335,9 +27346,7 @@ fn emit_specializations<a>(c: (&a mut C)) -> unit {
             part_label := c.label;
             part_ref := c.ref_next;
             replay_function(&mut c, i);
-            while saved < c.out.len() {
-                c.out.pop()!;
-            }
+            c.out.truncate(saved);
             exchange(&mut c.part, part_mark);
             exchange(&mut c.lpart, part_lpart);
             exchange(&mut c.label, part_label);
@@ -34228,9 +34237,7 @@ fn isolated_body_type<a, b, d>(c: (&a mut C), start: u64, names: (&b u8[][]), pa
     v := expr(&mut c, 0);
     result := v.ty;
     exchange(&mut c.pos, enter);
-    while out_mark < c.out.len() {
-        c.out.pop()!;
-    }
+    c.out.truncate(out_mark);
     fx_edges_truncate(&mut c, fx_edge_trial);
     exchange(&mut c.fx_calls, fx_calls_trial);
     while closures_mark < c.closures.len() {
