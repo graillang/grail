@@ -1570,6 +1570,11 @@ fn rt_alloc_unlocked(n: u64) -> u64 {
     return rt_alloc_slow(n);
 }
 fn rt_alloc_slow(n: u64) -> u64 {
+    return rt_alloc_take(n, 0);
+}
+// An allocation whose reused block is cleared from byte `from` on (a word boundary at or below it):
+// rt_grow copies the old contents over the first `from` bytes, so clearing them first was wasted.
+fn rt_alloc_take(n: u64, from: u64) -> u64 {
     state := raw_state();
     if 1152921504606846976 < n {
         rt_abort();
@@ -1597,7 +1602,7 @@ fn rt_alloc_slow(n: u64) -> u64 {
             raw_store(wrapping_add(ptr, 32), 0);
             raw_store(wrapping_add(ptr, 40), 0);
         } else {
-            mut i = 0;
+            mut i = from & 18446744073709551608;
             while i < n {
                 raw_store(wrapping_add(ptr, i), 0);
                 i = wrapping_add(i, 8);
@@ -1726,7 +1731,13 @@ fn rt_grow(ptr: u64, used: u64, need: u64) -> u64 {
         rt_allocator_unlock();
         return moved + first + 16;
     }
-    fresh := rt_alloc(need);
+    mut fresh = 0;
+    if (raw_load(wrapping_add(raw_state(), 3416)) == 0) & (240 < need) {
+        // One thread, a block past the small classes: cleared only beyond what is copied in.
+        fresh = rt_alloc_take(need, used);
+    } else {
+        fresh = rt_alloc(need);
+    }
     rt_copy_bytes(fresh, ptr, used);
     rt_free(ptr);
     return fresh;
