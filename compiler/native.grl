@@ -8311,8 +8311,7 @@ fn ref_pred_count<a>(c: (&a mut C)) -> u64 {
 // function `<name>` that stores the arguments, checks each parameter predicate (an entry fact of
 // this record: the caller's obligation), puts the arguments back and calls `<name>.proved`, whose
 // result it returns in `%rax`. Every unproved caller, a function value and a vtable reach it; a
-// proved call skips it. More than six parameters arrive as a record behind `%r9`, which the body
-// frees: the wrapper reads the rest from it for the checks and passes `%r9` through untouched.
+// proved call skips it. Words past the sixth arrive on the stack and are passed on the same way.
 fn ref_wrapper<a, b, d>(c: (&a mut C), m: &b [u8], name: &b [u8], body_symbol: &d [u8], export: u64, count: u64, position: u64, claimed_alloc: u64, claimed_panic: u64, entry_state: ownership::State) -> unit {
     after := exchange(&mut c.check, entry_state);
     func_directive(&mut c, view(m), view(name), view(body_symbol), export);
@@ -8354,36 +8353,59 @@ fn ref_wrapper<a, b, d>(c: (&a mut C), m: &b [u8], name: &b [u8], body_symbol: &
     if total != count {
         dslot = fresh(&mut c);
     }
+    // Six words arrive in registers and the rest on the stack, word 6 + k at 16 + 8k(%rbp)
+    // (load_call_args): all are stored for the checks, and handed on the same way.
     mut regs = total;
     if 6 < total {
-        regs = 5;
+        regs = 6;
     }
-    for i in regs {
-        o(&mut c, view("movq "));
-        o(&mut c, view(argreg(i)));
-        c.out.push(44);
+    for i in total {
+        if i < 6 {
+            o(&mut c, view("movq "));
+            o(&mut c, view(argreg(i)));
+            c.out.push(44);
+        } else {
+            o(&mut c, view("movq "));
+            on(&mut c, 16 + (i - 6) * 8);
+            o(&mut c, view("(%rbp),%rax\nmovq %rax,"));
+        }
         if i < count {
             stack_slot(&mut c, i);
         } else {
             stack_slot(&mut c, dslot);
         }
         c.out.push(10);
-    }
-    mut spill = 0;
-    if 6 < total {
-        spill = fresh(&mut c);
-        o(&mut c, view("movq %r9,"));
-        stack_slot(&mut c, spill);
-        c.out.push(10);
-        for k in count - 5 {
-            o(&mut c, view("movq "));
-            on(&mut c, k * 8);
-            o(&mut c, view("(%r9),%rax\nmovq %rax,"));
-            stack_slot(&mut c, 5 + k);
-            c.out.push(10);
-        }
     }
     ref_params(&mut c);
+    mut area = 0;
+    if 6 < total {
+        extra := total - 6;
+        area = 16 * ((extra + 1) / 2);
+        x86 := (c.target == 0) || (c.target == 3);
+        if x86 {
+            o(&mut c, view("subq $"));
+            on(&mut c, area);
+            o(&mut c, view(",%rsp\n"));
+        } else {
+            o(&mut c, view("cstack "));
+            on(&mut c, area);
+            c.out.push(10);
+        }
+        for k in extra {
+            o(&mut c, view("movq "));
+            if 6 + k < count {
+                stack_slot(&mut c, 6 + k);
+            } else {
+                stack_slot(&mut c, dslot);
+            }
+            o(&mut c, view(",%rax\n"));
+            if x86 {
+                ffi_store_stack(&mut c, 1, k * 8);
+            } else {
+                ffi_store_stack(&mut c, 0, k * 8);
+            }
+        }
+    }
     for i in regs {
         o(&mut c, view("movq "));
         if i < count {
@@ -8395,12 +8417,8 @@ fn ref_wrapper<a, b, d>(c: (&a mut C), m: &b [u8], name: &b [u8], body_symbol: &
         o(&mut c, view(argreg(i)));
         c.out.push(10);
     }
-    if spill != 0 {
-        o(&mut c, view("movq "));
-        stack_slot(&mut c, spill);
-        o(&mut c, view(",%r9\n"));
-    }
     call_proved_out(&mut c, view(sym));
+    release_call_args(&mut c, area);
     o(&mut c, view("leave\nret\n.set "));
     fname(&mut c, frame);
     c.out.push(44);
