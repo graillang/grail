@@ -2345,6 +2345,8 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
     dead_defs(&mut o, view(s), first, last);
     xmm_loads(&mut o, view(s), last);
     xmm_stores(&mut o, view(s), last);
+    xmm_fold(&mut o, view(s), last);
+    xmm_memops(&mut o, view(s), last);
     newframe := compact(&mut o, view(s), prologue, ns);
     // Rule 3 (call ABI S4): of the cleared range, only the slots that may be read before written.
     mut zkeep = u64[];
@@ -3213,29 +3215,52 @@ fn xmm_is<a, b>(o: (&a ir::Body), s: &b [u8], i: u64, j: u64, a: u64, e: u64) ->
     }
     return (o.k1[i] == 6) && ir::same_range(view(s), o.s1[i], o.e1[i], view(s[a: e]));
 }
-// Whether the scratch SSE register written s[a..e] is dead after line i: the next mention in the
-// block overwrites it whole, followed through at most `depth` jumps. A label, an unfollowed jump, a
-// call that returns or an unknown instruction first counts as a use.
-fn xmm_dead_after<a, b>(o: (&a ir::Body), s: &b [u8], i: u64, a: u64, e: u64, depth: u64) -> bool {
+// The SSE register operand j of line i names, by number (a parsed `%xmmN` or a promoted one), or 99.
+fn xmm_no<a, b>(o: (&a ir::Body), s: &b [u8], i: u64, j: u64) -> u64 {
+    mut k = o.k0[i];
+    mut v = o.v0[i];
+    mut a = o.s0[i];
+    mut e = o.e0[i];
+    if j != 0 {
+        k = o.k1[i];
+        v = o.v1[i];
+        a = o.s1[i];
+        e = o.e1[i];
+    }
+    if k == 7 {
+        return v;
+    }
+    if (k == 6) && is_xmm_text(view(s), a, e) {
+        if e - a == 5 {
+            return s[a + 4] - 48;
+        }
+        if e - a == 6 {
+            return 10 + s[a + 5] - 48;
+        }
+    }
+    return 99;
+}
+// Whether SSE register r is dead after line i: on every path the next mention writes it whole,
+// followed through at most `depth` jumps (a label is no use: deadness depends on what follows). A
+// call that returns, an unknown instruction or an unfollowed jump first counts as a use.
+fn xmm_dead_after<a, b>(o: (&a ir::Body), s: &b [u8], i: u64, r: u64, depth: u64) -> bool {
     last := o.op.len();
-    if depth == 0 {
+    if (depth == 0) || (r == 99) {
         return false;
     }
     mut j = i;
-    for step in 12 {
+    for step in 40 {
         j = next_live(&o, j, last);
         if j >= last {
             return false;
         }
         op := o.op[j];
-        // Past a runtime exit nothing is read; a bounds check's failure arm is one.
         if (op == 15) && never_returns(&o, view(s), j) {
             return true;
         }
         if (op == 16 || ((16 < op) && (op < 25))) && (o.k0[j] == 4) {
-            // A check's conditional jump around its exit: the register must be dead at the target too.
             t := jump_target(&o, j);
-            if (t >= last) || !xmm_dead_after(&o, view(s), t, a, e, depth - 1) {
+            if (t >= last) || !xmm_dead_after(&o, view(s), t, r, depth - 1) {
                 return false;
             }
             if op == 16 {
@@ -3243,19 +3268,18 @@ fn xmm_dead_after<a, b>(o: (&a ir::Body), s: &b [u8], i: u64, a: u64, e: u64, de
             }
             continue;
         }
-        // A label: whether this value is read depends only on what follows, whatever else jumps here.
         if op == 100 {
             continue;
         }
         if (op == 0) || (op == 15) || (op == 29) || (op == 30) || ir::is_jump(op) {
             return false;
         }
-        if xmm_is(&o, view(s), j, 0, a, e) {
+        if xmm_no(&o, view(s), j, 0) == r {
             return false;
         }
-        if xmm_is(&o, view(s), j, 1, a, e) {
+        if xmm_no(&o, view(s), j, 1) == r {
             // Whole-register writes; the arithmetic and the compare read their destination too.
-            return (op == 1) || (op == 68) || (op == 70) || (op == 71) || (op == 65) || (op == 66);
+            return (op == 1) || (op == 68) || (op == 70) || (op == 71) || (op == 65) || (op == 66) || (op == 77);
         }
     }
     return false;
@@ -3452,7 +3476,7 @@ fn xmm_narrow<a, b>(o: (&a mut ir::Body), s: &b [u8], lsrc: (&u64[]), ldst: (&u6
         set_range(&mut o, i, 0, a, e);
         set_operand(&mut o, i, 1, 6, 0);
         set_range(&mut o, i, 1, a, e);
-        if xmm_dead_after(&o, view(s), i, a, e, 3) {
+        if xmm_dead_after(&o, view(s), i, xmm_no(&o, view(s), i, 0), 3) {
             kill(&mut o, i);
         }
     }
@@ -3950,10 +3974,10 @@ fn xmm_fold<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
             continue;
         }
         d := o.v1[l4];
-        if !xmm_dead_after(&o, view(s), l4, o.s1[i], o.e1[i], 3) {
+        if !xmm_dead_after(&o, view(s), l4, xmm_no(&o, view(s), i, 1), 3) {
             continue;
         }
-        if binary && !xmm_dead_after(&o, view(s), l4, o.s0[i], o.e0[i], 3) {
+        if binary && !xmm_dead_after(&o, view(s), l4, xmm_no(&o, view(s), i, 0), 3) {
             continue;
         }
         commutes := (op == 60) || (op == 62) || (op == 72) || (op == 74);
@@ -4504,6 +4528,35 @@ fn xmm_stores<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
         }
         ir::put(&mut o.op, j, 77);
         set_operand(&mut o, j, 0, o.k0[p], o.v0[p]);
+        set_range(&mut o, j, 0, o.s0[p], o.e0[p]);
+        kill(&mut o, p);
+    }
+}
+// A float loaded only to be an operand - `movsd MEM,%xmmT; OPsd %xmmT,%xmmD` with %xmmT dead after -
+// is `OPsd MEM,%xmmD`: the arithmetic reads memory itself (+ - * /, double precision). T may be a
+// scratch or a promoted register (an element loaded into one, then used once).
+fn xmm_memops<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
+    for p in last {
+        if (o.del[p] != 0) || (o.op[p] != 77) || !((o.k0[p] == 4) || (o.k0[p] == 5)) {
+            continue;
+        }
+        t := xmm_no(&o, view(s), p, 1);
+        if t == 99 {
+            continue;
+        }
+        j := next_live(&o, p, last);
+        if (j >= last) || !((59 < o.op[j]) && (o.op[j] < 64)) {
+            continue;
+        }
+        if (xmm_no(&o, view(s), j, 0) != t) || (xmm_no(&o, view(s), j, 1) == t) {
+            continue;
+        }
+        if !xmm_dead_after(&o, view(s), j, t, 3) {
+            continue;
+        }
+        m0 := o.m0[p];
+        set_operand(&mut o, j, 0, o.k0[p], o.v0[p]);
+        ir::put(&mut o.m0, j, m0);
         set_range(&mut o, j, 0, o.s0[p], o.e0[p]);
         kill(&mut o, p);
     }

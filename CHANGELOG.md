@@ -141,6 +141,11 @@
   base and index from the registers that hold them instead of copies in `%rdi`/`%rsi`, and a load
   of the element takes the scaled address as its operand (`movsd (%r12,%rbx,8),%xmm9`) instead of
   computing it with `leaq` first. nbody executes another 10% fewer instructions.
+- **Native backend: SSE register liveness by register number.** Whether a float register is still
+  needed is now decided by its number, for promoted registers as for scratch ones, and through a
+  chain of overflow checks; so more float operations work on their registers directly, and a float
+  element loaded only to be an operand is read by the arithmetic itself (`subsd (%rdi,%rsi,8),%xmm8`).
+  nbody executes 3% fewer instructions.
 
 - **Raw address offsets.** In an `unsafe module`, the address operand of `raw_load`/`raw_store`
   and their narrow forms written as `p + k` with a literal `k` has no overflow check and is folded
