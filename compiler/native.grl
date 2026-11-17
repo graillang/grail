@@ -2881,6 +2881,9 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
             }
             absolute := site_at(text, a, e, view(".gposa "));
             if absolute || site_at(text, a, e, view(".gpos ")) {
+                // A new statement: a kind its predecessor stated for an abort that is not there any
+                // more is not this statement's.
+                pending = 0;
                 w := site_words(text[a..e]);
                 if w.len() == 4 {
                     internal := w[3] != 0;
@@ -2998,8 +3001,11 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
         // Only a check in program code is rewritten: the runtime's own aborts (rt_fail ends in one)
         // stay plain, or a failing check would report itself forever.
         if (e - a == 13) && seen_own && !own_internal && site_at(text, a, e, view("call rt_abort")) {
+            // An inlined accessor's bounds check is recognised by its shape before any pending
+            // kind: a `.gkind` whose own abort the optimiser removed (a divisor it proved non-zero)
+            // must not name the next check in the statement.
             mut kind = pending;
-            if (kind == 0) && site_at(text, p1a, p1e, view("jb ")) && site_in(text, p2a, p2e, view("cmpq 8(%rdi),%rsi")) {
+            if site_at(text, p1a, p1e, view("jb ")) && site_in(text, p2a, p2e, view("cmpq 8(%rdi),%rsi")) {
                 kind = 1;
             }
             out.append(text[pend..a]);
@@ -3458,6 +3464,60 @@ fn tls_enter_callback<a>(c: (&a mut C), slot: u64, adopt: u64) -> unit {
     }
     mark(&mut c, done);
     callback_pin(&mut c, view("addq"));
+    return ();
+}
+// The foreign-call marker (rt_sysmon): %r11 = this thread's record, then the block's counter word.
+fn ffi_marker_enter<a>(c: (&a mut C), slot: u64) -> unit {
+    other := label(&mut c);
+    have := label(&mut c);
+    none := label(&mut c);
+    done := label(&mut c);
+    o(&mut c, view("cmpq $0,rt_state+184(%rip)\n"));
+    jump(&mut c, view("je"), other);
+    o(&mut c, view("movq %fs:rt_tls_record@tpoff,%r11\n"));
+    jump(&mut c, view("jmp"), have);
+    mark(&mut c, other);
+    o(&mut c, view("movq %fs:0,%r11\n"));
+    mark(&mut c, have);
+    o(&mut c, view("cmpq $2,24(%r11)\n"));
+    jump(&mut c, view("jne"), none);
+    o(&mut c, view("movq 32(%r11),%r11\nmovq 320(%r11),%r11\nincq (%r11)\n"));
+    jump(&mut c, view("jmp"), done);
+    mark(&mut c, none);
+    o(&mut c, view("xorl %r11d,%r11d\n"));
+    mark(&mut c, done);
+    o(&mut c, view("movq %r11,"));
+    stack_slot(&mut c, slot);
+    c.out.push(10);
+    return ();
+}
+// The call's end: count out (a locked increment, because the monitor may have marked the word with
+// its top bit at the same moment); a set top bit says the worker was given away during the call, and
+// rt_foreign_lost makes this thread block-less and names the symbol once.
+fn ffi_marker_leave<a, b>(c: (&a mut C), slot: u64, symbol: &b [u8]) -> unit {
+    done := label(&mut c);
+    o(&mut c, view("movq "));
+    stack_slot(&mut c, slot);
+    o(&mut c, view(",%r11\ntestq %r11,%r11\n"));
+    jump(&mut c, view("je"), done);
+    o(&mut c, view("lock incq (%r11)\n"));
+    jump(&mut c, view("jns"), done);
+    o(&mut c, view("subq $32,%rsp\nmovq %rax,(%rsp)\nmovq %rdx,8(%rsp)\nmovq %xmm0,%r10\nmovq %r10,16(%rsp)\nmovq %xmm1,%r10\nmovq %r10,24(%rsp)\n"));
+    // The symbol's name, NUL-ended, as read-only data (as a `cstr` literal is emitted).
+    name := label(&mut c);
+    o(&mut c, view(".pushsection .rodata\n"));
+    mark(&mut c, name);
+    for i in symbol.len() {
+        o(&mut c, view(".byte "));
+        on(&mut c, symbol[i]);
+        c.out.push(10);
+    }
+    o(&mut c, view(".byte 0\n.popsection\nleaq "));
+    lname(&mut c, name);
+    o(&mut c, view("(%rip),%rdi\n"));
+    call_out(&mut c, view("rt_foreign_lost"));
+    o(&mut c, view("movq 16(%rsp),%r10\nmovq %r10,%xmm0\nmovq 24(%rsp),%r10\nmovq %r10,%xmm1\nmovq (%rsp),%rax\nmovq 8(%rsp),%rdx\naddq $32,%rsp\n"));
+    mark(&mut c, done);
     return ();
 }
 // While a callback runs there are C frames under it on this stack, so the task (if this thread is
@@ -11716,6 +11776,91 @@ fn infer_from_callables<a, b>(c: (&a mut C), sets: (&a u64[][]), map: (&b mut u6
     }
     return ();
 }
+// A callable bound is higher-ranked in its free lifetimes: a reference parameter whose lifetime the
+// bound names nowhere else (`F: FnMut((&mut T), C) -> R`) is a fresh lifetime on every call, so the
+// closure or function given for it must not tie that parameter's lifetime to anything else it can
+// reach - another parameter (a context `C = &mut Out<'a>`), its result, or what it captured -
+// or the callee's guarded `&mut T` could be stored where it outlives the call. Empty when `actual`
+// is independent enough; otherwise the parameter index (1-based) that is tied.
+fn callable_tied_param<a>(c: (&a mut C), actual: u64, bound: u64) -> u64 {
+    ak := ty_kind(&mut c, actual);
+    if (ak != 20) && (ak != 12) {
+        return 0;
+    }
+    bp := type_args(&mut c, bound);
+    ap := type_args(&mut c, actual);
+    if bp.len() != ap.len() {
+        return 0;
+    }
+    for i in bp.len() {
+        bk := ty_kind(&mut c, bp[i]);
+        if (bk != 5) && (bk != 7) && (bk != 27) {
+            continue;
+        }
+        // The bound's own lifetime for this parameter: free unless something else in the bound
+        // names it.
+        mut trail = u64[];
+        mine := caps_walk(&mut c, bp[i], &mut trail);
+        mut others = u64[];
+        for j in bp.len() {
+            if j != i {
+                mut t2 = u64[];
+                more := caps_walk(&mut c, bp[j], &mut t2);
+                for q in more.len() {
+                    add_region(&mut others, more[q]);
+                }
+            }
+        }
+        mut t3 = u64[];
+        res := caps_walk(&mut c, ty_arg(&mut c, bound), &mut t3);
+        for q in res.len() {
+            add_region(&mut others, res[q]);
+        }
+        mut free = true;
+        for q in mine.len() {
+            for r in others.len() {
+                if mine[q] == others[r] {
+                    free = false;
+                }
+            }
+        }
+        if !free {
+            continue;
+        }
+        // The argument's lifetime for it must be named nowhere else the argument can reach.
+        mut t4 = u64[];
+        theirs := caps_walk(&mut c, ap[i], &mut t4);
+        mut reach = u64[];
+        for j in ap.len() {
+            if j != i {
+                mut t5 = u64[];
+                more := caps_walk(&mut c, ap[j], &mut t5);
+                for q in more.len() {
+                    add_region(&mut reach, more[q]);
+                }
+            }
+        }
+        mut t6 = u64[];
+        ares := caps_walk(&mut c, ty_arg(&mut c, actual), &mut t6);
+        for q in ares.len() {
+            add_region(&mut reach, ares[q]);
+        }
+        if ak == 20 {
+            captured := type_regions(&mut c, actual);
+            for q in captured.len() {
+                add_region(&mut reach, captured[q]);
+            }
+        }
+        for q in theirs.len() {
+            for r in reach.len() {
+                if (theirs[q] != 0) && (theirs[q] == reach[r]) {
+                    return i + 1;
+                }
+            }
+        }
+    }
+    return 0;
+}
 // One entry of a parameter's requirement set, met by `ty` with the parameters bound by `map`: an
 // interface, or a callable bound (the closure or function `ty` converts to the bound).
 fn meets_requirement<a, b>(c: (&a mut C), ty: u64, id: u64, map: (&b u64[])) -> bool {
@@ -11737,6 +11882,9 @@ fn meets_requirement<a, b>(c: (&a mut C), ty: u64, id: u64, map: (&b u64[])) -> 
             return (ty_kind(&mut c, t) == 20) || (ty_kind(&mut c, t) == 12);
         }
         bound := bind_types(&mut c, id - CALLABLE_BOUND, &map);
+        if callable_tied_param(&mut c, t, bound) != 0 {
+            return false;
+        }
         if same_type(&mut c, t, bound) != 0 {
             return true;
         }
@@ -12916,6 +13064,15 @@ fn require_interfaces<a, b, d>(c: (&a mut C), arguments: (&b u64[]), sets: (&d u
                 // A closure written inside a specialisation is typed by its aliases, one passed in
                 // from outside by plain types: either form of the bound is met.
                 aliased := bind_types(&mut c, id - CALLABLE_BOUND, &arguments);
+                tied := callable_tied_param(&mut c, given, bound);
+                if tied != 0 {
+                    mut msg = copy_bytes(view("this argument does not meet the callable bound `"));
+                    push_bytes(&mut msg, view(source_type_name(&mut c, bound)));
+                    push_bytes(&mut msg, view("`: its parameter "));
+                    decimal(&mut msg, tied);
+                    push_bytes(&mut msg, view(" is a reference the bound gives it fresh on every call, but its lifetime is tied to another parameter, its result or a capture, so it could be kept past the call"));
+                    fail(&mut c, view(msg));
+                }
                 if (same_type(&mut c, given, bound) == 0) && (closure_converts(&mut c, given, bound) == 0)
                     && (same_type(&mut c, given, aliased) == 0) && (closure_converts(&mut c, given, aliased) == 0) {
                     if !((ty_kind(&mut c, given) == 12) && (ty_kind(&mut c, bound) == 20)) {
@@ -17148,6 +17305,15 @@ fn ffi_emit_call<a, b, d, e, f>(
     if block_here {
         call_out(&mut c, view("rt_blocking_enter"));
     }
+    // Every other foreign call on x86-64 Linux marks the worker as inside a foreign call (an odd
+    // count in the word block word 320 names), so the scheduler's monitor can give the worker away
+    // if the call holds it for more than 10 ms (rt_sysmon). The word's address is kept in the call's
+    // `tls` slot for the exit; 0 there means "not on a worker". Clobbers %rax and %r11 only, before
+    // any argument register is loaded.
+    marked := (!blocking) & (c.target == 0) & (c.plat == 0) & (tls != 0);
+    if marked {
+        ffi_marker_enter(&mut c, tls);
+    }
     if area != 0 {
         if x86 {
             o(&mut c, view("subq $"));
@@ -17339,6 +17505,9 @@ fn ffi_emit_call<a, b, d, e, f>(
         }
     } else {
         call_out(&mut c, view(symbol));
+    }
+    if marked {
+        ffi_marker_leave(&mut c, tls, view(symbol));
     }
     if block_here {
         // The result registers survive the runtime call: rax, rdx, xmm0 and xmm1, in 32 bytes of
@@ -18380,6 +18549,10 @@ fn fn_reg_type<a, b>(p: (&a mut IR), c: (&b mut C)) -> u64 {
 // after the body's `.gbase` line; the facts are the ones recorded since `fact_mark`; the
 // registrations are the ones `fn_reg_drop` and `fn_reg_spec` wrote down.
 fn fn_unit_of<a>(c: (&a mut C), key: u8[], text_mark: u64, fact_mark: u64) -> fncache::Unit {
+    // A check's unit has no text and no facts: a check writes neither, and a build refuses it.
+    if c.check_only != 0 {
+        return fncache::Unit { key: key, text: u8[], facts: u8[], regs: c.fn_regs.copy() };
+    }
     mut text = u8[];
     text.append(c.out[text_mark..c.out.len()]);
     return fncache::Unit { key: key, text: text, facts: fn_facts_encode(&c, fact_mark), regs: c.fn_regs.copy() };
@@ -18456,8 +18629,11 @@ fn fn_apply<a, b, d>(c: (&a mut C), u: (&b fncache::Unit), regs: (&d FnReg[]), l
             lines += 1;
         }
     }
-    c.out.append(view(u.text));
-    fn_facts_restore(&mut c, view(u.facts));
+    // A check keeps no text and runs no optimiser, so a unit's text and facts are not put back.
+    if c.check_only == 0 {
+        c.out.append(view(u.text));
+        fn_facts_restore(&mut c, view(u.facts));
+    }
     for i in regs.len() {
         kind := regs[i].kind;
         template := regs[i].template;
@@ -18609,7 +18785,7 @@ fn fn_key<a, b, d>(c: (&a mut C), unit: &b [u8], symbol: &d [u8], from: u64, to:
     }
     place := fn_place(&mut c, at);
     mut key = u8[];
-    push_bytes(&mut key, view("grail-fnkey 3\nunit "));
+    push_bytes(&mut key, view("grail-fnkey 4\nunit "));
     push_bytes(&mut key, view(unit));
     push_bytes(&mut key, view("\nprefix "));
     push_bytes(&mut key, view(c.lpart));
@@ -18621,10 +18797,16 @@ fn fn_key<a, b, d>(c: (&a mut C), unit: &b [u8], symbol: &d [u8], from: u64, to:
     push_bytes(&mut key, view(c.fn_id));
     push_bytes(&mut key, view("\nsurface "));
     push_bytes(&mut key, view(c.fn_surface));
+    // The declaration and the signature as they are, each after its length: the key is hashed once,
+    // for the file's name, rather than each piece being hashed into it first.
     push_bytes(&mut key, view("\ndecl "));
-    push_bytes(&mut key, view(fncache::hash(c.src[from: to])));
+    push_bytes(&mut key, view(decimal_bytes(to - from)));
+    key.push(32);
+    key.append(c.src[from: to]);
     push_bytes(&mut key, view("\nsig "));
-    push_bytes(&mut key, view(fncache::hash(view(sig))));
+    push_bytes(&mut key, view(decimal_bytes(sig.len())));
+    key.push(32);
+    key.append(view(sig));
     push_bytes(&mut key, view("\nfile "));
     push_bytes(&mut key, view(decimal_bytes(c.file)));
     push_bytes(&mut key, view("\ncolumn "));
@@ -19821,7 +20003,11 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             from_worker := par_unit.key.len() != 0;
             mut hit = par_unit;
             if (hit.key.len() == 0) & (c.fn_dir.len() != 0) {
-                hit = fncache::load(view(c.fn_dir), view(fncache::hash(view(key))));
+                if c.check_only != 0 {
+                    hit = fncache::load_checked(view(c.fn_dir), view(fncache::hash(view(key))));
+                } else {
+                    hit = fncache::load(view(c.fn_dir), view(fncache::hash(view(key))));
+                }
                 par_outcome = 2;
             }
             if hit.key.len() != 0 {
@@ -20502,9 +20688,13 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
         exchange(&mut c.output_region, 0);
         // `fn name(...) -> T { body }` is a default: an implementation may leave it out.
         mut default = 0;
+        mut default_text = u8[];
         if is(&mut c, view("{")) {
             default = header + 1;
             skip_braces(&mut c);
+            // The default's own text travels in the interface (as a generic template's does), so an
+            // implementation in another module can be given it.
+            default_text = (c.src[c.toks[header].start: c.toks[c.pos - 1].end]).copy();
         } else {
             expect(&mut c, view(";"));
         }
@@ -20546,7 +20736,7 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
                     owner: 0,
                     ext: 0,
                     symbol: u8[],
-                    body: u8[],
+                    body: default_text,
                     ppreds: Pred[],
                     rpred: no_pred(),
                     pnames: u8[][],
@@ -32841,6 +33031,26 @@ fn emit_resolved_call<a>(
         ty := argtypes[i];
         move_out(&mut c, val(slot, ty));
     }
+    // `Some(x)` and `None` of an inline option are written in place, not called: the tag and the
+    // payload words into frame words of this site (core::some / core::none, stage 5).
+    if (c.raw == 0) & same(view(m), view("core")) & (same(view(name), view("some")) || same(view(name), view("none"))) && framed(&mut c, ret) {
+        od := ty_arg(&mut c, base_type(&mut c, ret));
+        some := success_variant(&mut c, od);
+        mut slot = 0;
+        if same(view(name), view("some")) {
+            tag := imm(&mut c, some);
+            slot = enum_frame(&mut c, tag, args[0], ret, argtypes[0]);
+        } else {
+            tag := imm(&mut c, 1 - some);
+            zero := imm(&mut c, 0);
+            slot = enum_frame(&mut c, tag, zero, ret, 1);
+        }
+        own(&mut c, slot, ret);
+        mut none_lent = u64[];
+        captured_bonds(&mut c, val(slot, ret), &map, &sources, &argtypes, &none_lent);
+        call_bonds(&mut c, val(slot, ret), first, &sources, signature_ret);
+        return val(slot, ret);
+    }
     mut sent = args.copy();
     dest := call_dest(&mut c, ret);
     if dest != 0 {
@@ -34588,10 +34798,21 @@ fn format_brace_refuse<a, b>(c: (&a mut C), text: &b [u8], at: u64) -> unit {
 // format("x = {}", x) -> string, with the same compile-time placeholder checks as print.
 fn format_builtin<a>(c: (&a mut C)) -> Val {
     expect(&mut c, view("("));
+    acc := invoke(&mut c, view("rt_new"), u64[]);
+    // A fresh string is checked whole by rt_fmt_finish.
+    raw := format_pieces(&mut c, acc);
+    slot := invoke(&mut c, view("rt_fmt_finish"), one(acc));
+    return own(&mut c, slot, 3);
+}
+// The literal and its arguments up to the closing `)`, appended to the byte buffer `acc`: what
+// `format(...)` builds into a fresh buffer and `out.append_format(...)` into `out`. True when an
+// argument may have written bytes that are not UTF-8 (a byte vector, a view, a record or vector
+// shown through its fields, a padded spec); numbers, bools, chars and strings never do.
+fn format_pieces<a>(c: (&a mut C), acc: u64) -> bool {
+    mut raw = false;
     if kind(&mut c) != 3 {
         fail(&mut c, view("format needs a string literal"));
     }
-    acc := invoke(&mut c, view("rt_new"), u64[]);
     text := decode_literal(&mut c, c.pos);
     advance(&mut c);
     mut piece = u8[];
@@ -34618,6 +34839,7 @@ fn format_builtin<a>(c: (&a mut C)) -> Val {
             piece = u8[];
             end := sp.end;
             format_spec_arg(&mut c, acc, sp);
+            raw = true;
             i = end;
             continue;
         }
@@ -34628,6 +34850,10 @@ fn format_builtin<a>(c: (&a mut C)) -> Val {
                 fail(&mut c, view("missing argument for {} in format string"));
             }
             input := expr(&mut c, 0);
+            ak := ty_kind(&mut c, input.ty);
+            if !((input.ty == 0) || (ak == 1) || (ak == 4) || (ak == 18) || (ak == 19) || (ak == 21) || (ak == 22)) {
+                raw = true;
+            }
             format_arg(&mut c, acc, input);
             i += 2;
             continue;
@@ -34643,8 +34869,7 @@ fn format_builtin<a>(c: (&a mut C)) -> Val {
         fail(&mut c, view("more arguments than {} placeholders in format string"));
     }
     expect(&mut c, view(")"));
-    slot := invoke(&mut c, view("rt_fmt_finish"), one(acc));
-    return own(&mut c, slot, 3);
+    return raw;
 }
 fn format_raw<a, b>(c: (&a mut C), acc: u64, piece: &b [u8]) -> unit {
     if piece.len() == 0 {
@@ -40649,12 +40874,9 @@ fn text_method<a, b>(c: (&a mut C), xt: u64, k: u64, name: &b [u8]) -> Val {
         release_temporary(&mut c, arg.t);
         return val(r, bt);
     }
-    if same(view(name), view("to_upper")) || same(view(name), view("to_lower")) || same(view(name), view("trim")) {
+    if same(view(name), view("to_upper")) || same(view(name), view("to_lower")) {
         expect(&mut c, view(")"));
-        mut f = "rt_seq_trim";
-        if same(view(name), view("to_upper")) {
-            f = "rt_seq_upper";
-        }
+        mut f = "rt_seq_upper";
         if same(view(name), view("to_lower")) {
             f = "rt_seq_lower";
         }
@@ -40689,15 +40911,6 @@ fn text_method<a, b>(c: (&a mut C), xt: u64, k: u64, name: &b [u8]) -> Val {
         r := invoke(&mut c, view("rt_seq_chars"), one(xt));
         ch := char_type(&mut c);
         vt := intern(&mut c, 6, ch);
-        return own(&mut c, r, vt);
-    }
-    if same(view(name), view("split")) {
-        sep := expr(&mut c, 0);
-        require_type(&mut c, sep.ty, 0);
-        expect(&mut c, view(")"));
-        valid := imm(&mut c, k == 4);
-        r := invoke(&mut c, view("rt_seq_split"), three(xt, sep.t, valid));
-        vt := intern(&mut c, 6, result);
         return own(&mut c, r, vt);
     }
     return val(0, NO_TYPE);
@@ -41531,6 +41744,25 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
         slot := apply(&mut c, view(f), one(xt));
         release_temporary(&mut c, input);
         return own(&mut c, slot, ty);
+    }
+    // `out.append_format("{}:{};", a, b)`: `format`'s text written onto the end of `out`, with no
+    // string of its own (Rust's `write!(out, ...)`). Onto a string, only the new tail is checked to
+    // be UTF-8.
+    if same(view(name), view("append_format")) {
+        if (c.raw == 0) & (k != 3) & (k != 4) {
+            fail(&mut c, view("append_format requires a string or a byte vector as its destination"));
+        }
+        require_write(&mut c, xt);
+        mut start = 0;
+        if k == 4 {
+            start = invoke(&mut c, view("rt_len"), one(xt));
+        }
+        raw := format_pieces(&mut c, xt);
+        if (k == 4) & raw {
+            invoke(&mut c, view("rt_utf8_from"), two(xt, start));
+        }
+        release_temporary(&mut c, input);
+        return val(imm(&mut c, 0), 1);
     }
     if same(view(name), view("is_empty")) {
         expect(&mut c, view(")"));
@@ -48138,8 +48370,15 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
                 if (k == 6) || (k == 27) {
                     a := ty_arg(&mut c, x.ty);
                     elemty = a;
-                    // Owners are moved out one at a time; plain scalar loops copy.
-                    if (!scalar(&mut c, a)) & (ty_kind(&mut c, v.ty) == 6) {
+                    // Owners are moved out one at a time; plain scalar loops copy. Shared views
+                    // and references (`text.split(10)` gives `(&[u8])[]`) are borrowed in place, as
+                    // `for x in &v` does: moving one out would drop the loan it carries.
+                    ak := ty_kind(&mut c, a);
+                    shared_elem := ((ak == 5) || (ak == 7)) & (ty_mode(&mut c, a) == 0);
+                    if shared_elem & (ty_kind(&mut c, v.ty) == 6) {
+                        byref = 1;
+                        refmode = 0;
+                    } else if (!scalar(&mut c, a)) & (ty_kind(&mut c, v.ty) == 6) {
                         owned := move_value(&mut c, v);
                         bind(&mut c, copy_bytes(view("__iterated")), owned.ty, owned.t, 0);
                         hidden_local = c.locals.len();
@@ -49496,6 +49735,7 @@ fn host_fn<a, b>(c: (&a mut C), name: &b [u8], ret: u64) -> unit {
     if same(view(name), view("mutex_lock_until"))
         || same(view(name), view("rw_try"))
         || same(view(name), view("rw_unlock"))
+        || same(view(name), view("rw_release"))
         || same(view(name), view("sem_try"))
         || same(view(name), view("cond_notify"))
         || same(view(name), view("latch_wait"))
@@ -49542,6 +49782,7 @@ fn host_fn<a, b>(c: (&a mut C), name: &b [u8], ret: u64) -> unit {
         || same(view(name), view("mutex_lock_until"))
         || same(view(name), view("rw_try"))
         || same(view(name), view("rw_unlock"))
+        || same(view(name), view("rw_release"))
         || same(view(name), view("sem_try"))
         || same(view(name), view("cond_notify"))
         || same(view(name), view("latch_wait"))
@@ -53149,7 +53390,7 @@ fn iface_rec_fn<a>(c: (&a mut C), p: (&a mut IR), home: &a [u8], module: &a [u8]
         file := virtual_source(&mut c, view(label), view(body));
         exchange(&mut c.funcs[index].file, file);
         exchange(&mut c.funcs[index].pos, 0);
-        exchange(&mut c.funcs[index].body, body);
+        exchange(&mut c.funcs[index].body, body.copy());
     }
     if section == 3 {
         // An implementation's method list is what dispatch walks.
@@ -53159,8 +53400,31 @@ fn iface_rec_fn<a>(c: (&a mut C), p: (&a mut IR), home: &a [u8], module: &a [u8]
     if section == 2 {
         // The interface's own method list is what `check_interfaces` compares an implementation
         // against, so it has to be as complete as the implementations are.
+        // A default body travels as its text: it becomes a source of its own, compiled for every
+        // implementation that leaves the method out, as it is in the interface's own module.
+        mut dfile = 0;
+        if body.len() != 0 {
+            mut label = u8[];
+            push_bytes(&mut label, view(p.path));
+            label.push(58);
+            push_bytes(&mut label, view(module));
+            push_bytes(&mut label, view("::"));
+            push_bytes(&mut label, view(name));
+            push_bytes(&mut label, view("#default"));
+            dfile = virtual_source(&mut c, view(label), view(body));
+        }
         mut item = &mut c.interfaces[contract - 1];
+        while item.defaults.len() < item.methods.len() {
+            item.defaults.push(0);
+            item.default_files.push(0);
+        }
         item.methods.push(index);
+        if dfile != 0 {
+            item.defaults.push(1);
+        } else {
+            item.defaults.push(0);
+        }
+        item.default_files.push(dfile);
     }
     return ();
 }
@@ -55805,6 +56069,7 @@ pub fn main() -> u64 {
     host_fn_unsafe(&mut c, view("mutex_lock_until"), 0);
     host_fn_unsafe(&mut c, view("rw_try"), 0);
     host_fn_unsafe(&mut c, view("rw_unlock"), 0);
+    host_fn_unsafe(&mut c, view("rw_release"), 0);
     host_fn_unsafe(&mut c, view("sem_try"), 0);
     host_fn_unsafe(&mut c, view("cond_notify"), 0);
     host_fn_unsafe(&mut c, view("latch_wait"), 0);
@@ -56312,8 +56577,9 @@ pub fn main() -> u64 {
         if pass == 2 {
             jobs::phase(view("declarations"));
             par_start(&mut c, n);
-            // From the bodies on, a check writes no text (`quiet`); a unit store would keep it.
-            if (c.check_only != 0) & (c.fn_dir.len() == 0) {
+            // From the bodies on, a check writes no text (`quiet`): its units are check units, with
+            // the registrations and no text (fn_unit_of), as cargo's metadata is to its rlib.
+            if c.check_only != 0 {
                 exchange(&mut c.quiet, 1);
             }
         }
