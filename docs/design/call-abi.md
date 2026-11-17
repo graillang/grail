@@ -300,3 +300,9 @@ optimiser_labels, then S6 after unboxed 3a lands (it builds on 3a's frame aggreg
   and the in-place drop as its drop word. Generic `F` is S6 (A), closure_bounds_design's. Closure
   loop (10 M calls): native 1,400 M -> 930 M, LLVM 1,400 M -> 450 M; callabi-lent-closure-frame-env
   is valgrind-clean on both backends.
+- **SysV byval records lifted (LLVM).** ffi_signature_fact counts a byval record by its
+  ffi_byval_mode decision: each INTEGER eightbyte one integer word, each SSE eightbyte one vector
+  register passed as `double` (its bits: one f64 or two f32), a MEMORY record as `ptr byval([N x
+  i64]) align 8` filled from the outgoing area's words (an entry-block buffer). A call whose area
+  holds anything else keeps the native call. The foreign-call marker's save area may now open inside
+  a call's outgoing area (one level of nesting). test-ffi runs its fixtures on both backends.

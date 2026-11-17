@@ -1,5 +1,10 @@
 ## Unreleased
 
+- Release builds optimise functions that pass C records by value: a `byval` record crosses in
+  registers by its SysV eightbyte classes (INTEGER in general registers, SSE in vector registers)
+  or, over 16 bytes, as `ptr byval` on the stack - matching the native placement. tools/test-ffi.mjs
+  now runs every FFI fixture on the LLVM backend too (x86-64, with --verify-facts).
+
 - An effect refusal over a callee the run cannot see (compiling a program to assembly without the
   runtime's sources) names it - "the target is `rt_len`, whose body and effect summary this run does
   not have" - instead of calling it an indirect call.
