@@ -5,6 +5,11 @@
   distance is at least eight. Inflate and zstd use it instead of a push per byte: the 20 MB zstd
   archive Grail-LLVM 14.4G -> 11.9G instructions (1.43 -> 1.24 s), the 4K png 8.07G -> 7.47G
   (0.91 -> 0.85 s).
+- A push onto a vector or a text that has room is a store and a length again, in a release build too:
+  growing moved out of `rt_push` into a cold `rt_push_slow`, so the call a release program makes
+  into the runtime no longer saves five registers on every push. Abundance's slowest program
+  (abgeo) runs 6% fewer instructions; `rt_push` went from 17% to 6-8% of its time.
+
 - Fixed: an interface whose methods carry default bodies could not be read back and written again
   unchanged ("does not round-trip"): the reader kept a default body only as the source it compiles,
   not as the method's text.
@@ -75,6 +80,16 @@
   when a check or `len()` in the loop needs it) into registers on the way into the loop, and the
   accesses inside read those. An unchecked access needs only the data register. fnv executes 11%
   fewer instructions.
+- Bounds checks across loops that rebuild their vectors: a fact a `while` body's writes would end
+  (`v.len == n` when the body swaps `v` with another vector) is kept while the body is compiled and
+  checked where the body ends; if it holds again it holds at every evaluation of the guard and
+  after the loop, and if not the function is compiled again without it. Assignments now state what
+  they store (`v = tmp` gives `v.len == tmp.len`), a write keeps what its name tied together
+  (`v.len == n` and `tmp.len == v.len` leave `tmp.len == n`), `x := y.copy()` has `y`'s length,
+  `if hi > n { hi = n; }` leaves `hi <= n`, and an index `t - c` with `c <= t` and `n / 2` are
+  read. Sort's checks in `main` go from 12 to 7.
+  `for x in v` reads its element unchecked when the body mentions `v` only as `v[...]` and
+  `v.len()` (no closure): the length the loop counted to cannot change.
 
 - **Interface format 11:** an interface's trailer ends with `fast_hash` of the bytes before it (XXH64
   under four seeds, the build store's digest) instead of SHA-256. It guards against corruption, which

@@ -1810,7 +1810,20 @@ fn rt_shutdown() -> u64 {
 fn rt_new() -> u64 {
     return rt_alloc(24);
 }
+// A push with room is a store and a length, and nothing else: a release program's objects call the
+// runtime's (it is another object), so this must be a leaf that saves no register. Growing is
+// rt_push_slow, out of line and cold - inlined here it made every push save five registers.
 fn rt_push(s: u64, v: u64) -> u64 {
+    n := raw_load(wrapping_add(s, 8));
+    if n == raw_load(wrapping_add(s, 16)) {
+        return rt_push_slow(s, v);
+    }
+    raw_store(wrapping_add(raw_load(s), wrapping_mul(n, 8)), v);
+    raw_store(wrapping_add(s, 8), wrapping_add(n, 1));
+    return 0;
+}
+// Doubling, from 8 words: amortised constant per push.
+fn rt_push_slow(s: u64, v: u64) -> u64 {
     n := raw_load(wrapping_add(s, 8));
     cap := raw_load(wrapping_add(s, 16));
     if n == cap {
@@ -1863,6 +1876,15 @@ fn rt_fillb(s: u64, v: u64, n: u64) -> u64 {
     return 0;
 }
 fn rt_pushb(s: u64, v: u64) -> u64 {
+    n := raw_load(wrapping_add(s, 8));
+    if n == raw_load(wrapping_add(s, 16)) {
+        return rt_pushb_slow(s, v);
+    }
+    raw_putbyte(wrapping_add(raw_load(s), n), v & 255);
+    raw_store(wrapping_add(s, 8), wrapping_add(n, 1));
+    return 0;
+}
+fn rt_pushb_slow(s: u64, v: u64) -> u64 {
     n := raw_load(wrapping_add(s, 8));
     cap := raw_load(wrapping_add(s, 16));
     if n == cap {
