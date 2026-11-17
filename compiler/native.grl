@@ -50846,9 +50846,6 @@ fn s256_k() -> u64[] {
         0xc67178f2
     ];
 }
-fn s256_rotr(x: u64, n: u64) -> u64 {
-    return ((x >> n) | (x << (32 - n))) & S256MASK;
-}
 // Compresses the 64-byte block text[at:at+64] into `h`, using `w` as the message schedule.
 fn s256_block(h: (&mut u64[]), text: &[u8], at: u64, w: (&mut u64[]), k: (&u64[])) {
     for t in 16 {
@@ -50858,8 +50855,10 @@ fn s256_block(h: (&mut u64[]), text: &[u8], at: u64, w: (&mut u64[]), k: (&u64[]
     for t in 16..64 {
         x := w[t - 15];
         y := w[t - 2];
-        s0 := s256_rotr(x, 7) ^ s256_rotr(x, 18) ^ (x >> 3);
-        s1 := s256_rotr(y, 17) ^ s256_rotr(y, 19) ^ (y >> 10);
+        // The rotations written out (every word is below 2^32, and the sum is masked below): a call
+        // per rotation was most of what a block cost.
+        s0 := (((x >> 7) | (x << 25)) ^ ((x >> 18) | (x << 14)) ^ (x >> 3)) & S256MASK;
+        s1 := (((y >> 17) | (y << 15)) ^ ((y >> 19) | (y << 13)) ^ (y >> 10)) & S256MASK;
         // stays: the written place is indexed (`&mut w[t]`), and two-phase defers only a plain
         // `&mut path`, so the value's reads of `w` are part of taking the place.
         packed := w[t - 16] + s0 + w[t - 7] + s1;
@@ -50874,10 +50873,10 @@ fn s256_block(h: (&mut u64[]), text: &[u8], at: u64, w: (&mut u64[]), k: (&u64[]
     mut g: u64 = h[6];
     mut i: u64 = h[7];
     for t in 64 {
-        s1 := s256_rotr(e, 6) ^ s256_rotr(e, 11) ^ s256_rotr(e, 25);
+        s1 := (((e >> 6) | (e << 26)) ^ ((e >> 11) | (e << 21)) ^ ((e >> 25) | (e << 7))) & S256MASK;
         ch := (e & f) ^ ((e ^ S256MASK) & g);
         t1 := i + s1 + ch + k[t] + w[t];
-        s0 := s256_rotr(a, 2) ^ s256_rotr(a, 13) ^ s256_rotr(a, 22);
+        s0 := (((a >> 2) | (a << 30)) ^ ((a >> 13) | (a << 19)) ^ ((a >> 22) | (a << 10))) & S256MASK;
         maj := (a & b) ^ (a & c) ^ (b & c);
         i = g;
         g = f;
