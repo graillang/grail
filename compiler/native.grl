@@ -29143,7 +29143,10 @@ fn member_bytes<a>(c: (&a mut C), ft: u64) -> u64 {
     return narrow_width(&mut c, t);
 }
 fn member_align<a>(c: (&a mut C), ft: u64) -> u64 {
-    t := base_type(&mut c, ft);
+    t := base_type(&mut c, closure_record(&mut c, ft));
+    if closure_env_record(&mut c, t) {
+        return 8;
+    }
     if is_array(&mut c, t) {
         return member_align(&mut c, ty_arg(&mut c, t));
     }
@@ -29177,6 +29180,11 @@ fn round_up(n: u64, align: u64) -> u64 {
 // The bytes a value held as its words takes: a record's fields laid out and rounded up to its
 // alignment, then its live word (stage 4) if it has one.
 fn value_bytes<a>(c: (&a mut C), ty: u64) -> u64 {
+    // A closure held as its environment record (S6(A)): a word per field.
+    ty := closure_record(&mut c, ty);
+    if closure_env_record(&mut c, ty) {
+        return c.decls[ty_arg(&mut c, ty)].count * 8;
+    }
     if is_array(&mut c, ty) {
         return array_bytes(&mut c, ty);
     }
@@ -29194,7 +29202,7 @@ fn value_bytes<a>(c: (&a mut C), ty: u64) -> u64 {
 }
 // The offsets table of a record that holds plain records inline, worked out once per type.
 fn field_layout<a>(c: (&a mut C), alias: u64) -> u64 {
-    ty := base_type(&mut c, alias);
+    ty := base_type(&mut c, closure_record(&mut c, alias));
     while c.layout_offsets.len() <= ty {
         c.layout_offsets.push(u64[]);
     }
@@ -44900,7 +44908,7 @@ fn record_bytes<a>(c: (&a mut C), alias: u64) -> u64 {
     if is_array(&mut c, alias) {
         return array_bytes(&mut c, alias);
     }
-    ty := base_type(&mut c, alias);
+    ty := base_type(&mut c, closure_record(&mut c, alias));
     d := ty_arg(&mut c, ty);
     if c.decls[d].c_layout != 0 {
         return ffi_record_size(&mut c, d);
