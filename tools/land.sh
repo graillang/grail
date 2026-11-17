@@ -3,6 +3,8 @@
 #
 #   bash tools/land.sh BRANCH            land origin/BRANCH
 #   bash tools/land.sh --status          the queue and the last landings
+#   bash tools/land.sh --remote-status   each emulated leg's verdict for the newest landing on the
+#                                        build host (GRAIL_LAND_REMOTE; tools/land-remote.sh)
 #
 # The branch must already contain origin/main: merge main into it and resolve conflicts on the
 # branch, where the owner knows both sides. The gate then runs on exactly the branch's tree, and
@@ -31,7 +33,12 @@ if [ "${1:-}" = "--status" ]; then
   tail -n 15 "$logs/landings.txt" 2>/dev/null
   exit 0
 fi
-br=${1:?usage: tools/land.sh BRANCH | --status}
+if [ "${1:-}" = "--remote-status" ]; then
+  [ -n "$remote" ] || { echo "land: GRAIL_LAND_REMOTE names no build host"; exit 2; }
+  ssh -o BatchMode=yes "$remote" "bash /srv/grail/w/tools/land-remote.sh --status"
+  exit $?
+fi
+br=${1:?usage: tools/land.sh BRANCH | --status | --remote-status}
 exec 9>"$queue.lock"
 if ! flock -n 9; then echo "land: queue busy ($(cat "$queue.lock.who" 2>/dev/null)); waiting"; flock 9; fi
 echo "$br since $(date -u +%H:%M)" > "$queue.lock.who"
@@ -120,7 +127,7 @@ record "landed ${mins}min"
 if [ -n "$remote" ]; then
   if ( git push -q "$remote:/srv/grail/repo.git" HEAD:refs/heads/main &&
        rsync -az "$C" "$remote:/srv/grail/grail-main" &&
-       ssh -o BatchMode=yes "$remote" "cd /srv/grail/w && git fetch -q origin && git checkout -q -f origin/main && mkdir -p /srv/grail/logs/$stamp && for t in aarch64 riscv64; do for i in 1 2 3; do GRAIL_LEG_COMPILER=/srv/grail/grail-main nohup setsid /srv/grail/run-leg.sh $stamp/\${t}_\$i env GRAIL_TEST_SHARD=\$i/3 bun tools/test-native.mjs \$t --jobs 2 >/dev/null 2>&1 & done; done" ) > "$out/remote.log" 2>&1
+       ssh -o BatchMode=yes "$remote" "cd /srv/grail/w && git fetch -q origin && git checkout -q -f origin/main && bash tools/land-remote.sh $stamp" ) > "$out/remote.log" 2>&1
   then note "emulated legs started on $remote (/srv/grail/logs/$stamp)"; else note "could not start the emulated legs (remote.log)"; fi
 fi
 exit 0

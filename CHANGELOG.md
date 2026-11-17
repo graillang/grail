@@ -1,5 +1,9 @@
 ## Unreleased
 
+- The landing queue's build host runs the aarch64 legs under the patched qemu-aarch64:
+  `tools/land-remote.sh` builds it there with `tools/qemu/build.sh` before starting the legs, and
+  `tools/land.sh --remote-status` (`just land-status-remote`) prints each emulated leg's verdict for
+  the newest landing. `build.sh` names any missing build dependency and the packages that provide it.
 - **Fixed: an LLVM-backend miscompile of a vector grown through its address.** A call handed `&mut v`
   receives the slot's address, not the header word, so the lifter did not count it as a call that
   can grow `v`, and the `len`/`data` it had read before the call were used after it: `pad(&mut out,
