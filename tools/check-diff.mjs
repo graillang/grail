@@ -10,7 +10,6 @@
 // compile is `--check`, the run `grail check` makes. Exit 1 when anything differs, listing it.
 import { spawn, execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { cpus } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { root } from './platforms.mjs';
 
@@ -21,7 +20,7 @@ if (!base) { console.error('usage: bun tools/check-diff.mjs --base OLD [--new NE
 const fresh = option('--new') ? resolve(option('--new')) : execFileSync('bun', [join(root, 'tools/native.mjs'), 'which'], { encoding: 'utf8' }).trim().split('\n').pop();
 const build = argv.includes('--build');
 const filter = option('--filter') ? new RegExp(option('--filter')) : null;
-const jobs = Number(option('--jobs', String(Math.max(1, cpus().length - 2))));
+const jobs = Number(option('--jobs', '4'));
 const work = join(root, '.work/check-diff');
 rmSync(work, { recursive: true, force: true });
 mkdirSync(work, { recursive: true });
