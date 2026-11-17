@@ -64,6 +64,24 @@ wrong number. It is off by default because the check costs a compare per fact us
 
 `ci.mjs lint` is the cheapest check and catches most documentation and workflow drift.
 
+## The aarch64 emulator
+
+The aarch64 legs run under the repository's own `qemu-aarch64-static`: QEMU 11.1.3 with
+`tools/qemu/stlr-rcsc.patch`, built by `tools/qemu/build.sh` into
+`.work/architectures/toolchain/usr/bin/`, which `runner()` in `tools/native.mjs` uses ahead of
+`PATH` (only `GRAIL_QEMU_AARCH64` comes first). Stock 11.1.3 puts a barrier before a store-release
+and after a load-acquire but none between them, so on an x86 host an `stlr` followed by an `ldar`
+can pass each other, which ARMv8 forbids (both are RCsc). The store-buffering litmus test
+(`tests/atomics/litmus_sb.grl`) caught it: at 200,000 rounds stock qemu let through 31-704
+forbidden outcomes for the native backend and 2,469-7,458 for LLVM, and the patched build none.
+Two barriers, one after each store-release form, close it, with no measurable cost on the filtered
+corpus. The build script fetches the tarballs, checks their sha256, builds a static zlib (the host
+has no `libz.a`) and QEMU, and needs no root; it does nothing when the installed binary is already
+this one, so `tools/gate.sh` runs it every time and prints the version line of the emulator its legs
+use. Check a binary with `--version`: it must end in `(grail-stlr-rcsc)`.
+`bun tools/test-atomics-litmus.mjs` asserts store buffering under that binary, and only reports
+under any other qemu.
+
 ## Two traps worth knowing
 
 **Do not set `GRAIL_SYSROOT_*` unless you have a real glibc sysroot.** The cross targets link

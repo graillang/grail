@@ -555,7 +555,12 @@ export async function fuzz(options) {
     bugs.push(entry);
   }
 
-  const report = { seed: options.seed, cases: options.cases, jobs: options.jobs, timeout: options.timeout, maxBytes: options.maxBytes, corpus: sources.length, compiler, elapsed, counts, byKind, bugs, others: [...others.entries()].map(([why, hits]) => ({ why, hits: hits.length, case: hits[0].id })) };
+  // The slowest cases, whatever their verdict: a hang under a loaded host and a real loop look the
+  // same in the counts, and the time each case took is what tells them apart (and where to look).
+  const slowest = [...results].sort((a, b) => b.elapsed - a.elapsed).slice(0, 5)
+    .map(r => ({ case: r.id, source: r.source, ms: r.elapsed, verdict: r.kind === 'hang' ? 'hang' : r.verdict }));
+  const report = { seed: options.seed, cases: options.cases, jobs: options.jobs, timeout: options.timeout, maxBytes: options.maxBytes, corpus: sources.length, compiler, elapsed, counts, byKind, bugs, others: [...others.entries()].map(([why, hits]) => ({ why, hits: hits.length, case: hits[0].id })), slowest };
+  const slowLine = `slowest: ${slowest.map(s => `${s.case} ${s.source} ${s.ms}ms${s.verdict === 'hang' ? ' (hang)' : ''}`).join('; ')}`;
   mkdirSync(workRoot, { recursive: true });
   writeFileSync(join(workRoot, 'report.json'), `${JSON.stringify(report, null, 2)}\n`);
 
@@ -578,6 +583,7 @@ export async function fuzz(options) {
         }
       }
     }
+    console.log(slowLine);
     if (others.size > 0) {
       console.log('not classified as a bug, and not a plain rejection:');
       for (const [why, hits] of others) console.log(`  ${hits.length}x ${why} (first: ${hits[0].id}, ${hits[0].source})`);
@@ -589,6 +595,7 @@ export async function fuzz(options) {
     );
   } else {
     for (const bug of bugs) console.log(`BUG ${bug.signature}\n  repro ${bug.repro} (source ${bug.source}, ${bug.mutations.join(', ')})`);
+    if (counts.hangs > 0) console.log(slowLine);
     console.log(
       `fuzz: ${counts.cases} cases, ${counts.fine} fine, ${counts.bugs} bugs, ${counts.hangs} hangs` +
         `${counts.other ? `, ${counts.other} other` : ''} (seed ${options.seed}, ${sources.length} sources, ` +
