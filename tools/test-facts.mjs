@@ -278,6 +278,11 @@ ok('indirect: the values are right', run([indirect.exe]).stdout === '30\n', JSON
 const shortFact = refused('indirect-short', 'f_main_apply', '--forge-indirect=');
 ok('indirect: a fact one word short fails under --verify-facts', /the signature fact of f_main_apply is wrong: an indirect call passes 1 words but %rsi was loaded for it/.test(shortFact), shortFact.slice(0, 400));
 
+// ---- a byval C record from a lifted body: never a one-word typed call ----
+spawnSync('cc', ['-O2', '-c', join(root, 'compiler/tests/ffi_byval.c'), '-o', join(root, 'compiler/tests/ffi_byval.o')], { stdio: 'inherit' });
+const byval = build('ffi-byval', 'ffi_byval.grl', { backend: 'llvm', verifyFacts: true });
+ok('ffi: a byval record argument crosses whole on the LLVM backend', run([byval.exe]).stdout === '7043\n', JSON.stringify(run([byval.exe]).stdout));
+
 if (failed) {
   console.log(`facts: ${failed} check(s) failed`);
   process.exit(1);

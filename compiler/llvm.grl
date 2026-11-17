@@ -2762,6 +2762,16 @@ fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> uni
         rwords = callee_sig % 4;
     }
     if typed_ffi {
+        // The fact's integer words must cover every argument register loaded for the call.
+        ints := (fcode - 2) & 7;
+        if (loaded >> ints) != 0 {
+            mut why = copy(view("a C call passes "));
+            num(&mut why, ints);
+            put(&mut why, view(" integer words but more argument registers were loaded for it"));
+            fname := copy(view(l.fname));
+            sig_wrong(&mut l, view(fname), view(why));
+            return ();
+        }
         lower_ffi_call(&mut l, target, fcode - 2);
         return ();
     }
@@ -7846,7 +7856,9 @@ fn thunk_into_ir<a>(out: (&a mut u8[]), name: &a [u8], target: u64, weak: bool) 
     return ();
 }
 fn thunk_from_ir<a>(out: (&a mut u8[]), name: &a [u8], target: u64) -> unit {
-    put(&mut out, view(".text\n.globl "));
+    // Weak: every unit of a per-module release build that calls the native NAME from IR carries
+    // the same thunk, and the link keeps one (`duplicate symbol: rt_abort.c` otherwise).
+    put(&mut out, view(".text\n.weak "));
     put(&mut out, name);
     put(&mut out, view(".c\n.hidden "));
     put(&mut out, name);
