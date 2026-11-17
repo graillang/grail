@@ -95,6 +95,19 @@ landed alone and byte-identical (objects compared with `grail asm --records` and
    as they splice text; then a build hands the Rec to assemble_object and stops printing the text,
    which is made only for `-S` and the dumps.
 
+## S3 after step 1: the ceiling, and why steps 2-3 are not done
+
+Step 1 landed (3545d78c): assemble_object encodes from the stream's records when it has them, and
+from the text otherwise. Measured on syn4000's 33.6 MB of assembly with the dev stage-2 compiler:
+`grail asm` (read and encode the text) costs 6.08G instructions, about 6.4% of the 94G cold build;
+`grail asm --records` (records_of, then assemble_records) costs 13.9G for the same object. So the
+most steps 2-3 could save is the reading half of 6.08G, and only if the optimiser made its rows for
+less than the assembler spends reading a line. It would not: emit_line copies most lines unchanged
+from the front end, whose memory, symbol and immediate operands are still unparsed spans, so a row
+would need an operand decoder per line - the very cost being removed. Estimated net 0-1.5% of a cold
+build, for a multi-day change across the optimiser's emission. Not done; the record path stays for
+a producer that has decoded operands to hand over (GRAIL_ASM_BY_RECORDS=1 exercises it).
+
 ## Interfaces
 
 - Optimiser to assembler: per body, `ir::Body`'s record columns for the surviving lines plus its
