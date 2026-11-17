@@ -84,6 +84,9 @@
   probe silently again. Frames within 128 bytes of a page are probed when the saved-register area
   carries them over it.
 
+- Fixed: `grail fmt` could break a long expression inside `<<` or `>>` (each is two `<`/`>` tokens),
+  or start a continuation line with `<`, and the output then read as a generic argument list and no
+  longer parsed. A wrapped line now never starts with `<` or `>`.
 - **Small runtime functions are inlined into every module.** A small runtime body (the scheduler's
   `rt_current`, `rt_list_set`, `rt_list_head`, ...) is now inlined where another module calls it,
   in every build shape: a per-module build carries the bodies in `runtime.facts`. A failure inside
