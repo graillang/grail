@@ -1080,10 +1080,16 @@ fn rt_alloc_shared(n: u64) -> u64 {
                     raw_store(wrapping_add(slot, 8), wrapping_sub(raw_load(wrapping_add(slot, 8)), 1));
                     raw_store(wrapping_add(block, 8), 1);
                     ptr := wrapping_add(block, 16);
-                    mut i = 0;
-                    while i < n {
-                        raw_store(wrapping_add(ptr, i), 0);
-                        i = wrapping_add(i, 8);
+                    // As in rt_alloc_unlocked: bin 0 is cleared with two fixed stores.
+                    if n < 17 {
+                        raw_store(ptr, 0);
+                        raw_store(wrapping_add(ptr, 8), 0);
+                    } else {
+                        mut i = 0;
+                        while i < n {
+                            raw_store(wrapping_add(ptr, i), 0);
+                            i = wrapping_add(i, 8);
+                        }
                     }
                     raw_store(wrapping_add(c, 8), wrapping_add(raw_load(wrapping_add(c, 8)), 1));
                     return ptr;
@@ -1580,10 +1586,17 @@ fn rt_alloc_unlocked(n: u64) -> u64 {
             raw_store(head, raw_load(wrapping_add(block, 8)));
             raw_store(wrapping_add(block, 8), 1);
             ptr := wrapping_add(block, 16);
-            mut i = 0;
-            while i < n {
-                raw_store(wrapping_add(ptr, i), 0);
-                i = wrapping_add(i, 8);
+            // The smallest bin holds every request up to 16 bytes in at least 16, so its blocks
+            // are cleared with two fixed stores (a tree node, a box) rather than the loop.
+            if n < 17 {
+                raw_store(ptr, 0);
+                raw_store(wrapping_add(ptr, 8), 0);
+            } else {
+                mut i = 0;
+                while i < n {
+                    raw_store(wrapping_add(ptr, i), 0);
+                    i = wrapping_add(i, 8);
+                }
             }
             live := wrapping_add(raw_state(), 24);
             raw_store(live, wrapping_add(raw_load(live), 1));

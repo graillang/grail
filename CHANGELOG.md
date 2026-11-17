@@ -1,5 +1,8 @@
 ## Unreleased
 
+- Small allocations clear their block with two fixed stores instead of the general loop: every
+  request up to 16 bytes (a tree node, a box) is served from the smallest bin, whose blocks hold at
+  least 16. bench/bintrees.grl: Grail-LLVM 4.89G -> 4.15G instructions, Grail-native 14.2G -> 13.7G.
 - **`bench-rivals` no longer charts a build that printed the wrong answer.** It already failed the
   run when a build's output differed from C's, but still wrote that build's figures into the
   results, so a miscompiled program could chart as the fastest. Such a figure is now left out and
