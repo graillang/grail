@@ -16,8 +16,8 @@ use llvm;
 //
 // A slot is one word unless the typed-IR facts say it is the first word of a `DynPair`
 // (docs/design/fat-dyn.md), the 16-byte `{data, vtable}` value a `&dyn I` points at: the body's
-// pair list and its two-word-result flag are read once, in `ir::build`, through
-// `llvm::facts_dyn_pairs` and `llvm::facts_dyn_result`, keyed by the body symbol. The two words are
+// pair list and its two-word-result flag are read once, in `ir::build`, from the body's facts (kinds
+// 3 and 4), keyed by the body symbol. The two words are
 // then one value with one identity - never promoted, never forwarded, their stores never dead, kept
 // adjacent and in order - and a function that builds a pair is not inlined. This is the language's
 // `DynPair`, not a directive the emitter wrote.
@@ -1385,8 +1385,8 @@ fn body<a, b, c, d, e>(o: (&a mut ir::Body), s: &b [u8], facts: (&c llvm::Facts)
     // The slots the fact table says hold a slice's descriptor (F1 `what` 5: SEQ-STABLE, so its
     // `data` and `len` cannot change while the slice lives).
     mut desc = u64[];
-    for n in o.maxslot / 8 + 1 {
-        if (ir::frame_fact(ix, facts, view(o.name), n) >> 8) == 5 {
+    for n in o.sfact.len() {
+        if (o.sfact[n] >> 8) == 5 {
             desc.push(n);
         }
     }
