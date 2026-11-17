@@ -574,6 +574,9 @@ struct C {
     interior: u64[],
     // 1 + the frame slot holding the hidden result address (needs_dest), or 0.
     result_dest: u64,
+    // Slots holding the address of a field's word in a Grail record: a plain, untagged word address,
+    // so a sub-word value there (an f32, a u8) is read and written as the word it is stored as.
+    word_refs: u64[],
     // The result adapters this object needs (box_result_thunk): closure * 4 + words.
     box_thunks: u64[],
     // Per type id: 0 not yet known, else 1 + (1 if the type is a plain record) + (2 if it is a
@@ -19267,6 +19270,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     exchange(&mut c.caddr, u64[]);
     exchange(&mut c.interior, u64[]);
     exchange(&mut c.boxed, u64[]);
+    exchange(&mut c.word_refs, u64[]);
     // A function with refined parameters is two: the body, `<name>.proved`, which a proved call
     // enters and which checks nothing, and `<name>`, a wrapper emitted after it that checks the
     // parameters and calls the body (ref_wrapper). Both are ordinary functions to every later pass.
@@ -28759,6 +28763,10 @@ fn field_path<a>(c: (&a mut C), id: u64, lty: u64, address: u64) -> Val {
             } else {
                 n = field_load(&mut c, b, base.ty, k, last);
             }
+            if last & subword(&mut c, fty) {
+                // Every field of a Grail record is at least a word: the address is untagged.
+                c.word_refs.push(n);
+            }
         }
         if last {
             // 2 is a `&mut` of the field, 3 the place an assignment writes (assign_field_path).
@@ -37692,6 +37700,7 @@ fn isolated_body_type<a, b, d>(c: (&a mut C), start: u64, names: (&b u8[][]), pa
     // aside with them.
     saved_interior := exchange(&mut c.interior, u64[]);
     saved_boxed := exchange(&mut c.boxed, u64[]);
+    saved_word_refs := exchange(&mut c.word_refs, u64[]);
     saved_scope := exchange(&mut c.scope_end, end);
     saved_loop_start := exchange(&mut c.loop_start, 0);
     saved_loop_end := exchange(&mut c.loop_end, 0);
@@ -37753,6 +37762,7 @@ fn isolated_body_type<a, b, d>(c: (&a mut C), start: u64, names: (&b u8[][]), pa
     exchange(&mut c.next, saved_next);
     exchange(&mut c.interior, saved_interior);
     exchange(&mut c.boxed, saved_boxed);
+    exchange(&mut c.word_refs, saved_word_refs);
     exchange(&mut c.scope_end, saved_scope);
     exchange(&mut c.loop_start, saved_loop_start);
     exchange(&mut c.loop_end, saved_loop_end);
@@ -38559,6 +38569,7 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
         exchange(&mut c.next, 0);
         exchange(&mut c.interior, u64[]);
         exchange(&mut c.boxed, u64[]);
+        exchange(&mut c.word_refs, u64[]);
         // Facts made in the body (a frame record, a DynPair) are about the body's own frame, under
         // the symbol it is emitted as.
         exchange(&mut c.facts_fn, body_label(&c, view(".closure"), view(symbol), view(""), 0));
@@ -41047,9 +41058,22 @@ fn swap_records<a>(c: (&a mut C), x: u64, y: u64, ty: u64) -> unit {
     }
     return ();
 }
+fn is_word_ref<a>(c: (&a C), slot: u64) -> bool {
+    for i in c.word_refs.len() {
+        if c.word_refs[i] == slot {
+            return true;
+        }
+    }
+    return false;
+}
 fn ref_load<a>(c: (&a mut C), r: u64, ty: u64) -> u64 {
     if direct(&mut c, ty) {
         get(&mut c, r, view("%rax"));
+        return save(&mut c);
+    }
+    if is_word_ref(&c, r) {
+        get(&mut c, r, view("%rax"));
+        o(&mut c, view("movq (%rax),%rax\n"));
         return save(&mut c);
     }
     narrow := caddr_ty(&mut c, r);
@@ -41105,7 +41129,7 @@ fn ref_store<a>(c: (&a mut C), r: u64, ty: u64, value: u64) -> unit {
         caddr_store(&mut c, dst, ty, value);
         return ();
     }
-    if !subword(&mut c, ty) {
+    if !subword(&mut c, ty) || is_word_ref(&c, r) {
         get(&mut c, value, view("%rax"));
         get(&mut c, r, view("%rcx"));
         o(&mut c, view("movq %rax,(%rcx)\n"));
@@ -53710,6 +53734,7 @@ pub fn main() -> u64 {
         caddr: u64[],
         interior: u64[],
         box_thunks: u64[],
+        word_refs: u64[],
         result_dest: 0,
         layout_memo: u64[],
         layout_offsets: u64[][],
