@@ -123,7 +123,7 @@ than the hardware it emulates. What each test can catch therefore depends on whe
 | test | catches a fault under qemu (x86 host) | catches it only on real hardware |
 |---|---|---|
 | message passing (release store, acquire load) | a missing atomic on x86-64 itself | aarch64 and riscv64: the x86 host never reorders two stores or two loads, so a dropped `stlr`/`ldar` or fence goes unseen under qemu |
-| store buffering, seq_cst | x86-64 (a seq_cst store that is a plain `mov`), riscv64 (dropped fences), a lost order anywhere | aarch64: see below |
+| store buffering, seq_cst | x86-64 (a seq_cst store that is a plain `mov`), riscv64 (dropped fences), aarch64 under the repository's patched qemu, a lost order anywhere | aarch64 under a stock qemu: see below |
 | CAS counter, weak-CAS loop, fetch_add from 24 jobs | a read-modify-write that is not atomic, on every target | a spurious store-conditional failure, which qemu's emulated exclusives rarely produce, so the weak loop's retry path is exercised for real only on hardware |
 | min/max signedness, wrap at every width | every target (no ordering involved) | - |
 
@@ -132,7 +132,9 @@ and after an `ldar`, but none between the two, so on an x86 host the pair can pa
 ARMv8 forbids. LLVM's own `stlr`/`ldar` lowering shows the same forbidden outcomes there. The program
 therefore recognises the emulator by the CPU it reports, implementer `0x00` (reserved for software,
 used by no silicon vendor). Under qemu it prints the count instead of asserting. A real AArch64
-machine asserts, and it is the only place the aarch64 store-buffering result means anything.
+machine asserts. The repository builds its own qemu with that gap closed (`tools/qemu/build.sh`, a
+full barrier after each store-release). Its `--version` ends in `(grail-stlr-rcsc)`, and under it
+the litmus tool asserts a count of zero, which was the result over 200,000 rounds on both backends.
 
 Rust's `std::thread::scope` gives the same "joined before the scope ends" guarantee with
 closures. Grail closures capture by value, so shared state is passed explicitly as the `context`
