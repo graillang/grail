@@ -1229,6 +1229,26 @@ callee-saved registers is a candidate too: those registers are the caller's in a
 holds the values in free scratch registers (`rename_register`; a body that also uses a narrower name
 of the register is refused). The size cap is 32 IR lines.
 
+### Release builds: ThinLTO across modules
+
+A release unit is lifted to LLVM and optimised by `clang -O2` per module, so a small function of one
+module stayed a call from every other module (the hash's `write_num` in the map's loop, `core::some`
+in the iterator chain): LLVM inlines only what is in the module it is optimising. Copying small
+bodies into importers (`available_externally`) was the plan; ThinLTO does it with LLVM's own cost
+model and no copy in the interface. `grail llvm-compile` runs `clang -O2 -flto=thin` on each part
+of the unit's module and leaves the parts as bitcode in an archive; `release_optimise` makes the
+unit object one flat archive of its native part and those parts (`llvm-ar qcsDL`: lld reads no
+nested archives); the link takes every member (`--whole-archive`), imports the small bodies across
+units and optimises and generates code in parallel (`--thinlto-jobs`), with its cache in the build
+store (`<store>/thinlto`, beside `llvm-parts`). A function LLVM does not inline keeps its one
+definition in its own module, so nothing changes about what links. The release compiler's own
+build goes the same way (`tools/native.mjs release`).
+
+Measured on `bench/hashmap.grl` (fresh store): 1,235M -> 823M instructions; a cold build 15.6 s ->
+12.6 s (per part, codegen moves to the link and runs in parallel); a rebuild after one function of
+`main` changes 0.66 s -> 0.82 s (the warm ThinLTO link re-imports and re-optimises what the edit
+reaches), against 0.65 s for `cargo build --release` after the same edit of its twin.
+
 ### The frame constant, which was a latent miscompile
 
 The per-unit change found a real defect that had nothing to do with caching. A function's frame

@@ -1,5 +1,11 @@
 ## Unreleased
 
+- **Release builds optimise across modules (ThinLTO).** A `--release` build of more than one module
+  compiles each module to ThinLTO bitcode and links with ThinLTO, so a small function of one module
+  is inlined into another (LLVM's choice, with the real definition kept where it was). The ThinLTO
+  cache lives in the build store. `bench/hashmap.grl`: 1,235M -> 823M instructions; a one-function
+  edit rebuilds in 0.82 s (cargo --release: 0.65 s). The release compiler is built the same way.
+  Needs `llvm-ar` (or `GRAIL_AR`) beside clang and ld.lld.
 - Fixed (release builds): a function calling a blocking `extern "C"` function was left unoptimised
   since the foreign-call marker landed - the marker's locked counter, thread-pointer read and
   register save around `rt_foreign_lost` were text the LLVM lifter refused. It now lifts them
