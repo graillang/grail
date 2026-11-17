@@ -1,5 +1,11 @@
 ## Unreleased
 
+- The landing queue's build host runs the aarch64 legs under the patched qemu-aarch64:
+  `tools/land-remote.sh` builds it there with `tools/qemu/build.sh` before starting the legs, and
+  `tools/land.sh --remote-status` (`just land-status-remote`) prints each emulated leg's verdict for
+  the newest landing. `build.sh` names any missing build dependency and the packages that provide it.
+  Beside the emulated legs the build host runs the front-end fuzzer at 2000 cases, seeded from the
+  landing, and `--remote-status` reports it with the shrunk input of anything it found.
 - **`grail check` is incremental.** It goes through the build store as `grail build` does: one
   compiler run per module, a module whose inputs did not change is not checked again, and in a
   module that is, the unchanged function bodies replay. A check after an edit to one module checks
