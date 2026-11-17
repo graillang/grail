@@ -575,6 +575,9 @@ struct C {
     // C symbols declared `extern "C" blocking`, and whether the call being emitted is one of them.
     ffi_blocking: u8[][],
     ffi_block_now: u64,
+    // C symbols declared `extern "C" nonblocking`: promised never to block, so their calls carry no
+    // foreign-call marker (a bare call, C-to-C cost) and the monitor never hands them off.
+    ffi_nonblocking: u8[][],
     // Slots holding the address of a narrow (non-8-byte or f32) C-layout record field, paired
     // with the field type: stores and compound loads through them use the field's width.
     caddr: u64[],
@@ -17282,7 +17285,9 @@ fn ffi_emit_call<a, b, d, e, f>(
         fixed = c.ffi_fixed;
     }
     exchange(&mut c.ffi_fixed, 0);
-    blocking := exchange(&mut c.ffi_block_now, 0) != 0;
+    block_mode := exchange(&mut c.ffi_block_now, 0);
+    blocking := block_mode == 1;
+    nonblocking := block_mode == 2;
     abi := ffi_abi(&mut c);
     x86 := abi < 2;
     nint := ffi_int_regs(abi);
@@ -17431,7 +17436,7 @@ fn ffi_emit_call<a, b, d, e, f>(
     // if the call holds it for more than 10 ms (rt_sysmon). The word's address is kept in the call's
     // `tls` slot for the exit; 0 there means "not on a worker". Clobbers %rax and %r11 only, before
     // any argument register is loaded.
-    marked := (!blocking) & (c.target == 0) & (c.plat == 0) & (tls != 0);
+    marked := (!blocking) & (!nonblocking) & (c.target == 0) & (c.plat == 0) & (tls != 0);
     if marked {
         ffi_marker_enter(&mut c, tls);
     }
@@ -18201,8 +18206,14 @@ fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     mut input = u8[];
     mut symbol = u8[];
     mut blocking = 0;
+    mut nonblocking = 0;
     while true {
-        if eat(&mut c, view("blocking")) {
+        if eat(&mut c, view("nonblocking")) {
+            // `extern "C" nonblocking fn ...`: the call never blocks (math, an engine API that only
+            // records commands). It is a bare call; if it does block after all, the cost is latency -
+            // its worker is held - never safety.
+            nonblocking = 1;
+        } else if eat(&mut c, view("blocking")) {
             // `extern "C" blocking fn ...`: the call may block for long (a read, a wait, a
             // vkQueuePresentKHR): on a worker it gives the worker to a spare thread for its duration.
             blocking = 1;
@@ -18263,8 +18274,14 @@ fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     if symbol.len() == 0 {
         symbol = name.copy();
     }
+    if (blocking != 0) & (nonblocking != 0) {
+        fail(&mut c, view("a foreign function is `blocking` or `nonblocking`, not both"));
+    }
     if blocking != 0 {
         c.ffi_blocking.push(symbol.copy());
+    }
+    if nonblocking != 0 {
+        c.ffi_nonblocking.push(symbol.copy());
     }
     // Byte-view parameters need an input lifetime context, exactly like a Grail
     // function signature; the region is irrelevant to the C ABI.
@@ -33264,6 +33281,11 @@ fn emit_resolved_call<a>(
         for bi in c.ffi_blocking.len() {
             if same(view(c.ffi_blocking[bi]), view(ffi_symbol)) {
                 c.ffi_block_now = 1;
+            }
+        }
+        for bi in c.ffi_nonblocking.len() {
+            if same(view(c.ffi_nonblocking[bi]), view(ffi_symbol)) {
+                c.ffi_block_now = 2;
             }
         }
         // The declared parameter types decide which arguments cross by value (`byval`); the values
@@ -52408,7 +52430,23 @@ fn iface_enc_fn<a>(c: (&a mut C), index: u64, deps: (&a mut u64[]), text: (&a mu
     iface_w1(&mut body_bytes, public);
     iface_wv(&mut body_bytes, types);
     iface_wv(&mut body_bytes, regions);
-    iface_wv(&mut body_bytes, ext);
+    // Bit 8 of the extern word: the function is `extern "C" blocking` (ffi_blocking), so a caller in
+    // another module hands its worker off too.
+    mut ext_word = ext;
+    if ext != 0 {
+        for bi in c.ffi_blocking.len() {
+            if same(view(c.ffi_blocking[bi]), view(symbol)) {
+                ext_word = ext | 256;
+            }
+        }
+        // Bit 9: `nonblocking`.
+        for bi in c.ffi_nonblocking.len() {
+            if same(view(c.ffi_nonblocking[bi]), view(symbol)) {
+                ext_word = ext | 512;
+            }
+        }
+    }
+    iface_wv(&mut body_bytes, ext_word);
     iface_ws(&mut body_bytes, view(symbol));
     iface_w1(&mut body_bytes, strict);
     iface_wv(&mut body_bytes, params.len());
@@ -53882,8 +53920,24 @@ fn iface_rec_fn<a>(c: (&a mut C), p: (&a mut IR), home: &a [u8], module: &a [u8]
     public := iface_r1(&mut p);
     types := iface_rv(&mut p);
     regions := iface_rv(&mut p);
-    ext := iface_rv(&mut p);
+    ext_word := iface_rv(&mut p);
+    ext := ext_word & 255;
     symbol := iface_rs(&mut p);
+    if (ext_word & 512) != 0 {
+        c.ffi_nonblocking.push(symbol.copy());
+    }
+    // `extern "C" blocking` in the module that declared it (bit 8): calls from here hand off too.
+    if (ext_word & 256) != 0 {
+        mut known = false;
+        for bi in c.ffi_blocking.len() {
+            if same(view(c.ffi_blocking[bi]), view(symbol)) {
+                known = true;
+            }
+        }
+        if !known {
+            c.ffi_blocking.push(symbol.copy());
+        }
+    }
     strict := iface_r1(&mut p);
     if p.phase == 0 {
         iface_rt_indent(&mut p, view(indent));
@@ -53916,6 +53970,12 @@ fn iface_rec_fn<a>(c: (&a mut C), p: (&a mut IR), home: &a [u8], module: &a [u8]
         iface_rt_num(&mut p, view(" lifetimes="), regions);
         if ext != 0 {
             iface_rt_num(&mut p, view(" extern="), ext);
+            if (ext_word & 256) != 0 {
+                push_bytes(&mut p.rtext, view(" blocking"));
+            }
+            if (ext_word & 512) != 0 {
+                push_bytes(&mut p.rtext, view(" nonblocking"));
+            }
             push_bytes(&mut p.rtext, view(" symbol="));
             push_bytes(&mut p.rtext, view(symbol));
         }
@@ -56419,6 +56479,7 @@ pub fn main() -> u64 {
         ffi_fixed: 0,
         ffi_blocking: u8[][],
         ffi_block_now: 0,
+        ffi_nonblocking: u8[][],
         caddr: u64[],
         interior: u64[],
         box_thunks: u64[],

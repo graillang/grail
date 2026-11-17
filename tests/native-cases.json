@@ -11886,7 +11886,6 @@
   },
   {
     "name": "sched-help-stops-when-the-stack-is-low",
-    "timing": true,
     "note": "A task recurses through about 90% of its stack and joins there while a thief runs its forked branch, which forks eight children of about 290 KiB each. They are its own job's work, so leapfrogging may take them, but there is no room for one: the room check makes the waiter park instead of running one into the guard page.",
     "files": [
       "tests/sched/help_depth.grl"
@@ -11953,7 +11952,6 @@
   },
   {
     "name": "sched-join-failure-names-the-user-join",
-    "timing": true,
     "note": "A branch of a user's pool::join, run by another worker, fails. try_join reports the failing statement and, as the join, the user's own pool::join line rather than the fork inside lib/pool.grl (standard-library sites carry bit 62 in the site table and are skipped for that line). The exit note counts one failure, and the stacks it discarded separately. Native only: an LLVM build carries no statement table, so a site cannot be named there (an LLVM backend gap, recorded in concurrency-stages-5-7.md).",
     "files": [
       "tests/sched/join_failure_site.grl"
@@ -18040,5 +18038,24 @@
     "note": "a bare `return;` in a function that takes a borrow is not a returned borrow (the unit value was read from slot 0, the first parameter)",
     "source": "fn bump(s: &mut [u64], depth: u64) {\n    if depth == 0 {\n        return;\n    }\n    s[0] += 1;\n}\nfn main() {\n    mut xs = u64[0; 8];\n    bump(&mut xs[0: 8], 2);\n    println(xs);\n}\n",
     "stdout": "[1, 0, 0, 0, 0, 0, 0, 0]\n"
+  },
+  {
+    "name": "ffi-nonblocking-call-is-bare",
+    "note": "A foreign function declared `extern \"C\" nonblocking` is called with no foreign-call marker (a bare call): the call works as any foreign call does.",
+    "source": "extern \"C\" nonblocking lib \"c\" fn labs(x: i64) -> i64;\nfn main() {\n    mut r: i64 = 0;\n    unsafe {\n        r = labs(i64(0) - 42);\n    }\n    println(r);\n}\n",
+    "stdout": "42\n",
+    "targets": [
+      "x86_64"
+    ]
+  },
+  {
+    "name": "ffi-blocking-and-nonblocking-refused",
+    "note": "A foreign function cannot be both.",
+    "source": "extern \"C\" blocking nonblocking lib \"c\" fn labs(x: i64) -> i64;\nfn main() {}\n",
+    "reject": true,
+    "diagnostic": "`blocking` or `nonblocking`, not both",
+    "targets": [
+      "x86_64"
+    ]
   }
 ]
