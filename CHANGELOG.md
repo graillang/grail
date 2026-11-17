@@ -1,5 +1,10 @@
 ## Unreleased
 
+- `grail check` is about a fifth cheaper again: a check files *check units* - what a function asks
+  of the build, without its assembly - and writes no assembly at all; a build does not take a check
+  unit for its own and compiles that function. The compiler is no longer hashed on every command
+  (its digest is kept in the store by path, size and time).
+
 - **The standard map is one open-addressed table** (`lib/hashmap.grl`). Keys, values and their
   hashes are stored densely in insertion order (iteration order and `key_at`/`value_at` are
   unchanged), indexed by one table of slot words (a 32-bit hash tag and the entry index) with
