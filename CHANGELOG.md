@@ -58,6 +58,18 @@
   now numbered within it, so the module text is the same whatever the count. Together with the
   table lookups that replaced the lifter's per-call and per-slot scans, lifting the compiler goes
   from 904 s to well under the old figure on one core (136 s measured before this change).
+- **Native backend: a slice's `data` and `len` live in registers.** The type facts are recorded on
+  the native path too, and the optimiser reads F1's slice-descriptor fact: a slice written once at
+  the top of a function keeps its data pointer and length in two callee-saved registers, so a
+  checked access is `cmpq %rL,%rsi; jb` and an indexed load (`movq (%rD,%rsi,8),%rax`), and
+  `n := x.len()` is the length's register. A failed check still names the index and the length
+  (`rt_trap` kind 64; `slice-hoisted-len-index-message`). With it: `movl`/`movb` are known
+  instructions (they were barriers across which every register was live); a float slot is found
+  through the temporaries the front end copies results through; a float held in a register across a
+  drop helper call is saved around it; and the type facts of a frame slot are looked up under the
+  table's own numbering (`-8(k+1)(%rbp)` is slot k), which the typed IR had off by one.
+  Instructions per element against scalar C: xform_f32 8.7x -> 6.9x, xform_f64 7.1x -> 5.6x,
+  dot_f32 10.8x -> 8.9x, dot_f64 8.6x -> 6.7x, matmul 12.4x -> 11.4x.
 
 - **Fixed: an LLVM-backend miscompile of a vector grown through its address.** A call handed `&mut v`
   receives the slot's address, not the header word, so the lifter did not count it as a call that
@@ -260,6 +272,17 @@
   pointer, which keeps their provenance. `x[i] = x[i] * a + y[i]` over one million elements goes
   from 7x to 1.2x (`f32`) and from 4x to 1.1x (`f64`) of vectorised `clang -O2`. Under
   `--verify-facts` every such access re-reads the header and aborts if it moved.
+
+- Fixed: the native optimiser took an `f32` constant whose 64-bit immediate it cannot read (2.0 is
+  `$4611686018427387904`, more than 18 digits) for zero, held the variable as binary32 and read 2.0
+  back as 0.0. It changed Abundance's abgeo mesh digests (meshopt's `quadric_error_attr`);
+  `f32-constant-wide-immediate-not-narrowed` pins it.
+
+- Fixed: a small leaf that takes the address of its own local (runtime.grl's `rt_frame`) was
+  inlined with that local turned into a scratch register, so split and cached builds of programs
+  that reach it emitted `leaq %r8,%rax` and did not assemble. Such a leaf is no longer an inline
+  candidate.
+
 - **Fixed-size arrays, `[T; N]`** (docs/design/fixed-arrays.md, stage A1). N values back to back in
   C layout, held in the frame: no heap allocation, no header, the length a constant of the type.
   Literals `[a, b, c]` and `[x; N]` where an array is expected (count checked while compiling),
