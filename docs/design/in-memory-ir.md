@@ -63,6 +63,23 @@ stream and the side tables the optimiser fills (sites per body, frame sizes per 
 the text is written only for `.s` output and the dumps. Then `ir::parse` is the reader of hand-written
 text alone.
 
+## State (after S2)
+
+Landed: S1 (edited builds hit the memo; probe and interest rescans), the linear liveness passes
+(optimize.grl `live_fx`, `slots_live_in`, `gpr_live`), and S2. syn4000 `grail build`, GRAIL_JOBS=1,
+from an empty store: after a one-function edit 95.7G -> 29.4G instructions, cold 120.9G -> 104.0G.
+
+What a cold syn4000 module run spends on the text hops now (dev compiler, sampled):
+`ir::parse` + `parse_line` + `pm_replay` 3.9%; `frame_scan` + `probe_frames` 3.7% (only when some
+frame nears a page, which syn's `main` does); `lines_of_interest` 2.2%; `site_table` 1.5%; the
+assembler 2.7% (object emit's measurement). Each is a per-byte line scan in compiled Grail: there is
+no byte-search primitive, so a newline is found one checked index at a time.
+
+So the order is now S5 before S3/S4: the whole-stream passes cost more than the parse that S3
+removes, and the assembler's share no longer pays for S4's encoder on its own. The cheapest lever
+under all of them is a runtime byte search (`rt_find_byte`, SSE2 on x86-64) that every line scanner
+- these passes, `ir::parse`'s operand split, the assembler's reader - would call.
+
 ## Interfaces
 
 - Optimiser to assembler: per body, `ir::Body`'s record columns for the surviving lines plus its
