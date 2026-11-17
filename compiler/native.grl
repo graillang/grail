@@ -561,6 +561,8 @@ struct C {
     // unboxed-values.md, stage 1b): the value is that interior address, which no one may own, so
     // a move or an owner of it first copies the words into a box of its own (materialise).
     interior: u64[],
+    // 1 + the frame slot holding the hidden result address (needs_dest), or 0.
+    result_dest: u64,
     // The result adapters this object needs (box_result_thunk): closure * 4 + words.
     box_thunks: u64[],
     // Per type id: 0 not yet known, else 1 + (1 if the type is a plain record) + (2 if it is a
@@ -3356,10 +3358,8 @@ fn save_result<a>(c: (&a mut C), ret: u64) -> u64 {
             // into frame words of this call site.
             return frame_from_registers(&mut c, words);
         }
-        // A larger result comes back boxed until it has a destination pointer (3c, part 2).
-        slot := save(&mut c);
-        unbox_into_frame(&mut c, slot, ret);
-        return slot;
+        // A larger result was written to the destination the call passed (call_dest): rax is it.
+        return save(&mut c);
     }
     if borrowed_object(&mut c, ret) == 0 {
         return save(&mut c);
@@ -4172,7 +4172,13 @@ fn load_call_args<a, b>(c: (&a mut C), args: (&b u64[]), shift: u64) -> unit {
     return ();
 }
 // Prologue: parameter i of `count` into frame slot i (see load_call_args for more than six).
-fn store_params<a>(c: (&a mut C), count: u64) -> unit {
+fn store_params<a>(c: (&a mut C), declared: u64) -> unit {
+    // A function whose result is a plain record of more than two words also takes, after its
+    // declared parameters, the address the caller wants the result written to (result_dest).
+    mut count = declared;
+    if c.result_dest != 0 {
+        count = declared + 1;
+    }
     mut regs = count;
     if 6 < count {
         regs = 5;
@@ -4182,7 +4188,7 @@ fn store_params<a>(c: (&a mut C), count: u64) -> unit {
         o(&mut c, view("movq "));
         o(&mut c, view(reg));
         c.out.push(44);
-        stack_slot(&mut c, i);
+        stack_slot(&mut c, arg_slot(&c, declared, i));
         c.out.push(10);
     }
     if 6 < count {
@@ -4190,13 +4196,57 @@ fn store_params<a>(c: (&a mut C), count: u64) -> unit {
             o(&mut c, view("movq "));
             on(&mut c, k * 8);
             o(&mut c, view("(%r9),%rax\nmovq %rax,"));
-            stack_slot(&mut c, 5 + k);
+            stack_slot(&mut c, arg_slot(&c, declared, 5 + k));
             c.out.push(10);
         }
         o(&mut c, view("movq %r9,%rdi\n"));
     call_out(&mut c, view("rt_free"));
     }
     return ();
+}
+// The frame slot argument `i` lands in: declared parameter i is slot i, the hidden result address
+// after them is result_dest's slot.
+fn arg_slot<a>(c: (&a C), declared: u64, i: u64) -> u64 {
+    if i == declared {
+        return c.result_dest - 1;
+    }
+    return i;
+}
+// The hidden result address of a function whose result is a plain record of more than two words
+// (docs/design/unboxed-values.md, 3c): a frame slot of its own, from the prologue on.
+// It is the slot right after the parameters, so the frame zeroing that starts after them starts
+// after it (kept_slots).
+fn begin_result_dest<a>(c: (&a mut C), ret: u64, count: u64) -> unit {
+    exchange(&mut c.result_dest, 0);
+    if (c.raw == 0) & needs_dest(&mut c, ret) {
+        d := fresh(&mut c);
+        if d != count {
+            fail(&mut c, view("internal: the result address is not the slot after the parameters"));
+        }
+        exchange(&mut c.result_dest, d + 1);
+    }
+    return ();
+}
+// The slots the prologue fills and the frame zeroing leaves alone.
+fn kept_slots<a>(c: (&a C), count: u64) -> u64 {
+    if c.result_dest != 0 {
+        return count + 1;
+    }
+    return count;
+}
+// The caller's side of needs_dest: frame words of the call site the callee writes its result to,
+// passed after the declared arguments; 0 when the result needs none.
+fn call_dest<a>(c: (&a mut C), ret: u64) -> u64 {
+    if (c.raw != 0) || !needs_dest(&mut c, ret) {
+        return 0;
+    }
+    return frame_alloc(&mut c, record_words(&mut c, base_type(&mut c, ret)));
+}
+fn needs_dest<a>(c: (&a mut C), ret: u64) -> bool {
+    if !framed(&mut c, ret) {
+        return false;
+    }
+    return 2 < record_words(&mut c, base_type(&mut c, ret));
 }
 // An integer conversion of the value in slot `v`, from the type `from` codes to the type `to`
 // codes (int_code: bits, 256 signed, 512 wrapping). The native backend emits it in line: nothing at
@@ -18533,6 +18583,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         exchange(&mut c.export_fret, fret);
     } else {
         exchange(&mut c.export_fret, 0);
+        begin_result_dest(&mut c, ret, count);
         store_params(&mut c, count);
     }
     // The parameter refinements hold here, where the parameters are the arguments they were given.
@@ -18543,7 +18594,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     o(&mut c, view("(%rbp),%rdi\nmovq $"));
     fname(&mut c, frame);
     o(&mut c, view("/8-"));
-    on(&mut c, count);
+    on(&mut c, kept_slots(&c, count));
     o(&mut c, view(",%rcx\nxorl %eax,%eax\nrep stosq\n"));
     for i in count {
         mut l = &c.locals[i];
@@ -21838,6 +21889,10 @@ fn static_probe_init<a, b, d, e>(c: (&a mut C), m: &b [u8], n: &d [u8], sym: &e 
     if framed(&mut c, ty) {
         // A plain record comes back as a result does (save_result); the static's word holds a box
         // of its own, which word_reference reads as the record.
+        dest := call_dest(&mut c, ty);
+        if dest != 0 {
+            get(&mut c, dest, view("%rdi"));
+        }
         call_out(&mut c, view(value_sym));
         t = save_result(&mut c, ty);
         if memo != 0 {
@@ -25011,8 +25066,20 @@ fn return_value<a>(c: (&a mut C), slot: u64, ty: u64) -> unit {
 fn frame_result<a>(c: (&a mut C), slot: u64, ty: u64) -> unit {
     words := record_words(&mut c, base_type(&mut c, ty));
     if words > 2 {
-        boxed := frame_box(&mut c, slot, ty);
-        get(&mut c, boxed, view("%rax"));
+        if c.result_dest == 0 {
+            fail(&mut c, view("internal: a result of more than two words without a destination"));
+        }
+        // Into the caller's words, whose address is also the returned value.
+        get(&mut c, slot, view("%rcx"));
+        get(&mut c, c.result_dest - 1, view("%rdx"));
+        for k in words {
+            o(&mut c, view("movq "));
+            on(&mut c, k * 8);
+            o(&mut c, view("(%rcx),%rax\nmovq %rax,"));
+            on(&mut c, k * 8);
+            o(&mut c, view("(%rdx)\n"));
+        }
+        o(&mut c, view("movq %rdx,%rax\n"));
         return ();
     }
     if words == 2 {
@@ -29189,7 +29256,12 @@ fn emit_resolved_call<a>(
         ty := argtypes[i];
         move_out(&mut c, val(slot, ty));
     }
-    load_call_args(&mut c, &args, 0);
+    mut sent = args.copy();
+    dest := call_dest(&mut c, ret);
+    if dest != 0 {
+        sent.push(dest);
+    }
+    load_call_args(&mut c, &sent, 0);
     if dyn_entry != 0 {
         if dyn_pair != 0 {
             // A borrowed object's receiver is the handle to its pair: word 0 is the value (the
@@ -29443,36 +29515,21 @@ fn fn_value_decl<a>(c: (&a mut C)) -> u64 {
 // The adapter every function-as-closure calls: %rdi addresses the slot holding the object; the
 // function's own arguments follow in %rsi.. (Fn types take at most five), so they shift down one
 // register and the target is called; its result returns unchanged.
-// The adapter the runtime calls in place of a function whose plain result (one or two words) comes
-// back in rax:rdx, where the runtime keeps one word: it calls the function and returns a box of the
-// words. `closure` 1: the environment word addresses the slot holding the closure object, whose word
-// 0 is the code, and the arguments pass unchanged; 0: it addresses a cell holding the function, and
-// the arguments shift down one register. One per shape, shared by every caller.
-fn box_result_thunk<a>(c: (&a mut C), closure: bool, words: u64) -> u8[] {
-    mut name = copy_bytes(view("grail_box_result_"));
-    if closure {
-        name.push(99);
-    } else {
-        name.push(102);
-    }
+// The adapter the runtime calls in place of a function whose plain result it cannot keep: the
+// runtime keeps one word, and the result is one or two words in rax:rdx or written to a destination
+// (needs_dest). The adapter calls the function and returns a box holding the result. `kind` 0: the
+// first argument addresses a cell holding the function, and the rest shift down one register; 1: a
+// closure, whose first argument addresses the slot holding the object (word 0 the code), passed
+// unchanged; 2: a task, whose first argument is a cell {function, item} replaced by the item and then
+// freed. `args` is how many arguments the function itself receives. One per shape, shared.
+fn result_adapter<a>(c: (&a mut C), kind: u64, args: u64, words: u64) -> u8[] {
+    mut name = copy_bytes(view("grail_result_adapter_"));
+    decimal(&mut name, kind);
+    name.push(95);
+    decimal(&mut name, args);
+    name.push(95);
     decimal(&mut name, words);
-    code := u64(closure) * 4 + words;
-    mut known = false;
-    for i in c.box_thunks.len() {
-        if c.box_thunks[i] == code {
-            known = true;
-        }
-    }
-    if !known {
-        c.box_thunks.push(code);
-    }
-    return name;
-}
-// The task form of box_result_thunk: the item is a cell {function, item}; it is freed once unpacked.
-fn task_result_thunk<a>(c: (&a mut C), words: u64) -> u8[] {
-    mut name = copy_bytes(view("grail_box_result_t"));
-    decimal(&mut name, words);
-    code := 8 + words;
+    code := (kind * 16 + args) * 65536 + words;
     mut known = false;
     for i in c.box_thunks.len() {
         if c.box_thunks[i] == code {
@@ -29491,35 +29548,50 @@ fn emit_box_thunks<a>(c: (&a mut C)) -> unit {
     o(&mut c, view(".text\n"));
     for i in c.box_thunks.len() {
         code := c.box_thunks[i];
-        if code >= 8 {
-            name := task_result_thunk(&mut c, code - 8);
-            weak_def(&mut c);
-            push_bytes(&mut c.out, view(name));
-            c.out.push(10);
-            push_bytes(&mut c.out, view(name));
-            o(&mut c, view(":\npushq %rbp\nmovq %rsp,%rbp\nsubq $32,%rsp\nmovq %rdi,-24(%rbp)\nmovq (%rdi),%rax\nmovq 8(%rdi),%rdi\n"));
-            o(&mut c, view("call *%rax\nmovq %rax,-16(%rbp)\nmovq %rdx,-8(%rbp)\nmovq -24(%rbp),%rdi\ncall rt_free\n"));
-            o(&mut c, view("leaq -16(%rbp),%rdi\nmovq $"));
-            on(&mut c, (code - 8) * 8);
-            o(&mut c, view(",%rsi\ncall rt_flat_box\nleave\nret\n"));
-            continue;
-        }
-        closure := code >= 4;
-        words := code % 4;
-        name := box_result_thunk(&mut c, closure, words);
+        words := code % 65536;
+        args := (code / 65536) % 16;
+        kind := code / 1048576;
+        name := result_adapter(&mut c, kind, args, words);
         weak_def(&mut c);
         push_bytes(&mut c.out, view(name));
         c.out.push(10);
         push_bytes(&mut c.out, view(name));
-        o(&mut c, view(":\npushq %rbp\nmovq %rsp,%rbp\nsubq $16,%rsp\nmovq (%rdi),%rax\n"));
-        if closure {
-            o(&mut c, view("movq (%rax),%rax\n"));
-        } else {
-            o(&mut c, view("movq %rsi,%rdi\nmovq %rdx,%rsi\nmovq %rcx,%rdx\n"));
+        // -8..-32 the incoming argument registers, -40 the result box, -48 the task cell.
+        o(&mut c, view(":\npushq %rbp\nmovq %rsp,%rbp\nsubq $48,%rsp\nmovq %rdi,-8(%rbp)\nmovq %rsi,-16(%rbp)\nmovq %rdx,-24(%rbp)\nmovq %rcx,-32(%rbp)\n"));
+        big := words > 2;
+        if big {
+            o(&mut c, view("movq $"));
+            on(&mut c, words * 8);
+            o(&mut c, view(",%rdi\ncall rt_alloc\nmovq %rax,-40(%rbp)\n"));
         }
-        o(&mut c, view("call *%rax\nmovq %rax,-16(%rbp)\nmovq %rdx,-8(%rbp)\nleaq -16(%rbp),%rdi\nmovq $"));
-        on(&mut c, words * 8);
-        o(&mut c, view(",%rsi\ncall rt_flat_box\nleave\nret\n"));
+        o(&mut c, view("movq -8(%rbp),%rdi\nmovq -16(%rbp),%rsi\nmovq -24(%rbp),%rdx\nmovq -32(%rbp),%rcx\n"));
+        if kind == 0 {
+            o(&mut c, view("movq (%rdi),%rax\nmovq %rsi,%rdi\nmovq %rdx,%rsi\nmovq %rcx,%rdx\n"));
+        } else if kind == 1 {
+            o(&mut c, view("movq (%rdi),%rax\nmovq (%rax),%rax\n"));
+        } else {
+            o(&mut c, view("movq %rdi,-48(%rbp)\nmovq (%rdi),%rax\nmovq 8(%rdi),%rdi\n"));
+        }
+        if big {
+            o(&mut c, view("movq -40(%rbp),"));
+            o(&mut c, view(argreg(args)));
+            c.out.push(10);
+        }
+        o(&mut c, view("call *%rax\n"));
+        if !big {
+            o(&mut c, view("movq %rax,-40(%rbp)\nmovq %rdx,-32(%rbp)\n"));
+        }
+        if kind == 2 {
+            o(&mut c, view("movq -48(%rbp),%rdi\ncall rt_free\n"));
+        }
+        if big {
+            o(&mut c, view("movq -40(%rbp),%rax\n"));
+        } else {
+            o(&mut c, view("leaq -40(%rbp),%rdi\nmovq $"));
+            on(&mut c, words * 8);
+            o(&mut c, view(",%rsi\ncall rt_flat_box\n"));
+        }
+        o(&mut c, view("leave\nret\n"));
     }
     return ();
 }
@@ -29790,6 +29862,10 @@ fn indirect_call<a>(c: (&a mut C), value: Val, opened: u64) -> Val {
         call_bonds(&mut c, val(rslot, resulttype), first, &sources, resulttype);
         release_temporary(&mut c, input);
         return val(rslot, resulttype);
+    }
+    dest := call_dest(&mut c, resulttype);
+    if dest != 0 {
+        args.push(dest);
     }
     load_call_args(&mut c, &args, shift);
     if shift != 0 {
@@ -32724,7 +32800,7 @@ fn parallel_map_builtin<a>(c: (&a mut C), items: Val) -> Val {
     mut fn_env = env;
     if (c.raw == 0) & (flat_bytes(&mut c, result) != 0) {
         rw = flat_bytes(&mut c, result);
-        if framed(&mut c, result) && (record_words(&mut c, base_type(&mut c, result)) <= 2) {
+        if framed(&mut c, result) {
             words := record_words(&mut c, base_type(&mut c, result));
             if !closure {
                 // The adapter takes the target from a cell its environment word points at.
@@ -32734,7 +32810,12 @@ fn parallel_map_builtin<a>(c: (&a mut C), items: Val) -> Val {
                 o(&mut c, view("movq %rax,(%rcx)\n"));
             }
             o(&mut c, view("leaq "));
-            push_bytes(&mut c.out, view(box_result_thunk(&mut c, closure, words)));
+            mut kind = 0;
+            if closure {
+                kind = 1;
+            }
+            // Called as (item, context), after the closure's environment when there is one.
+            push_bytes(&mut c.out, view(result_adapter(&mut c, kind, 2 + u64(closure), words)));
             o(&mut c, view("(%rip),%rax\n"));
             fn_target = save(&mut c);
         }
@@ -33076,17 +33157,15 @@ fn parallel_spawn_builtin<a>(c: (&a mut C), callee: Val) -> Val {
     }
     if (c.raw == 0) & framed(&mut c, result) {
         words := record_words(&mut c, base_type(&mut c, result));
-        if words <= 2 {
-            if !closure {
-                fail(&mut c, view("a pool job of a named function cannot return a plain record of one or two words yet: write the job as a closure"));
-            }
-            // The runtime keeps one word of a job's result: the job runs the adapter, which reads the
-            // closure's code from its box as the closure ABI does and returns the result boxed.
-            o(&mut c, view("leaq "));
-            push_bytes(&mut c.out, view(box_result_thunk(&mut c, true, words)));
-            o(&mut c, view("(%rip),%rax\n"));
-            target = save(&mut c);
+        if !closure {
+            fail(&mut c, view("a pool job of a named function cannot return a plain record yet: write the job as a closure"));
         }
+        // The runtime keeps one word of a job's result: the job runs the adapter, which reads the
+        // closure's code from its box as the closure ABI does and returns the result boxed.
+        o(&mut c, view("leaq "));
+        push_bytes(&mut c.out, view(result_adapter(&mut c, 1, 1, words)));
+        o(&mut c, view("(%rip),%rax\n"));
+        target = save(&mut c);
     }
     mut pargs = two(target, box);
     slot := invoke(&mut c, view("rt_parallel_spawn"), pargs);
@@ -33309,19 +33388,17 @@ fn spawn_builtin<a>(c: (&a mut C), scope: Val) -> Val {
     mut entry = f.t;
     if (c.raw == 0) & framed(&mut c, result) {
         words := record_words(&mut c, base_type(&mut c, result));
-        if words <= 2 {
-            // The runtime keeps one word of a task's result: the task runs an adapter, whose item is
-            // a cell {function, item} it unpacks, and which returns the result boxed.
-            sz := imm(&mut c, 2);
-            cell := invoke(&mut c, view("rt_rec"), one(sz));
-            rec_store(&mut c, cell, 0, f.t);
-            rec_store(&mut c, cell, 1, value);
-            value = cell;
-            o(&mut c, view("leaq "));
-            push_bytes(&mut c.out, view(task_result_thunk(&mut c, words)));
-            o(&mut c, view("(%rip),%rax\n"));
-            entry = save(&mut c);
-        }
+        // The runtime keeps one word of a task's result: the task runs an adapter, whose item is a
+        // cell {function, item} it unpacks, and which returns the result boxed.
+        sz := imm(&mut c, 2);
+        cell := invoke(&mut c, view("rt_rec"), one(sz));
+        rec_store(&mut c, cell, 0, f.t);
+        rec_store(&mut c, cell, 1, value);
+        value = cell;
+        o(&mut c, view("leaq "));
+        push_bytes(&mut c.out, view(result_adapter(&mut c, 2, count, words)));
+        o(&mut c, view("(%rip),%rax\n"));
+        entry = save(&mut c);
     }
     arity := imm(&mut c, count);
     mut dropper = imm(&mut c, 0);
@@ -35104,6 +35181,7 @@ fn isolated_body_type<a, b, d>(c: (&a mut C), start: u64, names: (&b u8[][]), pa
     saved_loop_end := exchange(&mut c.loop_end, 0);
     saved_terminated := exchange(&mut c.terminated, 0);
     saved_result := exchange(&mut c.result, NO_TYPE);
+    saved_dest := exchange(&mut c.result_dest, 0);
     saved_validating := exchange(&mut c.validating, 1);
     saved_cf_start := exchange(&mut c.cf_start, 0);
     saved_cf_end := exchange(&mut c.cf_end, 0);
@@ -35166,6 +35244,7 @@ fn isolated_body_type<a, b, d>(c: (&a mut C), start: u64, names: (&b u8[][]), pa
     exchange(&mut c.loop_end, saved_loop_end);
     exchange(&mut c.terminated, saved_terminated);
     exchange(&mut c.result, saved_result);
+    exchange(&mut c.result_dest, saved_dest);
     exchange(&mut c.validating, saved_validating);
     exchange(&mut c.cf_start, saved_cf_start);
     exchange(&mut c.cf_end, saved_cf_end);
@@ -36053,13 +36132,14 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
             fname(&mut c, frame);
             o(&mut c, view(",%rsp\n"));
         }
+        begin_result_dest(&mut c, c.result, count);
         store_params(&mut c, count);
         o(&mut c, view("leaq -"));
         fname(&mut c, frame);
         o(&mut c, view("(%rbp),%rdi\nmovq $"));
         fname(&mut c, frame);
         o(&mut c, view("/8-"));
-        on(&mut c, count);
+        on(&mut c, kept_slots(&c, count));
         o(&mut c, view(",%rcx\nxorl %eax,%eax\nrep stosq\n"));
         for j in count {
             mut l = &c.locals[j];
@@ -51039,6 +51119,7 @@ pub fn main() -> u64 {
         caddr: u64[],
         interior: u64[],
         box_thunks: u64[],
+        result_dest: 0,
         layout_memo: u64[],
         layout_offsets: u64[][],
         export_fret: 0,
