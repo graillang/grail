@@ -21,7 +21,13 @@ pub struct Lowered {
     // --verify-facts: what was found wrong with the facts (the compile fails); empty otherwise.
     error: u8[],
     // The bodies whose signature fact this lowering proved wrong (see lower_target).
-    wrong: u8[][]
+    wrong: u8[][],
+    // The signature every lifted body was defined with, `sig_code` (words * 4 + result words): what
+    // another module's run declares it with (fact_imported_signature), so its calls match the
+    // definition and LLVM can inline across modules. A body defined in the six-word form (its
+    // address taken, its fact proved wrong) is not listed.
+    sig_names: u8[][],
+    sig_codes: u64[]
 }
 
 // One typed-IR fact (docs/design/typed-ir.md), carried beside the word stream by the front end.
@@ -39,6 +45,7 @@ pub const FACT_SIGNATURE: u64 = 5; // a body's argument words
 pub const FACT_FFI: u64 = 6; // a foreign function's signature
 pub const FACT_INDIRECT: u64 = 7; // an indirect call's argument words
 pub const FACT_LOOP_STABLE: u64 = 8; // a sequence header stable across a loop
+pub const FACT_IMPORTED_SIGNATURE: u64 = 9; // another module's body's signature, sig_code in `a`
 pub struct Fact {
     // 0 frame slot, 1 call argument, 3 `DynPair` slot, 4 two-word dyn result.
     kind: u64,
@@ -118,6 +125,15 @@ pub fn facts_dyn_pairs<a, b, d>(facts: (&a Facts), name: &b [u8], out: (&d mut u
 // result is one word unless a `dyn_result` fact makes it two. A fact that is too small is caught
 // where the body reads an argument register past it before writing it (`sig_prologue`), and a
 // result that is wider than the fact where a caller reads `%rdx` after the call (`rdx_dead`).
+// The signature `code` (words * 4 + result words) another module's run defined the body `name`
+// with, read from that module's interface: a call to it from this run is declared and made with
+// exactly that type, so the declaration agrees with the definition and LLVM may inline across
+// modules (docs/design/separate-compilation.md, "Cross-module calls are declared with the callee's
+// own signature"). A body this run emits keeps its own fact.
+pub fn fact_imported_signature<a>(facts: (&a mut Facts), name: u8[], code: u64) -> unit {
+    facts.items.push(Fact { kind: FACT_IMPORTED_SIGNATURE, fn: name, a: code, b: 0, callee: u8[], what: 0, width: 0 });
+    return ();
+}
 pub fn fact_signature<a>(facts: (&a mut Facts), name: u8[], words: u64) -> unit {
     facts.items.push(Fact { kind: FACT_SIGNATURE, fn: name, a: words, b: 0, callee: u8[], what: 0, width: 0 });
     return ();
@@ -4658,7 +4674,13 @@ fn signatures<a, b>(facts: (&a Facts), taken: (&b Set)) -> Set {
             n += 1;
         }
     }
-    mut out = set_new(n + 1);
+    mut imported = 0;
+    for i in facts.items.len() {
+        if facts.items[i].kind == FACT_IMPORTED_SIGNATURE {
+            imported += 1;
+        }
+    }
+    mut out = set_new(n + imported + 1);
     for i in facts.items.len() {
         f := &facts.items[i];
         if (f.kind == FACT_SIGNATURE) && !eq(view(f.fn), view("rt_abort")) && !set_has(&taken, view(f.fn)) {
@@ -4672,6 +4694,21 @@ fn signatures<a, b>(facts: (&a Facts), taken: (&b Set)) -> Set {
             if code != 0 {
                 set_put(&mut out, view(f.fn), (code / 4) * 4 + 2);
             }
+        }
+    }
+    // Another module's bodies, as their own run defined them. Taking the address of one here does
+    // not change its definition, so this run's `taken` does not apply; a body this run emits (it has
+    // its own signature fact) is not overridden.
+    mut own = set_new(n + 1);
+    for i in facts.items.len() {
+        if facts.items[i].kind == FACT_SIGNATURE {
+            set_add(&mut own, view(facts.items[i].fn));
+        }
+    }
+    for i in facts.items.len() {
+        f := &facts.items[i];
+        if (f.kind == FACT_IMPORTED_SIGNATURE) && !set_has(&own, view(f.fn)) && (f.a != 0) {
+            set_put(&mut out, view(f.fn), f.a);
         }
     }
     return out;
@@ -9604,5 +9641,17 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
             }
         }
     }
-    return Lowered { ir: ir, native: native, thunks: thunks, error: sigerrors, wrong: l.wrong };
+    mut sig_names = u8[][];
+    mut sig_codes = u64[];
+    for i in facts.items.len() {
+        f := &facts.items[i];
+        if (f.kind == FACT_SIGNATURE) && set_has(&lifted, view(f.fn)) {
+            code := set_get(&l.sigs, view(f.fn));
+            if code != 0 {
+                sig_names.push(copy(view(f.fn)));
+                sig_codes.push(code);
+            }
+        }
+    }
+    return Lowered { ir: ir, native: native, thunks: thunks, error: sigerrors, wrong: l.wrong, sig_names: sig_names, sig_codes: sig_codes };
 }

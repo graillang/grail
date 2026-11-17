@@ -1030,6 +1030,11 @@ struct C {
     // Runtime bodies to inline across units: read from runtime.facts, or exported by the run that
     // emitted them (optimize::Shared).
     xinl: optimize::Shared,
+    // What the LLVM lowering of this run defined each lifted body with (llvm::Lowered.sig_names /
+    // sig_codes), sorted by name: written into the interface's facts so another module's run
+    // declares its calls to them with the same type.
+    lifted_sig_names: u8[][],
+    lifted_sig_codes: u64[],
     iface_emit: u8[],
     iface_verify: u64,
     // `--iface-dump FILE` renders a written interface's record tree and `--iface-roundtrip FILE`
@@ -4893,7 +4898,8 @@ fn win_unwind<a>(text: &a [u8]) -> u8[] {
 // STT_FUNC with a size (profilers, readelf, debuggers name addresses by it). ELF only: COFF has no
 // symbol size (a function's extent is its .pdata entry) and Mach-O none either.
 fn size_directive<a, b, d>(c: (&a mut C), m: &b [u8], name: &b [u8], symbol: &d [u8], export: u64) -> unit {
-    if (c.plat == 1) || (c.target == 3) || (c.target == 4) {
+    // A quiet (check-only) run writes no text, and this reads its own text back.
+    if (c.plat == 1) || (c.target == 3) || (c.target == 4) || (c.quiet != 0) {
         return ();
     }
     at := c.out.len();
@@ -12926,6 +12932,18 @@ fn resolve_callable_bounds<a>(c: (&a mut C)) -> unit {
     }
     return ();
 }
+// `ty`, or - for a type parameter bound to a closure or function - that closure or function type.
+fn callable_or_self<a>(c: (&a mut C), ty: u64) -> u64 {
+    k := ty_kind(&mut c, ty);
+    if (k == 12) || (k == 20) {
+        return ty;
+    }
+    bound := param_callable(&mut c, ty);
+    if (bound != NO_TYPE) && ((ty_kind(&mut c, bound) == 12) || (ty_kind(&mut c, bound) == 20)) {
+        return bound;
+    }
+    return ty;
+}
 // The callable bound a type parameter's own type carries (`F: FnMut(T) -> U`), or NO_TYPE.
 fn param_callable<a>(c: (&a mut C), ty: u64) -> u64 {
     mut t = ty;
@@ -12973,6 +12991,16 @@ fn spec_callable_signature<a>(c: (&a mut C), alias: u64) -> u64 {
         }
     }
     return NO_TYPE;
+}
+// Whether type parameter `i` of function `f` (index) carries a callable bound.
+fn callable_formal_at<a>(c: (&a mut C), f: u64, i: u64) -> u64 {
+    if i < c.funcs[f].constraints.len() {
+        set := copy_numbers(&c.funcs[f].constraints[i]);
+        if callable_in(&set) != NO_TYPE {
+            return 1;
+        }
+    }
+    return 0;
 }
 // In a specialisation, a value typed by a closure expression's own type that a callable-bound
 // parameter was bound to - a capture of it, or a closure body's copy of it - is typed by that
@@ -34928,6 +34956,12 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
             }
             expect(&mut c, view(","));
         }
+        // Trailing parameters that only a callable bound names (`F: Fn() -> A`) may be left out of
+        // an explicit list: the argument's closure type fixes them. `pool::join<u64, u64>(a, b)`
+        // keeps working when join takes its closures as generic `F`.
+        while (map.len() < types) && (callable_formal_at(&mut c, f - 1, map.len()) != 0) {
+            map.push(NO_TYPE);
+        }
         if map.len() != types {
             fail(&mut c, view("function type argument count"));
         }
@@ -35086,6 +35120,20 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
                         if adopt_literal(&mut c, astart, aend, formal) {
                             v = val(v.t, formal);
                         }
+                    }
+                }
+            }
+            if (c.raw == 0) & (argi < count) & (types != 0) {
+                // A closure given for a callable-bound parameter (`F: Fn<Send>() -> A`): its capture
+                // bounds are checked here, as the argument is taken, as an erased `Fn<Send>()`
+                // parameter's are - not only once every argument is in, where an error a later
+                // argument makes (a capture that this closure moved) would be reported first.
+                formal := c.params[template_first + argi];
+                bound := param_callable(&mut c, formal);
+                if (bound != NO_TYPE) && (ty_kind(&mut c, bound) == 20) && (ty_kind(&mut c, v.ty) == 20) && (ty_env(&mut c, v.ty) != 0) {
+                    bm := ty_mode(&mut c, bound);
+                    if !closure_bounds_hold(&mut c, v.ty, bm & CLOSURE_BOUNDS) {
+                        closure_bound_fail(&mut c, v.ty, bm & CLOSURE_BOUNDS);
                     }
                 }
             }
@@ -39674,7 +39722,7 @@ fn parallel_split_builtin<a>(c: (&a mut C), data: Val) -> Val {
     }
     require_type(&mut c, chunks.ty, 0);
     function := deref(&mut c, callee);
-    fty := function.ty;
+    fty := callable_or_self(&mut c, function.ty);
     closure := ty_kind(&mut c, fty) == 20;
     if (ty_kind(&mut c, fty) != 12) & !closure {
         fail(&mut c, view("parallel_split requires a callable"));
@@ -39739,7 +39787,9 @@ fn parallel_with_builtin<a>(c: (&a mut C), callee: Val) -> Val {
     input := callee.t;
     inty := callee.ty;
     function := deref(&mut c, callee);
-    fty := function.ty;
+    // A generic `F: Fn() -> A` parameter is checked and called as the closure or function its
+    // specialisation binds it to.
+    fty := callable_or_self(&mut c, function.ty);
     closure := ty_kind(&mut c, fty) == 20;
     if (ty_kind(&mut c, fty) != 12) & !closure {
         fail(&mut c, view("parallel_with requires a callable"));
@@ -39762,7 +39812,7 @@ fn parallel_with_builtin<a>(c: (&a mut C), callee: Val) -> Val {
     input2 := other.t;
     inty2 := other.ty;
     here := deref(&mut c, other);
-    hty := here.ty;
+    hty := callable_or_self(&mut c, here.ty);
     closure2 := ty_kind(&mut c, hty) == 20;
     if (ty_kind(&mut c, hty) != 12) & !closure2 {
         fail(&mut c, view("parallel_with requires a callable"));
@@ -39782,7 +39832,10 @@ fn parallel_with_builtin<a>(c: (&a mut C), callee: Val) -> Val {
     if cargs.len() != 2 {
         fail(&mut c, view("parallel_with's third argument takes the two results"));
     }
-    if (same_type(&mut c, cargs[0], result) == 0) | (same_type(&mut c, cargs[1], second) == 0) {
+    // In a generic body the two sides may name the same parameter differently (its binding, or the
+    // parameter); the specialisation checks the concrete types again.
+    generic := (ty_kind(&mut c, result) == 9) | (ty_kind(&mut c, result) == 10) | (ty_kind(&mut c, cargs[0]) == 9) | (ty_kind(&mut c, cargs[0]) == 10);
+    if !generic & ((same_type(&mut c, cargs[0], result) == 0) | (same_type(&mut c, cargs[1], second) == 0)) {
         fail(&mut c, view("parallel_with's third argument takes the first result, then the second"));
     }
     combined := ty_arg(&mut c, cty);
@@ -39845,7 +39898,7 @@ fn parallel_class_builtin<a>(c: (&a mut C), klass: Val) -> Val {
     input := callee.t;
     inty := callee.ty;
     function := deref(&mut c, callee);
-    fty := function.ty;
+    fty := callable_or_self(&mut c, function.ty);
     closure := ty_kind(&mut c, fty) == 20;
     if (ty_kind(&mut c, fty) != 12) & !closure {
         fail(&mut c, view("parallel_class requires a callable"));
@@ -39918,7 +39971,7 @@ fn parallel_spawn_builtin<a>(c: (&a mut C), callee: Val) -> Val {
     input := callee.t;
     inty := callee.ty;
     mut function = deref(&mut c, callee);
-    fty := function.ty;
+    fty := callable_or_self(&mut c, function.ty);
     closure := ty_kind(&mut c, fty) == 20;
     if (ty_kind(&mut c, fty) != 12) & !closure {
         fail(&mut c, view("parallel_spawn requires a callable"));
@@ -54665,7 +54718,7 @@ pub fn iface_digest<a>(data: &a [u8]) -> u8[] {
 // Format 7 added the effect summary rows of every listed function; format 8 gives an `Atomic<T>`
 // its element type; format 9 carries a `dyn` type's bounds; format 10 adds the SIMD vector types
 // (kind 36: the element, and the lane count in the mode).
-const IFACE_VERSION: u64 = 12;
+const IFACE_VERSION: u64 = 13;
 const IFACE_TAG_MODULE: u64 = 1;
 const IFACE_TAG_TRAILER: u64 = 2;
 const IFACE_TAG_LINK: u64 = 3;
@@ -54689,6 +54742,11 @@ const IFACE_TAG_FACTS: u64 = 20;
 // across a module boundary"): the symbol and its crossing form, carried in `runtime.facts` after the
 // summary, so the readers' keys (the file's digest) move when a body does.
 const IFACE_TAG_INLINE: u64 = 21;
+// What the LLVM lowering of the module's run defined each lifted body with: the symbol and its
+// signature code (words * 4 + result words). Another module's run declares its calls with it
+// (llvm::fact_imported_signature), so the declaration agrees with the definition and a release
+// build inlines across modules. Like the facts, it is not surface: it changes with bodies.
+const IFACE_TAG_SIGS: u64 = 22;
 
 // The ABI this compiler builds objects for, as the one line every interface carries: the `dyn`
 // layout (docs/design/fat-dyn.md) - a `&dyn I` is an 8-byte pointer to a 16-byte, 8-aligned
@@ -54890,6 +54948,9 @@ fn iface_tag_name(tag: u64) -> string {
     if tag == IFACE_TAG_INLINE {
         return "inline";
     }
+    if tag == IFACE_TAG_SIGS {
+        return "signatures";
+    }
     return "unknown";
 }
 fn iface_known_tag(tag: u64) -> bool {
@@ -54897,7 +54958,7 @@ fn iface_known_tag(tag: u64) -> bool {
         || (tag == IFACE_TAG_TYPE) || (tag == IFACE_TAG_ALIAS) || (tag == IFACE_TAG_CONST)
         || (tag == IFACE_TAG_FN) || (tag == IFACE_TAG_INHERENT) || (tag == IFACE_TAG_IFACE)
         || (tag == IFACE_TAG_IMPL) || (tag == IFACE_TAG_ENV) || (tag == IFACE_TAG_INHERENT_TYPE)
-        || (tag == IFACE_TAG_STATIC) || (tag == IFACE_TAG_FACTS) || (tag == IFACE_TAG_INLINE);
+        || (tag == IFACE_TAG_STATIC) || (tag == IFACE_TAG_FACTS) || (tag == IFACE_TAG_INLINE) || (tag == IFACE_TAG_SIGS);
 }
 // Where a refusal happened, so no diagnostic says only "malformed".
 fn iface_where<a>(p: (&a IR)) -> u8[] {
@@ -56669,6 +56730,85 @@ fn iface_listed_fns<a, b>(items: (&a IItem[]), keep: (&b u64[])) -> u64[] {
     }
     return out;
 }
+// Records what the LLVM lowering defined each lifted body with, then writes this run's interfaces
+// (and the runtime's summary) again with it: they were written before lowering, which runs last.
+fn record_lifted_sigs<a, b>(c: (&a mut C), names: (&b u8[][]), codes: (&b u64[])) -> unit {
+    mut order = u64[];
+    for i in names.len() {
+        order.push(i);
+    }
+    // Insertion sort by name; a module's lifted bodies are a few thousand at most.
+    for i in 1..order.len() {
+        mut j = i;
+        while (j > 0) && bytes_less(view(names[order[j]]), view(names[order[j - 1]])) {
+            order.swap(j, j - 1);
+            j -= 1;
+        }
+    }
+    c.lifted_sig_names.clear();
+    c.lifted_sig_codes.clear();
+    for i in order.len() {
+        c.lifted_sig_names.push(names[order[i]].copy());
+        c.lifted_sig_codes.push(codes[order[i]]);
+    }
+    if (c.lifted_sig_names.len() != 0) && (c.iface_emit.len() != 0) {
+        iface_emit_facts(&mut c);
+    }
+    return ();
+}
+// The signatures record: every lifted body's symbol and code, in name order (lifted_sig_names is
+// sorted), or nothing outside a release run.
+fn lifted_sigs_bytes<a>(c: (&a C)) -> u8[] {
+    if c.lifted_sig_names.len() == 0 {
+        return u8[];
+    }
+    mut out = u8[];
+    iface_wv(&mut out, c.lifted_sig_names.len());
+    for i in c.lifted_sig_names.len() {
+        iface_ws(&mut out, view(c.lifted_sig_names[i]));
+        iface_wv(&mut out, c.lifted_sig_codes[i]);
+    }
+    return out;
+}
+// Reads a signatures record: rendered in phase 0, installed in phase 2 as the declared type of
+// calls to those bodies from this run (a body this run emits keeps its own).
+fn iface_rec_sigs<a>(c: (&a mut C), p: (&a mut IR)) -> unit {
+    n := iface_rv(&mut p);
+    for i in n {
+        sym := iface_rs(&mut p);
+        code := iface_rv(&mut p);
+        if p.phase == 0 {
+            iface_rt_indent(&mut p, view(""));
+            push_bytes(&mut p.rtext, view("signature "));
+            push_bytes(&mut p.rtext, view(sym));
+            p.rtext.push(32);
+            decimal(&mut p.rtext, code / 4);
+            p.rtext.push(32);
+            decimal(&mut p.rtext, code % 4);
+        }
+        if p.phase == 2 {
+            llvm::fact_imported_signature(&mut c.facts, sym.copy(), code);
+        }
+    }
+    return ();
+}
+// The signature code the lowering defined `sym` with, or 0.
+fn lifted_sig_of<a, b>(c: (&a C), sym: &b [u8]) -> u64 {
+    mut lo = 0;
+    mut hi = c.lifted_sig_names.len();
+    while lo < hi {
+        mid := (lo + hi) / 2;
+        if bytes_less(view(c.lifted_sig_names[mid]), sym) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    if (lo < c.lifted_sig_names.len()) && same(view(c.lifted_sig_names[lo]), sym) {
+        return c.lifted_sig_codes[lo];
+    }
+    return 0;
+}
 fn iface_facts_bytes<a, b, d>(c: (&a mut C), m: &b [u8], listed: (&d u64[])) -> u8[] {
     // One entry per symbol, in symbol order: the order a read file's declarations come back in is
     // not the order the source declared them, and the bytes must not depend on either.
@@ -56820,7 +56960,7 @@ fn iface_without_facts<a>(bytes: &a [u8]) -> u8[] {
         if tag == IFACE_TAG_TRAILER {
             break;
         }
-        if tag == IFACE_TAG_FACTS {
+        if (tag == IFACE_TAG_FACTS) || (tag == IFACE_TAG_SIGS) {
             found = 1;
         } else {
             for i in tag_at..at + len {
@@ -56846,11 +56986,17 @@ fn iface_with_facts<a, b>(c: (&a mut C), text: &a [u8], m: &b [u8]) -> u8[] {
     keep := iface_keep(&items);
     listed := iface_listed_fns(&items, &keep);
     facts := iface_facts_bytes(&mut c, view(m), &listed);
-    if facts.len() == 0 {
+    sigs := lifted_sigs_bytes(&c);
+    if (facts.len() == 0) && (sigs.len() == 0) {
         return copy_bytes(view(text));
     }
     mut out = iface_surface(view(text));
-    iface_wrec(&mut out, IFACE_TAG_FACTS, view(facts));
+    if facts.len() != 0 {
+        iface_wrec(&mut out, IFACE_TAG_FACTS, view(facts));
+    }
+    if sigs.len() != 0 {
+        iface_wrec(&mut out, IFACE_TAG_SIGS, view(sigs));
+    }
     head := iface_r_head(view(""), view(text));
     iface_seal_out(&mut out, view(head.digest));
     return out;
@@ -58148,6 +58294,8 @@ fn iface_walk<a>(c: (&a mut C), p: (&a mut IR), home: &a [u8], source_index: u64
             iface_rec_env(&mut c, &mut p, view(home));
         } else if tag == IFACE_TAG_FACTS {
             iface_rec_facts(&mut c, &mut p);
+        } else if tag == IFACE_TAG_SIGS {
+            iface_rec_sigs(&mut c, &mut p);
         }
         iface_rend(&mut p, start);
         p.stop = saved;
@@ -59699,6 +59847,10 @@ fn fx_write_runtime_facts<a>(c: (&a mut C)) -> unit {
         }
         iface_wrec(&mut out, IFACE_TAG_INLINE, view(bodies));
     }
+    sigs := lifted_sigs_bytes(&c);
+    if sigs.len() != 0 {
+        iface_wrec(&mut out, IFACE_TAG_SIGS, view(sigs));
+    }
     iface_seal_out(&mut out, view(""));
     host::mkdir(view(c.iface_emit));
     file := iface_join(view(c.iface_emit), view("runtime"), view(".facts"));
@@ -59745,6 +59897,11 @@ fn fx_read_runtime_facts<a>(c: (&a mut C)) -> unit {
             c.xinl.names.push(name);
             c.xinl.bodies.push(body);
         }
+        iface_rend(&mut p, start);
+    }
+    if (p.at < p.stop) && (data[p.at] == IFACE_TAG_SIGS) {
+        start := iface_rec(&mut p, IFACE_TAG_SIGS);
+        iface_rec_sigs(&mut c, &mut p);
         iface_rend(&mut p, start);
     }
     return ();
@@ -60203,6 +60360,8 @@ pub fn main() -> u64 {
         spell_failed: 0,
         drop_emitted: u8[][],
         xinl: optimize::new_shared(),
+        lifted_sig_names: u8[][],
+        lifted_sig_codes: u64[],
         iface_emit: u8[],
         iface_verify: 0,
         iface_dump: u8[],
@@ -61441,6 +61600,7 @@ pub fn main() -> u64 {
                 host::print(view(lowered.error));
                 return 1;
             }
+            record_lifted_sigs(&mut c, &lowered.sig_names, &lowered.sig_codes);
             mut ir_path = copy_bytes(view(path));
             push_bytes(&mut ir_path, view(".ll"));
             written := host::write_file(view(ir_path), view(with_cpu_level(&mut c, view(lowered.ir))));
@@ -61468,6 +61628,7 @@ pub fn main() -> u64 {
             host::print(view(lowered.error));
             return 1;
         }
+        record_lifted_sigs(&mut c, &lowered.sig_names, &lowered.sig_codes);
         mut ir_path = copy_bytes(view(path));
         push_bytes(&mut ir_path, view(".ll"));
         written := host::write_file(view(ir_path), view(with_cpu_level(&mut c, view(lowered.ir))));
