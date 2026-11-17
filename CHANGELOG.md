@@ -1,5 +1,9 @@
 ## Unreleased
 
+- The optimiser parses each distinct instruction line once per compile and replays the record for
+  its repeats (a label operand is numbered again, the frame-slot bookkeeping redone): byte-identical
+  output, 2.6% fewer instructions for a 4000-function file. The plan for taking the remaining text
+  hops out of the dev backend is docs/design/in-memory-ir.md.
 - **The optimiser's liveness is linear in a function's length.** The register and frame-slot
   liveness behind dead-store removal, prologue zeroing and register colouring looked at every
   candidate slot on every line of every round; each line's effect is now worked out once per pass
