@@ -1,5 +1,11 @@
 ## Unreleased
 
+- Fixed two compiler aborts on malformed input found by the front-end fuzzer: an unmatched `)` or
+  `>` in an `extern` signature (an arithmetic overflow), and a file ending in a `//` comment or a `/`
+  with no newline (an out-of-bounds read). Both are ordinary diagnostics now.
+- `tools/fuzz-frontend.mjs` checks the unmutated source of any refused case whose first error points
+  outside the mutated file, and reports a source that fails as it is as a `baseline` bug: a library
+  that stops checking can no longer pass as a stream of fine refusals.
 - **Writing interfaces no longer costs the square of the declarations.** The interface writer put
   each list of names in order with a selection sort, and looked up every type's inherent methods
   by scanning every function of the program. A stable merge sort and a by-module index of the
