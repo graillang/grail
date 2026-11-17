@@ -113,7 +113,7 @@ than misread.
  source "tests/interfaces/pair.grl"
  sha256 "ad1f2b3cf421decab61ea22f7dfc572fec79a74a3078b3ef330f4e49a94db2d0"
  mode typed_refs=1 default_u64=1 overflow=checked target=x86_64
- abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0 ref record = address record plain = inline plain record = frame
+ abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0 ref record = address record plain = inline plain record = frame args = 6 registers then stack
  unsafe 0
  std 0
  host 0
@@ -541,7 +541,7 @@ are keyed by index rather than written in order, so they cannot desynchronise fr
 and a parameter that gains a default does not change any other parameter's record.
 
 The module record also carries the **ABI line** - `abi dyn pair size = 16 align = 8 word0 = data
-word1 = vtable drop = 0 ref record = address record plain = inline plain record = frame`, one length-counted string holding exactly what
+word1 = vtable drop = 0 ref record = address record plain = inline plain record = frame args = 6 registers then stack`, one length-counted string holding exactly what
 `iface_dyn_abi()` returns. Its last clause says what a reference to a record is (the record's own
 address, docs/design/unboxed-values.md); a stage that changes a layout changes this line.
 A `&dyn I` in a signature or a field crosses a module boundary as a pair, so two modules built for
@@ -1164,6 +1164,38 @@ Consequences, stated rather than discovered:
   `tools/split-test.mjs` compares;
 - the single-file build keeps cross-module inlining only where the optimizer knows no unit
   boundaries; it emits the same markers, so both shapes inline identically.
+
+### Site markers in an inlined copy
+
+A candidate's body may hold the site markers a build with error locations writes for every
+statement (`.gpos`, `.gkind`); any other directive still keeps it from being inlined. The copy keeps
+them, its positions made absolute when it is filed (`ir::absolute_positions`), and `inline_calls`
+writes the caller's last `.gpos` again after each copy, so the caller's code after the call is
+attributed to the caller's statement. The rule for inlined code is therefore: **a failure inside an
+inlined copy reports the line it was written on, in its caller's frame** - the copy is not a frame,
+so the backtrace goes from that line straight to the caller's caller. A synthesised caller with no
+statement of its own (a refined function's checking wrapper, whose `.proved` body is inlined into it)
+is why the copy's own positions are kept: with only the caller's, such a failure had no position at
+all. Inline-site numbers continue per unit across all of its parts, since a unit can stand in the
+stream more than once.
+
+### Inlining across a module boundary
+
+The gate above has one door open: **the runtime**. It is in every program and every compiler run, so
+a small runtime body (`rt_current`, `rt_list_set`, ...) may stand in a call from any unit. A body
+crosses in its *crossing form* (`optimize::export_form`): its own positions are dropped, because a
+`.gposa` names a file of the run that wrote it, so a failure inside a crossed copy reports the
+caller's statement; and a body that names a local label it does not define (a constant, a string)
+does not cross at all. Labels in the copy are renamed per site, as for any copy.
+
+Where the body comes from depends on the build shape, and the bytes do not: a single-run or `--split`
+build has the runtime's bodies in its own stream, and a per-module run of another module reads them
+from `runtime.facts`, where the runtime's own run writes them after optimising as an `inline` record
+(tag 21, after the effect summary). That file's digest is already in the key of every run that reads
+it, so a changed body reruns its dependants exactly as a changed summary does. A function unit's text
+and an optimiser memo entry are taken before the inline pass (`one_body` remembers the optimised body;
+`inline_calls` runs over the whole output afterwards), so neither depends on another module's bodies
+and neither key names them; the object-encoding chunks are keyed on the final text and see the copy.
 
 ### The frame constant, which was a latent miscompile
 

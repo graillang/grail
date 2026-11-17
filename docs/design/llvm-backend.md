@@ -143,6 +143,35 @@ On AArch64 and RISC-V the word machine returns rax:rdx in x9:x2 (t0:a2) while C 
 `NAME`, and IR reaches native functions through `NAME.c`; function addresses always name the
 native-convention entry.
 
+### Signatures, linkage and indirect calls (call ABI S1-S2, docs/design/call-abi.md)
+
+Lifted bodies used to be `define {i64, i64} @f(i64 x 6)`, and every call passed whatever the six
+argument registers held. A register a body never wrote was passed through to its callees, so LLVM
+kept those words alive across every call (fib: rsi, r8 and r9 in three callee-saved registers, five
+pushes per frame), and the second result word made the high half of a `mul` and the callee's
+`%rdx` part of every result. Nearly every lifted function was also external, because the native
+remainder carried its `.type NAME,@function` line and that counted as a use.
+
+- `.type` lines are not uses: a lifted function native code does not call is internal (505 of 590 in
+  a small program, where 1 was before).
+- The front end records a **signature fact** per body (kind 5: argument words, at most six). The
+  lifter defines the body with exactly those parameters, returns `i64` unless a `dyn_result` fact
+  makes the result two words, and passes exactly that many words at every direct call; a native
+  body with a fact is declared the same way. A function whose address is taken (`NAME(%rip)`, a
+  data word) keeps the six-word form, because an indirect call cannot know its target.
+- A wrong fact is caught, not trusted: a body that reads an argument register past its fact before
+  writing it (`sig_prologue`), or a caller that reads `%rdx` after a call the fact says returns
+  one word, drops that fact everywhere and the module is lowered again in the six-word form. Under
+  `--verify-facts` it is a compile error naming the fact. `--forge-signature=SYMBOL:WORDS[:1]` is the
+  test aid that shows both firing (tools/test-facts.mjs).
+- `call *%rax`, the Grail-convention call through a code pointer (closure, vtable slot, function
+  value), is lifted on x86-64 as a six-word call through the pointer. A C call through a `cfn` value
+  is spelled `call *%r11` and stays native with the import thunks, which use the C ABI. AArch64 and
+  RV64 keep indirect calls native: a code pointer names the native-convention entry.
+
+Measured (fib(32), user instructions): 112.8 M before, 74.9 M after, clang -O2 67.1 M. LLVM now emits
+clang's own shape (one recursive call, the other turned into a loop, two pushes).
+
 Stage 2 carries type information into the stream so both backends benefit: inline float
 arithmetic (no `rt_f64_op`), real `f32` values instead of rounded binary64 words, 4-byte
 elements for `f32[]`/`u32[]`/`i32[]`, and pointer-typed loads so LLVM's alias analysis works.

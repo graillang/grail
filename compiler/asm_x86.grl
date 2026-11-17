@@ -3,6 +3,7 @@ use elf;
 use host;
 use machine;
 use asm_a64;
+use asm_rv64;
 
 // The internal x86-64 assembler (docs/design/compile-speed.md, stage 4): the assembly text the
 // compiler writes, in, an ELF relocatable object, out. It reads exactly the subset of AT&T syntax
@@ -34,8 +35,14 @@ const IT_JMP: u64 = 2;
 const IT_ALU: u64 = 3;
 
 pub struct A {
-    // 0 x86-64, 1 AArch64.
+    // 0 x86-64, 1 AArch64, 2 RISC-V 64.
     target: u64,
+    // RISC-V: how many `.Lpcrel_hiN` labels `lla` has made, the current section's mapping state
+    // (`map_state` holds the others' as LLVM's RISC-V streamer files them), and whether the
+    // switch under way is a `.popsection`.
+    pcrel_count: u64,
+    map_live: u64,
+    map_pop: u64,
     // AArch64 mapping symbols: what each section last held ($x code, $d data; 0 nothing yet).
     map_state: u64[],
     // Numeric labels (`1:`, `1f`, `1b`): how many of each digit string were defined.
@@ -57,6 +64,10 @@ pub struct A {
     sym_pos: u64[],
     sym_k: u64[],
     sym_bind: u64[],
+    // ELF visibility (`.hidden` 2, `.protected` 3, `.internal` 1).
+    sym_vis: u64[],
+    // `.comm` sizes.
+    sym_size: u64[],
     sym_type: u64[],
     sym_ref: u64[],
     st_id: u64[],
@@ -335,6 +346,11 @@ fn directives<a>(o: (&a mut A)) {
     def(&mut o, view(".file"), 21);
     def(&mut o, view(".loc"), 22);
     def(&mut o, view(".uleb128"), 23);
+    def(&mut o, view(".option"), 24);
+    def(&mut o, view(".hidden"), 25);
+    def(&mut o, view(".protected"), 26);
+    def(&mut o, view(".internal"), 27);
+    def(&mut o, view(".comm"), 28);
 }
 
 pub fn new() -> A {
@@ -358,6 +374,9 @@ pub fn new() -> A {
     }
     mut o = A {
         target: 0,
+        pcrel_count: 0,
+        map_live: 0,
+        map_pop: 0,
         map_state: u64[],
         num_names: u8[][],
         num_count: u64[],
@@ -374,6 +393,8 @@ pub fn new() -> A {
         sym_pos: u64[],
         sym_k: u64[],
         sym_bind: u64[],
+        sym_vis: u64[],
+        sym_size: u64[],
         sym_type: u64[],
         sym_ref: u64[],
         st_id: st,
@@ -571,6 +592,8 @@ fn new_symbol<a>(o: (&a mut A), a0: u64, e: u64, h: u64) -> u64 {
     o.sym_pos.push(0);
     o.sym_k.push(0);
     o.sym_bind.push(0);
+    o.sym_vis.push(0);
+    o.sym_size.push(0);
     o.sym_type.push(0);
     o.sym_ref.push(0);
     o.sym_seen.push(0);
@@ -626,6 +649,20 @@ fn switch_to<a>(o: (&a mut A), k: u64) {
     }
     // A `.loc` not yet attached to an instruction does not survive a section switch (LLVM's rule).
     o.loc_pending = 0;
+    if o.target == 2 {
+        // LLVM's RISC-V streamer files the state under MCStreamer's "previous section" before it
+        // changes section. A `.popsection` changes section before it pops, so the previous section
+        // is the one the pushed section was entered from - the one being returned to: the
+        // returning section takes the popped one's state (its next instruction gets a fresh $x),
+        // and the popped section's own state is never filed (its next data gets a fresh $d).
+        if o.map_pop != 0 {
+            o.map_state[k] = o.map_live;
+        } else {
+            o.map_state[o.cur] = o.map_live;
+            o.map_live = o.map_state[k];
+        }
+        o.map_pop = 0;
+    }
     old := exchange(&mut o.buf, u8[]);
     exchange(&mut o.sec_data[o.cur], old);
     o.buf = exchange(&mut o.sec_data[k], u8[]);
@@ -675,6 +712,8 @@ fn section<a, b>(o: (&a mut A), s: &b [u8], a0: u64, e: u64, ty: u64, flags: u64
     o.sym_pos.push(0);
     o.sym_k.push(0);
     o.sym_bind.push(0);
+    o.sym_vis.push(0);
+    o.sym_size.push(0);
     o.sym_type.push(3);
     o.sym_ref.push(0);
     o.sym_seen.push(0);
@@ -1034,7 +1073,6 @@ fn data<a>(o: (&a mut A), width: u64) {
 }
 
 fn string<a>(o: (&a mut A), zero: bool) {
-    map_to(&mut o, 2);
     expect(&mut o, '"');
     while (o.at < o.le) && (peek(&o) != '"') {
         mut c = peek(&o);
@@ -1209,7 +1247,9 @@ fn directive<a>(o: (&a mut A), id: u64) {
             return ();
         }
         k := o.stack.pop()!;
+        o.map_pop = 1;
         switch_to(&mut o, k);
+        o.map_pop = 0;
     } else if (id == 7) || (id == 16) {
         n := number(&mut o);
         if id == 7 {
@@ -1222,8 +1262,10 @@ fn directive<a>(o: (&a mut A), id: u64) {
         o.sym_bind[sym] = 2;
         note_attr(&mut o, sym);
     } else if id == 9 {
+        map_to(&mut o, 2);
         string(&mut o, true);
     } else if id == 20 {
+        map_to(&mut o, 2);
         string(&mut o, false);
     } else if id == 10 {
         section_line(&mut o);
@@ -1253,6 +1295,9 @@ fn directive<a>(o: (&a mut A), id: u64) {
         named_section(&mut o, d, 0, d.len());
     } else if id == 17 {
         data(&mut o, 4);
+    } else if (id == 19) && (o.target != 0) {
+        // `.word` is 32 bits on AArch64 and RISC-V, 16 on x86.
+        data(&mut o, 4);
     } else if (id == 18) || (id == 19) {
         data(&mut o, 2);
     } else if id == 21 {
@@ -1280,8 +1325,46 @@ fn directive<a>(o: (&a mut A), id: u64) {
             o.loc_col = number(&mut o);
         }
         o.loc_pending = 1;
+    } else if id == 24 {
+        // `.option norelax` / `.option norvc`: the only RISC-V options the compiler writes, and
+        // what this assembler does anyway.
+        skip(&mut o);
+        a0 := o.at;
+        e := name_end(&mut o);
+        if !at_src(&o, a0, e, view("norelax")) && !at_src(&o, a0, e, view("norvc")) {
+            fail(&mut o, view("unsupported `.option`"));
+        }
+        o.at = e;
+    } else if id == 28 {
+        // `.comm NAME,SIZE,ALIGN`: a common symbol, which the linker allocates.
+        sym := sym_operand(&mut o);
+        expect(&mut o, ',');
+        size := number(&mut o);
+        mut align = 1;
+        skip(&mut o);
+        if peek(&o) == ',' {
+            o.at += 1;
+            align = number(&mut o);
+        }
+        o.sym_sec[sym] = elf::common();
+        o.sym_pos[sym] = align;
+        o.sym_size[sym] = size;
+        o.sym_type[sym] = 1;
+        o.sym_bind[sym] = 1;
+        o.chunk_ok = 0;
+    } else if (id >= 25) && (id <= 27) {
+        sym := sym_operand(&mut o);
+        mut v = 2;
+        if id == 26 {
+            v = 3;
+        } else if id == 27 {
+            v = 1;
+        }
+        o.sym_vis[sym] = v;
+        note_attr(&mut o, sym);
     } else if id == 23 {
         take_loc(&mut o);
+        map_to(&mut o, 2);
         loop {
             n := number(&mut o);
             uleb(&mut o.buf, n);
@@ -1392,7 +1475,7 @@ fn atom_line<a>(o: (&a mut A)) {
 
 fn label<a>(o: (&a mut A), a0: u64, e: u64) {
     mut id = 0;
-    if (o.target == 1) && all_digits(&o, a0, e) {
+    if (o.target != 0) && all_digits(&o, a0, e) {
         id = numeric_def(&mut o, a0, e);
     } else {
         id = symbol(&mut o, a0, e);
@@ -1466,6 +1549,11 @@ fn read_line<a>(o: (&a mut A)) {
         map_to(&mut o, 1);
         o.cacheable = 0;
         asm_a64::instruction(&mut o, o.at, i);
+    } else if o.target == 2 {
+        take_loc(&mut o);
+        map_to(&mut o, 1);
+        o.cacheable = 0;
+        asm_rv64::instruction(&mut o, o.at, i);
     } else {
         if (id < 100) || (id >= 1000) {
             fail(&mut o, view("unsupported instruction"));
@@ -1642,13 +1730,19 @@ pub fn command<a>(args: (&a u8[][])) -> u64 {
         for i in args.len() - 2 {
             rest.push(args[i + 2].copy());
         }
+        mut tgt = 0;
         if at_word(view(args[1]), 0, args[1].len(), view("aarch64")) {
+            tgt = 1;
+        } else if at_word(view(args[1]), 0, args[1].len(), view("riscv64")) {
+            tgt = 2;
+        }
+        if tgt != 0 {
             if rest.len() != 3 {
-                host::print(view("usage: grail asm --target aarch64 IN.s -o OUT.o\n"));
+                host::print(view("usage: grail asm --target aarch64|riscv64 IN.s -o OUT.o\n"));
                 return 2;
             }
             text := host::read_file(view(rest[0]));
-            r := assemble_for(1, text);
+            r := assemble_for(tgt, text);
             if r.error.len() != 0 {
                 mut said = view("grail asm: ").copy();
                 said.append(view(rest[0]));
@@ -1664,7 +1758,7 @@ pub fn command<a>(args: (&a u8[][])) -> u64 {
             return 0;
         }
         if !at_word(view(args[1]), 0, args[1].len(), view("x86_64")) {
-            host::print(view("grail asm: --target is x86_64 or aarch64\n"));
+            host::print(view("grail asm: --target is x86_64, aarch64 or riscv64\n"));
             return 2;
         }
         return command(&rest);
@@ -1800,6 +1894,10 @@ fn run<a>(o: (&a mut A)) -> Result {
         }
         if hit {
             take_loc(&mut o);
+            // Only data lines are remembered on AArch64 and RISC-V: they still mark data.
+            if o.target != 0 {
+                map_to(&mut o, 2);
+            }
             from := o.lc_out[slot];
             o.buf.append(o.lc_pool[from: from + o.lc_olen[slot]]);
             a0 = e + 1;
@@ -1834,6 +1932,9 @@ fn run<a>(o: (&a mut A)) -> Result {
     // Every section's bytes back in its slot.
     last := exchange(&mut o.buf, u8[]);
     exchange(&mut o.sec_data[o.cur], last);
+    if (o.target == 2) && (o.err.len() == 0) {
+        rv_attributes(&mut o);
+    }
     if o.err.len() != 0 {
         return Result { object: u8[], error: o.err.copy(), units: u8[], replayed: 0, encoded: 0 };
     }
@@ -1863,6 +1964,10 @@ fn run<a>(o: (&a mut A)) -> Result {
             a64_fixup(&mut o, &pre, i, &mut r_sec, &mut r_off, &mut r_type, &mut r_sym, &mut r_add);
             continue;
         }
+        if o.target == 2 {
+            rv_fixup(&mut o, i, &mut r_sec, &mut r_off, &mut r_type, &mut r_sym, &mut r_add);
+            continue;
+        }
         sec := o.fx_sec[i];
         mut at = o.fx_pos[i];
         if sec == 0 {
@@ -1882,7 +1987,7 @@ fn run<a>(o: (&a mut A)) -> Result {
             put_le(&mut o.sec_data[sec], at, v, o.fx_width[i]);
             continue;
         }
-        defined := (o.sym_sec[sym] != 0) && (o.sym_sec[sym] != ABS);
+        defined := (o.sym_sec[sym] != 0) && (o.sym_sec[sym] != ABS) && (o.sym_sec[sym] != elf::common());
         local := o.sym_bind[sym] == 0;
         if kind == FX_TPOFF {
             r_sec.push(sec);
@@ -2196,31 +2301,64 @@ fn line_table<a, b, c>(o: (&a mut A), pre: (&b u64[]), r_sec: (&c mut u64[]), r_
     // into the buffer for the switches and out again after.
     keep := o.cur;
     o.buf = exchange(&mut o.sec_data[keep], u8[]);
-    ls := view(".debug_line_str");
-    section(&mut o, ls, 0, ls.len(), 1, 0x30, 1);
-    str_sec := o.cur;
-    o.sec_entsize[str_sec] = 1;
+    // In LLVM's order: .debug_line, then the strings it names.
     l := view(".debug_line");
     section(&mut o, l, 0, l.len(), 1, 0, 1);
+    map_to(&mut o, 2);
     line_sec := o.cur;
+    ls := view(".debug_line_str");
+    section(&mut o, ls, 0, ls.len(), 1, 0x30, 1);
+    map_to(&mut o, 2);
+    str_sec := o.cur;
+    o.sec_entsize[str_sec] = 1;
     switch_to(&mut o, keep);
     back := exchange(&mut o.buf, u8[]);
     exchange(&mut o.sec_data[keep], back);
     o.sec_data[str_sec] = strs;
     o.sec_data[line_sec] = out;
+    // R_X86_64_32 / R_X86_64_64, or AArch64's ABS32 / ABS64.
+    mut t32 = 10;
+    mut t64 = 1;
+    if o.target == 1 {
+        t32 = 258;
+        t64 = 257;
+    } else if o.target == 2 {
+        t32 = 1;
+        t64 = 2;
+    }
     for i in str_fields.len() {
         r_sec.push(line_sec);
         r_off.push(str_fields[i]);
-        r_type.push(10);
+        r_type.push(t32);
         r_sym.push(o.sec_sym[str_sec]);
         r_add.push(str_values[i]);
     }
     if o.ln_pos.len() != 0 {
         r_sec.push(line_sec);
         r_off.push(set_at);
-        r_type.push(1);
-        r_sym.push(o.sec_sym[0]);
-        r_add.push(final_text(pre, o.ln_pos[0], o.ln_k[0]));
+        r_type.push(t64);
+        start := final_text(pre, o.ln_pos[0], o.ln_k[0]);
+        if o.target == 2 {
+            // RISC-V names the sequence's start through the row's own label, LLVM's first unnamed
+            // temporary `.L0 ` (the space keeps it from any name in the text; RISC-V relocations
+            // keep temporaries).
+            name := view(".L0 ").copy();
+            outer := exchange(&mut o.src, name);
+            o.nh_a = 1;
+            o.nh_e = 0;
+            l0 := symbol(&mut o, 0, 4);
+            o.src = outer;
+            o.nh_a = 1;
+            o.nh_e = 0;
+            o.sym_sec[l0] = 1;
+            o.sym_pos[l0] = start;
+            o.sym_k[l0] = 0;
+            r_sym.push(l0);
+            r_add.push(0);
+        } else {
+            r_sym.push(o.sec_sym[0]);
+            r_add.push(start);
+        }
     }
 }
 
@@ -2228,8 +2366,13 @@ fn object<a, b, c>(o: (&a mut A), pre: (&b u64[]), r_sec: (&c u64[]), r_off: (&c
     mut machine = 62;
     if o.target == 1 {
         machine = 183;
+    } else if o.target == 2 {
+        machine = 243;
     }
     mut out = elf::new(machine);
+    if o.target == 2 {
+        out.flags = 4;
+    }
     for k in o.sec_name.len() {
         out.sec_name.push(o.sec_name[k].copy());
         out.sec_type.push(o.sec_type[k]);
@@ -2243,12 +2386,20 @@ fn object<a, b, c>(o: (&a mut A), pre: (&b u64[]), r_sec: (&c u64[]), r_off: (&c
     // appear; a section symbol only when a relocation names it; an undefined symbol only when
     // something refers to it or binds it.
     mut index = u64[];
+    mut named = u64[];
     for id in o.sym_name.len() {
         index.push(0);
+        named.push(0);
+    }
+    // LLVM's RISC-V writer keeps a temporary that a relocation names.
+    if o.target == 2 {
+        for i in r_sym.len() {
+            named[r_sym[i]] = 1;
+        }
     }
     for pass in 2 {
         for id in o.sym_name.len() {
-            if temporary(&o, id) {
+            if temporary(&o, id) && (named[id] == 0) {
                 continue;
             }
             if (o.sym_type[id] == 3) && (o.sym_ref[id] == 0) {
@@ -2267,14 +2418,19 @@ fn object<a, b, c>(o: (&a mut A), pre: (&b u64[]), r_sec: (&c u64[]), r_off: (&c
             }
             mut ty = o.sym_type[id];
             sec := o.sym_sec[id];
-            if (sec != 0) && (sec != ABS) && ((o.sec_flags[sec - 1] & 0x400) != 0) && (ty == 0) {
+            // A symbol in a TLS section is TLS - except RISC-V's mapping symbols, which LLVM leaves
+            // untyped there (AArch64's it types).
+            mapping := (o.target == 2) && (o.sym_name[id].len() > 0) && (o.sym_name[id][0] == '$');
+            if (sec != 0) && (sec != ABS) && (sec != elf::common()) && ((o.sec_flags[sec - 1] & 0x400) != 0) && (ty == 0) && !mapping {
                 ty = 6;
             }
             index[id] = out.sym_name.len() + 1;
             out.sym_name.push(o.sym_name[id].copy());
             out.sym_info.push((bind << 4) | ty);
+            out.sym_other.push(o.sym_vis[id]);
+            out.sym_size.push(o.sym_size[id]);
             out.sym_sec.push(sec);
-            if (sec == 0) || (sec == ABS) {
+            if (sec == 0) || (sec == ABS) || (sec == elf::common()) {
                 out.sym_value.push(o.sym_pos[id]);
             } else {
                 out.sym_value.push(sym_final(&o, pre, id));
@@ -3289,6 +3445,7 @@ fn chunk_finish<a>(o: (&a mut A), at: u64) {
         wv(&mut u, o.sym_slot[sym]);
         wv(&mut u, o.sym_type[sym]);
         wv(&mut u, o.sym_bind[sym]);
+        wv(&mut u, o.sym_vis[sym]);
         i += 1;
     }
     wv(&mut u, o.fx_sec.len() - o.ck_fx);
@@ -3431,6 +3588,8 @@ fn symbol_in<a>(o: (&a mut A), start: u64, end: u64) -> u64 {
     o.sym_pos.push(0);
     o.sym_k.push(0);
     o.sym_bind.push(0);
+    o.sym_vis.push(0);
+    o.sym_size.push(0);
     o.sym_type.push(0);
     o.sym_ref.push(0);
     o.sym_seen.push(0);
@@ -3622,6 +3781,7 @@ fn unit_replay<a>(o: (&a mut A), u: u64) -> bool {
         sym := syms[rv(&o, &mut at, &mut bad)];
         o.sym_type[sym] = rv(&o, &mut at, &mut bad);
         o.sym_bind[sym] = rv(&o, &mut at, &mut bad);
+        o.sym_vis[sym] = rv(&o, &mut at, &mut bad);
     }
     nf := rv(&o, &mut at, &mut bad);
     for i in nf {
@@ -3752,13 +3912,27 @@ fn numeric_def<a>(o: (&a mut A), a0: u64, e: u64) -> u64 {
 
 // A mapping symbol ($x before code, $d before data) when the current section changes what it holds.
 pub fn map_to<a>(o: (&a mut A), kind: u64) {
-    if (o.target != 1) || (o.map_state[o.cur] == kind) {
+    if o.target == 0 {
         return ();
     }
-    o.map_state[o.cur] = kind;
+    if o.target == 2 {
+        if o.map_live == kind {
+            return ();
+        }
+        o.map_live = kind;
+    } else {
+        if o.map_state[o.cur] == kind {
+            return ();
+        }
+        o.map_state[o.cur] = kind;
+    }
     id := o.sym_name.len();
     if kind == 1 {
-        o.sym_name.push(view("$x").copy());
+        mut n = view("$x").copy();
+        if o.target == 2 {
+            n.append(view(asm_rv64::isa()));
+        }
+        o.sym_name.push(n);
     } else {
         o.sym_name.push(view("$d").copy());
     }
@@ -3767,6 +3941,8 @@ pub fn map_to<a>(o: (&a mut A), kind: u64) {
     o.sym_pos.push(pos(&o));
     o.sym_k.push(o.it_pos.len());
     o.sym_bind.push(0);
+    o.sym_vis.push(0);
+    o.sym_size.push(0);
     o.sym_type.push(0);
     o.sym_ref.push(0);
     o.sym_seen.push(0);
@@ -3899,4 +4075,170 @@ fn a64_fixup<a, b, c>(o: (&a mut A), pre: (&b u64[]), i: u64, r_sec: (&c mut u64
         r_sym.push(sym);
         r_add.push(add);
     }
+}
+
+// ---- RISC-V support -----------------------------------------------------------------------------
+
+// A `.Lpcrel_hiN` label at the current position: the auipc of an `lla`, which its addi's
+// relocation names.
+pub fn pcrel_label<a>(o: (&a mut A)) -> u64 {
+    mut name = view(".Lpcrel_hi").copy();
+    num(&mut name, o.pcrel_count);
+    o.pcrel_count += 1;
+    outer := exchange(&mut o.src, name);
+    o.nh_a = 1;
+    o.nh_e = 0;
+    id := symbol(&mut o, 0, o.src.len());
+    o.src = outer;
+    o.nh_a = 1;
+    o.nh_e = 0;
+    o.sym_sec[id] = o.cur + 1;
+    o.sym_pos[id] = pos(&o);
+    o.sym_k[id] = o.it_pos.len();
+    return id;
+}
+
+fn rv_type(kind: u64) -> u64 {
+    if kind == asm_rv64::fx_branch() {
+        return 16;
+    }
+    if kind == asm_rv64::fx_jal() {
+        return 17;
+    }
+    if kind == asm_rv64::fx_call() {
+        return 19;
+    }
+    if kind == asm_rv64::fx_pcrel_hi() {
+        return 23;
+    }
+    if kind == asm_rv64::fx_pcrel_lo() {
+        return 24;
+    }
+    if kind == asm_rv64::fx_tprel_hi() {
+        return 29;
+    }
+    if kind == asm_rv64::fx_tprel_lo() {
+        return 30;
+    }
+    if kind == asm_rv64::fx_tprel_add() {
+        return 32;
+    }
+    if kind == FX_ABS64 {
+        return 2;
+    }
+    if kind == FX_ABS32 {
+        return 1;
+    }
+    return 0;
+}
+
+fn or_word<a>(o: (&a mut A), sec: u64, at: u64, bits: u64) {
+    w := get32(&o.sec_data[sec], at) | (bits & 0xffffffff);
+    put_le(&mut o.sec_data[sec], at, w, 4);
+}
+
+// The hi20 and lo12 parts of a PC-relative distance, as auipc+addi/jalr take them.
+fn rv_hi(delta: u64) -> u64 {
+    return ((wrapping_add(delta, 0x800) >> 12) & 0xfffff) << 12;
+}
+
+fn rv_lo(delta: u64) -> u64 {
+    return delta & 0xfff;
+}
+
+// A RISC-V fixup resolved in place (a label of the same section, local), or a relocation that
+// names the symbol itself: LLVM's RISC-V writer keeps temporaries in relocations rather than
+// rewriting them to section symbols.
+fn rv_fixup<a, c>(o: (&a mut A), i: u64, r_sec: (&c mut u64[]), r_off: (&c mut u64[]), r_type: (&c mut u64[]), r_sym: (&c mut u64[]), r_add: (&c mut u64[])) {
+    sec := o.fx_sec[i];
+    at := o.fx_pos[i];
+    sym := o.fx_sym[i];
+    kind := o.fx_kind[i];
+    add := o.fx_add[i];
+    if kind == FX_DIFF {
+        other := o.fx_sym2[i];
+        v := wrapping_add(wrapping_sub(o.sym_pos[sym], o.sym_pos[other]), add);
+        put_le(&mut o.sec_data[sec], at, v, o.fx_width[i]);
+        return ();
+    }
+    if o.sym_sec[sym] == ABS {
+        put_le(&mut o.sec_data[sec], at, wrapping_add(o.sym_pos[sym], add), o.fx_width[i]);
+        return ();
+    }
+    local := (o.sym_sec[sym] == sec + 1) && (o.sym_bind[sym] == 0);
+    if kind == asm_rv64::fx_pcrel_lo() {
+        // The addi of an lla: its auipc's fixup is the one before it, at sym (the .Lpcrel_hi label).
+        hi := i - 1;
+        hsym := o.fx_sym[hi];
+        if (o.sym_sec[hsym] == sec + 1) && (o.sym_bind[hsym] == 0) {
+            delta := wrapping_sub(wrapping_add(o.sym_pos[hsym], o.fx_add[hi]), o.fx_pos[hi]);
+            or_word(&mut o, sec, at, rv_lo(delta) << 20);
+            return ();
+        }
+    } else if local {
+        delta := wrapping_sub(wrapping_add(o.sym_pos[sym], add), at);
+        if kind == asm_rv64::fx_branch() {
+            // B-type: imm[12|10:5] in bits 31:25, imm[4:1|11] in bits 11:7.
+            b12 := ((delta >> 12) & 1) << 31;
+            b10 := ((delta >> 5) & 0x3f) << 25;
+            b4 := ((delta >> 1) & 15) << 8;
+            b11 := ((delta >> 11) & 1) << 7;
+            b := b12 | b10 | b4 | b11;
+            or_word(&mut o, sec, at, b);
+            return ();
+        }
+        if kind == asm_rv64::fx_jal() {
+            // J-type: imm[20|10:1|11|19:12] in bits 31:12.
+            j20 := ((delta >> 20) & 1) << 31;
+            j10 := ((delta >> 1) & 0x3ff) << 21;
+            j11 := ((delta >> 11) & 1) << 20;
+            j19 := ((delta >> 12) & 0xff) << 12;
+            j := j20 | j10 | j11 | j19;
+            or_word(&mut o, sec, at, j);
+            return ();
+        }
+        if kind == asm_rv64::fx_call() {
+            or_word(&mut o, sec, at, rv_hi(delta));
+            or_word(&mut o, sec, at + 4, rv_lo(delta) << 20);
+            return ();
+        }
+        if kind == asm_rv64::fx_pcrel_hi() {
+            or_word(&mut o, sec, at, rv_hi(delta));
+            return ();
+        }
+    }
+    r_sec.push(sec);
+    r_off.push(at);
+    r_type.push(rv_type(kind));
+    r_sym.push(sym);
+    r_add.push(add);
+    if (kind == asm_rv64::fx_tprel_hi()) || (kind == asm_rv64::fx_tprel_lo()) || (kind == asm_rv64::fx_tprel_add()) {
+        if o.sym_type[sym] == 0 {
+            o.sym_type[sym] = 6;
+        }
+    }
+}
+
+// The RISC-V attributes section LLVM writes for rv64imafd (Tag_RISCV_arch), last.
+fn rv_attributes<a>(o: (&a mut A)) {
+    keep := o.cur;
+    o.buf = exchange(&mut o.sec_data[keep], u8[]);
+    n := view(".riscv.attributes");
+    section(&mut o, n, 0, n.len(), 0x70000003, 0, 1);
+    map_to(&mut o, 2);
+    isa := asm_rv64::isa();
+    // 'A', subsection length, "riscv\0", file tag 1, its length, Tag_RISCV_arch (5) and the string.
+    sub := 4 + 6 + 1 + 4 + 1 + isa.len() + 1;
+    o.buf.push('A');
+    emit_le(&mut o, sub, 4);
+    o.buf.append(view("riscv"));
+    o.buf.push(0);
+    o.buf.push(1);
+    emit_le(&mut o, 4 + 1 + 1 + isa.len() + 1, 4);
+    o.buf.push(5);
+    o.buf.append(view(isa));
+    o.buf.push(0);
+    switch_to(&mut o, keep);
+    back := exchange(&mut o.buf, u8[]);
+    exchange(&mut o.sec_data[keep], back);
 }

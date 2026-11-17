@@ -1,14 +1,13 @@
-// B3 contract: a foreign call blocks the executing task thread. `blocker` calls libc usleep, which
-// blocks its green worker for the whole 120 ms; `spinner` keeps running on another worker and only
-// stops once the blocked task finishes. So the blocking call really did block a worker, another
-// task really did keep running while it was blocked, and the runtime warned once that a blocking
-// foreign call occupies a worker (the diagnostic half of the contract). The three words are plain
-// runtime memory: word 0 = done, word 8 = spinner iterations, word 16 = measured block time.
+// A `blocking` foreign call does not take a worker with it. With one worker, `blocker` calls libc
+// usleep for 120 ms - declared `extern "C" blocking` - and `spinner`, queued behind it on the same
+// single worker, still runs while it sleeps: the worker was given to a spare thread for the call
+// (rt_blocking_enter). Before stage 6 the call held the only worker and the spinner waited for it.
+// The three words are plain runtime memory: word 0 = done, word 8 = spinner iterations while the
+// blocker slept, word 16 = measured block time.
 unsafe module runtime;
 use host;
-extern "C" lib "c" fn usleep(us: u32) -> i32;
+extern "C" blocking lib "c" fn usleep(us: u32) -> i32;
 fn blocker(n: u64, word: u64) -> u64 {
-    rt_blocking_enter();
     started := host::now_ms();
     unsafe {
         usleep(120000);

@@ -3319,5 +3319,147 @@ pub fn lower<a>(input: &a [u8], target: u64, plat: u64) -> u8[] {
         }
     }
     assert(start == input.len());
-    return out.text;
+    return same_moves(view(out.text), isa);
+}
+// ---- moves that move nothing (call ABI S7) ----
+// The word machine's %rax is x9 (t0) and %rdi is x0 (a0), and a move goes through the scratch x10
+// (t1): every call ends in `mov x9,x0`, and a result that becomes an argument or is returned goes
+// back with `mov x10,x9; mov x0,x10`-like pairs. A value number per integer register follows the
+// moves: `mov D,S` gives D the number of S, and is dropped when D already has it. Any other line
+// gives every register it names a fresh number (stores and compares only read, but the pass does
+// not need to know that to be right); a label, branch, call, return or system call forgets all.
+// So it only drops a move between two registers no line in between could have touched.
+fn same_moves<a>(text: &a [u8], isa: u64) -> u8[] {
+    mut mv = "mov ";
+    if isa == 2 {
+        mv = "mv ";
+    }
+    mut val = u64[];
+    for i in 64 {
+        val.push(i + 1);
+    }
+    mut next = 1000;
+    mut out = u8[];
+    mut start = 0;
+    for i in text.len() {
+        if text[i] != 10 {
+            continue;
+        }
+        line := text[start: i];
+        start = i + 1;
+        if starts(view(line), view(mv)) {
+            ops := line[mv.len():];
+            mut comma = 0;
+            while (comma < ops.len()) && (ops[comma] != 44) {
+                comma += 1;
+            }
+            if comma < ops.len() {
+                d := reg_number(view(ops[: comma]), isa);
+                src := reg_number(view(ops[comma + 1:]), isa);
+                // A 32-bit `mov w9,w10` zero-extends: it is not a copy of the 64-bit value.
+                wide := (isa != 1) || ((ops[0] == 120) && (comma + 1 < ops.len()) && (ops[comma + 1] == 120));
+                if (d < 64) && (src < 64) && wide {
+                    if val[d] == val[src] {
+                        continue;
+                    }
+                    val[d] = val[src];
+                    out.append(line);
+                    out.push(10);
+                    continue;
+                }
+            }
+        }
+        if !keeps_values(view(line)) {
+            for r in 64 {
+                val[r] = next;
+                next += 1;
+            }
+        } else {
+            forget_named(view(line), isa, &mut val, &mut next);
+        }
+        out.append(line);
+        out.push(10);
+    }
+    out.append(text[start:]);
+    return out;
+}
+// False for a line after which no register may be assumed: a label, or control that leaves or comes
+// back (branches, calls, returns, system calls).
+fn keeps_values<a>(line: &a [u8]) -> bool {
+    if line.len() == 0 {
+        return true;
+    }
+    if line[line.len() - 1] == 58 {
+        return false;
+    }
+    if line[0] == 46 {
+        // A directive emits no code, unless it is an encoded instruction or data in the text.
+        return !(starts(view(line), view(".inst")) || starts(view(line), view(".word")) || starts(view(line), view(".long")) || starts(view(line), view(".4byte")) || starts(view(line), view(".byte")) || starts(view(line), view(".quad")));
+    }
+    mut sp = 0;
+    while (sp < line.len()) && (line[sp] != 32) {
+        sp += 1;
+    }
+    op := line[: sp];
+    return !((op[0] == 98) || (op[0] == 106) || starts(view(op), view("cb")) || starts(view(op), view("tb")) || eq(view(op), view("ret")) || eq(view(op), view("call")) || eq(view(op), view("tail")) || eq(view(op), view("svc")) || eq(view(op), view("ecall")));
+}
+// Every integer register `line` names gets a fresh value number.
+fn forget_named<a>(line: &a [u8], isa: u64, val: (&mut u64[]), next: (&mut u64)) -> unit {
+    mut i = 0;
+    while i < line.len() {
+        if (i == 0) || !reg_char(line[i - 1]) {
+            mut j = i;
+            while (j < line.len()) && reg_char(line[j]) {
+                j += 1;
+            }
+            if j > i {
+                r := reg_number(view(line[i: j]), isa);
+                if r < 64 {
+                    val[r] = *next;
+                    *next = *next + 1;
+                }
+                i = j;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    return ();
+}
+// The number of an integer register (x0-x30 or w0-w30 on AArch64; x0-x31's ABI names on RV64),
+// 64 for anything else (sp, zero registers, vector registers, symbols).
+fn reg_number<a>(w: &a [u8], isa: u64) -> u64 {
+    if w.len() < 2 {
+        return 64;
+    }
+    if isa == 1 {
+        if (w[0] != 120) && (w[0] != 119) {
+            return 64;
+        }
+        mut n = 0;
+        for k in w.len() - 1 {
+            c := w[1 + k];
+            if (c < 48) || (c > 57) {
+                return 64;
+            }
+            n = n * 10 + c - 48;
+        }
+        if (w.len() > 3) || (n > 30) {
+            return 64;
+        }
+        return n;
+    }
+    names := ["ra", "sp", "gp", "tp", "t0", "t1", "t2", "s0", "s1", "a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "t3", "t4", "t5", "t6"];
+    for k in names.len() {
+        if eq(view(w), view(names[k])) {
+            if (k == 1) || (k == 2) || (k == 3) {
+                return 64;
+            }
+            return k + 1;
+        }
+    }
+    return 64;
+}
+fn reg_char(c: u64) -> bool {
+    return ((c >= 97) && (c <= 122)) || ((c >= 48) && (c <= 57)) || ((c >= 65) && (c <= 90)) || (c == 95);
 }

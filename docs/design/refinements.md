@@ -265,8 +265,8 @@ a proof about the wrong value; and three writes skipped it (`&mut r.n` handed to
 `r.n -= 8`, a closure's or a nested path's write). `--strict-refinements` accepted records that
 violated their own predicates.
 
-**What a field predicate may say.** Its own field, literals, `len()` and the pure tests, and
-nothing else; the field is an integer of any width, a float, or an owned vector (through `len()`).
+**What a field predicate may say.** Fields of its own record (see *Predicates across fields*),
+literals, `len()` and the pure tests, and nothing else; the field is an integer of any width, a float, or an owned vector (through `len()`).
 Anything else is refused at the struct (`ref_field_pred_rules`). Another field, a parameter or a
 global would be read wherever the record is built, which is the bug.
 
@@ -302,14 +302,26 @@ to the path (`pv_field_facts`). A `mut` or `&mut` root gets nothing.
 
 **Cost.** Nothing when no field is refined: every hook stops at `pred.hi == 0`.
 
-### Follow-up: predicates across fields (not built, refused until then)
+### Predicates across fields (2026-11-17)
 
-`struct P { lo: u64, hi: u64 where lo <= hi }`. Sketch: every field name in the predicate is renamed
-to the record's field values - at a literal all of them, after every field is stored; at a direct
-write of any field the predicate mentions, the new value and the other fields read from the
-record - the same renaming a call's arguments get. The no-`&mut` rule extends to every field a
-predicate mentions; a trusted root's reader fact becomes `r.lo <= r.hi`; the interface carries the
-text and the field list.
+`struct P { lo: u64, hi: u64 where lo <= hi }`. A predicate may read any field of its record (an
+integer, a float or a vector's `len()`), and nothing else; a name that is not a field, or a field
+of another type, is refused at the struct (`ref_field_pred_names`).
+
+- **A literal** owes such a predicate once every field has its value (`ref_field_cross`): each field
+  name in it stands for that field's value and its term, the renaming a call's arguments get. A
+  local that happens to be called `lo` is never read.
+- **A write** of any field the predicate reads - `p.lo = v`, `p.lo op= v`, also when the predicate
+  belongs to another field - owes it before the store, over the new value and the other fields as
+  the record holds them. Those have no term (the root is `mut`), so strict mode cannot prove a
+  single-field write and asks for a literal; plain code checks it at run time.
+- **No `&mut`** to any field a predicate reads (`ref_field_refined` asks every predicate of the
+  record), by the same routes as before.
+- **A reader** through a trusted root (a non-`mut` binding or a shared reference) gets every
+  predicate that reads the field, with each field it reads renamed to its path - and only when all
+  of those paths are trusted: `fn span(p: &P)` may pass `p.lo, p.hi` where `x <= y` is owed.
+- **The interface** carries each field's predicate as text and the field list with the record, so
+  an importer renames it the same way.
 
 ## A disproved obligation (2026-11-16)
 
