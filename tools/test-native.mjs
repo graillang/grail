@@ -10,6 +10,7 @@
 // status and signal, the failed assertion), then a stable summary line
 // `passed X failed Y skipped Z`. `--update` rewrites the expectations of the selected cases that
 // differ, and only when it is asked for.
+import { assertNoDuplicateKeys } from './case-keys.mjs';
 import { readFileSync, writeFileSync, mkdirSync, rmSync, readdirSync, existsSync, copyFileSync } from 'node:fs';
 import { join, basename, resolve, dirname } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -735,6 +736,8 @@ try {
   console.error(`test-native: ${error?.message ?? error}`);
   process.exit(2);
 }
+// A repeated key would silently fuse two cases (JSON.parse keeps the last): refuse the file instead.
+assertNoDuplicateKeys(join(root, 'tests/native-cases.json'));
 const cases = JSON.parse(readFileSync(join(root, 'tests/native-cases.json'), 'utf8'));
 // Two cases with one name would run one and silently shadow the other: a clean git merge can add the
 // same case on both sides at different places, which merge-cases never sees.
