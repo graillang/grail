@@ -19,6 +19,12 @@
   out. The table is now static text, the IDCT works in scratch kept between blocks, and pixels go
   straight to the image. A 2048x2048 photo: Grail-LLVM 6.9G -> 1.6G instructions (0.60 -> 0.14 s;
   it was 25.8G before the runtime's division fix), Grail-native 38.6G -> 24.3G.
+- **Release builds optimise across modules (ThinLTO).** A `--release` build of more than one module
+  compiles each module to ThinLTO bitcode and links with ThinLTO, so a small function of one module
+  is inlined into another (LLVM's choice, with the real definition kept where it was). The ThinLTO
+  cache lives in the build store. `bench/hashmap.grl`: 1,235M -> 823M instructions; a one-function
+  edit rebuilds in 0.82 s (cargo --release: 0.65 s). The release compiler is built the same way.
+  Needs `llvm-ar` (or `GRAIL_AR`) beside clang and ld.lld.
 - An effect refusal over a callee the run cannot see (compiling a program to assembly without the
   runtime's sources) names it - "the target is `rt_len`, whose body and effect summary this run does
   not have" - instead of calling it an indirect call.
