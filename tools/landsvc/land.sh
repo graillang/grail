@@ -19,10 +19,10 @@ if [ -z "${existing:-}" ]; then
   req="$svc/requests/$(date -u +%s%N)-${br//\//_}"
   printf '%s\n%s\n' "$br" "$(whoami)@$(pwd)" > "$req"; echo "land: queued $br"
 fi
-res="$svc/results/${br//\//_}.txt"; before=$(wc -l < "$res" 2>/dev/null || echo 0)
+res="$svc/results/${br//\//_}.txt"; before=$(wc -l 2>/dev/null < "$res" || echo 0)
 [ "${2:-}" = "--wait" ] || { echo "land: results in $res and /home/shulgin/grail-land-logs/landings.txt"; exit 0; }
 while :; do
-  n=$(wc -l < "$res" 2>/dev/null || echo 0)
+  n=$(wc -l 2>/dev/null < "$res" || echo 0)
   if [ "$n" -gt "$before" ]; then last=$(tail -1 "$res"); case "$last" in *" train-red "*|*" retry "*) before=$n; continue;; esac; echo "land: $last"; case "$last" in *" LANDED "*|*" already-on-main"*) exit 0;; *) exit 1;; esac; fi
   sleep 20
 done
