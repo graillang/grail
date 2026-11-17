@@ -84,6 +84,13 @@ pub struct Body {
     inl_units: u8[][],
     inl_head: u64[],
     inl_next: u64[],
+    // The small bodies early inlining splices into their callers before they are optimised
+    // (optimize.grl, early_table / early_splice).
+    early: Early,
+    // The two-word values of the copies early inlining spliced into this body, as `build` reads
+    // its own from the facts (front-end slot indices, and their widths).
+    extra_pairs: u64[],
+    extra_widths: u64[],
     // The emission unit the stream is inside: its name and its label prefix, both from the
     // `.grail_part` marker `native.grl` writes. A label is numbered only when it is this unit's.
     unit: u8[],
@@ -1354,6 +1361,27 @@ pub fn reset<a>(o: (&a mut Body)) {
 
 // The empty record, with every table allocated: a caller that needs a body starts here, so a new
 // field is added in one place instead of at every literal.
+// One small body early inlining may splice into a caller (optimize.grl): its symbol, its template
+// (frame operands as plain offsets from its own frame, `@END` where it returns), the unit it is
+// emitted in and that unit's label prefix, the frame bytes it needs, and whether it names a local
+// symbol of its object (a drop helper), which keeps it from crossing a unit.
+pub struct Early {
+    names: u8[][],
+    bodies: u8[][],
+    units: u8[][],
+    prefixes: u8[][],
+    needs: u64[],
+    local: u64[],
+    // Its two-word values (front-end slot indices) and their widths, from its facts: they travel
+    // with the copy, moved by its frame base.
+    pairs: u64[][],
+    widths: u64[][],
+    head: u64[],
+    next: u64[]
+}
+pub fn new_early() -> Early {
+    return Early { names: u8[][], bodies: u8[][], units: u8[][], prefixes: u8[][], needs: u64[], local: u64[], pairs: u64[][], widths: u64[][], head: u64[], next: u64[] };
+}
 pub fn new_body() -> Body {
     return Body {
         ls: u64[],
@@ -1397,6 +1425,9 @@ pub fn new_body() -> Body {
         inl_units: u8[][],
         inl_head: u64[],
         inl_next: u64[],
+        early: new_early(),
+        extra_pairs: u64[],
+        extra_widths: u64[],
         unit: u8[],
         uprefix: u8[],
         marked: 0,
@@ -1652,6 +1683,15 @@ pub fn build<a, b, c, d>(o: (&a mut Body), s: &b [u8], facts: (&c llvm::Facts), 
             k -= 1;
             o.dyn_pairs.push(llvm::fact_slot_at(facts, pairs[k]) + 1);
             mut w = llvm::fact_width(facts, pairs[k]);
+            if w == 0 {
+                w = 2;
+            }
+            o.pair_widths.push(w);
+        }
+        // The two-word values of copies spliced in (optimize.grl, early_copy), moved with their frames.
+        for q in o.extra_pairs.len() {
+            o.dyn_pairs.push(o.extra_pairs[q] + 1);
+            mut w = o.extra_widths[q];
             if w == 0 {
                 w = 2;
             }
