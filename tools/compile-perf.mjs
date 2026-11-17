@@ -57,6 +57,19 @@ for (const [name, text] of Object.entries(programs)) {
 }
 const ratio = figures.syn4000 / figures.syn1000;
 console.log(`syn4000/syn1000 ${ratio.toFixed(2)} (at most ${maxRatio})`);
+// The shipped compiler is the release build (tools/ci.mjs buildTarget): GRAIL_RELEASE_COMPILER names
+// one to measure beside the dev build. Reported only; the baseline stays the dev compiler's.
+const release = process.env.GRAIL_RELEASE_COMPILER;
+if (release && existsSync(release)) {
+  for (const [name, text] of Object.entries(programs)) {
+    const dir = join(work, `release-${name}`);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'main.grl'), text);
+    cpSync(join(template, 'store'), join(dir, 'store'), { recursive: true });
+    const m = measure([release, 'check', 'main.grl'], { cwd: dir, env: { ...process.env, GRAIL_JOBS: '1', GRAIL_CACHE_DIR: join(dir, 'store') } });
+    console.log(`release ${name.padEnd(8)} ${(m.instructions / 1e9).toFixed(3)} G instructions (${(figures[name] / m.instructions).toFixed(2)}x fewer than the dev build)`);
+  }
+}
 
 if (update) {
   const commit = spawnSync('git', ['-C', root, 'rev-parse', '--short=12', 'HEAD'], { encoding: 'utf8' }).stdout.trim() || 'unknown';
