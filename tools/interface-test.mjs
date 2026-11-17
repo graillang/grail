@@ -826,7 +826,9 @@ function proveCorpus() {
     }
     files = [...files, runtime, platform];
     if (test.reject) proveRejected(test.name, files, directory);
-    else if (test.compileOnly) {
+    // A case whose verdict is a wall-clock measurement (`timing`) proves nothing about interfaces when
+    // it runs on a loaded machine, so its builds are compared but not run.
+    else if (test.compileOnly || test.timing) {
       const source = compile(files, join(directory, 'source'));
       assert.equal(source.status, 0, `${test.name}: source build failed\n${source.output}`);
       const ifaces = emit(files, join(directory, 'emit'));
