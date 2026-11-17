@@ -50846,23 +50846,23 @@ fn s256_k() -> u64[] {
         0xc67178f2
     ];
 }
-fn s256_rotr(x: u64, n: u64) -> u64 {
-    return ((x >> n) | (x << (32 - n))) & S256MASK;
-}
-// Compresses the 64-byte block text[at:at+64] into `h`, using `w` as the message schedule.
+// Compresses the 64-byte block text[at:at+64] into `h`, using `w` as the message schedule. Every
+// value is a 32-bit word held in a u64, so a sum of five of them cannot overflow: the additions are
+// wrapping (no check) and masked once, and the rotations are written out rather than called: this
+// runs over every interface a module run loads.
 fn s256_block(h: (&mut u64[]), text: &[u8], at: u64, w: (&mut u64[]), k: (&u64[])) {
     for t in 16 {
         o := at + t * 4;
-        exchange(&mut w[t], (text[o] << 24) | (text[o + 1] << 16) | (text[o + 2] << 8) | text[o + 3]);
+        exchange(&mut w[t], (u64(text[o]) << 24) | (u64(text[o + 1]) << 16) | (u64(text[o + 2]) << 8) | u64(text[o + 3]));
     }
     for t in 16..64 {
         x := w[t - 15];
         y := w[t - 2];
-        s0 := s256_rotr(x, 7) ^ s256_rotr(x, 18) ^ (x >> 3);
-        s1 := s256_rotr(y, 17) ^ s256_rotr(y, 19) ^ (y >> 10);
+        s0 := (((x >> 7) | (x << 25)) ^ ((x >> 18) | (x << 14)) ^ (x >> 3)) & S256MASK;
+        s1 := (((y >> 17) | (y << 15)) ^ ((y >> 19) | (y << 13)) ^ (y >> 10)) & S256MASK;
         // stays: the written place is indexed (`&mut w[t]`), and two-phase defers only a plain
         // `&mut path`, so the value's reads of `w` are part of taking the place.
-        packed := w[t - 16] + s0 + w[t - 7] + s1;
+        packed := wrapping_add(wrapping_add(w[t - 16], s0), wrapping_add(w[t - 7], s1));
         exchange(&mut w[t], packed & S256MASK);
     }
     mut a: u64 = h[0];
@@ -50874,19 +50874,19 @@ fn s256_block(h: (&mut u64[]), text: &[u8], at: u64, w: (&mut u64[]), k: (&u64[]
     mut g: u64 = h[6];
     mut i: u64 = h[7];
     for t in 64 {
-        s1 := s256_rotr(e, 6) ^ s256_rotr(e, 11) ^ s256_rotr(e, 25);
+        s1 := (((e >> 6) | (e << 26)) ^ ((e >> 11) | (e << 21)) ^ ((e >> 25) | (e << 7))) & S256MASK;
         ch := (e & f) ^ ((e ^ S256MASK) & g);
-        t1 := i + s1 + ch + k[t] + w[t];
-        s0 := s256_rotr(a, 2) ^ s256_rotr(a, 13) ^ s256_rotr(a, 22);
+        t1 := wrapping_add(wrapping_add(wrapping_add(i, s1), wrapping_add(ch, k[t])), w[t]);
+        s0 := (((a >> 2) | (a << 30)) ^ ((a >> 13) | (a << 19)) ^ ((a >> 22) | (a << 10))) & S256MASK;
         maj := (a & b) ^ (a & c) ^ (b & c);
         i = g;
         g = f;
         f = e;
-        e = (d + t1) & S256MASK;
+        e = wrapping_add(d, t1) & S256MASK;
         d = c;
         c = b;
         b = a;
-        a = (t1 + s0 + maj) & S256MASK;
+        a = wrapping_add(wrapping_add(t1, s0), maj) & S256MASK;
     }
     h0 := (h[0] + a) & S256MASK;
     h1 := (h[1] + b) & S256MASK;
