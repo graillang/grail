@@ -1040,43 +1040,53 @@ fn rt_alloc_shared(n: u64) -> u64 {
         tp := raw_tp_get();
         if tp != 0 {
             // The thread's own cache (docs/design/allocator.md): no lock and no atomic from here
-            // to the return unless the bin is empty.
-            mut c = raw_load(tp + 64);
+            // to the return unless the bin is empty. Addresses inside the cache page and the
+            // thread's arenas: the arithmetic wraps rather than checks, as on the one-thread path.
+            mut c = raw_load(wrapping_add(tp, 64));
             if c == 0 {
                 c = rt_cache_make(tp);
             }
-            mut size = 32;
-            mut bin = 0;
-            while size < n + 16 {
-                size = size * 2;
-                bin = bin + 1;
-            }
-            slot := c + 64 + bin * 48;
+            bin := rt_alloc_bin(n);
+            size := 32 << bin;
+            slot := wrapping_add(wrapping_add(c, 64), wrapping_mul(bin, 48));
             while true {
                 block := raw_load(slot);
                 if block != 0 {
                     // A freed block: its state word is the list link. Clear what was asked for.
-                    raw_store(slot, raw_load(block + 8));
-                    raw_store(slot + 8, raw_load(slot + 8) - 1);
-                    raw_store(block + 8, 1);
-                    mut i = 0;
-                    while i < n {
-                        raw_store(block + 16 + i, 0);
-                        i = i + 8;
+                    raw_store(slot, raw_load(wrapping_add(block, 8)));
+                    raw_store(wrapping_add(slot, 8), wrapping_sub(raw_load(wrapping_add(slot, 8)), 1));
+                    raw_store(wrapping_add(block, 8), 1);
+                    ptr := wrapping_add(block, 16);
+                    if bin == 0 {
+                        raw_store(ptr, 0);
+                        raw_store(wrapping_add(ptr, 8), 0);
+                    } else if bin == 1 {
+                        raw_store(ptr, 0);
+                        raw_store(wrapping_add(ptr, 8), 0);
+                        raw_store(wrapping_add(ptr, 16), 0);
+                        raw_store(wrapping_add(ptr, 24), 0);
+                        raw_store(wrapping_add(ptr, 32), 0);
+                        raw_store(wrapping_add(ptr, 40), 0);
+                    } else {
+                        mut i = 0;
+                        while i < n {
+                            raw_store(wrapping_add(ptr, i), 0);
+                            i = wrapping_add(i, 8);
+                        }
                     }
-                    raw_store(c + 8, wrapping_add(raw_load(c + 8), 1));
-                    return block + 16;
+                    raw_store(wrapping_add(c, 8), wrapping_add(raw_load(wrapping_add(c, 8)), 1));
+                    return ptr;
                 }
-                left := raw_load(slot + 24);
+                left := raw_load(wrapping_add(slot, 24));
                 if left != 0 {
                     // A block of the thread's reserved run: never used, so already zero.
-                    fresh := raw_load(slot + 16);
-                    raw_store(slot + 16, fresh + size);
-                    raw_store(slot + 24, left - 1);
+                    fresh := raw_load(wrapping_add(slot, 16));
+                    raw_store(wrapping_add(slot, 16), wrapping_add(fresh, size));
+                    raw_store(wrapping_add(slot, 24), wrapping_sub(left, 1));
                     raw_store(fresh, size);
-                    raw_store(fresh + 8, 1);
-                    raw_store(c + 8, wrapping_add(raw_load(c + 8), 1));
-                    return fresh + 16;
+                    raw_store(wrapping_add(fresh, 8), 1);
+                    raw_store(wrapping_add(c, 8), wrapping_add(raw_load(wrapping_add(c, 8)), 1));
+                    return wrapping_add(fresh, 16);
                 }
                 rt_cache_refill(slot, bin, size);
             }
@@ -1118,38 +1128,34 @@ fn rt_free_shared(p: u64) -> u64 {
     if p == 0 {
         return 0;
     }
-    block := p - 16;
-    if raw_load(block + 8) == 2 {
+    block := wrapping_sub(p, 16);
+    st := raw_load(wrapping_add(block, 8));
+    if st == 2 {
         return 0;
     }
     // A block on any free list carries a link here (0 or an aligned address), so a second free of
     // it stops the program exactly as it does on the shared path.
-    if raw_load(block + 8) != 1 {
+    if st != 1 {
         rt_abort();
     }
     size := raw_load(block);
     if size < 262145 {
         tp := raw_tp_get();
         if tp != 0 {
-            mut c = raw_load(tp + 64);
+            mut c = raw_load(wrapping_add(tp, 64));
             if c == 0 {
                 c = rt_cache_for_free(tp);
             }
             if c != 0 {
                 // Whichever thread allocated the block, it joins the cache of the thread freeing it.
-                mut k = 32;
-                mut bin = 0;
-                while k < size {
-                    k = k * 2;
-                    bin = bin + 1;
-                }
-                slot := c + 64 + bin * 48;
-                raw_store(block + 8, raw_load(slot));
+                bin := rt_block_bin(size);
+                slot := wrapping_add(wrapping_add(c, 64), wrapping_mul(bin, 48));
+                raw_store(wrapping_add(block, 8), raw_load(slot));
                 raw_store(slot, block);
-                count := raw_load(slot + 8) + 1;
-                raw_store(slot + 8, count);
-                raw_store(c + 8, wrapping_sub(raw_load(c + 8), 1));
-                if raw_load(slot + 40) < count {
+                count := wrapping_add(raw_load(wrapping_add(slot, 8)), 1);
+                raw_store(wrapping_add(slot, 8), count);
+                raw_store(wrapping_add(c, 8), wrapping_sub(raw_load(wrapping_add(c, 8)), 1));
+                if raw_load(wrapping_add(slot, 40)) < count {
                     rt_cache_spill(slot, bin);
                 }
                 return 0;
@@ -2784,11 +2790,13 @@ fn raw_atomic_swap(p: u64, value: u64) -> u64 {
 // own record and nothing is allocated to wait: a task's is the tail of its record (rt_task_record_
 // size), a thread's hangs off thread-record word 96 (the main thread's is in process state, rt_main_waiter).
 //
-// Waiter block, 7 words:
+// Waiter block, 7 words and held slots:
 //   0 next in the queue   8 state (0 waiting, 1 woken, 2 granted what it waited for)
 //   16 what it asked for (a primitive's own use)   24 the queue's last block (kept in the head)
 //   32 HELD LIST: the locks this execution holds, newest first (rt_held_settle)
-//   40 the task record this block belongs to, 0 for a thread   48 unused
+//   40 the task record this block belongs to, 0 for a thread   48 how many held slots follow
+//   56.. held slots of 48 bytes (rt_held_node): a read lock, permits or a Once costs no allocation
+//   until an execution holds more of them than it has slots.
 //
 // A queue is one word in the primitive: the low four bits are the primitive's flags - bit 1 is the
 // queue's own lock - and the rest is the first waiter block (blocks are 16-byte aligned).
@@ -2812,9 +2820,17 @@ fn raw_atomic_swap(p: u64, value: u64) -> u64 {
 fn rt_main_waiter() -> u64 {
     return (raw_state() + 1935) & 18446744073709551600;
 }
+// The main thread's block has room for one held slot (1920..2048).
+fn rt_main_waiter_ready() -> u64 {
+    b := rt_main_waiter();
+    raw_store(b + 48, 1);
+    return b;
+}
 fn rt_task_record_size() -> u64 {
-    // 240 bytes of task record and the waiter block, a multiple of 16.
-    return 304;
+    // 240 bytes of task record and the waiter block (56 bytes and four held slots of 48): 488,
+    // rounded to 16, because a runner record is carved right after the last and a waiter block's
+    // address shares its queue word with four flag bits.
+    return 496;
 }
 // The current execution's waiter block, or 0 for a thread that has none yet. Never allocates.
 fn rt_waiter_peek() -> u64 {
@@ -2832,18 +2848,20 @@ fn rt_waiter() -> u64 {
     t := rt_current();
     if t != 0 {
         raw_store(t + 280, t);
+        raw_store(t + 288, 4);
         return t + 240;
     }
     tp := raw_tp_get();
     if tp == 0 {
-        return rt_main_waiter();
+        return rt_main_waiter_ready();
     }
     mut b = raw_load(tp + 96);
     if b == 0 {
         if tp == raw_state() + 128 {
-            b = rt_main_waiter();
+            b = rt_main_waiter_ready();
         } else {
-            b = rt_alloc(56);
+            b = rt_alloc(248);
+            raw_store(b + 48, 4);
         }
         raw_store(tp + 96, b);
     }
@@ -3219,28 +3237,72 @@ fn rt_mutex_release(p: u64) -> u64 {
 // Held-list entries are linked through word 16 and say what they are in word 32: a mutex block is
 // its own entry (kind 1); everything else is a 48-byte node {0 the object, 8 a count, 16 next,
 // 32 kind}: 2 semaphore permits, 3 a read lock, 4 a write lock, 5 a Once being initialised.
+// The current execution's waiter block, from the thread pointer, when it is ready (a task's slot
+// count is set, a thread has one); otherwise rt_waiter makes it ready.
+fn rt_block_fast() -> u64 {
+    tp := raw_tp_get();
+    if tp != 0 {
+        t := raw_load(wrapping_add(tp, 16));
+        if t != 0 {
+            b := wrapping_add(t, 240);
+            if raw_load(wrapping_add(b, 48)) != 0 {
+                return b;
+            }
+            return rt_waiter();
+        }
+        b := raw_load(wrapping_add(tp, 96));
+        if b != 0 {
+            return b;
+        }
+    }
+    return rt_waiter();
+}
 fn rt_held_push(p: u64) -> u64 {
-    b := rt_waiter();
+    b := rt_block_fast();
     raw_store(p + 16, raw_load(b + 32));
     raw_store(b + 32, p);
     return 0;
 }
 fn rt_held_node(object: u64, count: u64, kind: u64) -> u64 {
-    n := rt_alloc(48);
+    b := rt_block_fast();
+    slots := raw_load(wrapping_add(b, 48));
+    mut n = 0;
+    mut i = 0;
+    while i < slots {
+        at := wrapping_add(wrapping_add(b, 56), wrapping_mul(i, 48));
+        if raw_load(wrapping_add(at, 32)) == 0 {
+            n = at;
+            break;
+        }
+        i = wrapping_add(i, 1);
+    }
+    if n == 0 {
+        n = rt_alloc(48);
+    }
     raw_store(n, object);
-    raw_store(n + 8, count);
-    raw_store(n + 32, kind);
-    rt_held_push(n);
+    raw_store(wrapping_add(n, 8), count);
+    raw_store(wrapping_add(n, 32), kind);
+    raw_store(wrapping_add(n, 16), raw_load(wrapping_add(b, 32)));
+    raw_store(wrapping_add(b, 32), n);
     return n;
+}
+// A held node goes back: a slot is marked free, an allocated node freed.
+fn rt_held_free(b: u64, e: u64) -> u64 {
+    first := wrapping_add(b, 56);
+    if (e < first) | (wrapping_add(first, wrapping_mul(raw_load(wrapping_add(b, 48)), 48)) < wrapping_add(e, 1)) {
+        return rt_free(e);
+    }
+    raw_store(wrapping_add(e, 32), 0);
+    return 0;
 }
 // Take entry `e` off the current execution's list.
 fn rt_held_pop(e: u64) -> u64 {
-    b := rt_waiter_peek();
-    if b == 0 {
-        rt_abort();
-    }
-    if raw_load(b + 32) == e {
-        raw_store(b + 32, raw_load(e + 16));
+    return rt_held_unlink(rt_block_fast(), e);
+}
+// Take `e` off block `b`'s list; callback-scoped holds make it the head almost always.
+fn rt_held_unlink(b: u64, e: u64) -> u64 {
+    if raw_load(wrapping_add(b, 32)) == e {
+        raw_store(wrapping_add(b, 32), raw_load(wrapping_add(e, 16)));
         return 0;
     }
     mut at = raw_load(b + 32);
@@ -3256,13 +3318,13 @@ fn rt_held_pop(e: u64) -> u64 {
 }
 // The newest node of `kind` on `object`, taken off the list and freed; its count is the answer.
 fn rt_held_drop(object: u64, kind: u64) -> u64 {
-    b := rt_waiter_peek();
-    mut at = raw_load(b + 32);
+    b := rt_block_fast();
+    mut at = raw_load(wrapping_add(b, 32));
     while at != 0 {
-        if (raw_load(at + 32) == kind) & (raw_load(at) == object) {
-            n := raw_load(at + 8);
-            rt_held_pop(at);
-            rt_free(at);
+        if (raw_load(wrapping_add(at, 32)) == kind) & (raw_load(at) == object) {
+            n := raw_load(wrapping_add(at, 8));
+            rt_held_unlink(b, at);
+            rt_held_free(b, at);
             return n;
         }
         at = raw_load(at + 16);
@@ -3311,7 +3373,7 @@ fn rt_held_settle(b: u64, site: u64) -> u64 {
             if kind == 5 {
                 rt_once_reset(object);
             }
-            rt_free(e);
+            rt_held_free(b, e);
         }
     }
     return 0;
@@ -3460,32 +3522,79 @@ fn rt_wait_answer(r: u64, flags: u64) -> u64 {
 }
 
 // ---- RwLock<T> (lib/sync.grl) -----------------------------------------------------------------
-// Block: 0 queue word (bit 2 poisoned, bit 3 a writer holds it), 8 readers holding it, 16 writers
-// waiting, 24 the poisoning statement, 32 the payload. Writer-preferring: a reader that arrives
+// Block: 0 queue word (bit 2 poisoned), 8 STATE: bit 0 a writer holds it, bit 1 someone is queued
+// or a writer waits (the fast paths step aside), the rest four times the readers holding it;
+// 16 writers waiting (queue lock held), 24 the poisoning statement, 32 the payload.
+// Uncontended read and write locks and unlocks are one atomic operation on the state word; the
+// queue lock is taken only when bit 1 is or must be set. Writer-preferring: a reader that arrives
 // while a writer waits queues behind it, so a frame's writer is not starved by a stream of
 // readers. A queued block's request word is 1 for a reader, 2 for a writer.
-fn rt_rw_dispatch(l: u64) -> u64 {
-    if (raw_atomic_load(l) & 8) != 0 {
-        return 0;
+fn rt_rw_try_read(l: u64) -> u64 {
+    st := wrapping_add(l, 8);
+    mut s = raw_atomic_load(st);
+    while (s & 3) == 0 {
+        seen := raw_atomic_cas(st, s, wrapping_add(s, 4));
+        if seen == s {
+            return 1;
+        }
+        s = seen;
     }
+    return 0;
+}
+fn rt_rw_try_write(l: u64) -> u64 {
+    return raw_atomic_cas(wrapping_add(l, 8), 0, 1) == 0;
+}
+// Atomically clear or set bits of a word; the answer is the word before.
+fn rt_word_and(p: u64, mask: u64) -> u64 {
+    mut old = raw_atomic_load(p);
+    while true {
+        seen := raw_atomic_cas(p, old, old & mask);
+        if seen == old {
+            return old;
+        }
+        old = seen;
+    }
+    return old;
+}
+fn rt_word_or(p: u64, bits: u64) -> u64 {
+    mut old = raw_atomic_load(p);
+    while true {
+        seen := raw_atomic_cas(p, old, old | bits);
+        if seen == old {
+            return old;
+        }
+        old = seen;
+    }
+    return old;
+}
+// Queue lock held: grant what the head of the queue can have, and clear bit 1 when nobody is left.
+fn rt_rw_dispatch(l: u64) -> u64 {
+    st := l + 8;
     while true {
         h := rt_q_head(l);
         if h == 0 {
+            break;
+        }
+        s := raw_atomic_load(st);
+        if (s & 1) != 0 {
             return 0;
         }
         if raw_load(h + 16) == 2 {
-            if raw_load(l + 8) != 0 {
+            if 3 < s {
                 return 0;
             }
             rt_q_pop(l);
-            rt_q_flags(l, 0, 8);
             raw_store(l + 16, raw_load(l + 16) - 1);
+            raw_atomic_fetch_add(st, 1);
             rt_unpark(h, 2);
-            return 0;
+            break;
         }
         rt_q_pop(l);
-        raw_store(l + 8, raw_load(l + 8) + 1);
+        raw_atomic_fetch_add(st, 4);
         rt_unpark(h, 2);
+    }
+    if (rt_q_head(l) == 0) & (raw_load(l + 16) == 0) {
+        rt_word_and(st, 18446744073709551613);
     }
     return 0;
 }
@@ -3506,42 +3615,60 @@ fn rt_rw_poisoned(l: u64) -> u64 {
 }
 // mode 1 read, 2 write; flags as rt_park_until's, plus 4: ignore poison (recover_write).
 fn f_host_rw_lock(l: u64, mode: u64, until: u64, flags: u64) -> u64 {
-    rt_q_lock(l);
-    w := raw_atomic_load(l);
-    mut free = 0;
-    if mode == 1 {
-        free = ((w & 8) == 0) & (raw_load(l + 16) == 0);
-        if free {
-            raw_store(l + 8, raw_load(l + 8) + 1);
+    mut got = 0;
+    // Most holds are shorter than a park and a wake: try the fast path for a while first, the
+    // way the mutex does (rt_mutex_acquire).
+    mut spin = 0;
+    while (got == 0) & (spin < 100) {
+        if mode == 1 {
+            got = rt_rw_try_read(l);
+        } else {
+            got = rt_rw_try_write(l);
         }
-    } else {
-        free = ((w & 8) == 0) & (raw_load(l + 8) == 0);
-        if free {
-            rt_q_flags(l, 0, 8);
-        }
+        spin = spin + 1;
     }
-    if free == 0 {
-        b := rt_waiter();
-        raw_atomic_store(b + 8, 0);
-        raw_store(b + 16, mode);
-        if mode == 2 {
-            raw_store(l + 16, raw_load(l + 16) + 1);
+    if got == 0 {
+        st := l + 8;
+        rt_q_lock(l);
+        // Step the fast paths aside first, then look: an unlock that came before this sees bit 1
+        // and dispatches, one that came after left a state this sees.
+        rt_word_or(st, 2);
+        s := raw_atomic_load(st);
+        if mode == 1 {
+            if ((s & 1) == 0) & (raw_load(l + 16) == 0) & (rt_q_head(l) == 0) {
+                raw_atomic_fetch_add(st, 4);
+                got = 1;
+            }
+        } else {
+            if (s < 4) & ((s & 1) == 0) & (rt_q_head(l) == 0) {
+                raw_atomic_fetch_add(st, 1);
+                got = 1;
+            }
         }
-        rt_q_push(l, b);
-        rt_q_unlock(l);
-        r := rt_park_until(b, l, until, flags & 1);
-        if r != 2 {
+        if got {
+            rt_rw_dispatch(l);
+            rt_q_unlock(l);
+        } else {
+            b := rt_waiter();
+            raw_atomic_store(b + 8, 0);
+            raw_store(b + 16, mode);
             if mode == 2 {
+                raw_store(l + 16, raw_load(l + 16) + 1);
+            }
+            rt_q_push(l, b);
+            rt_q_unlock(l);
+            r := rt_park_until(b, l, until, flags & 1);
+            if r != 2 {
                 rt_q_lock(l);
-                raw_store(l + 16, raw_load(l + 16) - 1);
-                // Readers queued behind this writer may go now.
+                if mode == 2 {
+                    raw_store(l + 16, raw_load(l + 16) - 1);
+                }
+                // Readers queued behind this writer may go now; bit 1 clears if nobody is left.
                 rt_rw_dispatch(l);
                 rt_q_unlock(l);
+                return rt_wait_answer(r, flags);
             }
-            return rt_wait_answer(r, flags);
         }
-    } else {
-        rt_q_unlock(l);
     }
     if ((raw_atomic_load(l) & 4) != 0) & ((flags & 4) == 0) & (mode == 2) {
         rt_rw_unlock_write(l);
@@ -3555,22 +3682,13 @@ fn f_host_rw_lock(l: u64, mode: u64, until: u64, flags: u64) -> u64 {
     return 0;
 }
 fn f_host_rw_try(l: u64, mode: u64) -> u64 {
-    rt_q_lock(l);
-    w := raw_atomic_load(l);
-    mut free = 0;
+    mut got = 0;
     if mode == 1 {
-        free = ((w & 8) == 0) & (raw_load(l + 16) == 0);
-        if free {
-            raw_store(l + 8, raw_load(l + 8) + 1);
-        }
+        got = rt_rw_try_read(l);
     } else {
-        free = ((w & 8) == 0) & (raw_load(l + 8) == 0);
-        if free {
-            rt_q_flags(l, 0, 8);
-        }
+        got = rt_rw_try_write(l);
     }
-    rt_q_unlock(l);
-    if free == 0 {
+    if got == 0 {
         return 0;
     }
     if (raw_atomic_load(l) & 4) != 0 {
@@ -3585,15 +3703,21 @@ fn f_host_rw_try(l: u64, mode: u64) -> u64 {
     return 1;
 }
 fn rt_rw_unlock_read(l: u64) -> u64 {
-    rt_q_lock(l);
-    raw_store(l + 8, raw_load(l + 8) - 1);
-    rt_rw_dispatch(l);
-    rt_q_unlock(l);
+    old := raw_atomic_fetch_sub(wrapping_add(l, 8), 4);
+    // The last reader out, with someone queued: a writer may go.
+    if ((old & 2) != 0) & (old < 8) {
+        rt_q_lock(l);
+        rt_rw_dispatch(l);
+        rt_q_unlock(l);
+    }
     return 0;
 }
 fn rt_rw_unlock_write(l: u64) -> u64 {
+    if raw_atomic_cas(wrapping_add(l, 8), 1, 0) == 1 {
+        return 0;
+    }
     rt_q_lock(l);
-    rt_q_flags(l, 8, 0);
+    rt_word_and(l + 8, 18446744073709551614);
     rt_rw_dispatch(l);
     rt_q_unlock(l);
     return 0;
@@ -3616,43 +3740,79 @@ fn f_host_rw_poisoned(l: u64) -> u64 {
 }
 
 // ---- Semaphore (lib/sync.grl) -------------------------------------------------------------------
-// Block: 0 queue word, 8 permits available. FIFO: a request that fits is still refused while
-// others queue, so a large request is not starved. Permits are returned when their holder fails.
-fn rt_sem_release(m: u64, n: u64) -> u64 {
-    rt_q_lock(m);
-    raw_store(m + 8, raw_load(m + 8) + n);
+// Block: 0 queue word, 8 permits available (changed only atomically). With nobody queued, acquire
+// and release are one compare-and-swap or add on the permit word. Otherwise FIFO: a request that
+// fits is still refused while others queue, so a large request is not starved. Permits are
+// returned when their holder fails.
+// Queue lock held: grant the head while its request fits.
+fn rt_sem_dispatch(m: u64) -> u64 {
     while true {
         h := rt_q_head(m);
         if h == 0 {
-            break;
+            return 0;
         }
         want := raw_load(h + 16);
-        if raw_load(m + 8) < want {
-            break;
+        have := raw_atomic_load(m + 8);
+        if have < want {
+            return 0;
         }
-        rt_q_pop(m);
-        raw_store(m + 8, raw_load(m + 8) - want);
-        rt_unpark(h, 2);
+        if raw_atomic_cas(m + 8, have, have - want) == have {
+            rt_q_pop(m);
+            rt_unpark(h, 2);
+        }
     }
-    rt_q_unlock(m);
+    return 0;
+}
+fn rt_sem_release(m: u64, n: u64) -> u64 {
+    raw_atomic_fetch_add(wrapping_add(m, 8), n);
+    // A waiter links itself and then looks at the permits, both under the queue lock; this adds
+    // and then looks for waiters - one of the two sees the other.
+    if rt_q_head(m) != 0 {
+        rt_q_lock(m);
+        rt_sem_dispatch(m);
+        rt_q_unlock(m);
+    }
+    return 0;
+}
+fn rt_sem_take(m: u64, n: u64) -> u64 {
+    if rt_q_head(m) != 0 {
+        return 0;
+    }
+    st := wrapping_add(m, 8);
+    mut have = raw_atomic_load(st);
+    while (have < n) == 0 {
+        seen := raw_atomic_cas(st, have, have - n);
+        if seen == have {
+            return 1;
+        }
+        have = seen;
+    }
     return 0;
 }
 // 0 with `n` permits held (the answer's node is on the held list: rt_sem_node), 3, 4.
 fn f_host_sem_acquire(m: u64, n: u64, until: u64, flags: u64) -> u64 {
-    rt_q_lock(m);
-    if (rt_q_head(m) == 0) & ((raw_load(m + 8) < n) == 0) {
-        raw_store(m + 8, raw_load(m + 8) - n);
-        rt_q_unlock(m);
-    } else {
+    mut got = 0;
+    mut spin = 0;
+    while (got == 0) & (spin < 100) {
+        got = rt_sem_take(m, n);
+        spin = spin + 1;
+    }
+    if got == 0 {
         b := rt_waiter();
+        rt_q_lock(m);
         raw_atomic_store(b + 8, 0);
         raw_store(b + 16, n);
         rt_q_push(m, b);
+        // Linked first, then a look at the permits (rt_sem_release); if this block is at the head
+        // and fits, it is granted here and does not sleep.
+        rt_sem_dispatch(m);
         rt_q_unlock(m);
         r := rt_park_until(b, m, until, flags & 1);
         if r != 2 {
             // A withdrawn head may have been what held the others back.
-            rt_sem_release(m, 0);
+            rt_q_lock(m);
+            rt_sem_dispatch(m);
+            rt_q_unlock(m);
             return rt_wait_answer(r, flags);
         }
     }
@@ -3661,32 +3821,29 @@ fn f_host_sem_acquire(m: u64, n: u64, until: u64, flags: u64) -> u64 {
 }
 // The node of the permits the last acquire on this execution took (a Permit keeps it).
 fn f_host_sem_node(m: u64) -> u64 {
-    b := rt_waiter_peek();
-    mut at = raw_load(b + 32);
+    b := rt_block_fast();
+    mut at = raw_load(wrapping_add(b, 32));
     while at != 0 {
-        if (raw_load(at + 32) == 2) & (raw_load(at) == m) {
+        if (raw_load(wrapping_add(at, 32)) == 2) & (raw_load(at) == m) {
             return at;
         }
-        at = raw_load(at + 16);
+        at = raw_load(wrapping_add(at, 16));
     }
     return 0;
 }
 fn f_host_sem_try(m: u64, n: u64) -> u64 {
-    rt_q_lock(m);
-    if (rt_q_head(m) == 0) & ((raw_load(m + 8) < n) == 0) {
-        raw_store(m + 8, raw_load(m + 8) - n);
-        rt_q_unlock(m);
+    if rt_sem_take(m, n) {
         return rt_held_node(m, n, 2);
     }
-    rt_q_unlock(m);
     return 0;
 }
 // Give back the permits of node `e` (a Permit's drop, or the end of acquire_with).
 fn f_host_sem_give(e: u64) -> u64 {
     m := raw_load(e);
-    n := raw_load(e + 8);
-    rt_held_pop(e);
-    rt_free(e);
+    n := raw_load(wrapping_add(e, 8));
+    b := rt_block_fast();
+    rt_held_unlink(b, e);
+    rt_held_free(b, e);
     return rt_sem_release(m, n);
 }
 
