@@ -6,6 +6,7 @@ use explain;
 use bindgen;
 use pkg;
 use jobs;
+use llvm;
 use xxhash;
 use asm_x86;
 
@@ -266,6 +267,18 @@ fn home() -> Home {
     }
     say(view("grail: cannot find the Grail runtime; set GRAIL_HOME"));
     return Home { runtime: u8[], std: u8[] , roots: u8[][] };
+}
+// The runtime and the x86-64 Linux platform module, as home() finds them: what a compile-time probe
+// is compiled with when the compile that asks for it reads them as interfaces (a module of a separate
+// build), so the probe still links on its own. Empty when there is no runtime to find.
+pub fn probe_runtime_sources() -> u8[][] {
+    h := home();
+    if h.runtime.len() == 0 {
+        return u8[][];
+    }
+    mut out = u8[][h.runtime.copy()];
+    out.push(path_join(view(dirname(view(h.runtime))), view("os-linux.grl")));
+    return out;
 }
 fn collect<a, b>(dir: &a [u8], out: (&b mut u8[][])) {
     entries := host::list_dir(view(dir));
@@ -830,6 +843,7 @@ fn build_argv<a, b, d, e, g, k>(
     strict := (flags / 1024) % 2;
     emit_ir := (flags / 2048) % 2;
     release := (flags / 8192) % 2;
+    report_checks := (flags / 16384) % 2;
     mut command = u8[][host::exe_path(), copy(view("--target")), copy(view(target))];
     if release != 0 {
         command.push(copy(view("--backend=llvm")));
@@ -845,6 +859,9 @@ fn build_argv<a, b, d, e, g, k>(
     }
     if verify_facts != 0 {
         command.push(copy(view("--verify-facts")));
+    }
+    if report_checks != 0 {
+        command.push(copy(view("--report-checks")));
     }
     if debug != 0 {
         command.push(copy(view("--debug")));
@@ -946,25 +963,24 @@ fn release_optimise<a, b>(assemble: (&a u8[][]), asm: &b [u8], object: &b [u8], 
     lifted := cat(view(asm), view(".ll"));
     optimised := cat(view(object), view(".ll.o"));
     native_part := release_part(view(object));
-    mut clang = u8[][];
+    // `grail llvm-compile` runs `clang -O2` over the module cut in parts, in parallel.
+    mut clang = u8[][host::exe_path(), copy(view("llvm-compile")), lifted.copy(), optimised.copy(), copy(view(emulation))];
     for i in assemble.len() {
         clang.push(item(&assemble, i));
     }
-    clang.push(copy(view("-O2")));
-    clang.push(lifted.copy());
-    clang.push(copy(view("-o")));
-    clang.push(optimised.copy());
+    // ThinLTO across units (docs/design/separate-compilation.md, "Release builds: ThinLTO across
+    // modules"): the parts are bitcode, and the unit object is one flat archive of the native part
+    // and every part (`L` takes the members of the parts' archive; lld reads no nested archives).
+    clang.push(copy(view("-flto=thin")));
+    clear := u8[][copy(view("rm")), copy(view("-f")), copy(view(object))];
     merge := u8[][
-        tool(view("GRAIL_LINKER"), view("ld.lld")),
-        copy(view("-m")),
-        copy(view(emulation)),
-        copy(view("-r")),
+        tool(view("GRAIL_AR"), view("llvm-ar")),
+        copy(view("qcsDL")),
+        copy(view(object)),
         native_part.copy(),
-        optimised.copy(),
-        copy(view("-o")),
-        copy(view(object))
+        optimised.copy()
     ];
-    return u8[][][clang, merge];
+    return u8[][][clang, clear, merge];
 }
 fn compile_mode<a, b, d, e, g, k>(
     h: (&a Home),
@@ -989,6 +1005,7 @@ fn compile_mode<a, b, d, e, g, k>(
     mut cache = (flags / 64) % 2;
     whole := (flags / 128) % 2;
     release := (flags / 8192) % 2;
+    report_checks := (flags / 16384) % 2;
     if release != 0 {
         // The LLVM backend lifts the Linux streams; a release build of another platform, or one
         // that asks for what the lifter cannot carry, is refused rather than built native.
@@ -1060,9 +1077,10 @@ fn compile_mode<a, b, d, e, g, k>(
         pe = 1;
     }
     // The assembler: the compiler's own (`grail asm`, compiler/asm_x86.grl) for a Linux x86-64
-    // build it covers (Linux x86-64, AArch64, RISC-V), clang otherwise (a release build's LLVM
-    // module, macOS, Windows).
-    internal := (eq(view(target), view("x86_64")) || eq(view(target), view("aarch64")) || eq(view(target), view("riscv64")))
+    // build it covers (Linux x86-64, AArch64, RISC-V; Windows x86-64), clang otherwise (a release
+    // build's LLVM module, macOS, Windows on Arm).
+    internal := (eq(view(target), view("x86_64")) || eq(view(target), view("aarch64")) || eq(view(target), view("riscv64"))
+        || eq(view(target), view("windows-x86_64")))
         && (release == 0);
     mut assemble = u8[][tool(view("GRAIL_ASSEMBLER"), view("clang"))];
     if internal {
@@ -2081,6 +2099,153 @@ fn unit_reads<a, b>(groups: (&a ModuleGroup[]), base: (&b u8[][]), g: u64) -> u8
 // `grail unit-build N <N compiler words> <assembler words>`: one module's compiler run and then its
 // assembly, as one process, so a build can start several modules at once and wait for each as a
 // whole. Not a command a person runs.
+// `grail llvm-compile IN.ll OUT.o EMULATION CLANG...`: `CLANG -O2 -c` over the lifted module IN.ll,
+// cut into parts (llvm::split_module) compiled at once - as many as the build's jobserver grants,
+// about one per 4 MB of IR - and linked into one relocatable OUT.o. A release unit's optimisation is
+// then bounded by its largest part rather than by the whole module.
+fn llvm_compile_command<a>(args: (&a u8[][])) -> u64 {
+    if args.len() < 4 {
+        say(view("usage: grail llvm-compile IN.ll OUT.o EMULATION CLANG [ARGS...]"));
+        return 1;
+    }
+    input := item(&args, 0);
+    output := item(&args, 1);
+    emulation := item(&args, 2);
+    mut clang = u8[][];
+    mut i = 3;
+    while i < args.len() {
+        clang.push(item(&args, i));
+        i += 1;
+    }
+    // With `-flto=thin` the parts are ThinLTO bitcode and OUT is an archive of them: a relocatable
+    // link of bitcode would run full LTO over this unit alone and close it to the other units.
+    mut thin = false;
+    for c in clang.len() {
+        if eq(view(item(&clang, c)), view("-flto=thin")) {
+            thin = true;
+        }
+    }
+    text := host::read_file(view(input));
+    mut wanted = text.len() / 4194304 + 1;
+    mut cap = host::cpus();
+    asked := host::env(view("GRAIL_JOBS"));
+    if asked.len() != 0 {
+        cap = number_of(view(asked));
+    }
+    if 32 < cap {
+        cap = 32;
+    }
+    if cap < wanted {
+        wanted = cap;
+    }
+    mut js = jobs::open();
+    if 1 < wanted {
+        granted := jobs::workers(&mut js, wanted);
+        wanted = granted;
+    }
+    if wanted < 2 {
+        jobs::give_all(&mut js);
+        mut run = u8[][];
+        for c in clang.len() {
+            run.push(item(&clang, c));
+        }
+        run.push(copy(view("-O2")));
+        run.push(copy(view(input)));
+        run.push(copy(view("-o")));
+        if !thin {
+            run.push(copy(view(output)));
+            return host::command(run);
+        }
+        bitcode := cat(view(input), view(".bc"));
+        run.push(bitcode.copy());
+        if host::command(run) != 0 {
+            return 1;
+        }
+        return thin_archive(view(output), &u8[][bitcode]);
+    }
+    plan := llvm::split_plan(view(text), wanted);
+    // Unique to this unit's module: internal functions keep their own names in every part of it.
+    suffix := cat(view("u"), view(decimal(xxhash::hash64(view(input), 0))));
+    mut pids = u64[];
+    mut objects = u8[][];
+    mut compiled = u8[][];
+    mut destinations = u8[][];
+    parts_store := path_join(view(cache_base()), view("llvm-parts"));
+    cache_mkdirs(view(parts_store));
+    for k in plan.count {
+        mut name = copy(view(input));
+        push_bytes(&mut name, view("."));
+        push_bytes(&mut name, view(decimal(k)));
+        part := cat(view(name), view(".ll"));
+        object := cat(view(name), view(".o"));
+        part_text := llvm::split_part(view(text), &plan, k, view(suffix));
+        // A part's object is stored under the digest of its text and the compile command, so a
+        // rebuild after an edit compiles only the parts whose functions changed.
+        mut keyed = u8[];
+        for c in clang.len() {
+            push_bytes(&mut keyed, view(item(&clang, c)));
+            keyed.push(0);
+        }
+        push_bytes(&mut keyed, view(part_text));
+        stored := path_join(view(parts_store), view(cat(view(decimal(xxhash::hash64(view(keyed), 0))), view(".o"))));
+        if host::exists(view(stored)) != 0 {
+            objects.push(stored);
+            continue;
+        }
+        host::write_file(view(part), view(part_text));
+        compiled.push(object.copy());
+        destinations.push(stored);
+        mut run = u8[][];
+        for c in clang.len() {
+            run.push(item(&clang, c));
+        }
+        run.push(copy(view("-O2")));
+        run.push(part.copy());
+        run.push(copy(view("-o")));
+        run.push(object.copy());
+        pids.push(host::spawn(run, host::environment(), 2, 2));
+        objects.push(object);
+    }
+    mut bad = 0;
+    for k in pids.len() {
+        if (9223372036854775807 < pids[k]) || (host::wait(pids[k]) != 0) {
+            bad = 1;
+        }
+    }
+    jobs::give_all(&mut js);
+    if bad != 0 {
+        say(view("grail: clang -O2 failed on a part of the LLVM module"));
+        return 1;
+    }
+    // Into the store: copied under a name of this process's, then renamed, so a reader never sees a
+    // half-written object.
+    for q in compiled.len() {
+        bytes := host::read_file(view(item(&compiled, q)));
+        pending := cat(view(item(&destinations, q)), view(cat(view(".tmp"), view(decimal(host::now_ms())))));
+        host::write_file(view(pending), view(bytes));
+        host::rename(view(pending), view(item(&destinations, q)));
+    }
+    if thin {
+        return thin_archive(view(output), &objects);
+    }
+    mut link = u8[][tool(view("GRAIL_LINKER"), view("ld.lld")), copy(view("-m")), copy(view(emulation)), copy(view("-r"))];
+    for k in objects.len() {
+        link.push(item(&objects, k));
+    }
+    link.push(copy(view("-o")));
+    link.push(copy(view(output)));
+    return host::command(link);
+}
+// `output` as a fresh archive of `members` (ThinLTO bitcode parts): `r` would update an archive left
+// by an earlier build in place, so it is removed first.
+fn thin_archive<a, b>(output: &a [u8], members: (&b u8[][])) -> u64 {
+    host::remove(output, 0);
+    mut ar = u8[][tool(view("GRAIL_AR"), view("llvm-ar")), copy(view("rcsD")), copy(output)];
+    for k in members.len() {
+        ar.push(item(&members, k));
+    }
+    return host::command(ar);
+}
 fn unit_build_command<a>(args: (&a u8[][])) -> u64 {
     if args.len() == 0 {
         return 1;
@@ -2260,6 +2425,10 @@ fn per_module_build<a, d, e, g, k, m, n, x, y, jb, ev>(
             if !eq(view(name), view(base[0])) {
                 compile.push(copy(view("--use")));
                 compile.push(ifaces.copy());
+                // Every interface in that directory was written by a run of this build or restored
+                // from a store blob whose bytes hashed to its name: the run need not hash each one
+                // again to check its trailer.
+                compile.push(copy(view("--use-vouched")));
                 // A module with no interface file has no surface to read (the runtime's is the
                 // compiler's own knowledge of it).
                 compile.push(copy(view("--use-named")));
@@ -2504,7 +2673,11 @@ fn per_module_build<a, d, e, g, k, m, n, x, y, jb, ev>(
         }
         return u64(failed != 0);
     }
-    if link_objects(view(output), view(target), view(emulation), &objects, &link) != 0 {
+    mut thin_cache = u8[];
+    if cache != 0 {
+        thin_cache = path_join(view(cache_base()), view("thinlto"));
+    }
+    if link_objects(view(output), view(target), view(emulation), &objects, &link, view(thin_cache)) != 0 {
         return 1;
     }
     if cache != 0 {
@@ -2565,6 +2738,31 @@ fn unit_links<a>(stem: &a [u8]) -> u8[][] {
     }
     return out;
 }
+// Whether `path` is an archive (`!<arch>`), which is what a release unit is.
+fn is_archive<a>(path: &a [u8]) -> bool {
+    head := host::read_file(path);
+    return (head.len() >= 8) && eq(view(head[0..8]), view("!<arch>\n"));
+}
+// How many ThinLTO backends the link runs: GRAIL_JOBS when it is set, else the processors, at most 8.
+fn thin_jobs() -> u64 {
+    asked := host::env(view("GRAIL_JOBS"));
+    mut n: u64 = 0;
+    for i in asked.len() {
+        if (48 <= asked[i]) && (asked[i] <= 57) {
+            n = n * 10 + u64(asked[i] - 48);
+        }
+    }
+    if n == 0 {
+        n = host::cpus();
+        if 8 < n {
+            n = 8;
+        }
+    }
+    if n == 0 {
+        n = 1;
+    }
+    return n;
+}
 // Add a link input once: two modules may ask for the same library, and the link needs it once.
 fn add_link<a, b>(link: (&a mut u8[][]), input: &b [u8]) -> unit {
     for i in link.len() {
@@ -2579,20 +2777,39 @@ fn add_link<a, b>(link: (&a mut u8[][]), input: &b [u8]) -> unit {
 }
 // One link, from objects already on disk: the cache reuses exactly this, so a cached image and an
 // uncached one are the same link of the same objects.
-fn link_objects<a, b, d, e, g>(
+fn link_objects<a, b, d, e, g, k>(
     output: &a [u8],
     target: &b [u8],
     emulation: &d [u8],
     objects: (&e u8[][]),
-    inputs: (&g u8[][])
+    inputs: (&g u8[][]),
+    thin_cache: &k [u8] = view("")
 ) -> u64 {
     mut link = u8[][
         tool(view("GRAIL_LINKER"), view("ld.lld")),
         copy(view("-m")),
         copy(view(emulation))
     ];
+    // Release units are archives of a native part and ThinLTO bitcode (release_optimise): every
+    // member is part of the program, and the bitcode is optimised across units here.
+    mut thin = false;
+    for i in objects.len() {
+        if is_archive(view(item(&objects, i))) {
+            thin = true;
+        }
+    }
+    if thin {
+        link.push(copy(view("--whole-archive")));
+    }
     for i in objects.len() {
         link.push(item(&objects, i));
+    }
+    if thin {
+        link.push(copy(view("--no-whole-archive")));
+        link.push(cat(view("--thinlto-jobs="), view(decimal(thin_jobs()))));
+        if thin_cache.len() != 0 {
+            link.push(cat(view("--thinlto-cache-dir="), thin_cache));
+        }
     }
     for i in inputs.len() {
         link.push(item(&inputs, i));
@@ -2695,6 +2912,12 @@ fn cache_base() -> u8[] {
     }
     return copy(view(".work/cache"));
 }
+// Where compile-time probes keep their base objects (the runtime and the standard library compiled
+// once, docs/design/comptime-speed.md): inside the build store, so `grail cache clear` and `prune`
+// cover them.
+pub fn probe_base_root() -> u8[] {
+    return path_join(view(cache_base()), view("probe-base"));
+}
 fn cache_root<a>(target: &a [u8]) -> u8[] {
     return path_join(view(cache_base()), view(target));
 }
@@ -2772,174 +2995,15 @@ fn cache_touch<a, b, d>(root: &a [u8], kind: &b [u8], key: &d [u8]) -> unit {
 // A build or check starts no helper process to hash or file anything: every digest below is
 // `store_hash`, every write is a staging file renamed into place, every copy is a read and a write.
 //
-// The content digest of the store (blob names, source digests, record keys): XXH64 of the bytes
-// under the seeds 0, 1, 2 and 3, as 64 hex digits. Content addressing needs collisions to be
-// improbable, not hard to construct - an attacker who can write the store can write any record -
-// and four independent 64-bit hashes over every byte are that at a few instructions a byte, where
-// SHA-256 in this language costs hundreds. The words are read eight bytes at a time.
-const XP1: u64 = 11400714785074694791;
-const XP2: u64 = 14029467366897019727;
-const XP3: u64 = 1609587929392839161;
-const XP4: u64 = 9650029242287828579;
-const XP5: u64 = 2870177450012600261;
-fn xx_rotl(x: u64, r: u64) -> u64 {
-    return (x << r) | (x >> (64 - r));
-}
-fn xx_round(acc: u64, lane: u64) -> u64 {
-    return wrapping_mul(xx_rotl(wrapping_add(acc, wrapping_mul(lane, XP2)), 31), XP1);
-}
-fn xx_merge(acc: u64, lane: u64) -> u64 {
-    return wrapping_add(wrapping_mul(acc ^ xx_round(0, lane), XP1), XP4);
-}
-// The address of a byte sequence's first byte: the first word of the header its value points to.
-fn bytes_base<a>(data: &a [u8]) -> u64 {
-    mut v: u64 = 0;
-    unsafe {
-        header := ptr_of(&data).cast(u64).read();
-        v = ptr_from_addr(u64, header).read();
-    }
-    return v;
-}
-fn word_at(p: u64) -> u64 {
-    mut v: u64 = 0;
-    unsafe {
-        v = ptr_from_addr(u64, p).read();
-    }
-    return v;
-}
-fn half_at(p: u64) -> u64 {
-    mut v: u64 = 0;
-    unsafe {
-        v = u64(ptr_from_addr(u32, p).read());
-    }
-    return v;
-}
-// XXH64's last steps, from the four lanes of the stripes (or the seed alone for a short input).
-fn xx_finish<a, b>(data: &a [u8], p: u64, from: u64, seed: u64, lanes: (&b u64[])) -> u64 {
-    n := data.len();
-    mut at = from;
-    mut h: u64 = 0;
-    if n >= 32 {
-        h = wrapping_add(wrapping_add(xx_rotl(lanes[0], 1), xx_rotl(lanes[1], 7)), wrapping_add(xx_rotl(lanes[2], 12), xx_rotl(lanes[3], 18)));
-        h = xx_merge(h, lanes[0]);
-        h = xx_merge(h, lanes[1]);
-        h = xx_merge(h, lanes[2]);
-        h = xx_merge(h, lanes[3]);
-    } else {
-        h = wrapping_add(seed, XP5);
-    }
-    h = wrapping_add(h, n);
-    while at + 8 <= n {
-        h = wrapping_add(wrapping_mul(xx_rotl(h ^ xx_round(0, word_at(p + at)), 27), XP1), XP4);
-        at += 8;
-    }
-    if at + 4 <= n {
-        h = wrapping_add(wrapping_mul(xx_rotl(h ^ wrapping_mul(half_at(p + at), XP1), 23), XP2), XP3);
-        at += 4;
-    }
-    while at < n {
-        h = wrapping_mul(xx_rotl(h ^ wrapping_mul(u64(data[at]), XP5), 11), XP1);
-        at += 1;
-    }
-    h = wrapping_mul(h ^ (h >> 33), XP2);
-    h = wrapping_mul(h ^ (h >> 29), XP3);
-    return h ^ (h >> 32);
-}
-fn push_hex64<a>(out: (&a mut u8[]), v: u64) -> unit {
-    mut shift: u64 = 64;
-    while shift != 0 {
-        shift -= 4;
-        out.push(hex_digit((v >> shift) & 15));
-    }
-    return ();
-}
+// The content digest of the store (blob names, source digests, record keys): native::fast_hash as
+// 64 hex digits.
 pub fn store_hash<a>(data: &a [u8]) -> u8[] {
-    n := data.len();
-    mut p: u64 = 0;
-    if n != 0 {
-        p = bytes_base(data);
-    }
-    // Sixteen accumulators: XXH64's four lanes for each of the four seeds, one pass over the words.
-    mut a1 = wrapping_add(XP1, XP2);
-    mut a2 = XP2;
-    mut a3: u64 = 0;
-    mut a4 = wrapping_sub(0, XP1);
-    mut b1 = wrapping_add(a1, 1);
-    mut b2 = wrapping_add(a2, 1);
-    mut b3: u64 = 1;
-    mut b4 = wrapping_add(a4, 1);
-    mut c1 = wrapping_add(a1, 2);
-    mut c2 = wrapping_add(a2, 2);
-    mut c3: u64 = 2;
-    mut c4 = wrapping_add(a4, 2);
-    mut d1 = wrapping_add(a1, 3);
-    mut d2 = wrapping_add(a2, 3);
-    mut d3: u64 = 3;
-    mut d4 = wrapping_add(a4, 3);
-    mut at: u64 = 0;
-    // `at + 32 <= n` cannot overflow (n is a length) and neither can an address inside the data.
-    mut q = p;
-    mut stripes = n / 32;
-    while stripes != 0 {
-        mut w1: u64 = 0;
-        mut w2: u64 = 0;
-        mut w3: u64 = 0;
-        mut w4: u64 = 0;
-        unsafe {
-            w1 = ptr_from_addr(u64, q).read();
-            w2 = ptr_from_addr(u64, wrapping_add(q, 8)).read();
-            w3 = ptr_from_addr(u64, wrapping_add(q, 16)).read();
-            w4 = ptr_from_addr(u64, wrapping_add(q, 24)).read();
-        }
-        w1 = wrapping_mul(w1, XP2);
-        w2 = wrapping_mul(w2, XP2);
-        w3 = wrapping_mul(w3, XP2);
-        w4 = wrapping_mul(w4, XP2);
-        a1 = wrapping_add(a1, w1);
-        a1 = wrapping_mul((a1 << 31) | (a1 >> 33), XP1);
-        a2 = wrapping_add(a2, w2);
-        a2 = wrapping_mul((a2 << 31) | (a2 >> 33), XP1);
-        a3 = wrapping_add(a3, w3);
-        a3 = wrapping_mul((a3 << 31) | (a3 >> 33), XP1);
-        a4 = wrapping_add(a4, w4);
-        a4 = wrapping_mul((a4 << 31) | (a4 >> 33), XP1);
-        b1 = wrapping_add(b1, w1);
-        b1 = wrapping_mul((b1 << 31) | (b1 >> 33), XP1);
-        b2 = wrapping_add(b2, w2);
-        b2 = wrapping_mul((b2 << 31) | (b2 >> 33), XP1);
-        b3 = wrapping_add(b3, w3);
-        b3 = wrapping_mul((b3 << 31) | (b3 >> 33), XP1);
-        b4 = wrapping_add(b4, w4);
-        b4 = wrapping_mul((b4 << 31) | (b4 >> 33), XP1);
-        c1 = wrapping_add(c1, w1);
-        c1 = wrapping_mul((c1 << 31) | (c1 >> 33), XP1);
-        c2 = wrapping_add(c2, w2);
-        c2 = wrapping_mul((c2 << 31) | (c2 >> 33), XP1);
-        c3 = wrapping_add(c3, w3);
-        c3 = wrapping_mul((c3 << 31) | (c3 >> 33), XP1);
-        c4 = wrapping_add(c4, w4);
-        c4 = wrapping_mul((c4 << 31) | (c4 >> 33), XP1);
-        d1 = wrapping_add(d1, w1);
-        d1 = wrapping_mul((d1 << 31) | (d1 >> 33), XP1);
-        d2 = wrapping_add(d2, w2);
-        d2 = wrapping_mul((d2 << 31) | (d2 >> 33), XP1);
-        d3 = wrapping_add(d3, w3);
-        d3 = wrapping_mul((d3 << 31) | (d3 >> 33), XP1);
-        d4 = wrapping_add(d4, w4);
-        d4 = wrapping_mul((d4 << 31) | (d4 >> 33), XP1);
-        q = wrapping_add(q, 32);
-        stripes -= 1;
-    }
-    at = n - n % 32;
+    raw := native::fast_hash(data);
     mut out = u8[];
-    la := u64[a1, a2, a3, a4];
-    lb := u64[b1, b2, b3, b4];
-    lc := u64[c1, c2, c3, c4];
-    ld := u64[d1, d2, d3, d4];
-    push_hex64(&mut out, xx_finish(data, p, at, 0, &la));
-    push_hex64(&mut out, xx_finish(data, p, at, 1, &lb));
-    push_hex64(&mut out, xx_finish(data, p, at, 2, &lc));
-    push_hex64(&mut out, xx_finish(data, p, at, 3, &ld));
+    for i in raw.len() {
+        out.push(hex_digit(u64(raw[i]) >> 4));
+        out.push(hex_digit(u64(raw[i]) & 15));
+    }
     return out;
 }
 // What the store knows about one file without reading it again: its digest, and for a source the
@@ -3313,10 +3377,13 @@ fn hex_byte(b: u8) -> bool {
 // `grail cache clear` empties the store. Both cover every target under the store (cache_base).
 fn cache_command<a>(args: (&a u8[][])) -> u64 {
     if args.len() == 0 {
-        say(view("usage: grail cache prune [--keep N] | grail cache clear"));
+        say(view("usage: grail cache prune [--keep N] | grail cache clear | grail cache warm [--target T]"));
         return 1;
     }
     sub := item(&args, 0);
+    if eq(view(sub), view("warm")) {
+        return cache_warm(&args);
+    }
     if eq(view(sub), view("clear")) {
         mut run = u8[][copy(view("rm")), copy(view("-rf")), cache_base()];
         host::command(run);
@@ -3324,7 +3391,7 @@ fn cache_command<a>(args: (&a u8[][])) -> u64 {
         return 0;
     }
     if !eq(view(sub), view("prune")) {
-        say(view("usage: grail cache prune [--keep N] | grail cache clear"));
+        say(view("usage: grail cache prune [--keep N] | grail cache clear | grail cache warm [--target T]"));
         return 1;
     }
     mut keep = 10;
@@ -3339,6 +3406,13 @@ fn cache_command<a>(args: (&a u8[][])) -> u64 {
     if host::exists(view(base)) == 0 {
         host::print(view("cache: empty\n"));
         return 0;
+    }
+    // Probe bases are rebuilt on demand (one compile of the runtime and the standard library), so
+    // a prune drops them all rather than tracking their use.
+    probes := probe_base_root();
+    if host::exists(view(probes)) != 0 {
+        mut drop_probes = u8[][copy(view("rm")), copy(view("-rf")), probes.copy()];
+        host::command(drop_probes);
     }
     targets := host::list_dir(view(base));
     for t in targets.len() {
@@ -3441,6 +3515,81 @@ fn cache_command<a>(args: (&a u8[][])) -> u64 {
     push_bytes(&mut line, view(" blobs\n"));
     host::print(view(line));
     return 0;
+}
+// `grail cache warm [--target T]`: check and build every standard module into the store, as a
+// toolchain ships its standard library ready (rustup's libstd, Go's std in GOCACHE): a project's
+// first check then compiles only its own modules. One program that `use`s every module of the
+// standard directory is checked and built in the store's stage, through the ordinary commands, so
+// the records it files are exactly the ones a project's build would look up. The install step runs
+// it; running it again is a no-op.
+fn cache_warm<a>(args: (&a u8[][])) -> u64 {
+    h := home();
+    if h.std.len() == 0 {
+        return 1;
+    }
+    mut target = u8[];
+    if (args.len() == 3) && eq(view(item(args, 1)), view("--target")) {
+        target = item(args, 2);
+    }
+    mut store = Cache { root: u8[], cwd: host::cwd(), hits: 0, misses: 0, names: u8[][], quiet: 1 };
+    mut program = u8[];
+    entries := host::list_dir(view(h.std));
+    mut count = 0;
+    for e in entries.len() {
+        name := item(&entries, e);
+        if !ends_with_grl(view(name)) {
+            continue;
+        }
+        info := cache_file_info(&mut store, view(path_join(view(h.std), view(name))), true);
+        if info.module.len() != 0 {
+            push_bytes(&mut program, view("use "));
+            push_bytes(&mut program, view(info.module));
+            push_bytes(&mut program, view(";\n"));
+            count += 1;
+        }
+    }
+    push_bytes(&mut program, view("fn main() {}\n"));
+    // The program lives in the target's stage, which `grail cache prune` empties.
+    mut named = target.copy();
+    if named.len() == 0 {
+        named = target_name(host::target());
+    }
+    stage := path_join(view(cache_root(view(named))), view("stage"));
+    cache_mkdirs(view(stage));
+    dir := path_join(view(stage), view(cat(view("warm."), view(decimal(host::now_us())))));
+    host::mkdir(view(dir));
+    entry := path_join(view(dir), view("main.grl"));
+    host::write_file(view(entry), view(program));
+    exe := host::exe_path();
+    mut failed = 0;
+    for step in 2 {
+        mut run = u8[][exe.copy()];
+        if step == 0 {
+            run.push(copy(view("check")));
+        } else {
+            run.push(copy(view("build")));
+        }
+        run.push(entry.copy());
+        run.push(copy(view("-o")));
+        run.push(path_join(view(dir), view("warm")));
+        if target.len() != 0 {
+            run.push(copy(view("--target")));
+            run.push(target.copy());
+        }
+        if host::command(run) != 0 {
+            failed = 1;
+        }
+    }
+    removal := u8[][copy(view("rm")), copy(view("-rf")), dir];
+    host::command(removal);
+    mut line = copy(view("cache: warm: "));
+    push_bytes(&mut line, view(decimal(count)));
+    push_bytes(&mut line, view(" standard modules checked and built"));
+    if failed != 0 {
+        push_bytes(&mut line, view(" (a step failed; what it filed stays)"));
+    }
+    say(view(line));
+    return failed;
 }
 // File an artifact under the digest of its bytes: one read, then a staging copy renamed into place.
 fn cache_blob_put<a, b>(c: (&a mut Cache), path: &b [u8]) -> u8[] {
@@ -4080,6 +4229,9 @@ struct Options {
     // proof that is wrong aborts at the call instead of passing unnoticed. Without it the flag
     // never reached the compiler, and the check it exists to keep was the check nobody saw.
     verify_facts: u64,
+    // `--report checks`: the build prints every check left in the program's own functions, with its
+    // location and kind. One uncached run, so a cached module cannot hide its checks.
+    report_checks: u64,
     // `--strict-refinements`: an obligation the prover cannot settle is refused, program-wide.
     strict: u64,
     // `--no-cache`: one compiler run over the whole program, nothing read from or filed in the
@@ -4150,6 +4302,8 @@ fn flag_bits<a>(o: (&a Options), check_only: bool = false) -> u64 {
         * 4096
         + o.release
         * 8192
+        + o.report_checks
+        * 16384
         // A release build wraps by default; `--overflow=` on the command line still decides.
         + u64((o.release != 0) && (o.overflow == 0))
         * 16;
@@ -4191,6 +4345,7 @@ const F_WATCH: u64 = 11;
 const F_JSON: u64 = 12;
 const F_NO_ENTRY: u64 = 13;
 const F_VERIFY_FACTS: u64 = 14;
+const F_REPORT: u64 = 42;
 const F_STRICT: u64 = 15;
 const F_NO_CACHE: u64 = 17;
 const F_EMIT_IR: u64 = 16;
@@ -4231,6 +4386,7 @@ fn flag_table() -> Flag[] {
         },
         Flag { word: copy(view("--no-error-sites")), kind: FLAG_SWITCH, field: F_NO_SITES },
         Flag { word: copy(view("--verify-facts")), kind: FLAG_SWITCH, field: F_VERIFY_FACTS },
+        Flag { word: copy(view("--report")), kind: FLAG_TEXT, field: F_REPORT },
         Flag { word: copy(view("--strict-refinements")), kind: FLAG_SWITCH, field: F_STRICT },
         Flag { word: copy(view("--emit-ir")), kind: FLAG_SWITCH, field: F_EMIT_IR },
         Flag { word: copy(view("--interface")), kind: FLAG_TEXT, field: F_IFACE },
@@ -4367,6 +4523,13 @@ fn take_text<a, b>(o: (&a mut Options), field: u64, word: &b [u8]) {
         o.output = copy(word);
     } else if field == F_TARGET {
         o.target = copy(word);
+    } else if field == F_REPORT {
+        if !eq(word, view("checks")) {
+            say(view("grail: `--report` takes `checks`: the runtime checks left in the program's own functions"));
+            host::exit(2);
+        }
+        o.report_checks = 1;
+        o.no_cache = 1;
     } else if field == F_IFACE {
         o.iface = copy(word);
     } else if field == F_IFACE_EMIT {
@@ -4409,6 +4572,7 @@ fn options<a>(args: (&a u8[][])) -> Options {
         iface: u8[],
         verify: 0,
         verify_facts: 0,
+        report_checks: 0,
         strict: 0,
         emit_ir: 0,
         release: 0,
@@ -6532,6 +6696,7 @@ fn help() {
         )
     );
     say(view("  grail cache clear                  empty the build cache"));
+    say(view("  grail cache warm [--target T]      check and build the standard library into the cache"));
     say(view("  grail explain CODE                 what an error code means (error[E0004])"));
     say(view("  grail doc [--out DIR] [FILES|DIRS] reference documentation: HTML per module + index.json"));
     say(view("  grail bindgen HEADER.h -o OUT.grl  import a C header as extern \"C\" declarations [-I DIR] [-l LIB]"));
@@ -6604,6 +6769,7 @@ pub fn is_command<a>(name: &a [u8]) -> bool {
         || eq(view(name), view("profile"))
         || eq(view(name), view("cache"))
         || eq(view(name), view("unit-build"))
+        || eq(view(name), view("llvm-compile"))
         || eq(view(name), view("explain"))
         || eq(view(name), view("asm"))
         || eq(view(name), view("doc"))
@@ -6661,6 +6827,9 @@ pub fn run() -> u64 {
     }
     if eq(view(name), view("unit-build")) {
         return unit_build_command(&args);
+    }
+    if eq(view(name), view("llvm-compile")) {
+        return llvm_compile_command(&args);
     }
     if eq(view(name), view("explain")) {
         // `grail explain E0004`: what an error code means and how it is usually fixed.

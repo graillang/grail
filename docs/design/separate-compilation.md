@@ -113,7 +113,7 @@ than misread.
  source "tests/interfaces/pair.grl"
  sha256 "ad1f2b3cf421decab61ea22f7dfc572fec79a74a3078b3ef330f4e49a94db2d0"
  mode typed_refs=1 default_u64=1 overflow=checked target=x86_64
- abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0 ref record = address record plain = inline plain record = frame args = 6 registers then stack
+ abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0 ref record = address record plain = inline plain record = frame args = 6 registers then stack layout = c
  unsafe 0
  std 0
  host 0
@@ -511,7 +511,8 @@ declaration kind meant a new spelling, a new parse rule and a new way to lose a 
 ```
 file   := "GRIF" VERSION:u8 record* trailer
 record := tag:u8 len:VAR payload[len]
-trailer   tag 2: source digest, then 32 raw bytes of SHA-256 over every byte before them
+trailer   tag 2: source digest, then 32 raw bytes of fast_hash over every byte before them
+          (XXH64 under the seeds 0-3, each big-endian; format 11 - format 10 carried SHA-256 there)
 ```
 
 `VAR` is LEB128, so a small count costs one byte. One tag per declaration kind:
@@ -519,7 +520,7 @@ trailer   tag 2: source digest, then 32 raw bytes of SHA-256 over every byte bef
 | tag | record | carries |
 | --- | --- | --- |
 | 1 | `module` | module, source path, `std`/`unsafe`/`host`, overflow mode, target, and the `dyn` ABI |
-| 2 | `trailer` | the source's SHA-256, then the file's own digest |
+| 2 | `trailer` | the source's SHA-256, then the file's own digest (fast_hash: it guards against corruption, as the build store's does) |
 | 3 | `link` | one `extern "C" lib` input |
 | 10 | `type` | kind (struct/record/enum/handle), parameter and lifetime counts, `transfer`/`share`, bounds, requirements, fields with their names, types and refinements |
 | 11 | `alias` | name and the type it denotes |
@@ -945,7 +946,11 @@ record holds what the driver reads sources for: the module a file declares, the 
 and whether it has an `@embed`. A no-op build therefore reads no source; it stats each input and
 reads a handful of records. The compiler's `--print-inputs` answer is remembered the same way,
 under the stamps of the files it named and of the directories resolution looked in. A tool's
-`--version` is asked once per binary stamp.
+`--version` is asked once per binary stamp. A module run of a store build is told `--use-vouched`: every interface in its
+`--use` directory was written by a run of the same build or restored from a blob that hashed to its
+name, so it does not hash each one again to check its trailer. A user's `--use DIR` keeps the
+check. `grail cache warm` fills the store with every standard module's check and build records,
+which the installers run, so a project's first build compiles only its own modules.
 
 Measured by `tools/cache-test.mjs` (three modules plus runtime and `__start`, five parts; the absolute
 times move with the page cache, the ratio does not):
@@ -1204,6 +1209,46 @@ it, so a changed body reruns its dependants exactly as a changed summary does. A
 and an optimiser memo entry are taken before the inline pass (`one_body` remembers the optimised body;
 `inline_calls` runs over the whole output afterwards), so neither depends on another module's bodies
 and neither key names them; the object-encoding chunks are keyed on the final text and see the copy.
+
+### Small library bodies across modules: measured, deferred
+
+Carrying a small *library* body (not the runtime's) in a module's interface, so another module's
+calls to it are inlined, would need an interface format bump and a new edge (a body edit reruns the
+importers). Measured before building it, as the number of call sites it would reach - a candidate
+filed in another unit that is not the runtime: the scheduler's join probe 0, the typed iterator
+chain 0, `bench/hashmap.grl` 2 (`hash`'s `table_hash` and `equal`, called from `main`). The library's
+small accessors are generic, so their specialisations are emitted in the caller's own unit and are
+inlined already; a release build gets the rest from ThinLTO across modules. Deferred until a program
+shows the sites.
+
+### Copies inside copies, and promoted registers
+
+A candidate keeps a call only when it does not return or is the last thing the body does, so
+nothing of the copy is live across it: `inline_calls` expands such a call in turn when it names a
+candidate (`expand_copy`, three levels, a site number per copy). A leaf whose slots were promoted to
+callee-saved registers is a candidate too: those registers are the caller's in a copy, so the copy
+holds the values in free scratch registers (`rename_register`; a body that also uses a narrower name
+of the register is refused). The size cap is 32 IR lines.
+
+### Release builds: ThinLTO across modules
+
+A release unit is lifted to LLVM and optimised by `clang -O2` per module, so a small function of one
+module stayed a call from every other module (the hash's `write_num` in the map's loop, `core::some`
+in the iterator chain): LLVM inlines only what is in the module it is optimising. Copying small
+bodies into importers (`available_externally`) was the plan; ThinLTO does it with LLVM's own cost
+model and no copy in the interface. `grail llvm-compile` runs `clang -O2 -flto=thin` on each part
+of the unit's module and leaves the parts as bitcode in an archive; `release_optimise` makes the
+unit object one flat archive of its native part and those parts (`llvm-ar qcsDL`: lld reads no
+nested archives); the link takes every member (`--whole-archive`), imports the small bodies across
+units and optimises and generates code in parallel (`--thinlto-jobs`), with its cache in the build
+store (`<store>/thinlto`, beside `llvm-parts`). A function LLVM does not inline keeps its one
+definition in its own module, so nothing changes about what links. The release compiler's own
+build goes the same way (`tools/native.mjs release`).
+
+Measured on `bench/hashmap.grl` (fresh store): 1,235M -> 823M instructions; a cold build 15.6 s ->
+12.6 s (per part, codegen moves to the link and runs in parallel); a rebuild after one function of
+`main` changes 0.66 s -> 0.82 s (the warm ThinLTO link re-imports and re-optimises what the edit
+reaches), against 0.65 s for `cargo build --release` after the same edit of its twin.
 
 ### The frame constant, which was a latent miscompile
 

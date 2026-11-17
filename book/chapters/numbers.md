@@ -89,6 +89,14 @@ a `bool`: `a.lt(b)`, `a.eq(b)` and so on. A mask chooses lanes with `m.select(a,
 where the mask is set, else from `b`), and `m.any()`, `m.all()` and `m.not()` read or flip it;
 `m32x4::splat(true)` makes one directly. `a < b` on vectors is an error that says to use the method.
 
+`u8x16`, `u8x32`, `u32x4` and `i64x2` hold bytes, unsigned words and 64-bit integers; unsigned lanes
+compare and order as unsigned. `v.shuffle(3, 2, 1, 0)` rearranges lanes, and `v.shuffle2(w, 0, 4, 1,
+5)` picks from `v` followed by `w` (which is how a 4x4 transpose is written); the indices are
+literals. `to_f32()` and `to_i32()` convert lanes (`to_i32` truncates, saturates and turns NaN into
+0), and `bits()`/`T::from_bits` reinterpret them. `load_aligned` and `store_aligned` promise an
+address aligned to the vector's size, and a program that breaks the promise stops with the address
+rather than reading the wrong bytes.
+
 With `--release` (the LLVM backend) the vectors are SSE2 or NEON registers and a loop like the one
 above runs as fast as the same loop written in C with intrinsics. The development backend computes
 the same results one lane at a time for now. Every target and both backends give bit-identical

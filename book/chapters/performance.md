@@ -90,34 +90,22 @@ and Zig, written the way each language is usually written:
 
 {{perf:engine#release}}
 
-**Why Grail is behind**, read from the code of the commit charted:
+**Why Grail is behind**, read from the code of the commit charted. The standard map, strings and
+interface calls each got faster in the last round of work (the map is now a single open-addressed
+table, so hashmap fell from 22x the fewest instructions to 3.5x), and what remains is:
 
 - **`iterchain`: the adapters are not types.** `Iter<T>` is the erased form: every element is a call
   through a boxed closure returning an option, once per adapter, and nothing inlines through it.
   Rust's chain compiles to the same loop as the hand-written one. Making the adapters types with
   callable bounds is the plan in `docs/design/dyn-and-callable-bounds.md`.
-- **`hashmap`: a bucket is a vector.** The standard map chains collisions through a `u64[]` per
-  bucket and keeps its entries in insertion order in a second vector, so a lookup reads the
-  bucket's own header, then an index, then the entry; growing the table rebuilds every bucket
-  vector. Rust's, Go's and Zig's maps are one open-addressed table. (Since replaced: the map is
-  now dense entries under one open-addressed index, hashed with SipHash-1-3 as Rust's is.)
 - **`ecs`: owned vectors re-read their headers.** The update loop stores through six vectors made
   in the same function, and after each store the next access reloads a length and a data pointer
   and checks the index, so the loop stays scalar where C, Rust and Zig vectorise it.
-- **`dyncall`: two calls per dispatch.** Each slot of an interface object's table is a small thunk,
-  emitted outside the optimised module, that loads the boxed value and calls the method; neither
-  call can be inlined.
-- **`strings`: every piece is a new string.** `split` returns owned copies of every line and every
-  field, and `format` builds a new string per record, where Rust's and Zig's splits hand out slices
-  of the input. The standard library also has no float parser (the JSON module carries one
-  privately), so the Grail twin parses a two-decimal number as hundredths over 100.0. (Since
-  replaced: `split` hands out views, `parse_f64` is shared with `json`, and `append_format` writes
-  into the output; a view is still a small allocation of its own.)
-- **`json`**: behind by a similar margin to the dynamic-value parsers of the other languages; where
-  its instructions go has not been profiled yet.
-- **`bintrees`** is where Grail does best: its allocator's fast path makes it execute fewer
-  instructions than C with `malloc` and Rust with `Box`. Zig, with its general-purpose allocator for
-  release builds, executes the fewest.
+- **`hashmap`, `strings`, `json`, `dyncall`** are within 2x to 3.5x: what is left is allocation per
+  piece (a new string per split field and per formatted record, a box per interface object) and
+  bounds checks in the inner loops.
+- **`bintrees`** is where Grail does best against `malloc` and `Box`; Zig, with its release
+  allocator, executes the fewest instructions.
 
 {{perf:engine#dev}}
 
@@ -138,19 +126,17 @@ compiler's columns, so a change is measured on the engine the same way.
 
 {{perf:abundance#abundance-run}}
 
-**What it found.** On the commit charted, only two of the ten programs build through the store.
-Every program that imports the port's hash module stops at the same place: the interface file the
-store writes for that module carries `fnv1a64_offset`, a `u64` constant above 2^63, and reading the
-interface back refuses it as "a number wider than 64 bits". The ten-byte encoding is the correct one
-for such a value, so the reader's width check is one byte short. The same program builds as one
-compiler run, which is how the parity suite builds it, so this is a fault of the per-module build
-only; it is reported, with a three-line reproduction, to the owner of the build store. The table
-above has a dash wherever a program could not be built.
+**What it found.** Every program of the port builds through the store and matches its reference
+(the ImGui program is left out where its library is not built). A cold build of a test program is
+3 to 12 G instructions, most of it the port modules it imports; after a one-statement edit to
+`main` it is 0.17 to 0.37 G, a twentieth or less, because the store replays every unchanged module
+and function. The first measurement found a store fault that stopped eight programs building - a
+module's `u64` constant above 2^63 could not be read back from its interface - and its fix is on
+main.
 
-Of the two that build, `abgeo` (the cluster builder and its reader) is the slowest release run, and
-its hot spots are in the program's printing and float handling rather than in the geometry: the
-runtime's number formatting and `f32` rounding sit beside meshoptimizer's own `simplify_group` at
-the top of the profile.
+`abgeo` (the cluster builder and its reader) is the slowest release run, and its time goes to
+building vectors rather than to geometry: growing them (`rt_grow`) and pushing onto them
+(`rt_push`) lead the profile, with integer conversion (`rt_int`) third.
 
 {{perf:abundance#abundance-compile-cpu}}
 
@@ -171,38 +157,34 @@ table of its own further down.
 
 The figure is the user-space instructions of the tool and every process it started, with every
 toolchain held to one process (`GRAIL_JOBS=1`, `GOMAXPROCS=1 -p=1`, `cargo -j1`; Zig's build-exe has
-no job flag). Instruction counts do not move with the load of the shared machine, where time does.
+no job flag). The standard library is warm for every toolchain, as it is after an
+install: Grail's store holds what `grail cache warm` builds (every standard module, which the
+installers run), Go's build cache its standard library, Zig's cache its compiler runtime, and cargo
+works from its registry. "Cold" means a project's first build, not a toolchain's. Instruction counts do not move with the load of the shared machine, where time does.
 A second chart shows wall time with four jobs each, this machine's cap.
 
 {{perf:compile#compile}}
 
 {{perf:compile#compile-wall}}
 
-**Where Grail is behind, and why.** Grail is not the fastest on any row by instructions. By wall
-time it wins one: rebuilding the 104,000-line program after an edit (5.3 s, against Go's 6.7 s and
-cargo's 9.5 s). The causes, from profiles of the compiler on these programs:
+**Where Grail is ahead, and where it is behind.** On the commit charted, Grail is the fastest on
+every row of hello world and the seven engine programs except one (iterchain's check after an edit,
+level with cargo): a project's first check, its first build, a rebuild after an edit and a rebuild
+with nothing changed. A no-op rebuild is decided from fingerprints without reading the program
+again, and the build store files its results in-process. On the generated programs, Grail wins
+every edited build and no-op rebuild, and the edited check of the smaller one. It is behind in
+three places, with their causes from profiles of the compiler on these programs:
 
-- **A rebuild with nothing changed re-reads the program.** cargo decides from file times (0.07 G
-  instructions); Grail reads every source file three times - for its `module` and `use` lines, for
-  `@embed(`, and to hash it - before finding the build up to date, so the cost grows with the
-  program (0.71 G at 104,000 lines).
-- **Small programs pay for the build store's bookkeeping.** A build of hello world runs about
-  seventy helper processes (`sh -c sha256sum`, `mv`, `cp`) to hash and file its results, and checks
-  the runtime from source. This fixed cost is most of every small row; a program that uses
-  standard-library modules (`iterchain`, `json`, `hashmap`) checks those from source too.
-- **A check does more than check.** In a check of the 104,000-line program, hashing the module's
-  interface with SHA-256 is 11 % of the instructions, writing the interface 10 %, and code text is
-  still emitted and thrown away (6 %); allocation and copying are about a quarter.
-- **A check after an edit checks the whole module again**: about half the cold cost, where
-  `cargo check` re-checks only what changed.
-- **A build passes its program through text twice.** The optimiser parses the front end's
-  instruction text back into its own form (about 18 % of a cold build), and the assembler, now in
-  the same process, still reads the optimiser's assembly text line by line (10 %). The optimiser
-  itself is a third of the build, mostly liveness and dead-definition passes.
-- **After an edit, every function is optimised again.** The build store replays the front end's
-  work for unchanged functions, but the optimiser runs over the whole module (13.8 G instructions
-  after the edit against 14.3 G cold), where cargo's incremental compilation re-codegens only the
-  changed function.
+- **A cold check of a large program** (1.6x Zig at 26,000 lines, 3.2x at 104,000). The check of
+  one large module hashes its interface with SHA-256 (11 % of the instructions), writes the
+  interface (10 %) and still emits code text that it throws away (6 %); allocation and copying are
+  about a quarter. Zig checks the same program on one thread in a third of the instructions.
+- **A check of a large program after an edit** (1.4x Zig at 104,000 lines). The whole module is
+  checked again, at about half the cold cost, where `cargo check` re-checks only what changed.
+- **A cold build** (1.6x Go). The optimiser is a third of the build and re-reads the front end's
+  instruction text (about 18 %), and the assembler reads the optimiser's text again. A cold build of
+  the 104,000-line program also grew from 38 to 53 billion instructions between two recent commits
+  of the compiler; that regression is being traced.
 
 {{perf:compile#compile-go-check}}
 

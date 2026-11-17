@@ -14,7 +14,7 @@
 //                    re-digested, manifest rewritten) misses the module that reads it, and only it;
 //  (f) corruption  - a corrupted store entry is a miss and a rebuild, never a wrong binary, and the
 //                    entry is repaired instead of missing forever;
-//  (m) comptime    - a compile-time value reruns its probe when a body it reached changes, and only
+//  (o) comptime    - a compile-time value reruns its probe when a body it reached changes, and only
 //                    then.
 //
 // (c) is also where the *independence* of a module's emitted text is pinned, by measurement rather
@@ -29,10 +29,12 @@
 
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { fastDigest, storeDigest } from './store-hash.mjs';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
 import { buildCompiler, compilerSources, hostTarget, root, targetName } from './native.mjs';
+import { scalingProgram } from './compile-bench.mjs';
 
 const flags = process.argv.slice(2);
 const target = targetName(flags.includes('--target') ? flags[flags.indexOf('--target') + 1] : hostTarget);
@@ -122,32 +124,6 @@ function run(binary) {
 }
 const bytes = path => readFileSync(path);
 const digest = data => createHash('sha256').update(data).digest('hex');
-// The store's own content digest (compiler/cli.grl, store_hash): XXH64 under the seeds 0..3, each
-// as 16 hex digits - what a blob's file name is.
-const M64 = (1n << 64n) - 1n;
-const XP = [11400714785074694791n, 14029467366897019727n, 1609587929392839161n, 9650029242287828579n, 2870177450012600261n];
-const rotl = (x, r) => ((x << r) | (x >> (64n - r))) & M64;
-const xround = (acc, lane) => (rotl((acc + lane * XP[1]) & M64, 31n) * XP[0]) & M64;
-const xmerge = (acc, lane) => (((acc ^ xround(0n, lane)) * XP[0]) & M64) + XP[3] & M64;
-function xxh64(data, seed) {
-  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-  const n = data.length;
-  let at = 0, h;
-  if (n >= 32) {
-    const v = [(seed + XP[0] + XP[1]) & M64, (seed + XP[1]) & M64, seed, (seed - XP[0]) & M64];
-    for (; at + 32 <= n; at += 32) for (let k = 0; k < 4; k++) v[k] = xround(v[k], view.getBigUint64(at + 8 * k, true));
-    h = (rotl(v[0], 1n) + rotl(v[1], 7n) + rotl(v[2], 12n) + rotl(v[3], 18n)) & M64;
-    for (let k = 0; k < 4; k++) h = xmerge(h, v[k]);
-  } else h = (seed + XP[4]) & M64;
-  h = (h + BigInt(n)) & M64;
-  for (; at + 8 <= n; at += 8) h = ((rotl(h ^ xround(0n, view.getBigUint64(at, true)), 27n) * XP[0]) & M64) + XP[3] & M64;
-  if (at + 4 <= n) { h = ((rotl(h ^ ((BigInt(view.getUint32(at, true)) * XP[0]) & M64), 23n) * XP[1]) & M64) + XP[2] & M64; at += 4; }
-  for (; at < n; at++) h = (rotl(h ^ ((BigInt(data[at]) * XP[4]) & M64), 11n) * XP[0]) & M64;
-  h = ((h ^ (h >> 33n)) * XP[1]) & M64;
-  h = ((h ^ (h >> 29n)) * XP[2]) & M64;
-  return h ^ (h >> 32n);
-}
-const storeDigest = data => [0n, 1n, 2n, 3n].map(seed => xxh64(data, seed).toString(16).padStart(16, '0')).join('');
 // Interfaces are the typed record stream docs/design/separate-compilation.md describes: `GRIF`, a
 // version byte, then `tag, len, payload` records, then a trailer whose last 32 bytes are the digest
 // of everything before them. These read that framing only, so this test can change one byte of one
@@ -213,7 +189,7 @@ function constValueAt(bytes, name) {
 }
 function sealFile(bytes) {
   const body = Buffer.from(bytes.subarray(0, bytes.length - 32));
-  createHash('sha256').update(body).digest().copy(bytes, bytes.length - 32);
+  fastDigest(body).copy(bytes, bytes.length - 32);
   return bytes;
 }
 function dump(path) {
@@ -965,6 +941,39 @@ function proveMemoKeys() {
   return { hits };
 }
 
+// ---- (l) the optimiser's memo after a one-function edit ------------------------------------------
+// A build after an edit to one body re-optimises that body and no other: every unchanged body's
+// memo key - its unit, ordinal, facts and text - is the one it was filed under, so the store gains
+// exactly one optimiser entry (`opt-*`). A replayed body whose facts differ from a fresh emission's
+// keys apart and would file one per body.
+function proveMemoEdit() {
+  const dir = join(work, 'memo-edit');
+  rmSync(dir, { recursive: true, force: true });
+  mkdirSync(dir, { recursive: true });
+  const text = scalingProgram(40);
+  const at = text.indexOf('% 1000', text.search(/fn work20\(/));
+  const edited = text.slice(0, at) + '% 1001' + text.slice(at + 6);
+  const env = { ...process.env, GRAIL_CACHE_DIR: join(dir, 'store'), GRAIL_JOBS: '1' };
+  const entries = () => {
+    let n = 0;
+    const walk = d => { for (const e of readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) walk(join(d, e.name)); else if (e.name.startsWith('opt-')) n++; } };
+    walk(join(dir, 'store'));
+    return n;
+  };
+  const build = source => {
+    writeFileSync(join(dir, 'main.grl'), source);
+    const r = spawnSync(compiler, ['build', 'main.grl'], { cwd: dir, encoding: 'utf8', env, timeout: 900_000 });
+    assert.equal(r.status, 0, `the build failed\n${r.stdout}${r.stderr}`);
+  };
+  build(text);
+  const cold = entries();
+  assert.ok(cold > 80, `a cold build files an optimiser entry per body (${cold})`);
+  build(edited);
+  const after = entries();
+  assert.equal(after - cold, 1, `an edit to one body files ${after - cold} optimiser entries: the unchanged bodies missed the memo`);
+  return { cold };
+}
+
 // ---- (m) an incremental check ----------------------------------------------------------------
 // `grail check` runs one compiler per module through the store, as a build does: a module whose
 // inputs did not move is not checked again, and in a module that is, the unchanged bodies replay.
@@ -1063,7 +1072,7 @@ const corruption = proveCorruption();
 const pruning = provePruning();
 const modules = proveModules();
 const editCost = proveEditCost(flags.includes('--big') ? 2000 : 400);
-// (m) compile-time values (docs/design/comptime-speed.md, R3): a value is cached with what its
+// (o) compile-time values (docs/design/comptime-speed.md, R3): a value is cached with what its
 // computation read - the bodies the probe reached, the non-function declarations, the other values -
 // so an edit elsewhere runs no probe, and an edit to a body the value reached runs exactly one. The
 // probes are counted by the link each one makes (GRAIL_CC), in a project of its own.
@@ -1073,7 +1082,8 @@ function proveComptimeValues() {
   mkdirSync(dir, { recursive: true });
   const log = join(dir, 'cc.log');
   const wrapper = join(dir, 'cc.sh');
-  writeFileSync(wrapper, `#!/bin/sh\necho link >> ${log}\nexec cc "$@"\n`, { mode: 0o755 });
+  // A probe is linked with the build's linker: count the links of probe objects only.
+  writeFileSync(wrapper, `#!/bin/sh\ncase "$*" in *.probe.o*) echo link >> ${log};; esac\nexec ld.lld "$@"\n`, { mode: 0o755 });
   const source = (step, extra) => `static A: u64 = @fa();
 static B: u64 = @fb();
 fn fa() -> u64 {
@@ -1097,7 +1107,7 @@ fn main() -> u64 {
   const step = (text) => {
     writeFileSync(file, text);
     writeFileSync(log, '');
-    const result = spawnSync(compiler, ['run', file, '--no-cache'], { cwd: dir, encoding: 'utf8', env: { ...process.env, GRAIL_CC: wrapper }, timeout: 600_000 });
+    const result = spawnSync(compiler, ['run', file, '--no-cache'], { cwd: dir, encoding: 'utf8', env: { ...process.env, GRAIL_LINKER: wrapper }, timeout: 600_000 });
     assert.equal(result.status, 0, `compile-time values: the build failed: ${result.stdout}${result.stderr}`);
     return { out: result.stdout, probes: readFileSync(log, 'utf8').split('\n').filter(Boolean).length };
   };
@@ -1115,11 +1125,41 @@ fn main() -> u64 {
   assert.equal(again.probes, 0, 'and after it, an edit elsewhere runs none');
   return { cold, warm, elsewhere, reached, again };
 }
+// (n) a check needs no C toolchain (docs/design/comptime-speed.md): a run-tier value under
+// `grail check` is computed by a probe the compiler assembles itself and links with the build's
+// linker, so a `cc` that fails cannot matter; and check and build give the same verdict for a value
+// that fails.
+function proveCheckNeedsNoCc() {
+  const dir = join(work, 'nocc');
+  rmSync(dir, { recursive: true, force: true });
+  mkdirSync(join(dir, 'bin'), { recursive: true });
+  writeFileSync(join(dir, 'bin', 'cc'), '#!/bin/sh\necho "cc was called" >&2\nexit 1\n', { mode: 0o755 });
+  const env = { ...process.env, PATH: `${join(dir, 'bin')}:${process.env.PATH}` };
+  const good = join(dir, 'good.grl');
+  writeFileSync(good, 'static T: u64[] = @t();\nfn t() -> u64[] {\n    return u64[1, 2, 3];\n}\nfn main() -> u64 {\n    println(T.len());\n    return 0;\n}\n');
+  const checked = spawnSync(compiler, ['check', good], { cwd: dir, encoding: 'utf8', env, timeout: 600_000 });
+  assert.equal(checked.status, 0, `grail check with no working cc: ${checked.stdout}${checked.stderr}`);
+  assert.ok(!`${checked.stdout}${checked.stderr}`.includes('cc was called'), 'grail check called cc');
+  const bad = join(dir, 'bad.grl');
+  writeFileSync(bad, 'LIMIT := boom();\nfn boom() -> u64 {\n    mut x: u8 = 250;\n    x += 10;\n    return u64(x);\n}\nfn main() -> u64 {\n    return LIMIT;\n}\n');
+  const verdicts = ['check', 'build'].map(command => {
+    rmSync(join(dir, '.work'), { recursive: true, force: true });
+    const run = spawnSync(compiler, [command, bad], { cwd: dir, encoding: 'utf8', env, timeout: 600_000 });
+    const said = `${run.stdout}${run.stderr}`.split('\n').filter(line => line.startsWith('error:')).join('\n');
+    return { status: run.status, said };
+  });
+  assert.equal(verdicts[0].status, 1, 'check accepted a value that fails');
+  assert.deepEqual(verdicts[0], verdicts[1], 'check and build disagree on a value that fails');
+  assert.ok(verdicts[0].said.includes('compile-time value `main::LIMIT`'), verdicts[0].said);
+  return verdicts[0].said.split('\n').length;
+}
 const comptimeValues = proveComptimeValues();
+const checkNoCc = proveCheckNeedsNoCc();
 const units = proveUnits(flags.includes('--big') ? 2000 : 400);
 const registrations = proveRegistrations();
 const independent = proveIndependentUnits(flags.includes('--big') ? 1000 : 150);
 const memoKeys = proveMemoKeys();
+const memoEdit = proveMemoEdit();
 const checks = proveCheck();
 const finalStore = proveStore();
 
@@ -1154,8 +1194,10 @@ for (const item of [
 console.log(`               ${ms(units.clean.ms).padStart(10)}  a clean build of the same tree (no cache at all)`);
 reportIndependent(independent, registrations);
 console.log(`(m) check      a check after an edit to one module checks it alone (${checks.edited.line.hits} modules reused); errors in two modules are both reported and their readers are not checked`);
+console.log(`(l) memo edit  an edit to one of ${memoEdit.cold} optimised bodies re-optimises it alone`);
 console.log(`(l) memo keys  a warm rebuild of the compiler: ${memoKeys.hits} bodies replayed, every remembered optimisation checked against a fresh one`);
 console.log(`(f) pruning    --keep 0 after an edit dropped ${pruning.pruned.records} records and ${pruning.pruned.blobs} blobs; next build ${pruning.again.hits} hit, ${pruning.again.misses} miss`);
-console.log(`(m) comptime   probes: cold ${comptimeValues.cold.probes}, unchanged ${comptimeValues.warm.probes}, an edit elsewhere ${comptimeValues.elsewhere.probes}, an edit to a reached body ${comptimeValues.reached.probes}, then elsewhere again ${comptimeValues.again.probes}`);
+console.log(`(o) comptime   probes: cold ${comptimeValues.cold.probes}, unchanged ${comptimeValues.warm.probes}, an edit elsewhere ${comptimeValues.elsewhere.probes}, an edit to a reached body ${comptimeValues.reached.probes}, then elsewhere again ${comptimeValues.again.probes}`);
+console.log(`(n) check      a check with a failing cc passed, and check and build agree on a failing value (${checkNoCc} errors)`);
 console.log('');
 console.log('build cache verified');
