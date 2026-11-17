@@ -30170,6 +30170,12 @@ fn unbox_into_frame<a>(c: (&a mut C), slot: u64, ty: u64) -> unit {
 // The drop of a holder's word that holds `ty`: for a framed record it is the holder's box, freed;
 // for anything else the type's drop.
 fn holder_drop<a>(c: (&a mut C), ty: u64) -> unit {
+    t := base_type(&mut c, ty);
+    if (ty_kind(&mut c, t) == 5) || (ty_kind(&mut c, t) == 27) {
+        // A view a holder keeps is a reference it borrowed (a captured `&[T]` stores the pair's
+        // address): there is nothing of its own to free.
+        return ();
+    }
     if array_owned(&mut c, ty) {
         // An array has no boxed helper: its elements dropped in place, then the holder's box freed.
         o(&mut c, view("pushq %rdi\npushq %rdi\n"));
@@ -41953,6 +41959,11 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
                 rec_store(&mut c, obj, 2 + j, held.t);
             }
             move_out(&mut c, held);
+        } else if framed(&mut c, ty) {
+            // A plain value that owns nothing but is more than a word (a view, a small record): its
+            // words go in a box of the environment's, as with an owning capture, so they outlive the
+            // frame they came from; the environment's drop frees the box (holder_drop).
+            rec_store(&mut c, obj, 2 + j, frame_box(&mut c, slot, ty));
         } else {
             get(&mut c, slot, view("%rax"));
             copy := save(&mut c);
