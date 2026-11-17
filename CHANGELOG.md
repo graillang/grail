@@ -11,9 +11,18 @@
   empty) and `close`; waits park, as every `sync` wait does. `bench/chan.grl` measures it against
   crossbeam-channel and Go's chan in `tools/bench-rivals.mjs`.
 
+- A per-function unit's key, and a module run's declaration record key, carry a digest of the run's
+  declaration surface instead of its bytes (key formats `grail-fnkey 5`, `grail-declrec 3`; units
+  filed before miss once). compile-perf build_syn1000_edited 6.379G -> 6.266G (-1.8%).
 - Inflate calls its bit refill only when the buffer is short of the bits a symbol or extra field
   needs (a word refill holds 56 or more), instead of on every symbol: the 4K png Grail-LLVM 4.94G ->
   4.66G instructions (0.59 -> 0.53 s; stb_image 0.37 s), Grail-native 16.1G -> 15.1G.
+- Fixed (soundness): the interval proof removed the overflow check of `a * b` when each operand was
+  at most 2^40, but their product can reach 2^80; the product of the bounds must now stay below 2^62
+  (`bce-product-bound-kept`). The interval reading of an index (`i * n + k`) also formed its
+  products before testing them, which can wrap in a compiler built with wrapping arithmetic; it now
+  tests by division first.
+
 - xxhash reads its eight-byte lanes with one load (`bytes::load_u64`) now that the call inlines,
   instead of assembling each from eight indexed bytes: the 20 MB zstd archive (whose frames carry
   an XXH64 checksum) Grail-LLVM 5.88G -> 5.09G instructions, 0.65 -> 0.55 s (libzstd 0.26 s).
