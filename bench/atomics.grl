@@ -1,0 +1,163 @@
+// Atomics micro-benchmarks (docs/design/concurrency-stages-5-7.md, "Stage 7"): the cost of one
+// uncontended load, store, fetch_add and compare_exchange on an `Atomic<u64>`, an uncontended
+// Mutex round trip, 24 jobs hammering one fetch_add, and an SPSC ring of release stores and acquire
+// loads. Uses only the methods every compiler since stage 1 accepts, so the same source measures
+// the compiler before and after the atom.* ops.
+//   atomics all        every benchmark, `name value unit` lines
+//   atomics OP:N       N iterations of one op and nothing else (for instruction counts:
+//                      callgrind at two N gives the per-op count as the slope)
+use host;
+
+fn add<a>(total: (&a mut u64), amount: u64) -> u64 {
+    exchange(total, load(total) + amount);
+    return 0;
+}
+fn run_op<a, b>(op: (&a [u8]), n: u64, c: (&b Atomic<u64>), m: (&b Mutex<u64>)) -> u64 {
+    mut t = 0;
+    if same(op, view("empty")) {
+        for i in n {
+            t = wrapping_add(t, i);
+        }
+    }
+    if same(op, view("load")) {
+        for i in n {
+            t = wrapping_add(t, c.load());
+        }
+    }
+    if same(op, view("load_acquire")) {
+        for i in n {
+            t = wrapping_add(t, c.load_acquire());
+        }
+    }
+    if same(op, view("store")) {
+        for i in n {
+            c.store(i);
+        }
+    }
+    if same(op, view("store_release")) {
+        for i in n {
+            c.store_release(i);
+        }
+    }
+    if same(op, view("fetch_add")) {
+        for i in n {
+            t = wrapping_add(t, c.fetch_add(1));
+        }
+    }
+    if same(op, view("swap")) {
+        for i in n {
+            t = wrapping_add(t, c.swap(i));
+        }
+    }
+    if same(op, view("cas")) {
+        for i in n {
+            t = wrapping_add(t, c.compare_exchange(i, i + 1));
+        }
+    }
+    if same(op, view("mutex")) {
+        for i in n {
+            m.lock_with(1, add);
+        }
+    }
+    return t;
+}
+fn same<a, b>(x: (&a [u8]), y: (&b [u8])) -> bool {
+    if x.len() != y.len() {
+        return false;
+    }
+    for i in x.len() {
+        if x[i] != y[i] {
+            return false;
+        }
+    }
+    return true;
+}
+struct Ring {
+    slots: Atomic<u64>[],
+    head: Atomic<u64>,
+    tail: Atomic<u64>,
+    sum: Atomic<u64>
+}
+const RING: u64 = 1024;
+const ITEMS: u64 = 2000000;
+fn ring_side<a>(role: u64, r: (&a Ring)) -> u64 {
+    if role == 0 {
+        for i in ITEMS {
+            while i - r.head.load_acquire() == RING {}
+            r.slots[i % RING].store_relaxed(i);
+            r.tail.store_release(i + 1);
+        }
+        return 0;
+    }
+    mut sum = 0;
+    for i in ITEMS {
+        while r.tail.load_acquire() == i {}
+        sum = wrapping_add(sum, r.slots[i % RING].load_relaxed());
+        r.head.store_release(i + 1);
+    }
+    r.sum.store(sum);
+    return 0;
+}
+const CONTENDED: u64 = 240000;
+fn hammer<a>(id: u64, c: (&a Atomic<u64>)) -> u64 {
+    for i in CONTENDED {
+        c.fetch_add(1);
+    }
+    return id;
+}
+fn main(arg: &[u8]) {
+    c := Atomic::new(0);
+    m := Mutex::new(0);
+    mut colon = arg.len();
+    for i in arg.len() {
+        if arg[i] == 58 {
+            colon = i;
+        }
+    }
+    if colon < arg.len() {
+        mut n = 0;
+        for i in arg.len() - colon - 1 {
+            n = n * 10 + arg[colon + 1 + i] - 48;
+        }
+        println(run_op(arg[: colon], n, &c, &m));
+        return ();
+    }
+    n := 20000000;
+    ops := u8[][copy_text("empty"), copy_text("load"), copy_text("load_acquire"), copy_text("store"), copy_text("store_release"), copy_text("fetch_add"), copy_text("swap"), copy_text("cas"), copy_text("mutex")];
+    for k in ops.len() {
+        t0 := host::now_us();
+        run_op(view(ops[k]), n, &c, &m);
+        t1 := host::now_us();
+        print(ops[k]);
+        print(" ");
+        print((t1 - t0) * 1000 / (n / 1000));
+        println(" ps/op");
+    }
+    mut ids = u64[];
+    for i in 24 {
+        ids.push(i);
+    }
+    h := Atomic::new(0);
+    t2 := host::now_us();
+    parallel_map(ids, &h, hammer);
+    t3 := host::now_us();
+    assert(h.load() == 24 * CONTENDED);
+    print("fetch_add_24_threads ");
+    print((t3 - t2) * 1000 / (24 * CONTENDED / 1000));
+    println(" ps/op");
+    mut slots = Atomic<u64>[];
+    for i in RING {
+        slots.push(Atomic::new(0));
+    }
+    r := Ring { slots: slots, head: Atomic::new(0), tail: Atomic::new(0), sum: Atomic::new(0) };
+    t4 := host::now_us();
+    parallel_map(u64[0, 1], &r, ring_side);
+    t5 := host::now_us();
+    assert(r.sum.load() == ITEMS * (ITEMS - 1) / 2);
+    print("spsc_ring ");
+    print((t5 - t4) * 1000 / (ITEMS / 1000));
+    println(" ps/item");
+}
+fn copy_text(s: &[u8]) -> u8[] {
+    return s.copy();
+}

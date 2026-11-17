@@ -5752,33 +5752,6 @@
     "note": "C would write the array into storage dropped at the end of the statement"
   },
   {
-    "name": "pool-split-mut",
-    "note": "In-place splitting of an exclusive slice by grain (parallel_split / pool::split_mut): uneven pieces (10 elements in pieces of 4 is 4,4,2), one piece, a grain larger than the slice, a grain of one, more pieces than workers (1000 in pieces of 16), a sub-range that leaves its neighbours alone, an empty slice that runs no job, nested chunking inside a chunk callback, narrow (f32/u32) elements at their 4-byte stride, a byte buffer through a &mut [u8] view, and the library wrapper. Every check compares CONTENT: a chunk that ran twice doubles its elements, one that never ran leaves them, and one that wrote outside its region would fault or fail the borrow checker.",
-    "files": [
-      "tests/pool/split_mut.grl"
-    ],
-    "modules": [
-      "lib/pool.grl",
-      "lib/core.grl"
-    ],
-    "stdout": "ok\n"
-  },
-  {
-    "name": "pool-split-mut-timing",
-    "note": "The measured case for stage 2: the same 3M-u64 CPU-bound workload through the owned chunk split and through the in-place split, best of three. Asserts the copy is gone (one owned chunk at least 1.33x slower than one in-place chunk, both single-job, so no core count can explain it) and that parallelism still pays (eight in-place chunks at least 1.5x faster than one, asserted only above four cores). stderr carries the times; stdout is a fixed token.",
-    "files": [
-      "tests/pool/split_mut_timing.grl"
-    ],
-    "modules": [
-      "lib/pool.grl",
-      "lib/core.grl"
-    ],
-    "targets": [
-      "x86_64"
-    ],
-    "stdout": "ok\n"
-  },
-  {
     "name": "pool-job-handle",
     "note": "spawn-then-wait outside a structured call (parallel_spawn/parallel_join, pool::spawn/wait): an owned result, two live jobs joined in the reverse of the order they started, a handle that outlives the frame that made it, a handle dropped without being waited on (its drop waits and discards), a job that runs a job and chunks a vector of its own, and results consumed by later statements.",
     "files": [
@@ -6141,237 +6114,6 @@
     "source": "extern \"C\" record Z { a: [u8; 0] }\nfn main() -> u64 {\n    return 0;\n}\n",
     "reject": true,
     "diagnostic": "an array length is a positive integer constant"
-  },
-  {
-    "name": "array-literals-index-len",
-    "note": "fixed-size arrays in locals (docs/design/fixed-arrays.md): sized elements in C layout, nested arrays, an `&mut` parameter, compound assignment, a constant len()",
-    "source": "fn sum(a: &[f64; 3]) -> f64 {\n    return a[0] + a[1] + a[2];\n}\nfn scale(a: &mut [f64; 3], k: f64) {\n    for i in 3 {\n        a[i] = a[i] * k;\n    }\n}\nfn main() {\n    a: [f32; 4] = [1.0, 2.0, 3.5, 4.0];\n    println(a[2]);\n    println(a.len());\n    mut b: [f64; 3] = [1.0, 2.0, 3.0];\n    scale(&mut b, 2.0);\n    println(sum(&b));\n    mut z: [u8; 5] = [7; 5];\n    z[1] = 9;\n    z[2] += 1;\n    println(\"{} {} {}\", z[0], z[1], z[2]);\n    m: [[i32; 2]; 3] = [[1, -2], [3, 4], [5, 6]];\n    println(m[0][1] + m[2][0]);\n    mut t = 0.0;\n    for x in &b {\n        t = t + *x;\n    }\n    println(t);\n    k: u64 = 2;\n    println(a[k]);\n    c := a;\n    println(c[0] + a[3]);\n    w: [i16; 3] = [-300, 0, 300];\n    println(w);\n}\n",
-    "stdout": "3.5\n4\n12\n7 9 8\n3\n12\n3.5\n5\n[-300, 0, 300]\n"
-  },
-  {
-    "name": "array-equality-and-text",
-    "note": "`==` compares element by element (floats as IEEE, so -0.0 == 0.0), and an array prints as a vector does, nested and inside a format string",
-    "source": "fn main() {\n    a: [f32; 3] = [1.5, -0.0, 3.0];\n    b: [f32; 3] = [1.5, 0.0, 3.0];\n    c: [f32; 3] = [1.5, 0.0, 4.0];\n    println(a == b);\n    println(a == c);\n    println(a != c);\n    println(a);\n    m: [[u8; 2]; 2] = [[1, 2], [3, 4]];\n    println(m);\n    println(\"m = {}\", m);\n    big: [u64; 40] = [7; 40];\n    println(big[39] + big.len());\n}\n",
-    "stdout": "true\nfalse\ntrue\n[1.5, -0.0, 3.0]\n[[1, 2], [3, 4]]\nm = [[1, 2], [3, 4]]\n47\n"
-  },
-  {
-    "name": "array-small-copies",
-    "note": "the owner's copy rule: an array of plain data of at most four words copies on binding, and both names stay usable",
-    "source": "fn main() {\n    a: [f64; 4] = [1.0; 4];\n    mut b = a;\n    b[0] = 5.0;\n    println(\"{} {}\", a[0], b[0]);\n}\n",
-    "stdout": "1 5\n"
-  },
-  {
-    "name": "reject-array-large-moves",
-    "reject": true,
-    "note": "an array larger than four words moves; reading the moved-from name is refused and the help names .copy()",
-    "source": "fn main() {\n    a: [f64; 5] = [0.0; 5];\n    b := a;\n    println(a[0] + b[0]);\n}\n",
-    "diagnostic": "`a` was moved"
-  },
-  {
-    "name": "array-copy-method",
-    "note": "`.copy()` copies a large array; the copy is independent",
-    "source": "fn main() {\n    a: [u64; 6] = [3; 6];\n    mut b = a.copy();\n    b[5] = 4;\n    println(\"{} {}\", a, b);\n}\n",
-    "stdout": "[3, 3, 3, 3, 3, 3] [3, 3, 3, 3, 3, 4]\n"
-  },
-  {
-    "name": "array-assignment-never-aliases",
-    "note": "assignment copies into the variable's own storage: the literal on the right is re-evaluated each iteration while it reads the variable, and nothing shares storage",
-    "source": "fn main() {\n    mut keep: [u64; 2] = [1, 2];\n    for i in 3 {\n        keep = [keep[1], keep[0] + i];\n        b: [u64; 2] = [i, i];\n        t: [u64; 2] = b;\n        keep[0] = keep[0] + t[1];\n    }\n    println(keep);\n}\n",
-    "stdout": "[5, 4]\n"
-  },
-  {
-    "name": "array-through-reference",
-    "note": "`*r = v` and `exchange` on an array reference replace its bytes",
-    "source": "fn reset(a: &mut [f64; 3]) {\n    *a = [9.0, 8.0, 7.0];\n}\nfn main() {\n    mut a: [f64; 3] = [1.0, 2.0, 3.0];\n    reset(&mut a);\n    println(a);\n    old := exchange(&mut a, [4.0, 5.0, 6.0]);\n    println(\"{} {}\", old, a);\n    mut big: [u64; 6] = [1; 6];\n    prev := exchange(&mut big, [2; 6]);\n    println(\"{} {}\", prev, big);\n}\n",
-    "stdout": "[9.0, 8.0, 7.0]\n[9.0, 8.0, 7.0] [4.0, 5.0, 6.0]\n[1, 1, 1, 1, 1, 1] [2, 2, 2, 2, 2, 2]\n"
-  },
-  {
-    "name": "array-index-out-of-bounds-aborts",
-    "note": "an index the compiler cannot prove is checked against the constant length, and a failure reports both and where (the location comes from the site table, which only the native backend emits)",
-    "source": "fn main() {\n    a: [u64; 3] = [1, 2, 3];\n    k: u64 = 3;\n    println(a[k]);\n}\n",
-    "stderr": "error: index 3 out of bounds for length 3\n --> ",
-    "signal": "SIGABRT",
-    "backends": [
-      "native"
-    ]
-  },
-  {
-    "name": "reject-array-constant-index",
-    "reject": true,
-    "note": "a literal index is checked against N while compiling",
-    "source": "fn main() {\n    a: [u64; 3] = [1, 2, 3];\n    println(a[3]);\n}\n",
-    "diagnostic": "index 3 is out of bounds for `[u64; 3]`"
-  },
-  {
-    "name": "reject-array-literal-count",
-    "reject": true,
-    "note": "an array starts full: a literal must give exactly N elements",
-    "source": "fn main() {\n    a: [u64; 3] = [1, 2];\n}\n",
-    "diagnostic": "this literal has 2 elements, and `[u64; 3]` holds 3"
-  },
-  {
-    "name": "reject-array-repeat-count",
-    "reject": true,
-    "source": "fn main() {\n    a: [f32; 4] = [0.0; 3];\n}\n",
-    "diagnostic": "this repeat makes 3 elements, and `[f32; 4]` holds 4"
-  },
-  {
-    "name": "reject-array-uninitialised",
-    "reject": true,
-    "note": "no partially initialised arrays: a declaration without a value is refused",
-    "source": "fn main() {\n    mut a: [f32; 4];\n}\n",
-    "diagnostic": "an array starts full, so it is declared with a value"
-  },
-  {
-    "name": "reject-array-zero-length",
-    "reject": true,
-    "note": "[T; 0] is refused in v1",
-    "source": "fn main() {\n    a: [f32; 0] = [0.0; 0];\n}\n",
-    "diagnostic": "an array length is a positive integer constant"
-  },
-  {
-    "name": "reject-array-by-value-parameter",
-    "reject": true,
-    "source": "fn f(a: [f32; 4]) -> f32 {\n    return a[0];\n}\nfn main() {\n}\n",
-    "diagnostic": "an array as a parameter taken by value is not supported yet"
-  },
-  {
-    "name": "reject-array-result",
-    "reject": true,
-    "source": "fn f() -> [f32; 4] {\n    return [0.0; 4];\n}\nfn main() {\n}\n",
-    "diagnostic": "an array as a function result is not supported yet"
-  },
-  {
-    "name": "reject-array-struct-field",
-    "reject": true,
-    "source": "struct S {\n    a: [f32; 4]\n}\nfn main() {\n}\n",
-    "diagnostic": "an array as a field of a struct or a variant's payload is not supported yet"
-  },
-  {
-    "name": "reject-array-capture",
-    "reject": true,
-    "source": "fn main() {\n    a: [f32; 4] = [0.0; 4];\n    g := || a[0];\n}\n",
-    "diagnostic": "an array as a closure's capture is not supported yet"
-  },
-  {
-    "name": "reject-array-type-argument",
-    "reject": true,
-    "source": "fn main() {\n    t: ([u8; 2], u64) = ([1, 2], 3);\n}\n",
-    "diagnostic": "an array as a type argument"
-  },
-  {
-    "name": "reject-array-owned-element",
-    "reject": true,
-    "source": "fn main() {\n    a: [string; 2] = [\"a\".text(), \"b\".text()];\n}\n",
-    "diagnostic": "an array element is a number or another array in this version"
-  },
-  {
-    "name": "reject-array-write-through-shared",
-    "reject": true,
-    "source": "fn f(a: &[f32; 4]) {\n    a[0] = 1.0;\n}\nfn main() {\n}\n",
-    "diagnostic": "mutation through readonly reference"
-  },
-  {
-    "name": "reject-array-element-borrow-conflict",
-    "reject": true,
-    "note": "element places are one child of the array, as for a vector: a write to one element while another is borrowed is refused",
-    "source": "fn main() {\n    mut a: [u64; 4] = [0; 4];\n    r := &a[1];\n    a[0] = 5;\n    println(*r);\n}\n",
-    "diagnostic": ""
-  },
-  {
-    "name": "array-checks-proved-or-constant",
-    "targets": [
-      "x86_64"
-    ],
-    "backends": [
-      "native"
-    ],
-    "note": "a loop to N, `for x in a` and a refined index have no element check; an unknown index is one compare against the constant N - no length is loaded - and a loop over an array calls nothing",
-    "source": "fn total(a: &[u64; 8]) -> u64 {\n    mut t = 0;\n    for i in 8 {\n        t += a[i];\n    }\n    return t;\n}\nfn total_each(a: &[f64; 8]) -> f64 {\n    mut t = 0.0;\n    for x in a {\n        t = t + *x;\n    }\n    return t;\n}\nfn get(a: &[u64; 8], k: u64) -> u64 {\n    return a[k];\n}\nfn at(a: &[u64; 8], i: u64 where i < 8) -> u64 {\n    return a[i];\n}\nfn main() {\n    a: [u64; 8] = [1, 2, 3, 4, 5, 6, 7, 8];\n    f: [f64; 8] = [0.5; 8];\n    println(\"{} {} {} {}\", total(&a), total_each(&f), get(&a, 7), at(&a, 2));\n}\n",
-    "stdout": "36 4 8 3\n",
-    "asm": [
-      {
-        "in": "f_main_get",
-        "text": "movabsq $8,%rdx"
-      },
-      {
-        "in": "f_main_get",
-        "text": "call rt_fail"
-      }
-    ],
-    "asmAbsent": [
-      {
-        "in": "f_main_total",
-        "text": "rt_fail"
-      },
-      {
-        "in": "f_main_total_each",
-        "text": "call"
-      },
-      {
-        "in": "f_main_at",
-        "text": "rt_fail"
-      },
-      {
-        "in": "f_main_get",
-        "text": "8(%rdi)"
-      }
-    ]
-  },
-  {
-    "name": "array-frame-over-a-page-is-probed",
-    "note": "a frame larger than a page is touched a page at a time from the top before it is allocated (on LLVM, `probe-stack`), and a deep recursion through such frames reports a stack overflow instead of stepping over the guard",
-    "source": "fn fill(depth: u64) -> u64 {\n    mut buf: [u64; 8192] = [0; 8192];\n    buf[depth % 8192] = depth;\n    if depth == 0 {\n        return buf[0];\n    }\n    return fill(depth - 1) + buf[depth % 8192];\n}\nfn main() {\n    println(fill(10));\n}\n",
-    "stdout": "55\n"
-  },
-  {
-    "name": "array-frame-probe-pinned",
-    "targets": [
-      "x86_64"
-    ],
-    "backends": [
-      "native"
-    ],
-    "source": "fn fill(depth: u64) -> u64 {\n    mut buf: [u64; 8192] = [0; 8192];\n    buf[depth % 8192] = depth;\n    return buf[depth % 8192];\n}\nfn small(x: u64) -> u64 {\n    a: [u64; 4] = [x; 4];\n    return a[3];\n}\nfn main() {\n    println(fill(10) + small(1));\n}\n",
-    "stdout": "11\n",
-    "asm": [
-      {
-        "in": "f_main_fill",
-        "text": "movq $0,(%rsp)"
-      }
-    ],
-    "asmAbsent": [
-      {
-        "in": "f_main_small",
-        "text": ".Lgrail_probe_"
-      }
-    ]
-  },
-  {
-    "name": "array-large-frames-overflow-reports",
-    "backends": [
-      "native"
-    ],
-    "note": "recursion through 64 KiB frames runs into the stack's end page by page and is reported as an overflow, at the frame's statement",
-    "source": "fn fill(depth: u64) -> u64 {\n    mut buf: [u64; 8192] = [0; 8192];\n    buf[depth % 8192] = depth;\n    if depth == 0 {\n        return buf[0];\n    }\n    return fill(depth - 1) + buf[depth % 8192];\n}\nfn main() {\n    println(\"before\");\n    println(fill(100000));\n}\n",
-    "stdout": "before\n",
-    "status": 134,
-    "stderr": [
-      "error: stack overflow\n"
-    ]
-  },
-  {
-    "name": "reject-array-frame-over-task-stack",
-    "reject": true,
-    "note": "a frame larger than the 1 MiB stack a task runs on is refused at the largest array in it",
-    "source": "fn main() {\n    big: [u64; 200000] = [0; 200000];\n    println(big[1]);\n}\n",
-    "diagnostic": "more than the 1 MiB stack a task runs on"
-  },
-  {
-    "name": "array-in-task-frame-runs",
-    "note": "a task (1 MiB stack) with a 64 KiB array in its frame runs: the probe walks its stack from the top",
-    "source": "fn work(seed: u64, unused: u64) -> u64 {\n    mut buf: [u64; 8192] = [seed; 8192];\n    for i in 8192 {\n        buf[i] = buf[i] + i;\n    }\n    return buf[8191] + buf[0];\n}\nfn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {\n    t := spawn(sc, 5, work);\n    return join(t);\n}\nfn main() {\n    println(task_scope(0, body));\n}\n",
-    "stdout": "8201\n"
   },
   {
     "name": "extern-lib-link-only",
@@ -9220,15 +8962,6 @@
     "status": 0
   },
   {
-    "name": "pkg-manifest-overflow",
-    "note": "[package] overflow is the root's overflow mode for a build: \"checked\" or \"wrap\", anything else refused.",
-    "source": "use pkg;\nfn main() {\n    print(pkg::manifest_report(view(\"[package]\\nname = \\\"demo\\\"\\nversion = \\\"0.1.0\\\"\\noverflow = \\\"wrap\\\"\\n\")));\n    println(pkg::manifest_report(view(\"[package]\\nname = \\\"demo\\\"\\nversion = \\\"0.1.0\\\"\\noverflow = \\\"saturate\\\"\\n\")));\n    println(pkg::manifest_report(view(\"[package]\\nname = \\\"demo\\\"\\nversion = \\\"0.1.0\\\"\\noverflow = 1\\n\")));\n}\n",
-    "modules": [
-      "compiler/pkg.grl"
-    ],
-    "stdout": "name demo\nversion 0.1.0\nentry src/main.grl\noverflow wrap\nerror: line 4: [package] overflow must be \"checked\" or \"wrap\"\nerror: line 4: [package] overflow must be \"checked\" or \"wrap\"\n"
-  },
-  {
     "name": "pkg-resolve",
     "source": "use pkg;\nfn main() {\n\n    print(pkg::resolve_report(\"avail log 1.0.0 1.5.0 2.0.0\\navail core 1.0.0 1.3.0 1.5.0\\nneed log ^1.0\\nneed core ^1.0\\n\"));\n    print(pkg::resolve_report(\"avail a 1.0.0\\navail b 1.0.0\\navail log 1.0.0 1.2.0\\nneed a ^1.0\\ndep a 1.0.0 log ^1.0\\n\"));\n    print(pkg::resolve_report(\"avail log 1.0.0 1.2.0 1.9.0\\nneed log ^1.0\\nlock log 1.2.0\\n\"));\n}\n",
     "modules": [
@@ -10559,51 +10292,6 @@
     "note": "A conversion the target cannot hold died with an empty stderr and a bare abort; it now reports the value, the type and the line, like every other failed check (docs/design/frontend-robustness.md)."
   },
   {
-    "name": "int-cast-edges",
-    "files": [
-      "tests/intcast/edges.grl"
-    ],
-    "stdout": "0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n128\n128\n-128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n255\n255\n-1\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n128\n-128\n-128\n65408\n-128\n-128\n4294967168\n-128\n-128\n18446744073709551488\n-128\n-128\n255\n-1\n-1\n65535\n-1\n-1\n4294967295\n-1\n-1\n18446744073709551615\n-1\n-1\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n128\n128\n-128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n255\n255\n-1\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n0\n0\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n255\n-1\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n0\n0\n32768\n32768\n-32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n127\n127\n65407\n65407\n-129\n65407\n65407\n65407\n65407\n65407\n65407\n65407\n65407\n128\n-128\n65408\n65408\n-128\n65408\n65408\n65408\n65408\n65408\n65408\n65408\n65408\n255\n-1\n65535\n65535\n-1\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n0\n0\n32768\n-32768\n-32768\n4294934528\n-32768\n-32768\n18446744073709518848\n-32768\n-32768\n127\n127\n65407\n-129\n-129\n4294967167\n-129\n-129\n18446744073709551487\n-129\n-129\n128\n-128\n-128\n65408\n-128\n-128\n4294967168\n-128\n-128\n18446744073709551488\n-128\n-128\n255\n-1\n-1\n65535\n-1\n-1\n4294967295\n-1\n-1\n18446744073709551615\n-1\n-1\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n128\n128\n-128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n255\n255\n-1\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n0\n0\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n255\n-1\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n128\n128\n-128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n255\n255\n-1\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n0\n0\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n255\n-1\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n0\n0\n32768\n32768\n-32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n255\n-1\n65535\n65535\n-1\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n0\n0\n0\n0\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n255\n-1\n65535\n-1\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n0\n0\n0\n0\n2147483648\n2147483648\n-2147483648\n2147483648\n2147483648\n2147483648\n2147483648\n255\n-1\n32767\n32767\n4294934527\n4294934527\n-32769\n4294934527\n4294934527\n4294934527\n4294934527\n0\n0\n32768\n-32768\n4294934528\n4294934528\n-32768\n4294934528\n4294934528\n4294934528\n4294934528\n127\n127\n65407\n-129\n4294967167\n4294967167\n-129\n4294967167\n4294967167\n4294967167\n4294967167\n128\n-128\n65408\n-128\n4294967168\n4294967168\n-128\n4294967168\n4294967168\n4294967168\n4294967168\n255\n-1\n65535\n-1\n4294967295\n4294967295\n-1\n4294967295\n4294967295\n4294967295\n4294967295\n0\n0\n0\n0\n2147483648\n-2147483648\n-2147483648\n18446744071562067968\n-2147483648\n-2147483648\n255\n-1\n32767\n32767\n4294934527\n-32769\n-32769\n18446744073709518847\n-32769\n-32769\n0\n0\n32768\n-32768\n-32768\n4294934528\n-32768\n-32768\n18446744073709518848\n-32768\n-32768\n127\n127\n65407\n-129\n-129\n4294967167\n-129\n-129\n18446744073709551487\n-129\n-129\n128\n-128\n-128\n65408\n-128\n-128\n4294967168\n-128\n-128\n18446744073709551488\n-128\n-128\n255\n-1\n-1\n65535\n-1\n-1\n4294967295\n-1\n-1\n18446744073709551615\n-1\n-1\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n128\n128\n-128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n255\n255\n-1\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n0\n0\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n255\n-1\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n0\n0\n32768\n32768\n-32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n255\n-1\n65535\n65535\n-1\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n0\n0\n0\n0\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n255\n-1\n65535\n-1\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n128\n128\n-128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n255\n255\n-1\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n0\n0\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n255\n-1\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n0\n0\n32768\n32768\n-32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n255\n-1\n65535\n65535\n-1\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n0\n0\n0\n0\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n255\n-1\n65535\n-1\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n0\n0\n0\n0\n2147483648\n2147483648\n-2147483648\n2147483648\n2147483648\n2147483648\n2147483648\n255\n-1\n65535\n-1\n4294967295\n4294967295\n-1\n4294967295\n4294967295\n4294967295\n4294967295\n0\n0\n0\n0\n0\n0\n4294967296\n4294967296\n4294967296\n4294967296\n255\n-1\n65535\n-1\n4294967295\n-1\n9223372036854775807\n9223372036854775807\n9223372036854775807\n9223372036854775807\n0\n0\n0\n0\n0\n0\n9223372036854775808\n9223372036854775808\n-9223372036854775808\n255\n-1\n65535\n-1\n2147483647\n2147483647\n18446744071562067967\n18446744071562067967\n-2147483649\n0\n0\n0\n0\n2147483648\n-2147483648\n18446744071562067968\n18446744071562067968\n-2147483648\n255\n-1\n32767\n32767\n4294934527\n-32769\n18446744073709518847\n18446744073709518847\n-32769\n0\n0\n32768\n-32768\n4294934528\n-32768\n18446744073709518848\n18446744073709518848\n-32768\n127\n127\n65407\n-129\n4294967167\n-129\n18446744073709551487\n18446744073709551487\n-129\n128\n-128\n65408\n-128\n4294967168\n-128\n18446744073709551488\n18446744073709551488\n-128\n255\n-1\n65535\n-1\n4294967295\n-1\n18446744073709551615\n18446744073709551615\n-1\n0\n0\n0\n0\n0\n0\n9223372036854775808\n-9223372036854775808\n-9223372036854775808\n255\n-1\n65535\n-1\n2147483647\n2147483647\n18446744071562067967\n-2147483649\n-2147483649\n0\n0\n0\n0\n2147483648\n-2147483648\n-2147483648\n18446744071562067968\n-2147483648\n-2147483648\n255\n-1\n32767\n32767\n4294934527\n-32769\n-32769\n18446744073709518847\n-32769\n-32769\n0\n0\n32768\n-32768\n-32768\n4294934528\n-32768\n-32768\n18446744073709518848\n-32768\n-32768\n127\n127\n65407\n-129\n-129\n4294967167\n-129\n-129\n18446744073709551487\n-129\n-129\n128\n-128\n-128\n65408\n-128\n-128\n4294967168\n-128\n-128\n18446744073709551488\n-128\n-128\n255\n-1\n-1\n65535\n-1\n-1\n4294967295\n-1\n-1\n18446744073709551615\n-1\n-1\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n128\n128\n-128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n255\n255\n-1\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n0\n0\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n255\n-1\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n0\n0\n32768\n32768\n-32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n255\n-1\n65535\n65535\n-1\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n0\n0\n0\n0\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n255\n-1\n65535\n-1\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n0\n0\n0\n0\n2147483648\n2147483648\n-2147483648\n2147483648\n2147483648\n2147483648\n2147483648\n255\n-1\n65535\n-1\n4294967295\n4294967295\n-1\n4294967295\n4294967295\n4294967295\n4294967295\n0\n0\n0\n0\n0\n0\n4294967296\n4294967296\n4294967296\n4294967296\n255\n-1\n65535\n-1\n4294967295\n-1\n9223372036854775807\n9223372036854775807\n9223372036854775807\n9223372036854775807\n",
-    "note": "Integer conversions are emitted in line on the native backend (int_cast): nothing for a widening, a truncation for a wrapping one, and a range test whose failing side calls rt_int_cast. Every width, signed and unsigned, over the edge values of each, checked where the value fits and wrapping always; the expected output is what the called form printed before."
-  },
-  {
-    "name": "int-cast-edges-wrap",
-    "files": [
-      "tests/intcast/edges.grl"
-    ],
-    "overflow": "wrap",
-    "stdout": "0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n128\n128\n-128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n255\n255\n-1\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n128\n-128\n-128\n65408\n-128\n-128\n4294967168\n-128\n-128\n18446744073709551488\n-128\n-128\n255\n-1\n-1\n65535\n-1\n-1\n4294967295\n-1\n-1\n18446744073709551615\n-1\n-1\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n128\n128\n-128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n255\n255\n-1\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n0\n0\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n255\n-1\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n0\n0\n32768\n32768\n-32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n127\n127\n65407\n65407\n-129\n65407\n65407\n65407\n65407\n65407\n65407\n65407\n65407\n128\n-128\n65408\n65408\n-128\n65408\n65408\n65408\n65408\n65408\n65408\n65408\n65408\n255\n-1\n65535\n65535\n-1\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n0\n0\n32768\n-32768\n-32768\n4294934528\n-32768\n-32768\n18446744073709518848\n-32768\n-32768\n127\n127\n65407\n-129\n-129\n4294967167\n-129\n-129\n18446744073709551487\n-129\n-129\n128\n-128\n-128\n65408\n-128\n-128\n4294967168\n-128\n-128\n18446744073709551488\n-128\n-128\n255\n-1\n-1\n65535\n-1\n-1\n4294967295\n-1\n-1\n18446744073709551615\n-1\n-1\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n128\n128\n-128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n255\n255\n-1\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n0\n0\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n255\n-1\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n128\n128\n-128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n255\n255\n-1\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n0\n0\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n255\n-1\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n0\n0\n32768\n32768\n-32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n255\n-1\n65535\n65535\n-1\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n0\n0\n0\n0\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n255\n-1\n65535\n-1\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n0\n0\n0\n0\n2147483648\n2147483648\n-2147483648\n2147483648\n2147483648\n2147483648\n2147483648\n255\n-1\n32767\n32767\n4294934527\n4294934527\n-32769\n4294934527\n4294934527\n4294934527\n4294934527\n0\n0\n32768\n-32768\n4294934528\n4294934528\n-32768\n4294934528\n4294934528\n4294934528\n4294934528\n127\n127\n65407\n-129\n4294967167\n4294967167\n-129\n4294967167\n4294967167\n4294967167\n4294967167\n128\n-128\n65408\n-128\n4294967168\n4294967168\n-128\n4294967168\n4294967168\n4294967168\n4294967168\n255\n-1\n65535\n-1\n4294967295\n4294967295\n-1\n4294967295\n4294967295\n4294967295\n4294967295\n0\n0\n0\n0\n2147483648\n-2147483648\n-2147483648\n18446744071562067968\n-2147483648\n-2147483648\n255\n-1\n32767\n32767\n4294934527\n-32769\n-32769\n18446744073709518847\n-32769\n-32769\n0\n0\n32768\n-32768\n-32768\n4294934528\n-32768\n-32768\n18446744073709518848\n-32768\n-32768\n127\n127\n65407\n-129\n-129\n4294967167\n-129\n-129\n18446744073709551487\n-129\n-129\n128\n-128\n-128\n65408\n-128\n-128\n4294967168\n-128\n-128\n18446744073709551488\n-128\n-128\n255\n-1\n-1\n65535\n-1\n-1\n4294967295\n-1\n-1\n18446744073709551615\n-1\n-1\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n128\n128\n-128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n255\n255\n-1\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n0\n0\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n255\n-1\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n0\n0\n32768\n32768\n-32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n255\n-1\n65535\n65535\n-1\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n0\n0\n0\n0\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n255\n-1\n65535\n-1\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n128\n128\n-128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n255\n255\n-1\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n0\n0\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n255\n-1\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n0\n0\n32768\n32768\n-32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n255\n-1\n65535\n65535\n-1\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n0\n0\n0\n0\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n255\n-1\n65535\n-1\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n0\n0\n0\n0\n2147483648\n2147483648\n-2147483648\n2147483648\n2147483648\n2147483648\n2147483648\n255\n-1\n65535\n-1\n4294967295\n4294967295\n-1\n4294967295\n4294967295\n4294967295\n4294967295\n0\n0\n0\n0\n0\n0\n4294967296\n4294967296\n4294967296\n4294967296\n255\n-1\n65535\n-1\n4294967295\n-1\n9223372036854775807\n9223372036854775807\n9223372036854775807\n9223372036854775807\n0\n0\n0\n0\n0\n0\n9223372036854775808\n9223372036854775808\n-9223372036854775808\n255\n-1\n65535\n-1\n2147483647\n2147483647\n18446744071562067967\n18446744071562067967\n-2147483649\n0\n0\n0\n0\n2147483648\n-2147483648\n18446744071562067968\n18446744071562067968\n-2147483648\n255\n-1\n32767\n32767\n4294934527\n-32769\n18446744073709518847\n18446744073709518847\n-32769\n0\n0\n32768\n-32768\n4294934528\n-32768\n18446744073709518848\n18446744073709518848\n-32768\n127\n127\n65407\n-129\n4294967167\n-129\n18446744073709551487\n18446744073709551487\n-129\n128\n-128\n65408\n-128\n4294967168\n-128\n18446744073709551488\n18446744073709551488\n-128\n255\n-1\n65535\n-1\n4294967295\n-1\n18446744073709551615\n18446744073709551615\n-1\n0\n0\n0\n0\n0\n0\n9223372036854775808\n-9223372036854775808\n-9223372036854775808\n255\n-1\n65535\n-1\n2147483647\n2147483647\n18446744071562067967\n-2147483649\n-2147483649\n0\n0\n0\n0\n2147483648\n-2147483648\n-2147483648\n18446744071562067968\n-2147483648\n-2147483648\n255\n-1\n32767\n32767\n4294934527\n-32769\n-32769\n18446744073709518847\n-32769\n-32769\n0\n0\n32768\n-32768\n-32768\n4294934528\n-32768\n-32768\n18446744073709518848\n-32768\n-32768\n127\n127\n65407\n-129\n-129\n4294967167\n-129\n-129\n18446744073709551487\n-129\n-129\n128\n-128\n-128\n65408\n-128\n-128\n4294967168\n-128\n-128\n18446744073709551488\n-128\n-128\n255\n-1\n-1\n65535\n-1\n-1\n4294967295\n-1\n-1\n18446744073709551615\n-1\n-1\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n128\n128\n-128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n255\n255\n-1\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n0\n0\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n255\n-1\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n0\n0\n32768\n32768\n-32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n255\n-1\n65535\n65535\n-1\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n0\n0\n0\n0\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n255\n-1\n65535\n-1\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n0\n0\n0\n0\n2147483648\n2147483648\n-2147483648\n2147483648\n2147483648\n2147483648\n2147483648\n255\n-1\n65535\n-1\n4294967295\n4294967295\n-1\n4294967295\n4294967295\n4294967295\n4294967295\n0\n0\n0\n0\n0\n0\n4294967296\n4294967296\n4294967296\n4294967296\n255\n-1\n65535\n-1\n4294967295\n-1\n9223372036854775807\n9223372036854775807\n9223372036854775807\n9223372036854775807\n",
-    "note": "The same program built with --overflow=wrap, where every conversion truncates: the values it converts all fit, so the output is the same."
-  },
-  {
-    "name": "int-cast-fail-unsigned-narrow",
-    "source": "fn get(x: u64) -> u64 {\n    return x;\n}\nfn main() -> u64 {\n    println(u8(get(300)));\n    return 0;\n}\n",
-    "signal": "SIGABRT",
-    "stderr": "value 300 does not fit in u8",
-    "note": "The failing side of an in-line conversion is the runtime's own report, with the value and the type."
-  },
-  {
-    "name": "int-cast-fail-negative-unsigned",
-    "source": "fn get(x: i64) -> i64 {\n    return x;\n}\nfn main() -> u64 {\n    println(u32(get(-5)));\n    return 0;\n}\n",
-    "signal": "SIGABRT",
-    "stderr": "negative value converted to an unsigned type",
-    "note": "The failing side of an in-line conversion is the runtime's own report, with the value and the type."
-  },
-  {
-    "name": "int-cast-fail-signed-narrow",
-    "source": "fn get(x: i64) -> i64 {\n    return x;\n}\nfn main() -> u64 {\n    println(i8(get(-200)));\n    return 0;\n}\n",
-    "signal": "SIGABRT",
-    "stderr": "value -200 does not fit in i8",
-    "note": "The failing side of an in-line conversion is the runtime's own report, with the value and the type."
-  },
-  {
-    "name": "int-cast-fail-unsigned-to-signed",
-    "source": "fn get(x: u64) -> u64 {\n    return x;\n}\nfn main() -> u64 {\n    println(i64(get(18446744073709551615)));\n    return 0;\n}\n",
-    "signal": "SIGABRT",
-    "stderr": "value 18446744073709551615 does not fit in i64",
-    "note": "The failing side of an in-line conversion is the runtime's own report, with the value and the type."
-  },
-  {
     "name": "runtime-narrowing-conversion-u16",
     "source": "fn main() -> u64 { x: u64 = 70000; y := u16(x); println(y); return 0; }",
     "signal": "SIGABRT",
@@ -10661,24 +10349,6 @@
     "targets": [
       "x86_64"
     ]
-  },
-  {
-    "name": "drv-release-check-messages",
-    "driver": true,
-    "flags": [
-      "--release",
-      "--overflow=checked"
-    ],
-    "source": "use host;\n// Every inline check kind, failing inside a task so the failure is contained and its message can\n// be printed: built with --release (the LLVM backend), whose stream has no site table.\nfn overflow(n: u64, base: u64) -> u64 { a: u64 := 18446744073709551615 - base; return a + n; }\nfn negative(n: u64, base: u64) -> u64 { x: i64 := 0 - i64(n); return u64(x); }\nfn divide(n: u64, base: u64) -> u64 { return base / (n - 1); }\nfn unwrap(n: u64, base: u64) -> u64 { mut v = u64[]; if n == 2 { v.push(1); } return v.pop()!; }\nfn index8(n: u64, base: u64) -> u64 { v := u64[10, 20, 30]; return v[n + 5]; }\nfn index4(n: u64, base: u64) -> u64 { v := f32[1.0, 2.0]; s := &v[0: 2]; return u64(s[n + 3]); }\nfn asserted(n: u64, base: u64) -> u64 { assert(n == 2); return 0; }\nfn report<s>(sc: (&s Scope<u64>), f: fn(u64, u64) -> u64) -> unit {\n    t := spawn(sc, 1, f);\n    match try_join(t) {\n        v: u64 => { println(v); },\n        e: TaskFailure => { host::print(e.message); host::print(view(\"\\n\")); },\n    }\n}\nfn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {\n    report(sc, overflow);\n    report(sc, negative);\n    report(sc, divide);\n    report(sc, unwrap);\n    report(sc, index8);\n    report(sc, index4);\n    report(sc, asserted);\n    return 0;\n}\nfn main() { task_scope(0, body); }\n",
-    "stdout": "arithmetic overflow\nnegative value converted to an unsigned type\ndivision by zero\npop from an empty vector\nindex 6 out of bounds for length 3\nindex 4 out of bounds for length 2\nassertion failed\n",
-    "driverModules": [
-      "main",
-      "core"
-    ],
-    "targets": [
-      "x86_64"
-    ],
-    "note": "A release build (the LLVM backend) has no site table to turn an inline `call rt_abort` into a reported failure, so the front end writes `rt_trap` with the check's kind itself, and the 4-byte accessor reports through rt_fail like the 8-byte one: every check kind fails with the message a development build prints (contained in a task, so the message can be pinned)."
   },
   {
     "name": "diagx-argument-count-too-many",
@@ -11868,116 +11538,12 @@
     ]
   },
   {
-    "name": "pool-reduce-bit-identical-workers-1",
-    "note": "A float reduction over 1M terms through pool::reduce, and an ordered fold of pool::map results, print the same bits at GRAIL_WORKERS 1, 4 and 24 (three cases, one expected line): the pieces depend on the length and the grain only.",
+    "name": "atomic-widths-wrap",
+    "note": "Atomic<T> for u8..u64, i8..i64 and bool on the 8-byte cell: each width wraps at its own size (a narrow add/sub is a compare-exchange loop that cuts the sum back), and fetch_min/fetch_max compare as T does at the boundaries of every width.",
     "files": [
-      "tests/pool/reduce_bits.grl"
+      "tests/atomics/widths.grl"
     ],
-    "modules": [
-      "lib/pool.grl",
-      "lib/core.grl"
-    ],
-    "env": {
-      "GRAIL_WORKERS": "1"
-    },
-    "stdout": "102032.95195766681 101931.45245580416\n",
-    "targets": [
-      "x86_64"
-    ]
-  },
-  {
-    "name": "pool-reduce-bit-identical-workers-4",
-    "note": "A float reduction over 1M terms through pool::reduce, and an ordered fold of pool::map results, print the same bits at GRAIL_WORKERS 1, 4 and 24 (three cases, one expected line): the pieces depend on the length and the grain only.",
-    "files": [
-      "tests/pool/reduce_bits.grl"
-    ],
-    "modules": [
-      "lib/pool.grl",
-      "lib/core.grl"
-    ],
-    "env": {
-      "GRAIL_WORKERS": "4"
-    },
-    "stdout": "102032.95195766681 101931.45245580416\n",
-    "targets": [
-      "x86_64"
-    ]
-  },
-  {
-    "name": "pool-reduce-bit-identical-workers-24",
-    "note": "A float reduction over 1M terms through pool::reduce, and an ordered fold of pool::map results, print the same bits at GRAIL_WORKERS 1, 4 and 24 (three cases, one expected line): the pieces depend on the length and the grain only.",
-    "files": [
-      "tests/pool/reduce_bits.grl"
-    ],
-    "modules": [
-      "lib/pool.grl",
-      "lib/core.grl"
-    ],
-    "env": {
-      "GRAIL_WORKERS": "24"
-    },
-    "stdout": "102032.95195766681 101931.45245580416\n",
-    "targets": [
-      "x86_64"
-    ]
-  },
-  {
-    "name": "pool-chunks-mut-is-gone",
-    "note": "chunks_mut (a chunk count) was removed when the split became a grain: no alias is left, so a call to it is an unknown function.",
-    "source": "use pool;\nfn main() {\n    mut v = u64[1, 2];\n    pool::chunks_mut(&mut v[0: 2], 1, |s: &mut [u64]| -> unit { });\n}\n",
-    "modules": [
-      "lib/pool.grl",
-      "lib/core.grl"
-    ],
-    "reject": true,
-    "diagnostic": "chunks_mut",
-    "targets": [
-      "x86_64"
-    ]
-  },
-  {
-    "name": "pool-split-mut-zero-grain-refused",
-    "note": "The grain of pool::split_mut is a `u64 where grain > 0`. A zero written at the call is checked where it is passed (a literal is not refused at compile time today), so the failure names the caller's line and the refinement, before any job runs.",
-    "source": "use pool;\nfn main() {\n    mut v = u64[1, 2];\n    pool::split_mut<u64>(&mut v[0: 2], 0, |s: &mut [u64]| -> unit { });\n}\n",
-    "modules": [
-      "lib/pool.grl",
-      "lib/core.grl"
-    ],
-    "signal": "SIGABRT",
-    "stderr": "refinement violated: grain > 0",
-    "targets": [
-      "x86_64"
-    ]
-  },
-  {
-    "name": "sched-frame-not-starved-by-background",
-    "note": "A background task keeps Background jobs of about 30 ms queued (32 at a time) while the main thread runs Frame passes of 64 short leaves: the worst Frame pass stays within a loose bound of its time alone, at most the cap (2 of 8 workers) plus the forking stack run Background work at once, and host::background_wait_us() reports that the oldest queued Background job has waited.",
-    "files": [
-      "tests/sched/classes.grl"
-    ],
-    "modules": [
-      "lib/pool.grl",
-      "lib/core.grl"
-    ],
-    "env": {
-      "GRAIL_WORKERS": "8"
-    },
-    "stdout": "1\ntrue\n",
-    "targets": [
-      "x86_64"
-    ]
-  },
-  {
-    "name": "sched-class-records-recycled",
-    "note": "Three tasks fork the same nested joins as Frame, Normal and Background at once, forty times each: records freed by one class are reused by another while stale entries for them sit in the old class's queues. Stale entries are skipped, never claimed, and the checksum shows every job ran exactly once.",
-    "files": [
-      "tests/sched/class_records.grl"
-    ],
-    "modules": [
-      "lib/pool.grl",
-      "lib/core.grl"
-    ],
-    "stdout": "310080\n",
+    "stdout": "250\n4\n4\n255\n255\n255\n0\n127\n-128\n-128\n127\n127\n127\n-128\n0\n65535\n0\n0\n32768\n32767\n-32768\n32767\n32767\n-32768\n32767\n4294967295\n1\n1\n2147483648\n2147483647\n2147483647\n-2147483648\n-2147483648\n-1\n-2147483648\n18446744073709551615\n0\n0\n9223372036854775808\n9223372036854775807\n9223372036854775807\n-9223372036854775808\n-9223372036854775808\n-1\n-9223372036854775808\n0\n12\n8\n11\n244\n7\n9\n9\nfalse\ntrue\ntrue\nfalse\nfalse\ntrue\n",
     "targets": [
       "x86_64",
       "aarch64",
@@ -11985,34 +11551,153 @@
     ]
   },
   {
-    "name": "sched-start-applies-once",
-    "note": "sched::start applies its settings once, before the scheduler exists: three workers, pinned, with warmed stacks, a seed and a cap, and work then runs on exactly three workers. A second call, and a call after the scheduler started, return false instead of aborting.",
+    "name": "atomic-methods-every-order",
+    "note": "Every load, store, read-modify-write and compare-exchange name under every ordering it has, plus fences and spin_hint, in a function that is @no_alloc and @no_panic: the methods are inline atom.* ops, not runtime calls. compare_exchange_weak returns whether it stored.",
     "files": [
-      "tests/sched/start.grl"
+      "tests/atomics/orders.grl"
     ],
-    "modules": [
-      "lib/sched.grl",
-      "lib/pool.grl",
-      "lib/core.grl"
-    ],
-    "stdout": "true\nfalse\n3\ntrue\nfalse\n",
+    "stdout": "1906\n10\nfalse\n-3\n",
     "targets": [
-      "x86_64"
+      "x86_64",
+      "aarch64",
+      "riscv64"
     ]
   },
   {
-    "name": "sched-seeded-run-reproduces",
-    "note": "With one worker and a fixed seed (sched::start), tasks that yield print the same order on every run.",
+    "name": "atomic-litmus-message-passing-and-counters",
+    "note": "Message passing (relaxed data, release flag, acquire read) over 20000 rounds, and 24 jobs counting through compare_exchange, a compare_exchange_weak retry loop, fetch_add and a 16-bit fetch_add that wraps, with fetch_min/fetch_max at the i64, u8 and i8 boundaries. Store buffering is tools/test-atomics-litmus.mjs: under qemu-aarch64 it reports instead of asserting.",
     "files": [
-      "tests/sched/seeded.grl"
+      "tests/atomics/litmus.grl"
     ],
-    "modules": [
-      "lib/sched.grl",
-      "lib/core.grl"
-    ],
-    "stdout": "task 1 round 0\ntask 1 round 1\ntask 1 round 2\ntask 2 round 0\ntask 2 round 1\ntask 2 round 2\ntask 3 round 0\ntask 3 round 1\ntask 3 round 2\n6\n",
+    "stdout": "0\n48000\n48000\n48000\n8320\n11\n-12\n230\n232\n-77\n100\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ]
+  },
+  {
+    "name": "atomic-invalid-order-has-no-name",
+    "source": "fn main(){a:=Atomic::new(1);a.load_release();}",
+    "reject": true,
+    "diagnostic": "Atomic<u64> has no method `load_release`; the loads are load, load_relaxed and load_acquire"
+  },
+  {
+    "name": "atomic-store-acquire-has-no-name",
+    "source": "fn main(){a:=Atomic::new(u8(1));a.store_acquire(2);}",
+    "reject": true,
+    "diagnostic": "Atomic<u8> has no method `store_acquire`; the stores are store, store_relaxed and store_release"
+  },
+  {
+    "name": "atomic-bool-has-no-arithmetic",
+    "source": "fn main(){a:=Atomic::new(true);a.fetch_add(true);}",
+    "reject": true,
+    "diagnostic": "an Atomic<bool> has load, store, swap"
+  },
+  {
+    "name": "atomic-element-must-be-an-integer-or-bool",
+    "source": "fn f(a:Atomic<f64>)->u64{return 0;}fn main(){}",
+    "reject": true,
+    "diagnostic": "Atomic<T> holds u8, u16, u32, u64, i8, i16, i32, i64 or bool"
+  },
+  {
+    "name": "atomic-argument-has-the-element-type",
+    "source": "fn main(){a:=Atomic::new(u8(1));b:u64=7;a.store(b);}",
+    "reject": true
+  },
+  {
+    "name": "atomic-x86-inline-ops",
+    "note": "x86-64: a sequentially consistent load is a plain mov (stores are xchg), with no mfence; fetch_add is one lock xadd and no call; a seq_cst store is xchg.",
+    "source": "fn get<a>(c:(&a Atomic<u64>))->u64{return c.load();}fn add<a>(c:(&a Atomic<u64>))->u64{return c.fetch_add(3);}fn put<a>(c:(&a Atomic<u64>))->unit{c.store(4);}fn main(){c:=Atomic::new(1);println(add(&c));put(&c);println(get(&c));}",
+    "stdout": "1\n4\n",
     "targets": [
       "x86_64"
+    ],
+    "asm": [
+      {
+        "in": "f_main_get",
+        "text": "# atom.load seqcst u64\nmovq (%rdi),%rax\n"
+      },
+      {
+        "in": "f_main_add",
+        "text": "# atom.rmw add seqcst u64\nlock xaddq %rax,(%rdi)\n"
+      },
+      {
+        "in": "f_main_put",
+        "text": "# atom.store seqcst u64\nxchgq %rax,(%rdi)\n"
+      }
+    ],
+    "asmAbsent": [
+      {
+        "in": "f_main_get",
+        "text": "mfence"
+      },
+      {
+        "in": "f_main_add",
+        "text": "call"
+      }
+    ]
+  },
+  {
+    "name": "atomic-aarch64-acquire-is-ldar",
+    "note": "AArch64 v8.0: an acquire load is ldar, a release store stlr, a relaxed fetch_add an ldxr/stxr loop with no barrier.",
+    "source": "fn get<a>(c:(&a Atomic<u64>))->u64{return c.load_acquire();}fn put<a>(c:(&a Atomic<u64>))->unit{c.store_release(4);}fn add<a>(c:(&a Atomic<u64>))->u64{return c.fetch_add_relaxed(3);}fn main(){c:=Atomic::new(1);println(add(&c));put(&c);println(get(&c));}",
+    "stdout": "1\n4\n",
+    "targets": [
+      "aarch64"
+    ],
+    "asm": [
+      {
+        "in": "f_main_get",
+        "text": "ldar x9,[x0]"
+      },
+      {
+        "in": "f_main_put",
+        "text": "stlr x9,[x0]"
+      },
+      {
+        "in": "f_main_add",
+        "text": "ldxr x10,[x0]"
+      }
+    ],
+    "asmAbsent": [
+      {
+        "in": "f_main_get",
+        "text": "dmb"
+      },
+      {
+        "in": "f_main_add",
+        "text": "dmb"
+      },
+      {
+        "in": "f_main_add",
+        "text": "ldaxr"
+      }
+    ]
+  },
+  {
+    "name": "atomic-riscv64-relaxed-fetch-add-is-amoadd",
+    "note": "RV64: a relaxed fetch_add is one amoadd.d with no fence; an acquire one is amoadd.d.aq.",
+    "source": "fn add<a>(c:(&a Atomic<u64>))->u64{return c.fetch_add_relaxed(3);}fn acq<a>(c:(&a Atomic<u64>))->u64{return c.fetch_add_acquire(1);}fn main(){c:=Atomic::new(1);println(add(&c));println(acq(&c));println(c.load());}",
+    "stdout": "1\n4\n5\n",
+    "targets": [
+      "riscv64"
+    ],
+    "asm": [
+      {
+        "in": "f_main_add",
+        "text": "amoadd.d t0,t0,(a0)"
+      },
+      {
+        "in": "f_main_acq",
+        "text": "amoadd.d.aq t0,t0,(a0)"
+      }
+    ],
+    "asmAbsent": [
+      {
+        "in": "f_main_add",
+        "text": "fence"
+      }
     ]
   },
   {
@@ -15516,6 +15201,484 @@
     ],
     "stdout": "1 2 3 4 9\n6040 true\n70 7 8\n26\n100008\n1002 box 5 3\n1002 box\n",
     "note": "plain records stored inline in plain records and in a record with a string: field-of-field reads and writes, whole-field replacement, &mut to an inline field, exchange through it, a move out and a refill, structural ==, and moving the containing value"
+  },
+  {
+    "name": "pool-split-mut",
+    "note": "In-place splitting of an exclusive slice by grain (parallel_split / pool::split_mut): uneven pieces (10 elements in pieces of 4 is 4,4,2), one piece, a grain larger than the slice, a grain of one, more pieces than workers (1000 in pieces of 16), a sub-range that leaves its neighbours alone, an empty slice that runs no job, nested chunking inside a chunk callback, narrow (f32/u32) elements at their 4-byte stride, a byte buffer through a &mut [u8] view, and the library wrapper. Every check compares CONTENT: a chunk that ran twice doubles its elements, one that never ran leaves them, and one that wrote outside its region would fault or fail the borrow checker.",
+    "files": [
+      "tests/pool/split_mut.grl"
+    ],
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "ok\n"
+  },
+  {
+    "name": "pool-split-mut-timing",
+    "note": "The measured case for stage 2: the same 3M-u64 CPU-bound workload through the owned chunk split and through the in-place split, best of three. Asserts the copy is gone (one owned chunk at least 1.33x slower than one in-place chunk, both single-job, so no core count can explain it) and that parallelism still pays (eight in-place chunks at least 1.5x faster than one, asserted only above four cores). stderr carries the times; stdout is a fixed token.",
+    "files": [
+      "tests/pool/split_mut_timing.grl"
+    ],
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "stdout": "ok\n"
+  },
+  {
+    "name": "array-literals-index-len",
+    "note": "fixed-size arrays in locals (docs/design/fixed-arrays.md): sized elements in C layout, nested arrays, an `&mut` parameter, compound assignment, a constant len()",
+    "source": "fn sum(a: &[f64; 3]) -> f64 {\n    return a[0] + a[1] + a[2];\n}\nfn scale(a: &mut [f64; 3], k: f64) {\n    for i in 3 {\n        a[i] = a[i] * k;\n    }\n}\nfn main() {\n    a: [f32; 4] = [1.0, 2.0, 3.5, 4.0];\n    println(a[2]);\n    println(a.len());\n    mut b: [f64; 3] = [1.0, 2.0, 3.0];\n    scale(&mut b, 2.0);\n    println(sum(&b));\n    mut z: [u8; 5] = [7; 5];\n    z[1] = 9;\n    z[2] += 1;\n    println(\"{} {} {}\", z[0], z[1], z[2]);\n    m: [[i32; 2]; 3] = [[1, -2], [3, 4], [5, 6]];\n    println(m[0][1] + m[2][0]);\n    mut t = 0.0;\n    for x in &b {\n        t = t + *x;\n    }\n    println(t);\n    k: u64 = 2;\n    println(a[k]);\n    c := a;\n    println(c[0] + a[3]);\n    w: [i16; 3] = [-300, 0, 300];\n    println(w);\n}\n",
+    "stdout": "3.5\n4\n12\n7 9 8\n3\n12\n3.5\n5\n[-300, 0, 300]\n"
+  },
+  {
+    "name": "array-equality-and-text",
+    "note": "`==` compares element by element (floats as IEEE, so -0.0 == 0.0), and an array prints as a vector does, nested and inside a format string",
+    "source": "fn main() {\n    a: [f32; 3] = [1.5, -0.0, 3.0];\n    b: [f32; 3] = [1.5, 0.0, 3.0];\n    c: [f32; 3] = [1.5, 0.0, 4.0];\n    println(a == b);\n    println(a == c);\n    println(a != c);\n    println(a);\n    m: [[u8; 2]; 2] = [[1, 2], [3, 4]];\n    println(m);\n    println(\"m = {}\", m);\n    big: [u64; 40] = [7; 40];\n    println(big[39] + big.len());\n}\n",
+    "stdout": "true\nfalse\ntrue\n[1.5, -0.0, 3.0]\n[[1, 2], [3, 4]]\nm = [[1, 2], [3, 4]]\n47\n"
+  },
+  {
+    "name": "array-small-copies",
+    "note": "the owner's copy rule: an array of plain data of at most four words copies on binding, and both names stay usable",
+    "source": "fn main() {\n    a: [f64; 4] = [1.0; 4];\n    mut b = a;\n    b[0] = 5.0;\n    println(\"{} {}\", a[0], b[0]);\n}\n",
+    "stdout": "1 5\n"
+  },
+  {
+    "name": "reject-array-large-moves",
+    "reject": true,
+    "note": "an array larger than four words moves; reading the moved-from name is refused and the help names .copy()",
+    "source": "fn main() {\n    a: [f64; 5] = [0.0; 5];\n    b := a;\n    println(a[0] + b[0]);\n}\n",
+    "diagnostic": "`a` was moved"
+  },
+  {
+    "name": "array-copy-method",
+    "note": "`.copy()` copies a large array; the copy is independent",
+    "source": "fn main() {\n    a: [u64; 6] = [3; 6];\n    mut b = a.copy();\n    b[5] = 4;\n    println(\"{} {}\", a, b);\n}\n",
+    "stdout": "[3, 3, 3, 3, 3, 3] [3, 3, 3, 3, 3, 4]\n"
+  },
+  {
+    "name": "array-assignment-never-aliases",
+    "note": "assignment copies into the variable's own storage: the literal on the right is re-evaluated each iteration while it reads the variable, and nothing shares storage",
+    "source": "fn main() {\n    mut keep: [u64; 2] = [1, 2];\n    for i in 3 {\n        keep = [keep[1], keep[0] + i];\n        b: [u64; 2] = [i, i];\n        t: [u64; 2] = b;\n        keep[0] = keep[0] + t[1];\n    }\n    println(keep);\n}\n",
+    "stdout": "[5, 4]\n"
+  },
+  {
+    "name": "array-through-reference",
+    "note": "`*r = v` and `exchange` on an array reference replace its bytes",
+    "source": "fn reset(a: &mut [f64; 3]) {\n    *a = [9.0, 8.0, 7.0];\n}\nfn main() {\n    mut a: [f64; 3] = [1.0, 2.0, 3.0];\n    reset(&mut a);\n    println(a);\n    old := exchange(&mut a, [4.0, 5.0, 6.0]);\n    println(\"{} {}\", old, a);\n    mut big: [u64; 6] = [1; 6];\n    prev := exchange(&mut big, [2; 6]);\n    println(\"{} {}\", prev, big);\n}\n",
+    "stdout": "[9.0, 8.0, 7.0]\n[9.0, 8.0, 7.0] [4.0, 5.0, 6.0]\n[1, 1, 1, 1, 1, 1] [2, 2, 2, 2, 2, 2]\n"
+  },
+  {
+    "name": "array-index-out-of-bounds-aborts",
+    "note": "an index the compiler cannot prove is checked against the constant length, and a failure reports both and where (the location comes from the site table, which only the native backend emits)",
+    "source": "fn main() {\n    a: [u64; 3] = [1, 2, 3];\n    k: u64 = 3;\n    println(a[k]);\n}\n",
+    "stderr": "error: index 3 out of bounds for length 3\n --> ",
+    "signal": "SIGABRT",
+    "backends": [
+      "native"
+    ]
+  },
+  {
+    "name": "reject-array-constant-index",
+    "reject": true,
+    "note": "a literal index is checked against N while compiling",
+    "source": "fn main() {\n    a: [u64; 3] = [1, 2, 3];\n    println(a[3]);\n}\n",
+    "diagnostic": "index 3 is out of bounds for `[u64; 3]`"
+  },
+  {
+    "name": "reject-array-literal-count",
+    "reject": true,
+    "note": "an array starts full: a literal must give exactly N elements",
+    "source": "fn main() {\n    a: [u64; 3] = [1, 2];\n}\n",
+    "diagnostic": "this literal has 2 elements, and `[u64; 3]` holds 3"
+  },
+  {
+    "name": "reject-array-repeat-count",
+    "reject": true,
+    "source": "fn main() {\n    a: [f32; 4] = [0.0; 3];\n}\n",
+    "diagnostic": "this repeat makes 3 elements, and `[f32; 4]` holds 4"
+  },
+  {
+    "name": "reject-array-uninitialised",
+    "reject": true,
+    "note": "no partially initialised arrays: a declaration without a value is refused",
+    "source": "fn main() {\n    mut a: [f32; 4];\n}\n",
+    "diagnostic": "an array starts full, so it is declared with a value"
+  },
+  {
+    "name": "reject-array-zero-length",
+    "reject": true,
+    "note": "[T; 0] is refused in v1",
+    "source": "fn main() {\n    a: [f32; 0] = [0.0; 0];\n}\n",
+    "diagnostic": "an array length is a positive integer constant"
+  },
+  {
+    "name": "reject-array-by-value-parameter",
+    "reject": true,
+    "source": "fn f(a: [f32; 4]) -> f32 {\n    return a[0];\n}\nfn main() {\n}\n",
+    "diagnostic": "an array as a parameter taken by value is not supported yet"
+  },
+  {
+    "name": "reject-array-result",
+    "reject": true,
+    "source": "fn f() -> [f32; 4] {\n    return [0.0; 4];\n}\nfn main() {\n}\n",
+    "diagnostic": "an array as a function result is not supported yet"
+  },
+  {
+    "name": "reject-array-struct-field",
+    "reject": true,
+    "source": "struct S {\n    a: [f32; 4]\n}\nfn main() {\n}\n",
+    "diagnostic": "an array as a field of a struct or a variant's payload is not supported yet"
+  },
+  {
+    "name": "reject-array-capture",
+    "reject": true,
+    "source": "fn main() {\n    a: [f32; 4] = [0.0; 4];\n    g := || a[0];\n}\n",
+    "diagnostic": "an array as a closure's capture is not supported yet"
+  },
+  {
+    "name": "reject-array-type-argument",
+    "reject": true,
+    "source": "fn main() {\n    t: ([u8; 2], u64) = ([1, 2], 3);\n}\n",
+    "diagnostic": "an array as a type argument"
+  },
+  {
+    "name": "reject-array-owned-element",
+    "reject": true,
+    "source": "fn main() {\n    a: [string; 2] = [\"a\".text(), \"b\".text()];\n}\n",
+    "diagnostic": "an array element is a number or another array in this version"
+  },
+  {
+    "name": "reject-array-write-through-shared",
+    "reject": true,
+    "source": "fn f(a: &[f32; 4]) {\n    a[0] = 1.0;\n}\nfn main() {\n}\n",
+    "diagnostic": "mutation through readonly reference"
+  },
+  {
+    "name": "reject-array-element-borrow-conflict",
+    "reject": true,
+    "note": "element places are one child of the array, as for a vector: a write to one element while another is borrowed is refused",
+    "source": "fn main() {\n    mut a: [u64; 4] = [0; 4];\n    r := &a[1];\n    a[0] = 5;\n    println(*r);\n}\n",
+    "diagnostic": ""
+  },
+  {
+    "name": "array-checks-proved-or-constant",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a loop to N, `for x in a` and a refined index have no element check; an unknown index is one compare against the constant N - no length is loaded - and a loop over an array calls nothing",
+    "source": "fn total(a: &[u64; 8]) -> u64 {\n    mut t = 0;\n    for i in 8 {\n        t += a[i];\n    }\n    return t;\n}\nfn total_each(a: &[f64; 8]) -> f64 {\n    mut t = 0.0;\n    for x in a {\n        t = t + *x;\n    }\n    return t;\n}\nfn get(a: &[u64; 8], k: u64) -> u64 {\n    return a[k];\n}\nfn at(a: &[u64; 8], i: u64 where i < 8) -> u64 {\n    return a[i];\n}\nfn main() {\n    a: [u64; 8] = [1, 2, 3, 4, 5, 6, 7, 8];\n    f: [f64; 8] = [0.5; 8];\n    println(\"{} {} {} {}\", total(&a), total_each(&f), get(&a, 7), at(&a, 2));\n}\n",
+    "stdout": "36 4 8 3\n",
+    "asm": [
+      {
+        "in": "f_main_get",
+        "text": "movabsq $8,%rdx"
+      },
+      {
+        "in": "f_main_get",
+        "text": "call rt_fail"
+      }
+    ],
+    "asmAbsent": [
+      {
+        "in": "f_main_total",
+        "text": "rt_fail"
+      },
+      {
+        "in": "f_main_total_each",
+        "text": "call"
+      },
+      {
+        "in": "f_main_at",
+        "text": "rt_fail"
+      },
+      {
+        "in": "f_main_get",
+        "text": "8(%rdi)"
+      }
+    ]
+  },
+  {
+    "name": "array-frame-over-a-page-is-probed",
+    "note": "a frame larger than a page is touched a page at a time from the top before it is allocated (on LLVM, `probe-stack`), and a deep recursion through such frames reports a stack overflow instead of stepping over the guard",
+    "source": "fn fill(depth: u64) -> u64 {\n    mut buf: [u64; 8192] = [0; 8192];\n    buf[depth % 8192] = depth;\n    if depth == 0 {\n        return buf[0];\n    }\n    return fill(depth - 1) + buf[depth % 8192];\n}\nfn main() {\n    println(fill(10));\n}\n",
+    "stdout": "55\n"
+  },
+  {
+    "name": "array-frame-probe-pinned",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "source": "fn fill(depth: u64) -> u64 {\n    mut buf: [u64; 8192] = [0; 8192];\n    buf[depth % 8192] = depth;\n    return buf[depth % 8192];\n}\nfn small(x: u64) -> u64 {\n    a: [u64; 4] = [x; 4];\n    return a[3];\n}\nfn main() {\n    println(fill(10) + small(1));\n}\n",
+    "stdout": "11\n",
+    "asm": [
+      {
+        "in": "f_main_fill",
+        "text": "movq $0,(%rsp)"
+      }
+    ],
+    "asmAbsent": [
+      {
+        "in": "f_main_small",
+        "text": ".Lgrail_probe_"
+      }
+    ]
+  },
+  {
+    "name": "array-large-frames-overflow-reports",
+    "backends": [
+      "native"
+    ],
+    "note": "recursion through 64 KiB frames runs into the stack's end page by page and is reported as an overflow, at the frame's statement",
+    "source": "fn fill(depth: u64) -> u64 {\n    mut buf: [u64; 8192] = [0; 8192];\n    buf[depth % 8192] = depth;\n    if depth == 0 {\n        return buf[0];\n    }\n    return fill(depth - 1) + buf[depth % 8192];\n}\nfn main() {\n    println(\"before\");\n    println(fill(100000));\n}\n",
+    "stdout": "before\n",
+    "status": 134,
+    "stderr": [
+      "error: stack overflow\n"
+    ]
+  },
+  {
+    "name": "reject-array-frame-over-task-stack",
+    "reject": true,
+    "note": "a frame larger than the 1 MiB stack a task runs on is refused at the largest array in it",
+    "source": "fn main() {\n    big: [u64; 200000] = [0; 200000];\n    println(big[1]);\n}\n",
+    "diagnostic": "more than the 1 MiB stack a task runs on"
+  },
+  {
+    "name": "array-in-task-frame-runs",
+    "note": "a task (1 MiB stack) with a 64 KiB array in its frame runs: the probe walks its stack from the top",
+    "source": "fn work(seed: u64, unused: u64) -> u64 {\n    mut buf: [u64; 8192] = [seed; 8192];\n    for i in 8192 {\n        buf[i] = buf[i] + i;\n    }\n    return buf[8191] + buf[0];\n}\nfn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {\n    t := spawn(sc, 5, work);\n    return join(t);\n}\nfn main() {\n    println(task_scope(0, body));\n}\n",
+    "stdout": "8201\n"
+  },
+  {
+    "name": "pkg-manifest-overflow",
+    "note": "[package] overflow is the root's overflow mode for a build: \"checked\" or \"wrap\", anything else refused.",
+    "source": "use pkg;\nfn main() {\n    print(pkg::manifest_report(view(\"[package]\\nname = \\\"demo\\\"\\nversion = \\\"0.1.0\\\"\\noverflow = \\\"wrap\\\"\\n\")));\n    println(pkg::manifest_report(view(\"[package]\\nname = \\\"demo\\\"\\nversion = \\\"0.1.0\\\"\\noverflow = \\\"saturate\\\"\\n\")));\n    println(pkg::manifest_report(view(\"[package]\\nname = \\\"demo\\\"\\nversion = \\\"0.1.0\\\"\\noverflow = 1\\n\")));\n}\n",
+    "modules": [
+      "compiler/pkg.grl"
+    ],
+    "stdout": "name demo\nversion 0.1.0\nentry src/main.grl\noverflow wrap\nerror: line 4: [package] overflow must be \"checked\" or \"wrap\"\nerror: line 4: [package] overflow must be \"checked\" or \"wrap\"\n"
+  },
+  {
+    "name": "int-cast-edges",
+    "files": [
+      "tests/intcast/edges.grl"
+    ],
+    "stdout": "0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n128\n128\n-128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n255\n255\n-1\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n128\n-128\n-128\n65408\n-128\n-128\n4294967168\n-128\n-128\n18446744073709551488\n-128\n-128\n255\n-1\n-1\n65535\n-1\n-1\n4294967295\n-1\n-1\n18446744073709551615\n-1\n-1\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n128\n128\n-128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n255\n255\n-1\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n0\n0\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n255\n-1\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n0\n0\n32768\n32768\n-32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n127\n127\n65407\n65407\n-129\n65407\n65407\n65407\n65407\n65407\n65407\n65407\n65407\n128\n-128\n65408\n65408\n-128\n65408\n65408\n65408\n65408\n65408\n65408\n65408\n65408\n255\n-1\n65535\n65535\n-1\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n0\n0\n32768\n-32768\n-32768\n4294934528\n-32768\n-32768\n18446744073709518848\n-32768\n-32768\n127\n127\n65407\n-129\n-129\n4294967167\n-129\n-129\n18446744073709551487\n-129\n-129\n128\n-128\n-128\n65408\n-128\n-128\n4294967168\n-128\n-128\n18446744073709551488\n-128\n-128\n255\n-1\n-1\n65535\n-1\n-1\n4294967295\n-1\n-1\n18446744073709551615\n-1\n-1\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n128\n128\n-128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n255\n255\n-1\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n0\n0\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n255\n-1\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n128\n128\n-128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n255\n255\n-1\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n0\n0\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n255\n-1\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n0\n0\n32768\n32768\n-32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n255\n-1\n65535\n65535\n-1\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n0\n0\n0\n0\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n255\n-1\n65535\n-1\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n0\n0\n0\n0\n2147483648\n2147483648\n-2147483648\n2147483648\n2147483648\n2147483648\n2147483648\n255\n-1\n32767\n32767\n4294934527\n4294934527\n-32769\n4294934527\n4294934527\n4294934527\n4294934527\n0\n0\n32768\n-32768\n4294934528\n4294934528\n-32768\n4294934528\n4294934528\n4294934528\n4294934528\n127\n127\n65407\n-129\n4294967167\n4294967167\n-129\n4294967167\n4294967167\n4294967167\n4294967167\n128\n-128\n65408\n-128\n4294967168\n4294967168\n-128\n4294967168\n4294967168\n4294967168\n4294967168\n255\n-1\n65535\n-1\n4294967295\n4294967295\n-1\n4294967295\n4294967295\n4294967295\n4294967295\n0\n0\n0\n0\n2147483648\n-2147483648\n-2147483648\n18446744071562067968\n-2147483648\n-2147483648\n255\n-1\n32767\n32767\n4294934527\n-32769\n-32769\n18446744073709518847\n-32769\n-32769\n0\n0\n32768\n-32768\n-32768\n4294934528\n-32768\n-32768\n18446744073709518848\n-32768\n-32768\n127\n127\n65407\n-129\n-129\n4294967167\n-129\n-129\n18446744073709551487\n-129\n-129\n128\n-128\n-128\n65408\n-128\n-128\n4294967168\n-128\n-128\n18446744073709551488\n-128\n-128\n255\n-1\n-1\n65535\n-1\n-1\n4294967295\n-1\n-1\n18446744073709551615\n-1\n-1\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n128\n128\n-128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n255\n255\n-1\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n0\n0\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n255\n-1\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n0\n0\n32768\n32768\n-32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n255\n-1\n65535\n65535\n-1\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n0\n0\n0\n0\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n255\n-1\n65535\n-1\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n128\n128\n-128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n255\n255\n-1\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n0\n0\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n255\n-1\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n0\n0\n32768\n32768\n-32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n255\n-1\n65535\n65535\n-1\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n0\n0\n0\n0\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n255\n-1\n65535\n-1\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n0\n0\n0\n0\n2147483648\n2147483648\n-2147483648\n2147483648\n2147483648\n2147483648\n2147483648\n255\n-1\n65535\n-1\n4294967295\n4294967295\n-1\n4294967295\n4294967295\n4294967295\n4294967295\n0\n0\n0\n0\n0\n0\n4294967296\n4294967296\n4294967296\n4294967296\n255\n-1\n65535\n-1\n4294967295\n-1\n9223372036854775807\n9223372036854775807\n9223372036854775807\n9223372036854775807\n0\n0\n0\n0\n0\n0\n9223372036854775808\n9223372036854775808\n-9223372036854775808\n255\n-1\n65535\n-1\n2147483647\n2147483647\n18446744071562067967\n18446744071562067967\n-2147483649\n0\n0\n0\n0\n2147483648\n-2147483648\n18446744071562067968\n18446744071562067968\n-2147483648\n255\n-1\n32767\n32767\n4294934527\n-32769\n18446744073709518847\n18446744073709518847\n-32769\n0\n0\n32768\n-32768\n4294934528\n-32768\n18446744073709518848\n18446744073709518848\n-32768\n127\n127\n65407\n-129\n4294967167\n-129\n18446744073709551487\n18446744073709551487\n-129\n128\n-128\n65408\n-128\n4294967168\n-128\n18446744073709551488\n18446744073709551488\n-128\n255\n-1\n65535\n-1\n4294967295\n-1\n18446744073709551615\n18446744073709551615\n-1\n0\n0\n0\n0\n0\n0\n9223372036854775808\n-9223372036854775808\n-9223372036854775808\n255\n-1\n65535\n-1\n2147483647\n2147483647\n18446744071562067967\n-2147483649\n-2147483649\n0\n0\n0\n0\n2147483648\n-2147483648\n-2147483648\n18446744071562067968\n-2147483648\n-2147483648\n255\n-1\n32767\n32767\n4294934527\n-32769\n-32769\n18446744073709518847\n-32769\n-32769\n0\n0\n32768\n-32768\n-32768\n4294934528\n-32768\n-32768\n18446744073709518848\n-32768\n-32768\n127\n127\n65407\n-129\n-129\n4294967167\n-129\n-129\n18446744073709551487\n-129\n-129\n128\n-128\n-128\n65408\n-128\n-128\n4294967168\n-128\n-128\n18446744073709551488\n-128\n-128\n255\n-1\n-1\n65535\n-1\n-1\n4294967295\n-1\n-1\n18446744073709551615\n-1\n-1\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n128\n128\n-128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n255\n255\n-1\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n0\n0\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n255\n-1\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n0\n0\n32768\n32768\n-32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n255\n-1\n65535\n65535\n-1\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n0\n0\n0\n0\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n255\n-1\n65535\n-1\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n0\n0\n0\n0\n2147483648\n2147483648\n-2147483648\n2147483648\n2147483648\n2147483648\n2147483648\n255\n-1\n65535\n-1\n4294967295\n4294967295\n-1\n4294967295\n4294967295\n4294967295\n4294967295\n0\n0\n0\n0\n0\n0\n4294967296\n4294967296\n4294967296\n4294967296\n255\n-1\n65535\n-1\n4294967295\n-1\n9223372036854775807\n9223372036854775807\n9223372036854775807\n9223372036854775807\n",
+    "note": "Integer conversions are emitted in line on the native backend (int_cast): nothing for a widening, a truncation for a wrapping one, and a range test whose failing side calls rt_int_cast. Every width, signed and unsigned, over the edge values of each, checked where the value fits and wrapping always; the expected output is what the called form printed before."
+  },
+  {
+    "name": "int-cast-edges-wrap",
+    "files": [
+      "tests/intcast/edges.grl"
+    ],
+    "overflow": "wrap",
+    "stdout": "0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n128\n128\n-128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n255\n255\n-1\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n128\n-128\n-128\n65408\n-128\n-128\n4294967168\n-128\n-128\n18446744073709551488\n-128\n-128\n255\n-1\n-1\n65535\n-1\n-1\n4294967295\n-1\n-1\n18446744073709551615\n-1\n-1\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n128\n128\n-128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n255\n255\n-1\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n0\n0\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n255\n-1\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n0\n0\n32768\n32768\n-32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n127\n127\n65407\n65407\n-129\n65407\n65407\n65407\n65407\n65407\n65407\n65407\n65407\n128\n-128\n65408\n65408\n-128\n65408\n65408\n65408\n65408\n65408\n65408\n65408\n65408\n255\n-1\n65535\n65535\n-1\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n0\n0\n32768\n-32768\n-32768\n4294934528\n-32768\n-32768\n18446744073709518848\n-32768\n-32768\n127\n127\n65407\n-129\n-129\n4294967167\n-129\n-129\n18446744073709551487\n-129\n-129\n128\n-128\n-128\n65408\n-128\n-128\n4294967168\n-128\n-128\n18446744073709551488\n-128\n-128\n255\n-1\n-1\n65535\n-1\n-1\n4294967295\n-1\n-1\n18446744073709551615\n-1\n-1\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n128\n128\n-128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n255\n255\n-1\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n0\n0\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n255\n-1\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n128\n128\n-128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n255\n255\n-1\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n0\n0\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n255\n-1\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n0\n0\n32768\n32768\n-32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n255\n-1\n65535\n65535\n-1\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n0\n0\n0\n0\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n255\n-1\n65535\n-1\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n0\n0\n0\n0\n2147483648\n2147483648\n-2147483648\n2147483648\n2147483648\n2147483648\n2147483648\n255\n-1\n32767\n32767\n4294934527\n4294934527\n-32769\n4294934527\n4294934527\n4294934527\n4294934527\n0\n0\n32768\n-32768\n4294934528\n4294934528\n-32768\n4294934528\n4294934528\n4294934528\n4294934528\n127\n127\n65407\n-129\n4294967167\n4294967167\n-129\n4294967167\n4294967167\n4294967167\n4294967167\n128\n-128\n65408\n-128\n4294967168\n4294967168\n-128\n4294967168\n4294967168\n4294967168\n4294967168\n255\n-1\n65535\n-1\n4294967295\n4294967295\n-1\n4294967295\n4294967295\n4294967295\n4294967295\n0\n0\n0\n0\n2147483648\n-2147483648\n-2147483648\n18446744071562067968\n-2147483648\n-2147483648\n255\n-1\n32767\n32767\n4294934527\n-32769\n-32769\n18446744073709518847\n-32769\n-32769\n0\n0\n32768\n-32768\n-32768\n4294934528\n-32768\n-32768\n18446744073709518848\n-32768\n-32768\n127\n127\n65407\n-129\n-129\n4294967167\n-129\n-129\n18446744073709551487\n-129\n-129\n128\n-128\n-128\n65408\n-128\n-128\n4294967168\n-128\n-128\n18446744073709551488\n-128\n-128\n255\n-1\n-1\n65535\n-1\n-1\n4294967295\n-1\n-1\n18446744073709551615\n-1\n-1\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n128\n128\n-128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n255\n255\n-1\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n0\n0\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n255\n-1\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n0\n0\n32768\n32768\n-32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n255\n-1\n65535\n65535\n-1\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n0\n0\n0\n0\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n255\n-1\n65535\n-1\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n128\n128\n-128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n255\n255\n-1\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n0\n0\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n255\n-1\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n0\n0\n32768\n32768\n-32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n255\n-1\n65535\n65535\n-1\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n0\n0\n0\n0\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n255\n-1\n65535\n-1\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n0\n0\n0\n0\n2147483648\n2147483648\n-2147483648\n2147483648\n2147483648\n2147483648\n2147483648\n255\n-1\n65535\n-1\n4294967295\n4294967295\n-1\n4294967295\n4294967295\n4294967295\n4294967295\n0\n0\n0\n0\n0\n0\n4294967296\n4294967296\n4294967296\n4294967296\n255\n-1\n65535\n-1\n4294967295\n-1\n9223372036854775807\n9223372036854775807\n9223372036854775807\n9223372036854775807\n0\n0\n0\n0\n0\n0\n9223372036854775808\n9223372036854775808\n-9223372036854775808\n255\n-1\n65535\n-1\n2147483647\n2147483647\n18446744071562067967\n18446744071562067967\n-2147483649\n0\n0\n0\n0\n2147483648\n-2147483648\n18446744071562067968\n18446744071562067968\n-2147483648\n255\n-1\n32767\n32767\n4294934527\n-32769\n18446744073709518847\n18446744073709518847\n-32769\n0\n0\n32768\n-32768\n4294934528\n-32768\n18446744073709518848\n18446744073709518848\n-32768\n127\n127\n65407\n-129\n4294967167\n-129\n18446744073709551487\n18446744073709551487\n-129\n128\n-128\n65408\n-128\n4294967168\n-128\n18446744073709551488\n18446744073709551488\n-128\n255\n-1\n65535\n-1\n4294967295\n-1\n18446744073709551615\n18446744073709551615\n-1\n0\n0\n0\n0\n0\n0\n9223372036854775808\n-9223372036854775808\n-9223372036854775808\n255\n-1\n65535\n-1\n2147483647\n2147483647\n18446744071562067967\n-2147483649\n-2147483649\n0\n0\n0\n0\n2147483648\n-2147483648\n-2147483648\n18446744071562067968\n-2147483648\n-2147483648\n255\n-1\n32767\n32767\n4294934527\n-32769\n-32769\n18446744073709518847\n-32769\n-32769\n0\n0\n32768\n-32768\n-32768\n4294934528\n-32768\n-32768\n18446744073709518848\n-32768\n-32768\n127\n127\n65407\n-129\n-129\n4294967167\n-129\n-129\n18446744073709551487\n-129\n-129\n128\n-128\n-128\n65408\n-128\n-128\n4294967168\n-128\n-128\n18446744073709551488\n-128\n-128\n255\n-1\n-1\n65535\n-1\n-1\n4294967295\n-1\n-1\n18446744073709551615\n-1\n-1\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n127\n128\n128\n-128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n128\n255\n255\n-1\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n255\n0\n0\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n256\n255\n-1\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n32767\n0\n0\n32768\n32768\n-32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n32768\n255\n-1\n65535\n65535\n-1\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n65535\n0\n0\n0\n0\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n65536\n255\n-1\n65535\n-1\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n2147483647\n0\n0\n0\n0\n2147483648\n2147483648\n-2147483648\n2147483648\n2147483648\n2147483648\n2147483648\n255\n-1\n65535\n-1\n4294967295\n4294967295\n-1\n4294967295\n4294967295\n4294967295\n4294967295\n0\n0\n0\n0\n0\n0\n4294967296\n4294967296\n4294967296\n4294967296\n255\n-1\n65535\n-1\n4294967295\n-1\n9223372036854775807\n9223372036854775807\n9223372036854775807\n9223372036854775807\n",
+    "note": "The same program built with --overflow=wrap, where every conversion truncates: the values it converts all fit, so the output is the same."
+  },
+  {
+    "name": "int-cast-fail-unsigned-narrow",
+    "source": "fn get(x: u64) -> u64 {\n    return x;\n}\nfn main() -> u64 {\n    println(u8(get(300)));\n    return 0;\n}\n",
+    "signal": "SIGABRT",
+    "stderr": "value 300 does not fit in u8",
+    "note": "The failing side of an in-line conversion is the runtime's own report, with the value and the type."
+  },
+  {
+    "name": "int-cast-fail-negative-unsigned",
+    "source": "fn get(x: i64) -> i64 {\n    return x;\n}\nfn main() -> u64 {\n    println(u32(get(-5)));\n    return 0;\n}\n",
+    "signal": "SIGABRT",
+    "stderr": "negative value converted to an unsigned type",
+    "note": "The failing side of an in-line conversion is the runtime's own report, with the value and the type."
+  },
+  {
+    "name": "int-cast-fail-signed-narrow",
+    "source": "fn get(x: i64) -> i64 {\n    return x;\n}\nfn main() -> u64 {\n    println(i8(get(-200)));\n    return 0;\n}\n",
+    "signal": "SIGABRT",
+    "stderr": "value -200 does not fit in i8",
+    "note": "The failing side of an in-line conversion is the runtime's own report, with the value and the type."
+  },
+  {
+    "name": "int-cast-fail-unsigned-to-signed",
+    "source": "fn get(x: u64) -> u64 {\n    return x;\n}\nfn main() -> u64 {\n    println(i64(get(18446744073709551615)));\n    return 0;\n}\n",
+    "signal": "SIGABRT",
+    "stderr": "value 18446744073709551615 does not fit in i64",
+    "note": "The failing side of an in-line conversion is the runtime's own report, with the value and the type."
+  },
+  {
+    "name": "drv-release-check-messages",
+    "driver": true,
+    "flags": [
+      "--release",
+      "--overflow=checked"
+    ],
+    "source": "use host;\n// Every inline check kind, failing inside a task so the failure is contained and its message can\n// be printed: built with --release (the LLVM backend), whose stream has no site table.\nfn overflow(n: u64, base: u64) -> u64 { a: u64 := 18446744073709551615 - base; return a + n; }\nfn negative(n: u64, base: u64) -> u64 { x: i64 := 0 - i64(n); return u64(x); }\nfn divide(n: u64, base: u64) -> u64 { return base / (n - 1); }\nfn unwrap(n: u64, base: u64) -> u64 { mut v = u64[]; if n == 2 { v.push(1); } return v.pop()!; }\nfn index8(n: u64, base: u64) -> u64 { v := u64[10, 20, 30]; return v[n + 5]; }\nfn index4(n: u64, base: u64) -> u64 { v := f32[1.0, 2.0]; s := &v[0: 2]; return u64(s[n + 3]); }\nfn asserted(n: u64, base: u64) -> u64 { assert(n == 2); return 0; }\nfn report<s>(sc: (&s Scope<u64>), f: fn(u64, u64) -> u64) -> unit {\n    t := spawn(sc, 1, f);\n    match try_join(t) {\n        v: u64 => { println(v); },\n        e: TaskFailure => { host::print(e.message); host::print(view(\"\\n\")); },\n    }\n}\nfn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {\n    report(sc, overflow);\n    report(sc, negative);\n    report(sc, divide);\n    report(sc, unwrap);\n    report(sc, index8);\n    report(sc, index4);\n    report(sc, asserted);\n    return 0;\n}\nfn main() { task_scope(0, body); }\n",
+    "stdout": "arithmetic overflow\nnegative value converted to an unsigned type\ndivision by zero\npop from an empty vector\nindex 6 out of bounds for length 3\nindex 4 out of bounds for length 2\nassertion failed\n",
+    "driverModules": [
+      "main",
+      "core"
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "note": "A release build (the LLVM backend) has no site table to turn an inline `call rt_abort` into a reported failure, so the front end writes `rt_trap` with the check's kind itself, and the 4-byte accessor reports through rt_fail like the 8-byte one: every check kind fails with the message a development build prints (contained in a task, so the message can be pinned)."
+  },
+  {
+    "name": "pool-reduce-bit-identical-workers-1",
+    "note": "A float reduction over 1M terms through pool::reduce, and an ordered fold of pool::map results, print the same bits at GRAIL_WORKERS 1, 4 and 24 (three cases, one expected line): the pieces depend on the length and the grain only.",
+    "files": [
+      "tests/pool/reduce_bits.grl"
+    ],
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "env": {
+      "GRAIL_WORKERS": "1"
+    },
+    "stdout": "102032.95195766681 101931.45245580416\n",
+    "targets": [
+      "x86_64"
+    ]
+  },
+  {
+    "name": "pool-reduce-bit-identical-workers-4",
+    "note": "A float reduction over 1M terms through pool::reduce, and an ordered fold of pool::map results, print the same bits at GRAIL_WORKERS 1, 4 and 24 (three cases, one expected line): the pieces depend on the length and the grain only.",
+    "files": [
+      "tests/pool/reduce_bits.grl"
+    ],
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "env": {
+      "GRAIL_WORKERS": "4"
+    },
+    "stdout": "102032.95195766681 101931.45245580416\n",
+    "targets": [
+      "x86_64"
+    ]
+  },
+  {
+    "name": "pool-reduce-bit-identical-workers-24",
+    "note": "A float reduction over 1M terms through pool::reduce, and an ordered fold of pool::map results, print the same bits at GRAIL_WORKERS 1, 4 and 24 (three cases, one expected line): the pieces depend on the length and the grain only.",
+    "files": [
+      "tests/pool/reduce_bits.grl"
+    ],
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "env": {
+      "GRAIL_WORKERS": "24"
+    },
+    "stdout": "102032.95195766681 101931.45245580416\n",
+    "targets": [
+      "x86_64"
+    ]
+  },
+  {
+    "name": "pool-chunks-mut-is-gone",
+    "note": "chunks_mut (a chunk count) was removed when the split became a grain: no alias is left, so a call to it is an unknown function.",
+    "source": "use pool;\nfn main() {\n    mut v = u64[1, 2];\n    pool::chunks_mut(&mut v[0: 2], 1, |s: &mut [u64]| -> unit { });\n}\n",
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "reject": true,
+    "diagnostic": "chunks_mut",
+    "targets": [
+      "x86_64"
+    ]
+  },
+  {
+    "name": "pool-split-mut-zero-grain-refused",
+    "note": "The grain of pool::split_mut is a `u64 where grain > 0`. A zero written at the call is checked where it is passed (a literal is not refused at compile time today), so the failure names the caller's line and the refinement, before any job runs.",
+    "source": "use pool;\nfn main() {\n    mut v = u64[1, 2];\n    pool::split_mut<u64>(&mut v[0: 2], 0, |s: &mut [u64]| -> unit { });\n}\n",
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "signal": "SIGABRT",
+    "stderr": "refinement violated: grain > 0",
+    "targets": [
+      "x86_64"
+    ]
+  },
+  {
+    "name": "sched-frame-not-starved-by-background",
+    "note": "A background task keeps Background jobs of about 30 ms queued (32 at a time) while the main thread runs Frame passes of 64 short leaves: the worst Frame pass stays within a loose bound of its time alone, at most the cap (2 of 8 workers) plus the forking stack run Background work at once, and host::background_wait_us() reports that the oldest queued Background job has waited.",
+    "files": [
+      "tests/sched/classes.grl"
+    ],
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "env": {
+      "GRAIL_WORKERS": "8"
+    },
+    "stdout": "1\ntrue\n",
+    "targets": [
+      "x86_64"
+    ]
+  },
+  {
+    "name": "sched-class-records-recycled",
+    "note": "Three tasks fork the same nested joins as Frame, Normal and Background at once, forty times each: records freed by one class are reused by another while stale entries for them sit in the old class's queues. Stale entries are skipped, never claimed, and the checksum shows every job ran exactly once.",
+    "files": [
+      "tests/sched/class_records.grl"
+    ],
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "310080\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ]
+  },
+  {
+    "name": "sched-start-applies-once",
+    "note": "sched::start applies its settings once, before the scheduler exists: three workers, pinned, with warmed stacks, a seed and a cap, and work then runs on exactly three workers. A second call, and a call after the scheduler started, return false instead of aborting.",
+    "files": [
+      "tests/sched/start.grl"
+    ],
+    "modules": [
+      "lib/sched.grl",
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "true\nfalse\n3\ntrue\nfalse\n",
+    "targets": [
+      "x86_64"
+    ]
+  },
+  {
+    "name": "sched-seeded-run-reproduces",
+    "note": "With one worker and a fixed seed (sched::start), tasks that yield print the same order on every run.",
+    "files": [
+      "tests/sched/seeded.grl"
+    ],
+    "modules": [
+      "lib/sched.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "task 1 round 0\ntask 1 round 1\ntask 1 round 2\ntask 2 round 0\ntask 2 round 1\ntask 2 round 2\ntask 3 round 0\ntask 3 round 1\ntask 3 round 2\n6\n",
+    "targets": [
+      "x86_64"
+    ]
   },
   {
     "name": "sched-no-alloc-job-failure-contained",
