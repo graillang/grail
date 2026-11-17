@@ -3107,6 +3107,51 @@
     "note": "a 19-digit f32 constant immediate is not zero: the narrowing pass took imm_value's 'cannot read' (0) for the value 0"
   },
   {
+    "name": "raw-address-offset-folded-size-checked",
+    "source": "unsafe module runtime;\n// The address operand of a raw load or store written as `p + k` with a literal k is address\n// formation: no overflow check, and a field load is one instruction (`movq 16(%rax),%rax`). Integer\n// arithmetic in the same unsafe module still follows the build's overflow mode: the size `n * 8`\n// overflows and aborts in a checked build.\nfn field(p: u64) -> u64 {\n    return raw_load(p + 16);\n}\nfn size(n: u64) -> u64 {\n    return n * 8;\n}\nfn main() {\n    p := raw_map(4096);\n    raw_store(p + 16, 42);\n    println(field(p));\n    println(size(3));\n    println(size(4611686018427387904));\n}\n",
+    "stdout": "42\n24\n",
+    "signal": "SIGABRT",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "asm": [
+      {
+        "in": "field",
+        "text": "movq 16(%rax),%rax"
+      },
+      {
+        "in": "size",
+        "text": "jnc"
+      }
+    ],
+    "asmAbsent": [
+      {
+        "in": "field",
+        "text": "rt_abort"
+      },
+      {
+        "in": "field",
+        "text": "addq"
+      }
+    ],
+    "note": "docs/design/decisions 'raw address offsets': raw_load(p + 16) is address formation (no check, folded); n * 8 in the same unsafe module is checked"
+  },
+  {
+    "name": "raw-address-offset-behaviour",
+    "source": "unsafe module runtime;\n// The address operand of a raw load or store written as `p + k` with a literal k is address\n// formation: no overflow check, and a field load is one instruction (`movq 16(%rax),%rax`). Integer\n// arithmetic in the same unsafe module still follows the build's overflow mode: the size `n * 8`\n// overflows and aborts in a checked build.\nfn field(p: u64) -> u64 {\n    return raw_load(p + 16);\n}\nfn size(n: u64) -> u64 {\n    return n * 8;\n}\nfn main() {\n    p := raw_map(4096);\n    raw_store(p + 16, 42);\n    println(field(p));\n    println(size(3));\n    println(size(4611686018427387904));\n}\n",
+    "stdout": "42\n24\n",
+    "signal": "SIGABRT",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "the raw address offset rule on every target and backend: the field reads 42, the overflowing size aborts"
+  },
+  {
     "name": "raw-module-sized-integer-arithmetic",
     "targets": [
       "x86_64"

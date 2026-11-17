@@ -1,5 +1,11 @@
 ## Unreleased
 
+- **Raw address offsets.** In an `unsafe module`, the address operand of `raw_load`/`raw_store`
+  and their narrow forms written as `p + k` with a literal `k` has no overflow check and is folded
+  into the load's addressing (`movq 16(%rax),%rax`); other integer arithmetic there still follows
+  the build's overflow mode. The runtime loses about 950 of its 2,664 overflow checks
+  (docs/ffi.md; decision record "Raw address offsets").
+
 - **The standard map is one open-addressed table** (`lib/hashmap.grl`). Keys, values and their
   hashes are stored densely in insertion order (iteration order and `key_at`/`value_at` are
   unchanged), indexed by one table of slot words (a 32-bit hash tag and the entry index) with

@@ -347,3 +347,13 @@ retain newly installed sources under written reference bounds, track moved field
 and recheck argument materialization and hidden-body interfaces. These are implementation obligations,
 not features claimed complete. Readonly byte-view descriptor derivation is safe copying of a concrete
 pointer/length value; it does not authorize copying arbitrary mutable accesses.
+
+## Raw address offsets
+
+Decided 2026-11-17. Integer arithmetic in unsafe/raw modules follows the build's overflow mode, so a
+development build still catches real overflow in runtime computations (sizes, counts, indices).
+Separately, the address operand of a raw load or store written as `p + k`/`p - k` with a literal
+`k` is address formation, not arithmetic: no overflow check, folded into `k(%reg)` addressing on
+every target and a GEP on LLVM (docs/ffi.md, "Raw address offsets in unsafe modules"). It removed
+about 950 of the 2,664 overflow checks the runtime carried, most of them field loads in hot paths.
+
