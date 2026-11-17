@@ -6009,6 +6009,675 @@ fn copy_index<a, b, c>(o: (&a ir::Body), t: &b [u8], a: u64, e: u64, unit: &c [u
     }
     return 0;
 }
+// Early inlining (docs/design/separate-compilation.md, "Early inlining"). A small body is spliced
+// into its callers before they are optimised, so the optimiser sees one body and works across the
+// seam: arguments forwarded from the caller's registers into the callee's slots, the callee's
+// stores that nothing reads deleted, its slots promoted with the caller's. A copy spliced after
+// optimisation (inline_calls) cannot do that; it keeps every move and test the callee made.
+//
+// The copy is the callee's raw text - the front end's, before any pass - with its frame moved below
+// the caller's: every `-N(%rbp)` becomes `-(N+B)(%rbp)`, B the caller's frame size rounded to 16, and
+// the caller's `.set .F` grows by the largest frame it takes. Raw text keeps nothing in a register
+// across a call and uses no callee-saved register, so no save travels with it. Its frame clear
+// becomes a store per cleared slot (the optimiser deletes the ones nothing reads), its returns jump
+// to the end of the copy, its labels are renamed into the caller's numbering (a body with two
+// numberings is one the optimiser leaves alone), and after the copy the caller's statement position
+// is stated again.
+//
+// What is kept out: a body over EARLY_LINES instructions, one that reads stack arguments or names
+// %rbp or %rsp otherwise, jumps out of itself, calls itself, names a label it does not define, has a
+// two-word dynamic value (its facts are keyed by its own slots), or keeps a frame over EARLY_FRAME
+// bytes. A copy may splice the small bodies it calls in turn, to EARLY_DEPTH levels, and a caller
+// takes at most EARLY_CAP lines of copies, so a body grows by a bounded amount.
+const EARLY_LINES: u64 = 12;
+const EARLY_FRAME: u64 = 256;
+const EARLY_DEPTH: u64 = 2;
+const EARLY_CAP: u64 = 400;
+fn early_file<a>(o: (&a mut ir::Body), name: u8[], body: u8[], unit: u8[], prefix: u8[], need: u64, local: u64, pairs: u64[], widths: u64[]) {
+    if o.early.head.len() == 0 {
+        for i in 4096 {
+            o.early.head.push(0);
+        }
+    }
+    h := name_hash(view(name), 0, name.len());
+    index := o.early.names.len();
+    o.early.names.push(name);
+    o.early.bodies.push(body);
+    o.early.units.push(unit);
+    o.early.prefixes.push(prefix);
+    o.early.needs.push(need);
+    o.early.local.push(local);
+    o.early.pairs.push(pairs);
+    o.early.widths.push(widths);
+    old := o.early.head[h];
+    o.early.next.push(old);
+    ir::put(&mut o.early.head, h, index + 1);
+}
+// The entry for the symbol `t[a..e]`, plus one, or 0.
+fn early_find<a, b>(o: (&a ir::Body), t: &b [u8], a: u64, e: u64) -> u64 {
+    if o.early.head.len() == 0 {
+        return 0;
+    }
+    h := name_hash(t, a, e);
+    mut k = o.early.head[h];
+    while k != 0 {
+        n := &o.early.names[k - 1];
+        if (n.len() == e - a) && ir::same_range(t, a, e, view(n)) {
+            return k;
+        }
+        k = o.early.next[k - 1];
+    }
+    return 0;
+}
+// The small bodies of the stream, found where the emitter noted its `.type` lines (`starts`, in
+// no particular order and possibly stale, so each is checked), or by reading the stream when there
+// are no notes.
+fn early_table<a, b, c, d>(o: (&a mut ir::Body), s: &b [u8], starts: (&c u64[]), facts: (&d llvm::Facts)) {
+    mut at = u64[];
+    if starts.len() != 0 {
+        for i in starts.len() {
+            at.push(starts[i]);
+        }
+        sort_words(&mut at);
+    } else {
+        mut start = 0;
+        for i in s.len() {
+            if s[i] == 10 {
+                if (start < i) && (s[start] == 46) {
+                    at.push(start);
+                }
+                start = i + 1;
+            }
+        }
+    }
+    mut unit = u8[];
+    mut prefix = u8[];
+    mut gbase: u64 = 1;
+    mut last: u64 = 0;
+    for q in at.len() {
+        a := at[q];
+        if (a >= s.len()) || ((q != 0) && (a == last)) || ((a != 0) && (s[a - 1] != 10)) {
+            continue;
+        }
+        last = a;
+        mut e = a;
+        while (e < s.len()) && (s[e] != 10) {
+            e += 1;
+        }
+        if (e - a > 12) && ir::at(view(s), a, view(".grail_part ")) {
+            mut x = a + 12;
+            unit.clear();
+            while (x < e) && (s[x] != 32) {
+                unit.push(s[x]);
+                x += 1;
+            }
+            prefix.clear();
+            if x < e {
+                prefix.append(s[x + 1..e]);
+            }
+        } else if ir::at(view(s), a, view(".gbase ")) {
+            mut n: u64 = 0;
+            for x in a + 7..e {
+                if (48 <= s[x]) && (s[x] <= 57) {
+                    n = n * 10 + u64(s[x] - 48);
+                }
+            }
+            gbase = n;
+        } else if opens_body(view(s), a, e) {
+            name := ir::type_symbol(view(s), a, e);
+            mut pairs = u64[];
+            llvm::facts_dyn_pairs(facts, view(name), &mut pairs);
+            mut widths = u64[];
+            llvm::facts_pair_widths(facts, view(name), &mut widths);
+            if pairs.len() == widths.len() {
+                early_try(&mut o, view(s), a, name, view(unit), view(prefix), gbase, pairs, widths);
+            }
+        }
+    }
+}
+fn sort_words<a>(v: (&a mut u64[])) {
+    // Shell sort: the notes are a few per function.
+    mut gap = v.len() / 2;
+    while gap != 0 {
+        for i in gap..v.len() {
+            x := v[i];
+            mut j = i;
+            while (j >= gap) && (v[j - gap] > x) {
+                ir::put(&mut v, j, v[j - gap]);
+                j -= gap;
+            }
+            ir::put(&mut v, j, x);
+        }
+        gap = gap / 2;
+    }
+}
+// The value of `t[a..e]` as a frame offset expression, with `fsym` standing for `fval`.
+fn early_eval<a, b>(t: &a [u8], a: u64, e: u64, fsym: &b [u8], fval: u64, ok: (&mut bool)) -> i64 {
+    mut total: i64 = 0;
+    mut i = a;
+    mut sign: i64 = 1;
+    if a == e {
+        exchange(&mut ok, false);
+    }
+    while i < e {
+        c := t[i];
+        if c == 45 {
+            sign = 0 - sign;
+            i += 1;
+        } else if c == 43 {
+            i += 1;
+        } else if (48 <= c) && (c <= 57) {
+            mut n: i64 = 0;
+            while (i < e) && (48 <= t[i]) && (t[i] <= 57) {
+                n = n * 10 + i64(t[i] - 48);
+                i += 1;
+            }
+            total = total + sign * n;
+            sign = 1;
+        } else if (i + fsym.len() <= e) && ir::same_range(t, i, i + fsym.len(), fsym) {
+            total = total + sign * i64(fval);
+            sign = 1;
+            i += fsym.len();
+        } else {
+            exchange(&mut ok, false);
+            return 0;
+        }
+    }
+    return total;
+}
+fn early_number<a>(out: (&a mut u8[]), n: u64) {
+    mut d = u8[];
+    mut v = n;
+    while true {
+        d.push(u8(48 + v % 10));
+        v = v / 10;
+        if v == 0 {
+            break;
+        }
+    }
+    while d.len() != 0 {
+        out.push(d.pop()!);
+    }
+}
+// Whether the line `t[a..e]` is the instruction `w` exactly.
+fn line_is<a, b>(t: &a [u8], a: u64, e: u64, w: &b [u8]) -> bool {
+    return (e - a == w.len()) && ir::same_range(t, a, e, w);
+}
+// The template of the body whose `.type` line is at `a`, filed when it qualifies.
+fn early_try<a, b, c>(o: (&a mut ir::Body), s: &b [u8], a: u64, name: u8[], unit: &c [u8], prefix: &c [u8], gbase: u64, pairs: u64[], widths: u64[]) {
+    // The body's lines, up to its closing `.set`, and no further than a small body has.
+    mut ls = u64[];
+    mut le = u64[];
+    mut x = a;
+    mut closed = false;
+    while (x < s.len()) && (ls.len() < 4 * EARLY_LINES + 40) {
+        mut e = x;
+        while (e < s.len()) && (s[e] != 10) {
+            e += 1;
+        }
+        ls.push(x);
+        le.push(e);
+        if (ls.len() > 1) && closes_body(view(s), x, e) {
+            closed = true;
+            break;
+        }
+        x = e + 1;
+    }
+    if !closed || (ls.len() < 6) {
+        return ();
+    }
+    n := ls.len();
+    // `.type`, then labels, `NAME:`, `pushq %rbp`, `movq %rsp,%rbp`, `subq $.F..,%rsp`.
+    mut i = 1;
+    while (i < n) && (s[ls[i]] == 46) && (s[le[i] - 1] == 58) {
+        i += 1;
+    }
+    if (i + 3 >= n) || (le[i] - ls[i] != name.len() + 1) || !ir::same_range(view(s), ls[i], le[i] - 1, view(name)) {
+        return ();
+    }
+    if !line_is(view(s), ls[i + 1], le[i + 1], view("pushq %rbp")) || !line_is(view(s), ls[i + 2], le[i + 2], view("movq %rsp,%rbp")) {
+        return ();
+    }
+    sa := ls[i + 3];
+    se := le[i + 3];
+    if !ir::at(view(s), sa, view("subq $.F")) || !ir::at(view(s), se - 5, view(",%rsp")) {
+        return ();
+    }
+    fsym := s[sa + 6..se - 5].copy();
+    // The closing line: `.set FSYM,N`.
+    ca := ls[n - 1];
+    ce := le[n - 1];
+    if (ce - ca < fsym.len() + 7) || !ir::same_range(view(s), ca + 5, ca + 5 + fsym.len(), view(fsym)) || (s[ca + 5 + fsym.len()] != 44) {
+        return ();
+    }
+    mut fval: u64 = 0;
+    for y in ca + 6 + fsym.len()..ce {
+        if (s[y] < 48) || (57 < s[y]) {
+            return ();
+        }
+        fval = fval * 10 + u64(s[y] - 48);
+    }
+    if EARLY_FRAME < fval {
+        return ();
+    }
+    mut out = u8[];
+    mut defined = u8[][];
+    mut count = 0;
+    mut local = 0;
+    mut j = i + 4;
+    while j + 1 < n {
+        la := ls[j];
+        lend := le[j];
+        j += 1;
+        if la == lend {
+            continue;
+        }
+        // The frame clear: `leaq -F(%rbp),%rdi; movq $F/8-P,%rcx; xorl %eax,%eax; rep stosq`.
+        if ir::at(view(s), la, view("leaq -")) && (j + 2 < n) && ir::at(view(s), ls[j], view("movq $")) && line_is(view(s), ls[j + 1], le[j + 1], view("xorl %eax,%eax")) && line_is(view(s), ls[j + 2], le[j + 2], view("rep stosq")) {
+            // The count `$F/8-P`: the clear covers -8(P+1) .. -F.
+            ma := ls[j] + 6;
+            me := le[j];
+            if !ir::same_range(view(s), ma, ma + fsym.len(), view(fsym)) || !ir::at(view(s), ma + fsym.len(), view("/8-")) {
+                return ();
+            }
+            mut p: u64 = 0;
+            mut y = ma + fsym.len() + 3;
+            while (y < me) && (48 <= s[y]) && (s[y] <= 57) {
+                p = p * 10 + u64(s[y] - 48);
+                y += 1;
+            }
+            mut k = 8 * (p + 1);
+            while k <= fval {
+                out.append(view("movq $0,-"));
+                early_number(&mut out, k);
+                out.append(view("(%rbp)\n"));
+                k += 8;
+            }
+            j += 3;
+            continue;
+        }
+        if s[la] == 46 {
+            if s[lend - 1] == 58 {
+                defined.push(s[la..lend - 1].copy());
+                out.append(s[la..lend + 1]);
+            } else if ir::at(view(s), la, view(".gpos ")) {
+                out.append(view(ir::absolute_positions(s[la..lend + 1], gbase)));
+            } else if ir::at(view(s), la, view(".set ")) {
+                return ();
+            } else {
+                out.append(s[la..lend + 1]);
+            }
+            continue;
+        }
+        if line_is(view(s), la, lend, view("leave")) {
+            if (j < n) && line_is(view(s), ls[j], le[j], view("ret")) {
+                out.append(view("jmp @END\n"));
+                count += 1;
+                j += 1;
+                continue;
+            }
+            return ();
+        }
+        if line_is(view(s), la, lend, view("ret")) {
+            return ();
+        }
+        if ir::at(view(s), la, view("jmp ")) && !ir::at(view(s), la, view("jmp .L")) {
+            return ();
+        }
+        if ir::at(view(s), la, view("call ")) && (lend - la - 5 == name.len()) && ir::same_range(view(s), la + 5, lend, view(name)) {
+            return ();
+        }
+        mut line = u8[];
+        mut y = la;
+        while y < lend {
+            if (y + 6 <= lend) && ir::at(view(s), y, view("(%rbp)")) {
+                mut b = line.len();
+                while (0 < b) && (line[b - 1] != 32) && (line[b - 1] != 44) {
+                    b -= 1;
+                }
+                mut ok = true;
+                v := early_eval(view(line), b, line.len(), view(fsym), fval, &mut ok);
+                if !ok || (0 <= v) {
+                    return ();
+                }
+                while b < line.len() {
+                    line.pop()!;
+                }
+                line.push(45);
+                early_number(&mut line, u64(0 - v));
+                line.append(view("(%rbp)"));
+                y += 6;
+            } else if (y + 4 <= lend) && (ir::at(view(s), y, view("%rbp")) || ir::at(view(s), y, view("%rsp"))) {
+                return ();
+            } else if (y + 2 <= lend) && (s[y] == 46) && (s[y + 1] == 70) {
+                // Any other use of a frame symbol.
+                return ();
+            } else {
+                if (s[y] == 46) && (y + 1 < lend) && (s[y + 1] != 76) && ((y == la) || (s[y - 1] == 32) || (s[y - 1] == 44) || (s[y - 1] == 36) || (s[y - 1] == 42)) {
+                    // A local symbol of this object (a drop helper): the copy cannot leave it.
+                    local = 1;
+                }
+                line.push(s[y]);
+                y += 1;
+            }
+        }
+        line.push(10);
+        out.append(view(line));
+        count += 1;
+        if EARLY_LINES < count {
+            return ();
+        }
+    }
+    // Every `.L` the body names must be one it defines.
+    mut q = 0;
+    m := out.len();
+    while q + 1 < m {
+        if (out[q] == 46) && (out[q + 1] == 76) && ((q == 0) || (!ir::alnum(out[q - 1]) && (out[q - 1] != 95))) {
+            mut e2 = q;
+            while (e2 < m) && (ir::alnum(out[e2]) || (out[e2] == 95) || (out[e2] == 46)) {
+                e2 += 1;
+            }
+            mut found = false;
+            for d in defined.len() {
+                if (defined[d].len() == e2 - q) && ir::same_range(view(out), q, e2, view(defined[d])) {
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                return ();
+            }
+            q = e2;
+        } else {
+            q += 1;
+        }
+    }
+    early_file(&mut o, name, out, copy_text(unit), copy_text(prefix), (fval + 15) / 16 * 16, local, pairs, widths);
+}
+// The caller's own label numbering: its function number and the largest label number it uses.
+fn caller_numbering<a, b>(t: &a [u8], prefix: &b [u8], f: (&mut u64), top: (&mut u64)) -> bool {
+    // The frame symbol `.F<prefix>_<f>_<k>` names the function number.
+    mut found = false;
+    mut start = 0;
+    for i in t.len() {
+        if t[i] == 10 {
+            a := start;
+            start = i + 1;
+            if ir::at(view(t), a, view("subq $.F")) && ir::at(view(t), a + 8, prefix) && (a + 9 + prefix.len() < i) && (t[a + 8 + prefix.len()] == 95) {
+                mut x = a + 9 + prefix.len();
+                mut v: u64 = 0;
+                while (x < i) && (48 <= t[x]) && (t[x] <= 57) {
+                    v = v * 10 + u64(t[x] - 48);
+                    x += 1;
+                }
+                exchange(&mut f, v);
+                found = true;
+                break;
+            }
+        }
+    }
+    if !found {
+        return false;
+    }
+    // The largest `n` of `.L<prefix>_<f>_<n>` anywhere in the body.
+    mut most: u64 = 0;
+    mut q = 0;
+    n := t.len();
+    while q + 2 < n {
+        if (t[q] == 46) && (t[q + 1] == 76) && ir::at(view(t), q + 2, prefix) {
+            mut e = q + 2;
+            while (e < n) && (ir::alnum(t[e]) || (t[e] == 95)) {
+                e += 1;
+            }
+            packed := ir::label_number(view(t), q, e, prefix);
+            if (packed != 0) && ((packed >> 32) == *f + 1) {
+                v := (packed & 4294967295) - 1;
+                if most < v {
+                    most = v;
+                }
+            }
+            q = e;
+        } else {
+            q += 1;
+        }
+    }
+    exchange(&mut top, most);
+    return true;
+}
+// The caller `s[from..to]` with the small bodies it calls spliced in, or nothing when it calls
+// none (or cannot take a copy).
+fn early_splice<a, b>(o: (&a ir::Body), s: &b [u8], from: u64, to: u64, pairs: (&mut u64[]), widths: (&mut u64[])) -> u8[] {
+    if o.early.names.len() == 0 {
+        return u8[];
+    }
+    // A quick look first: most bodies call nothing small.
+    mut any = false;
+    mut start = from;
+    for i in from..to {
+        if s[i] == 10 {
+            a := start;
+            start = i + 1;
+            if (i - a > 5) && (s[a] == 99) && ir::at(view(s), a, view("call ")) {
+                k := early_find(&o, view(s), a + 5, i);
+                if (k != 0) && early_allowed(&o, k - 1) {
+                    any = true;
+                    break;
+                }
+            }
+        }
+    }
+    if !any {
+        return u8[];
+    }
+    t := s[from..to].copy();
+    mut f: u64 = 0;
+    mut top: u64 = 0;
+    if !caller_numbering(view(t), view(o.uprefix), &mut f, &mut top) {
+        return u8[];
+    }
+    // The caller's frame symbol and size, from its closing `.set`.
+    mut fsym = u8[];
+    mut fval: u64 = 0;
+    {
+        mut b = t.len() - 1;
+        while (0 < b) && (t[b - 1] != 10) {
+            b -= 1;
+        }
+        if !ir::at(view(t), b, view(".set ")) {
+            return u8[];
+        }
+        mut c = b + 5;
+        while (c < t.len()) && (t[c] != 44) {
+            c += 1;
+        }
+        fsym.append(t[b + 5..c]);
+        for y in c + 1..t.len() - 1 {
+            if (t[y] < 48) || (57 < t[y]) {
+                return u8[];
+            }
+            fval = fval * 10 + u64(t[y] - 48);
+        }
+    }
+    base := (fval + 15) / 16 * 16;
+    mut out = u8[];
+    mut position = u8[];
+    mut most: u64 = 0;
+    mut site: u64 = 0;
+    mut taken: u64 = 0;
+    mut next = top;
+    start = 0;
+    for i in t.len() {
+        if t[i] != 10 {
+            continue;
+        }
+        a := start;
+        start = i + 1;
+        if ir::at(view(t), a, view(".gpos ")) {
+            position.clear();
+            position.append(t[a..i + 1]);
+        }
+        if (i - a > 5) && (t[a] == 99) && ir::at(view(t), a, view("call ")) && (taken < EARLY_CAP) {
+            k := early_find(&o, view(t), a + 5, i);
+            if (k != 0) && early_allowed(&o, k - 1) {
+                need := early_copy(&o, k - 1, base, 1, &mut out, &mut next, f, &mut site, &mut taken, pairs, widths);
+                if most < need {
+                    most = need;
+                }
+                out.append(view(position));
+                continue;
+            }
+        }
+        if i + 1 == t.len() {
+            // The closing `.set`: the frame grows by what the copies take.
+            out.append(view(".set "));
+            out.append(view(fsym));
+            out.push(44);
+            early_number(&mut out, base + most);
+            out.push(10);
+            continue;
+        }
+        out.append(t[a..i + 1]);
+    }
+    if site == 0 {
+        return u8[];
+    }
+    return out;
+}
+// Whether the caller being optimised may take the copy of entry `k`: one of its own unit, or a
+// runtime body that names no local symbol.
+fn early_allowed<a>(o: (&a ir::Body), k: u64) -> bool {
+    if same_text(view(o.early.units[k]), view(o.unit)) {
+        return true;
+    }
+    return crossing_unit(view(o.early.units[k])) && (o.early.local[k] == 0);
+}
+// Writes the copy of entry `k` with its frame at `base` below the caller's; returns the frame bytes
+// the copy and the copies inside it take below the caller's own frame.
+fn early_copy<a, b>(o: (&a ir::Body), k: u64, base: u64, depth: u64, out: (&b mut u8[]), next: (&mut u64), f: u64, site: (&mut u64), taken: (&mut u64), pairs: (&mut u64[]), widths: (&mut u64[])) -> u64 {
+    // Its two-word values, moved with its frame: slot k is at -8(k+1).
+    for q in o.early.pairs[k].len() {
+        pairs.push(o.early.pairs[k][q] + base / 8);
+        widths.push(o.early.widths[k][q]);
+    }
+    exchange(&mut site, *site + 1);
+    me := *site;
+    body := &o.early.bodies[k];
+    cross := !same_text(view(o.early.units[k]), view(o.unit));
+    cprefix := &o.early.prefixes[k];
+    need := o.early.needs[k];
+    // The labels the template defines, and what each becomes.
+    mut olds = u8[][];
+    mut news = u8[][];
+    mut start = 0;
+    for i in body.len() {
+        if body[i] == 10 {
+            a := start;
+            start = i + 1;
+            if (i - a > 2) && (body[a] == 46) && (body[a + 1] == 76) && (body[i - 1] == 58) {
+                olds.push(body[a..i - 1].copy());
+                mut fresh = copy_text(view(".L"));
+                packed := ir::label_number(view(body), a, i - 1, view(cprefix));
+                if (packed != 0) && (o.uprefix.len() != 0) {
+                    fresh.append(view(o.uprefix));
+                    fresh.push(95);
+                    early_number(&mut fresh, f);
+                    fresh.push(95);
+                    exchange(&mut next, *next + 1);
+                    early_number(&mut fresh, *next);
+                } else {
+                    fresh = body[a..i - 1].copy();
+                    fresh.append(view("_e"));
+                    fresh.append(view(o.uprefix));
+                    fresh.push(95);
+                    early_number(&mut fresh, f);
+                    fresh.push(95);
+                    early_number(&mut fresh, me);
+                }
+                news.push(fresh);
+            }
+        }
+    }
+    // The label the copy's returns jump to.
+    mut end = copy_text(view(".L"));
+    end.append(view(o.uprefix));
+    end.push(95);
+    early_number(&mut end, f);
+    end.push(95);
+    exchange(&mut next, *next + 1);
+    early_number(&mut end, *next);
+    mut most = need;
+    start = 0;
+    for i in body.len() {
+        if body[i] != 10 {
+            continue;
+        }
+        a := start;
+        start = i + 1;
+        exchange(&mut taken, *taken + 1);
+        if cross && ir::at(view(body), a, view(".gposa ")) {
+            // A crossed copy reports its caller's statement.
+            continue;
+        }
+        if (depth < EARLY_DEPTH) && (i - a > 5) && ir::at(view(body), a, view("call ")) && (*taken < EARLY_CAP) {
+            k2 := early_find(&o, view(body), a + 5, i);
+            if (k2 != 0) && (k2 - 1 != k) && early_allowed(&o, k2 - 1) && (!cross || crossing_unit(view(o.early.units[k2 - 1]))) {
+                inner := early_copy(&o, k2 - 1, base + need, depth + 1, &mut out, &mut next, f, &mut site, &mut taken, pairs, widths);
+                if most < need + inner {
+                    most = need + inner;
+                }
+                continue;
+            }
+        }
+        // The line, with its frame operands moved and its labels renamed.
+        mut x = a;
+        while x < i {
+            c := body[x];
+            if (c == 64) && ir::at(view(body), x, view("@END")) {
+                out.append(view(end));
+                x += 4;
+            } else if (c == 45) && (x + 1 < i) && (48 <= body[x + 1]) && (body[x + 1] <= 57) {
+                // A number: a frame offset when `(%rbp)` follows it.
+                mut y = x + 1;
+                mut v: u64 = 0;
+                while (y < i) && (48 <= body[y]) && (body[y] <= 57) {
+                    v = v * 10 + u64(body[y] - 48);
+                    y += 1;
+                }
+                if ir::at(view(body), y, view("(%rbp)")) {
+                    out.push(45);
+                    early_number(&mut out, v + base);
+                } else {
+                    out.append(body[x..y]);
+                }
+                x = y;
+            } else if (c == 46) && (x + 1 < i) && (body[x + 1] == 76) && ((x == a) || (!ir::alnum(body[x - 1]) && (body[x - 1] != 95))) {
+                mut y = x;
+                while (y < i) && (ir::alnum(body[y]) || (body[y] == 95) || (body[y] == 46)) {
+                    y += 1;
+                }
+                mut done = false;
+                for d in olds.len() {
+                    if (olds[d].len() == y - x) && ir::same_range(view(body), x, y, view(olds[d])) {
+                        out.append(view(news[d]));
+                        done = true;
+                        break;
+                    }
+                }
+                if !done {
+                    out.append(body[x..y]);
+                }
+                x = y;
+            } else {
+                out.push(c);
+                x += 1;
+            }
+        }
+        out.push(10);
+    }
+    out.append(view(end));
+    out.append(view(":\n"));
+    return most;
+}
 // `_i<unit prefix>_<site>` on every `.L` in the body: the site number disambiguates two copies of
 // one body, and the unit prefix keeps a body label without a prefix of its own (`.Lret`) apart from
 // the same label minted by another unit of the same file.
@@ -6208,6 +6877,7 @@ pub fn optimize_parts<b, c, d, e, m, q, r, t>(s: &b [u8], split: u64, marks: (&m
     // write, so nothing is passed to them; what they made comes back through a pipe each.
     // Inside a build's jobserver (compiler/jobs.grl) the pieces are as many as there are tokens
     // free now, plus this process's own; the text is the same whatever the count.
+    early_table(&mut o, view(s), starts, facts);
     mut js = jobs::open();
     jobs::phase(view("optimiser-start"));
     pieces := jobs::workers(&mut js, jobs_for(s.len()));
@@ -6551,6 +7221,35 @@ fn scan_range<a, b, c, e, x>(o: (&a mut ir::Body), s: &b [u8], lo: u64, hi: u64,
 // inlinable copy, its typed IR and its call count are read back. This is what an edit to one
 // function of a large module costs the back end - that function.
 fn one_body<a, b, c, e, x, y>(o: (&a mut ir::Body), s: &b [u8], from: u64, to: u64, whole: bool, unit_key: &y [u8], facts: (&c llvm::Facts), ix: (&x ir::FactIndex), want_ir: u64, ir_text: (&mut u8[]), call_syms: (&mut u8[][]), call_counts: (&mut u64[])) {
+    // Small callees spliced in (early_splice): the body optimised is the spliced text, so the memo
+    // is keyed by it, and the call count the effect check compares is the one the front end wrote.
+    again := same_text(unit_key, view("#spliced"));
+    mut spliced = u8[];
+    mut epairs = u64[];
+    mut ewidths = u64[];
+    if !again {
+        spliced = early_splice(&o, s, from, to, &mut epairs, &mut ewidths);
+    }
+    if spliced.len() != 0 {
+        mut calls: u64 = 0;
+        mut ls = from;
+        for i in from..to {
+            if s[i] == 10 {
+                if (i - ls > 5) && (s[ls] == 99) && ir::at(view(s), ls, view("call ")) {
+                    calls += 1;
+                }
+                ls = i + 1;
+            }
+        }
+        exchange(&mut o.extra_pairs, epairs);
+        exchange(&mut o.extra_widths, ewidths);
+        one_body(&mut o, view(spliced), 0, spliced.len(), whole, view("#spliced"), facts, ix, want_ir, ir_text, call_syms, call_counts);
+        o.extra_pairs.clear();
+        o.extra_widths.clear();
+        last := call_counts.len() - 1;
+        exchange(&mut call_counts[last], calls);
+        return ();
+    }
     mut file = u8[];
     // GRAIL_MEMO_VERIFY=1: a memo entry found under a unit's key is not used but kept here, and the
     // body is optimised again and must come out as those bytes.
@@ -6570,12 +7269,17 @@ fn one_body<a, b, c, e, x, y>(o: (&a mut ir::Body), s: &b [u8], from: u64, to: u
         put_word(&mut meta, o.uniq);
         put_word(&mut meta, ir::facts_digest(ix, facts, view(o.name)));
         put_word(&mut meta, want_ir);
+        // A spliced body's copies bring their two-word values, which its text does not spell.
+        for q in o.extra_pairs.len() {
+            put_word(&mut meta, o.extra_pairs[q]);
+            put_word(&mut meta, o.extra_widths[q]);
+        }
         // A body the front end applied from its unit store is keyed by that unit's key instead of its
         // lines: its text is a function of the key, and hashing 100 MB of text that did not change
         // was most of what a rebuild after an edit spent here. The compiler's own identity is in
         // the unit key and in `memo_id`, so a rebuilt optimiser never reads an older one's entry.
         mut keyed = s[from..to];
-        if unit_key.len() != 0 {
+        if (unit_key.len() != 0) && !again {
             meta.append(view(" unit "));
             keyed = unit_key;
         }
@@ -6757,6 +7461,8 @@ fn run_forked<a, b, c, e, x, g, h>(o: (&a mut ir::Body), s: &b [u8], cuts: (&g C
             w.uniq_next = cut.counts.copy();
             w.uniq_plain = cut.plain;
             w.gbase = cut.gbase;
+            // The small bodies early inlining splices: this child's copy of the table.
+            exchange(&mut w.early, exchange(&mut o.early, ir::new_early()));
             w.memo_dir = o.memo_dir.copy();
             w.known = ir::Known { open: o.known.open.copy(), end: o.known.end.copy(), key: copy_texts(&o.known.key) };
             w.memo_id = o.memo_id.copy();
