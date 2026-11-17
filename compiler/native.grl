@@ -7625,8 +7625,12 @@ fn in_place_record<a>(c: (&a mut C), ty: u64) -> bool {
         return false;
     }
     index := ty_arg(&mut c, ty);
+    if c.decls[index].is_enum != 0 {
+        // An inline enum that owns its active payload drops it in place too (owned_enum).
+        return owned_enum(&mut c, ty);
+    }
     d := &c.decls[index];
-    return (d.is_enum == 0) && (d.c_layout == 0);
+    return d.c_layout == 0;
 }
 fn drop_symbol<a>(c: (&a mut C), ty: u64) -> u8[] {
     while c.drop_names.len() <= ty {
@@ -15711,6 +15715,12 @@ fn require_type<a>(c: (&a mut C), actual: u64, expected: u64) -> unit {
     mut want = expected;
     if ffi_byval(&mut c, want) {
         want = ty_arg(&mut c, want);
+    }
+    // A specialisation's binding (an alias, kind 10) where its own base type is named: the
+    // implementation reached through a bound takes `Self` as the concrete type the parameter is
+    // bound to here, and the two are one type in this specialisation.
+    if (ty_kind(&mut c, actual) == 10) && (ty_kind(&mut c, want) != 10) && (base_type(&mut c, actual) == want) {
+        return ();
     }
     if (want == 0) & is_bool(&mut c, actual) {
         return ();
@@ -30324,7 +30334,7 @@ fn member_align<a>(c: (&a mut C), ft: u64) -> u64 {
     if is_array(&mut c, t) {
         return member_align(&mut c, ty_arg(&mut c, t));
     }
-    if small_enum(&mut c, t) || (ty_kind(&mut c, t) == 5) || (ty_kind(&mut c, t) == 27) {
+    if inline_enum(&mut c, t) || (ty_kind(&mut c, t) == 5) || (ty_kind(&mut c, t) == 27) {
         return 8;
     }
     if is_c_record(&mut c, t) != 0 {
@@ -30371,7 +30381,7 @@ fn value_bytes<a>(c: (&a mut C), ty: u64) -> u64 {
     if is_c_record(&mut c, ty) != 0 {
         return ffi_record_size(&mut c, ty_arg(&mut c, ty));
     }
-    if small_enum(&mut c, ty) {
+    if inline_enum(&mut c, ty) {
         return enum_words(&mut c, ty) * 8;
     }
     at := field_layout(&mut c, ty);
@@ -30506,6 +30516,108 @@ fn small_enum<a>(c: (&a mut C), ty: u64) -> bool {
     }
     return true;
 }
+// An owning inline enum (unboxed-values.md, owned-payload enums): no Drop of its own, and every
+// payload either what a small enum allows, a one-word owner (a string, a vector), or an owning record
+// held as its words. Like a small enum it is {tag, payload words} in the frame, in records and in
+// vectors; unlike one it is not plain, and its in-place drop drops the active variant's payload.
+fn owned_enum<a>(c: (&a mut C), ty: u64) -> bool {
+    if ty_kind(&mut c, ty) != 8 {
+        return false;
+    }
+    index := ty_arg(&mut c, ty);
+    if (c.decls[index].is_enum == 0) || (c.decls[index].drop != 0) {
+        return false;
+    }
+    count := c.decls[index].count;
+    for i in count {
+        ft := base_type(&mut c, field_type(&mut c, ty, i));
+        k := ty_kind(&mut c, ft);
+        if (k == 7) && (ty_kind(&mut c, ty_arg(&mut c, ft)) == 35) {
+            return false;
+        }
+        if (k == 1) || (k == 2) || (k == 7) || (k == 12) || (k == 18) || (k == 19) || (k == 21) || (k == 22) || (k == 25) || (k == 26) {
+            continue;
+        }
+        if (k == 3) || (k == 4) || (k == 6) {
+            continue;
+        }
+        // A record payload that holds this enum again (`Node { next: Node? }`) would make it infinitely
+        // large: such an enum stays boxed, whichever of the two is laid out first.
+        if (k == 8) && (ft != ty) && !reaches(&mut c, ft, ty, 0) && framable(&mut c, ft) {
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+// Whether the record or enum `from` holds `target` by value, directly or through records and enums it
+// holds by value (a vector, a string or a reference is a pointer and ends the walk).
+fn reaches<a>(c: (&a mut C), from: u64, target: u64, depth: u64) -> bool {
+    t := base_type(&mut c, from);
+    if t == target {
+        return true;
+    }
+    if (depth > 12) || (ty_kind(&mut c, t) != 8) {
+        return depth > 12;
+    }
+    index := ty_arg(&mut c, t);
+    if c.decls[index].c_layout != 0 {
+        return false;
+    }
+    count := c.decls[index].count;
+    for i in count {
+        ft := base_type(&mut c, field_type(&mut c, t, i));
+        if (ty_kind(&mut c, ft) == 8) && reaches(&mut c, ft, target, depth + 1) {
+            return true;
+        }
+    }
+    return false;
+}
+fn inline_enum<a>(c: (&a mut C), ty: u64) -> bool {
+    return small_enum(&mut c, ty) || owned_enum(&mut c, ty);
+}
+// An enum the runtime built as a heap block {tag, payload word} (a task's outcome), as the type's own
+// representation: a boxed enum stays the block; an inline one is copied into frame words - a record
+// payload, which the block holds as a box of its own, is copied in and that box freed - and the
+// block is freed.
+fn enum_from_block<a>(c: (&a mut C), block: u64, ty: u64) -> u64 {
+    if !framed(&mut c, ty) {
+        return block;
+    }
+    ety := base_type(&mut c, ty);
+    words := enum_words(&mut c, ety);
+    n := frame_alloc(&mut c, words);
+    get(&mut c, block, view("%rcx"));
+    get(&mut c, n, view("%rdx"));
+    o(&mut c, view("movq (%rcx),%rax\nmovq %rax,(%rdx)\nmovq 8(%rcx),%rax\nmovq %rax,8(%rdx)\n"));
+    d := ty_arg(&mut c, ety);
+    count := c.decls[d].count;
+    done := label(&mut c);
+    for j in count {
+        pj := field_type(&mut c, ety, j);
+        if inline_payload(&mut c, ety, pj) {
+            next := label(&mut c);
+            get(&mut c, block, view("%rax"));
+            o(&mut c, view("cmpq $"));
+            on(&mut c, j);
+            o(&mut c, view(",(%rax)\n"));
+            jump(&mut c, view("jne"), next);
+            // word 1 of the block is the payload's box: its bytes go to words 1.. of the value.
+            get(&mut c, n, view("%rax"));
+            o(&mut c, view("leaq 8(%rax),%rax\n"));
+            at := save(&mut c);
+            boxw := word_load(&mut c, block, 1, 0);
+            bytes := imm(&mut c, value_bytes(&mut c, base_type(&mut c, pj)));
+            invoke(&mut c, view("rt_copy_bytes"), three(at, boxw, bytes));
+            invoke(&mut c, view("rt_free"), one(boxw));
+            jump(&mut c, view("jmp"), done);
+            mark(&mut c, next);
+        }
+    }
+    mark(&mut c, done);
+    invoke(&mut c, view("rt_free"), one(block));
+    return n;
+}
 // The words of a small enum: the tag, then the largest payload.
 fn enum_words<a>(c: (&a mut C), ty: u64) -> u64 {
     d := ty_arg(&mut c, ty);
@@ -30548,7 +30660,7 @@ fn payload_reference<a>(c: (&a mut C), at: u64, ety: u64, pty: u64) -> u64 {
 }
 fn inline_payload<a>(c: (&a mut C), ety: u64, pty: u64) -> bool {
     e := base_type(&mut c, ety);
-    if !small_enum(&mut c, e) {
+    if !inline_enum(&mut c, e) {
         return false;
     }
     p := base_type(&mut c, pty);
@@ -30632,6 +30744,9 @@ fn layout_bits_now<a>(c: (&a mut C), alias: u64) -> u64 {
     if small_enum(&mut c, ty) {
         // Plain, and held as its words (5a): a small enum is frame words wherever it is held.
         bits = 5;
+    } else if owned_enum(&mut c, ty) {
+        // Held as its words, but it owns what its active variant carries.
+        bits = 4;
     }
     if closure_env_record(&mut c, ty) {
         // S6(A): framed - its words in the frame - with every field a word; plain when no capture
@@ -30811,10 +30926,8 @@ fn retag_enum<a>(c: (&a mut C), xt: u64, tag: u64, ty: u64, from: u64) -> u64 {
         o(&mut c, view("movq %rax,(%rcx)\n"));
         return n;
     }
-    payload := word_load(&mut c, xt, 1, 0);
-    n := enum_frame(&mut c, tag, payload, ty, 1);
-    invoke(&mut c, view("rt_free"), one(xt));
-    return n;
+    retagged := invoke(&mut c, view("rt_enum_retag"), two(xt, tag));
+    return enum_from_block(&mut c, retagged, ty);
 }
 fn free_enum_shell<a>(c: (&a mut C), xt: u64, ty: u64) -> unit {
     if !framed(&mut c, ty) {
@@ -31112,7 +31225,7 @@ fn record_words<a>(c: (&a mut C), ty: u64) -> u64 {
     if is_array(&mut c, ty) {
         return (array_bytes(&mut c, ty) + 7) / 8;
     }
-    if small_enum(&mut c, ty) {
+    if inline_enum(&mut c, ty) {
         return enum_words(&mut c, ty);
     }
     d := ty_arg(&mut c, ty);
@@ -32812,6 +32925,14 @@ fn infer_type<a, b>(c: (&a mut C), formal: u64, actual: u64, map: (&b mut u64[])
         return ();
     }
     ak := ty_kind(&mut c, actual);
+    // A specialisation's binding of a type parameter (an alias, kind 10) given where the callee
+    // names the concrete type: a method reached through a bound (`it.fold(..)` with `it: I`, `I`
+    // bound to `Count`) is the implementation's, whose `Self` is `Count` itself. The alias stands for
+    // its base type here.
+    if (ak == 10) && (k != 10) {
+        infer_type(&mut c, formal, base_type(&mut c, actual), &mut map);
+        return ();
+    }
     // A vector reference passed for a typed slice is the slice over the whole vector (coerce_view):
     // the element type is inferred from the vector's.
     if (k == 27) && (ak == 7) {
@@ -40457,8 +40578,9 @@ fn try_join_builtin<a>(c: (&a mut C), handle: Val) -> Val {
     if c.raw == 0 {
         move_out(&mut c, handle);
     }
-    slot := invoke(&mut c, view("rt_task_outcome"), one(value));
+    boxed := invoke(&mut c, view("rt_task_outcome"), one(value));
     ty := task_outcome_type(&mut c, result);
+    slot := enum_from_block(&mut c, boxed, ty);
     return own(&mut c, slot, ty);
 }
 // `task_fail(text)`: fail the running task explicitly. Contained like a failed check - a value at
@@ -46461,7 +46583,7 @@ fn direct<a>(c: (&a mut C), alias: u64) -> bool {
     index := ty_arg(&mut c, ty);
     if c.decls[index].is_enum != 0 {
         // A small enum is frame words like a record, so its reference is their address too.
-        return small_enum(&mut c, ty);
+        return inline_enum(&mut c, ty);
     }
     d := &c.decls[index];
     // A closure's environment is not a record value anyone holds: its code is called with the
@@ -54384,6 +54506,33 @@ fn emit_drop_in_place<a, b>(c: (&a mut C), ty: u64, hook: &b [u8]) -> unit {
     }
     index := ty_arg(&mut c, ty);
     count := c.decls[index].count;
+    if c.decls[index].is_enum != 0 {
+        // An inline enum: only the active variant's payload, at word 1.
+        for i in count {
+            t := field_type(&mut c, ty, i);
+            if !needs_drop(&mut c, t) {
+                continue;
+            }
+            next := label(&mut c);
+            o(&mut c, view("cmpq $"));
+            on(&mut c, i);
+            o(&mut c, view(",(%r12)\n"));
+            jump(&mut c, view("jne"), next);
+            if inline_payload(&mut c, ty, t) {
+                if frame_drops(&mut c, t) {
+                    o(&mut c, view("leaq 8(%r12),%rdi\n"));
+                    call_out(&mut c, view(drop_in_place_ref(&mut c, t)));
+                }
+            } else {
+                o(&mut c, view("movq 8(%r12),%rdi\n"));
+                holder_drop(&mut c, t);
+            }
+            mark(&mut c, next);
+        }
+        mark(&mut c, done);
+        o(&mut c, view("popq %r13\npopq %r12\nleave\nret\n"));
+        return ();
+    }
     for i in count {
         t := field_type(&mut c, ty, i);
         if needs_drop(&mut c, t) {

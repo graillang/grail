@@ -163,6 +163,16 @@ checks += 10;
   const rows = r.stdout.split('\n').filter(line => line.includes('f_main_total'));
   assert.deepEqual(rows.map(line => line.split('\t').slice(1).join(' ').replace(/^.*checks\.grl/, 'checks.grl')),
     ['checks.grl:4:9 overflow', 'checks.grl:6:5 divide', 'checks.grl:6:5 index', 'checks.grl:6:5 overflow'], `the report of total: ${r.stdout}`);
+  // A release build reports the checks that survived LLVM's optimisation and the link, per function:
+  // the overflow checks a wrapping build never had are gone, the divide and the unproved index stay.
+  if (spawnSync('clang', ['--version']).status === 0) {
+    const rel = spawnSync(grail, ['build', 'checks.grl', '-o', join(work, 'checks-release'), '--release', '--report', 'checks'], { cwd: work, encoding: 'utf8', timeout: 900_000 });
+    assert.equal(rel.status, 0, `--release --report checks builds: ${rel.stdout}${rel.stderr}`);
+    const row = rel.stdout.split('\n').find(line => line.includes('f_main_total')) ?? '';
+    assert.match(row, /^  f_main_total\t2\tdivide 1, index 1$/, `the release report of total: ${rel.stdout}`);
+    assert.equal(String(execute(join(work, 'checks-release'), []).stdout), '8\n', 'the reported release build runs');
+    checks += 3;
+  }
   const bad = spawnSync(grail, ['build', 'checks.grl', '--report', 'nope'], { cwd: work, encoding: 'utf8' });
   assert.notEqual(bad.status, 0, '--report takes only `checks`');
   checks += 3;
