@@ -1,5 +1,8 @@
 ## Unreleased
 
+- Fixed: `grail fmt` could break a long expression inside `<<` or `>>` (each is two `<`/`>` tokens),
+  or start a continuation line with `<`, and the output then read as a generic argument list and no
+  longer parsed. A wrapped line now never starts with `<` or `>`.
 - The internal assembler takes `.previous`.
 
 - **Integer map keys hash in registers.** `hash::Hash` has a defaulted `table_hash`, the SipHash-1-3
