@@ -80,6 +80,16 @@
   when a check or `len()` in the loop needs it) into registers on the way into the loop, and the
   accesses inside read those. An unchecked access needs only the data register. fnv executes 11%
   fewer instructions.
+- Bounds checks across loops that rebuild their vectors: a fact a `while` body's writes would end
+  (`v.len == n` when the body swaps `v` with another vector) is kept while the body is compiled and
+  checked where the body ends; if it holds again it holds at every evaluation of the guard and
+  after the loop, and if not the function is compiled again without it. Assignments now state what
+  they store (`v = tmp` gives `v.len == tmp.len`), a write keeps what its name tied together
+  (`v.len == n` and `tmp.len == v.len` leave `tmp.len == n`), `x := y.copy()` has `y`'s length,
+  `if hi > n { hi = n; }` leaves `hi <= n`, and an index `t - c` with `c <= t` and `n / 2` are
+  read. Sort's checks in `main` go from 12 to 7.
+  `for x in v` reads its element unchecked when the body mentions `v` only as `v[...]` and
+  `v.len()` (no closure): the length the loop counted to cannot change.
 
 - **Interface format 11:** an interface's trailer ends with `fast_hash` of the bytes before it (XXH64
   under four seeds, the build store's digest) instead of SHA-256. It guards against corruption, which
