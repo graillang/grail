@@ -12,6 +12,10 @@
   file or directory`). The run now writes the native part, as the per-module units do;
   tools/test-cli.mjs builds every release shape and runs the program.
 
+- **`exchange` and `v[i] = x` are inline in release builds.** The LLVM lowering emits the runtime's
+  `rt_xchg` in place (tagged as element storage when the address is an element's), so a store loop
+  over a vector is a plain loop the optimiser sees: filling 10M words goes from 100M to 67M
+  instructions. bench/iterchain builds its vector at its final length, as its C and Rust twins do.
 - The orphan rule's diagnostic names the modules: an `impl I for T` written outside the modules that
   declare `I` and `T` now says where it was written, where the interface and the type are declared
   (or that no module declares the type, leaving only the interface's), and the fix - move the impl

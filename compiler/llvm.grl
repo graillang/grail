@@ -2938,6 +2938,28 @@ fn generic_element(l: (&mut L), target: (&[u8])) -> bool {
     // loaded and written back as `!tbaa !1`, the element read as `!tbaa !3`. A pop loop's length then
     // lives in a register, since no element load can alias it (B2,
     // docs/design/dyn-and-callable-bounds.md).
+    // `exchange(&mut slot, v)` (also behind `v[i] = x`): the old word read and the new one stored in
+    // place, so a store loop is visible to the vectoriser. Tagged as element storage only when the
+    // address is one the element accessors produced (l.evals), so it is known not to be a header.
+    if eq(target, view("rt_xchg")) && (l.verify == 0) && (l.proof.len() == 0) {
+        pv := get_reg(&mut l, view("rdi"));
+        nv := get_reg(&mut l, view("rsi"));
+        tagged := (l.evals.count != 0) && set_has(&l.evals, view(pv));
+        p := def(&mut l, view("inttoptr i64 {} to ptr"), &u8[][pv]);
+        mut old = u8[];
+        if tagged {
+            old = def(&mut l, view("load i64, ptr {}, align 8, !tbaa !3"), &u8[][copy(view(p))]);
+            emit(&mut l, view("store i64 {}, ptr {}, align 8, !tbaa !3"), &u8[][nv, p]);
+        } else {
+            old = def(&mut l, view("load i64, ptr {}, align 8"), &u8[][copy(view(p))]);
+            emit(&mut l, view("store i64 {}, ptr {}, align 8"), &u8[][nv, p]);
+        }
+        set_reg(&mut l, view("rax"), view(old));
+        set_chain(&mut l, reg_index(view("rax")) + 1, 0, 0, 0);
+        set_chain(&mut l, reg_index(view("rdx")) + 1, 0, 0, 0);
+        clear_args(&mut l);
+        return true;
+    }
     // `v.len()`: the header's length word, tagged as a header load.
     if eq(target, view("rt_len")) && (l.verify == 0) && (l.proof.len() == 0) {
         s := get_reg(&mut l, view("rdi"));
