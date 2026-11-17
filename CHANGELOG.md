@@ -1,5 +1,13 @@
 ## Unreleased
 
+- **Faster rebuilds after an edit: unchanged functions' optimised code comes from the store.** A
+  body replayed from the function store carried its parameters' type facts twice, so its key in the
+  optimiser's memo differed from the one it was filed under and every body of an edited module was
+  optimised again. The facts are now the fresh emission's, and the memo hits for every unchanged
+  body: `grail build` of a 4000-function file after a one-function edit went from 95.7G to 34.0G
+  instructions (GRAIL_JOBS=1). The stack-probe check reads the assembly once with no per-line
+  copies, and the inlining pass's call lines travel with each remembered body instead of being found
+  by a scan of the whole output.
 - **Soundness: a callable bound's reference parameters are fresh on every call.** In
   `F: FnMut((&mut T), C) -> R` the `&mut T` has a lifetime the bound names nowhere else, so - as in
   Rust's `for<'a>` elision - the closure or function given for `F` must accept any lifetime there. One

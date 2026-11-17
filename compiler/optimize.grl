@@ -1406,40 +1406,17 @@ fn put_num<a>(out: (&a mut u8[]), n: u64) {
 // allocated and its pages are touched from the top down, which is what Windows' guard-page growth
 // needs (it is `__chkstk`'s job), with only %rax, %r10 and %r11, which carry no argument.
 pub fn probe_frames<a>(s: &a [u8], after: u64) -> u8[] {
-    mut names = u8[][];
-    mut sizes = u64[];
-    mut a = 0;
-    while a < s.len() {
-        mut e = a;
-        while (e < s.len()) && (s[e] != 10) {
-            e += 1;
-        }
-        if (e - a > 8) && ir::at(view(s), a, view(".set .F")) {
-            mut comma = a;
-            while (comma < e) && (s[comma] != 44) {
-                comma += 1;
-            }
-            mut n: u64 = 0;
-            for x in comma + 1..e {
-                if (48 <= s[x]) & (s[x] <= 57) {
-                    n = n * 10 + u64(s[x] - 48);
-                }
-            }
-            // Every frame: the saved-register area a frame line adds (`+K`) can carry one just under
-            // a page over it.
-            if 4096 < n + 128 {
-                names.push(s[a + 5: comma].copy());
-                sizes.push(n);
-            }
-        }
-        a = e + 1;
-    }
-    if names.len() == 0 {
-        probe_backstop(view(s));
+    // The scan the backstop reads is the one that finds the frames: a stream with no frame over a
+    // page - nearly every one - is read once, checked, and returned as it is.
+    scan := frame_scan(view(s));
+    if scan.names.len() == 0 {
+        frame_check(view(s), &scan);
         return s.copy();
     }
+    names := &scan.names;
+    sizes := &scan.sizes;
     mut out = u8[];
-    a = 0;
+    mut a = 0;
     while a < s.len() {
         mut e = a;
         while (e < s.len()) && (s[e] != 10) {
@@ -1528,119 +1505,137 @@ pub fn probe_frames<a>(s: &a [u8], after: u64) -> u8[] {
     probe_backstop(view(out));
     return out;
 }
+// What one pass over a stream finds for the probes: the frame constants that can reach a page
+// (`.set .F<n>,SIZE`, with SIZE + 128 over 4096), the probe loops present (`.Lgrail_probe_<n>:`, as
+// `.F<n>`), and every line that moves %rsp down - its range in `down`, and the range of the label
+// line of the function it is in (for the error) in `func`, both as start/end pairs.
+struct FrameScan {
+    names: u8[][],
+    sizes: u64[],
+    probed: u8[][],
+    down: u64[],
+    func: u64[]
+}
+fn frame_scan<a>(s: &a [u8]) -> FrameScan {
+    mut f = FrameScan { names: u8[][], sizes: u64[], probed: u8[][], down: u64[], func: u64[] };
+    mut fa = 0;
+    mut fe = 0;
+    n := s.len();
+    mut a = 0;
+    while a < n {
+        mut e = a;
+        while (e < n) && (s[e] != 10) {
+            e += 1;
+        }
+        if e > a {
+            first := s[a];
+            if first == 46 {
+                if (e - a > 8) && ir::at(view(s), a, view(".set .F")) {
+                    mut comma = a;
+                    while (comma < e) && (s[comma] != 44) {
+                        comma += 1;
+                    }
+                    mut v: u64 = 0;
+                    for x in comma + 1..e {
+                        if (48 <= s[x]) & (s[x] <= 57) {
+                            v = v * 10 + u64(s[x] - 48);
+                        }
+                    }
+                    // Every frame: the saved-register area a frame line adds (`+K`, well under 128
+                    // bytes) can carry one just under a page over it.
+                    if 4096 < v + 128 {
+                        f.names.push(s[a + 5: comma].copy());
+                        f.sizes.push(v);
+                    }
+                } else if (e - a > 15) && (s[e - 1] == 58) && ir::at(view(s), a, view(".Lgrail_probe_")) {
+                    mut p = u8[];
+                    p.push(46);
+                    p.append(s[a + 14: e - 1]);
+                    f.probed.push(p);
+                }
+            } else if s[e - 1] == 58 {
+                fa = a;
+                fe = e - 1;
+            } else if ((first == 102) && ir::at(view(s), a, view("framesub "))) || ((first == 115) && (6 < e - a) && ir::at(view(s), a, view("subq $")) && ir::at(view(s), e - 5, view(",%rsp"))) {
+                f.down.push(a);
+                f.down.push(e);
+                f.func.push(fa);
+                f.func.push(fe);
+            }
+        }
+        a = e + 1;
+    }
+    return f;
+}
 // The backstop for the probes (the stack's guard page is a safety property, so it must not rest on
 // one spelling of the frame line): every frame line - a line that moves %rsp down by a `.F`
 // constant (`subq $.F<n>...,%rsp`, `framesub .F<n>...`) or by a literal - whose frame, with what the
 // line adds (`+K`), is larger than a page must be followed by its probe (`.Lgrail_probe_<n>`), or
 // the compiler stops with an internal error naming the function. One pass over the text.
 pub fn probe_backstop<a>(s: &a [u8]) {
-    mut names = u8[][];
-    mut sizes = u64[];
-    mut probed = u8[][];
-    mut a = 0;
-    while a < s.len() {
-        mut e = a;
-        while (e < s.len()) && (s[e] != 10) {
-            e += 1;
+    scan := frame_scan(view(s));
+    frame_check(view(s), &scan);
+}
+fn frame_check<a, b>(s: &a [u8], f: (&b FrameScan)) {
+    for d in f.down.len() / 2 {
+        a := f.down[2 * d];
+        e := f.down[2 * d + 1];
+        // The constant the line names, and the bytes it adds.
+        mut at = a;
+        while (at + 1 < e) && !((s[at] == 46) && (s[at + 1] == 70)) {
+            at += 1;
         }
-        if (e - a > 8) && ir::at(view(s), a, view(".set .F")) {
-            mut comma = a;
-            while (comma < e) && (s[comma] != 44) {
-                comma += 1;
+        mut bytes: u64 = 0;
+        mut ns = 0;
+        mut ne = 0;
+        if at + 1 < e {
+            mut stop = at;
+            while (stop < e) && (s[stop] != 43) && (s[stop] != 44) && (s[stop] != 32) {
+                stop += 1;
             }
-            mut n: u64 = 0;
-            for x in comma + 1..e {
-                if (48 <= s[x]) & (s[x] <= 57) {
-                    n = n * 10 + u64(s[x] - 48);
+            ns = at;
+            ne = stop;
+            for i in f.names.len() {
+                if ir::same_range(view(s), ns, ne, view(f.names[i])) {
+                    bytes = f.sizes[i];
                 }
             }
-            // Only a frame that can reach a page with its saved-register area (well under 128 bytes).
-            if 4096 < n + 128 {
-                names.push(s[a + 5: comma].copy());
-                sizes.push(n);
-            }
-        }
-        if (e - a > 15) && ir::at(view(s), a, view(".Lgrail_probe_")) && (s[e - 1] == 58) {
-            mut p = u8[];
-            p.push(46);
-            p.append(s[a + 14: e - 1]);
-            probed.push(p);
-        }
-        a = e + 1;
-    }
-    mut function = u8[];
-    a = 0;
-    while a < s.len() {
-        mut e = a;
-        while (e < s.len()) && (s[e] != 10) {
-            e += 1;
-        }
-        if (e > a) && (s[e - 1] == 58) && (s[a] != 46) {
-            function = s[a: e - 1].copy();
-        }
-        line := s[a: e].copy();
-        mut down = ir::at(view(s), a, view("framesub "));
-        if ir::at(view(s), a, view("subq $")) && (6 < e - a) && ir::at(view(s), e - 5, view(",%rsp")) {
-            down = true;
-        }
-        if down {
-            // The constant the line names, and the bytes it adds.
-            mut at = 0;
-            while (at + 1 < line.len()) && !((line[at] == 46) && (line[at + 1] == 70)) {
-                at += 1;
-            }
-            mut bytes: u64 = 0;
-            mut name = u8[];
-            if at + 1 < line.len() {
-                mut stop = at;
-                while (stop < line.len()) && (line[stop] != 43) && (line[stop] != 44) && (line[stop] != 32) {
-                    stop += 1;
-                }
-                name = line[at: stop].copy();
-                for i in names.len() {
-                    if ir::same_range(view(names[i]), 0, names[i].len(), view(name)) {
-                        bytes = sizes[i];
-                    }
-                }
-                if (stop < line.len()) && (line[stop] == 43) {
-                    mut k: u64 = 0;
-                    mut x = stop + 1;
-                    while (x < line.len()) && (48 <= line[x]) & (line[x] <= 57) {
-                        k = k * 10 + u64(line[x] - 48);
-                        x += 1;
-                    }
-                    bytes = bytes + k;
-                }
-            } else {
-                // A literal frame: the immediate itself.
-                mut x = 6;
-                while (x < line.len()) && (48 <= line[x]) & (line[x] <= 57) {
-                    bytes = bytes * 10 + u64(line[x] - 48);
+            if (stop < e) && (s[stop] == 43) {
+                mut k: u64 = 0;
+                mut x = stop + 1;
+                while (x < e) && (48 <= s[x]) & (s[x] <= 57) {
+                    k = k * 10 + u64(s[x] - 48);
                     x += 1;
                 }
+                bytes = bytes + k;
             }
-            if 4096 < bytes {
-                mut ok = false;
-                if name.len() != 0 {
-                    for i in probed.len() {
-                        if ir::same_range(view(probed[i]), 0, probed[i].len(), view(name)) {
-                            ok = true;
-                        }
-                    }
-                }
-                if !ok {
-                    host::print(view("grail: internal compiler error: "));
-                    host::print(view(function));
-                    host::print(view("'s frame is larger than a page and has no stack probe ("));
-                    host::print(view(line));
-                    host::print(view(")\n"));
-                    host::exit(70);
-                }
+        } else {
+            // A literal frame: the immediate itself.
+            mut x = a + 6;
+            while (x < e) && (48 <= s[x]) & (s[x] <= 57) {
+                bytes = bytes * 10 + u64(s[x] - 48);
+                x += 1;
             }
         }
-        a = e + 1;
+        if 4096 < bytes {
+            mut ok = false;
+            if ne != ns {
+                for i in f.probed.len() {
+                    if ir::same_range(view(s), ns, ne, view(f.probed[i])) {
+                        ok = true;
+                    }
+                }
+            }
+            if !ok {
+                host::print(view("grail: internal compiler error: "));
+                host::print(s[f.func[2 * d]..f.func[2 * d + 1]]);
+                host::print(view("'s frame is larger than a page and has no stack probe ("));
+                host::print(s[a..e]);
+                host::print(view(")\n"));
+                host::exit(70);
+            }
+        }
     }
-    return ();
 }
 pub fn lower_leaf_calls<a>(s: &a [u8]) -> u8[] {
     mut out = u8[];
@@ -4377,6 +4372,12 @@ fn lines_of_interest<a, b>(text: &a [u8], from: u64, out: (&b mut u64[])) {
         i += 1;
     }
 }
+// The lines of interest in what was written to `o.out` from `from` on, noted in `o.interest`.
+fn note_interest<a>(o: (&a mut ir::Body), from: u64) {
+    mut noted = exchange(&mut o.interest, u64[]);
+    lines_of_interest(view(o.out), from, &mut noted);
+    exchange(&mut o.interest, noted);
+}
 // Replaces `call NAME` lines for inlinable functions by their bodies with per-site labels.
 // Inlining rewrites the output, so the `--split` marker offsets recorded on the way through are
 // rewritten with it: markers are copied in stream order, and each one takes its new offset here.
@@ -4864,7 +4865,7 @@ pub fn optimize_parts<b, c, d, e, m, q, r, t>(s: &b [u8], split: u64, marks: (&m
         lines = exchange(&mut o.table, u64[]);
     } else {
         rest = run_range(&mut o, view(s), 0, s.len(), split, marks, names, facts, &ix, want_ir, ir_text, call_syms, call_counts);
-        lines_of_interest(view(o.out), 0, &mut lines);
+        lines = exchange(&mut o.interest, u64[]);
     }
     tail := o.out.len();
     o.out.append(s[rest..s.len()]);
@@ -5154,7 +5155,9 @@ fn scan_range<a, b, c, e, x>(o: (&a mut ir::Body), s: &b [u8], lo: u64, hi: u64,
                     } else {
                         ir::gbase_line(&mut o, view(s), a, e);
                     }
+                    at := o.out.len();
                     o.out.append(s[a..e + 1]);
+                    note_interest(&mut o, at);
                 }
             } else if closes_body(view(s), a, e) {
                 one_body(&mut o, view(s), opened, start, true, view(""), facts, ix, want_ir, ir_text, call_syms, call_counts);
@@ -5186,7 +5189,7 @@ fn one_body<a, b, c, e, x, y>(o: (&a mut ir::Body), s: &b [u8], from: u64, to: u
         // The key: the compiler, the unit and its label prefix, the body's ordinal in the unit
         // (its labels are numbered from it), its facts, and
         // whether the typed IR is wanted - and then the lines themselves, hashed twice.
-        mut meta = copy_text(view("grail-opt 2 "));
+        mut meta = copy_text(view("grail-opt 3 "));
         meta.append(view(o.memo_id));
         meta.push(10);
         meta.append(view(o.unit));
@@ -5221,6 +5224,7 @@ fn one_body<a, b, c, e, x, y>(o: (&a mut ir::Body), s: &b [u8], from: u64, to: u
                 if take_word(view(kept), &mut tail) == 6072411188134084935 {
                     mut at = 0;
                     n := take_word(view(kept), &mut at);
+                    base := o.out.len();
                     o.out.append(kept[at..at + n]);
                     at += n;
                     if take_word(view(kept), &mut at) != 0 {
@@ -5232,6 +5236,10 @@ fn one_body<a, b, c, e, x, y>(o: (&a mut ir::Body), s: &b [u8], from: u64, to: u
                     count := take_word(view(kept), &mut at);
                     ir_piece := take_text(view(kept), &mut at);
                     ir_text.append(view(ir_piece));
+                    lines := take_word(view(kept), &mut at);
+                    for l in lines {
+                        o.interest.push(base + take_word(view(kept), &mut at));
+                    }
                     call_syms.push(o.name.copy());
                     call_counts.push(count);
                     return ();
@@ -5252,6 +5260,8 @@ fn one_body<a, b, c, e, x, y>(o: (&a mut ir::Body), s: &b [u8], from: u64, to: u
     ir_mark := ir_text.len();
     inl_mark := o.inl_names.len();
     body(&mut o, view(s), facts, ix, want_ir, ir_text, call_syms, call_counts);
+    interest_mark := o.interest.len();
+    note_interest(&mut o, out_mark);
     if file.len() != 0 {
         mut kept = u8[];
         out_end := o.out.len();
@@ -5267,6 +5277,10 @@ fn one_body<a, b, c, e, x, y>(o: (&a mut ir::Body), s: &b [u8], from: u64, to: u
         put_word(&mut kept, call_counts[call_counts.len() - 1]);
         ir_end := ir_text.len();
         put_text(&mut kept, ir_text[ir_mark..ir_end]);
+        put_word(&mut kept, o.interest.len() - interest_mark);
+        for l in interest_mark..o.interest.len() {
+            put_word(&mut kept, o.interest[l] - out_mark);
+        }
         put_word(&mut kept, 6072411188134084935);
         if (verified.len() != 0) && !ir::same_range(view(verified), 0, verified.len(), view(kept)) {
             host::print(view("grail: GRAIL_MEMO_VERIFY: the remembered optimisation of "));
@@ -5378,8 +5392,7 @@ fn run_forked<a, b, c, e, x, g, h>(o: (&a mut ir::Body), s: &b [u8], cuts: (&g C
             mut wcounts = u64[];
             run_range(&mut w, view(s), cut.at, cuts[k + 1].at, split, &mut wmarks, &mut wnames, facts, ix, want_ir, &mut wir, &mut wsyms, &mut wcounts);
             mut packed = u8[];
-            mut wlines = u64[];
-            lines_of_interest(view(w.out), 0, &mut wlines);
+            wlines := exchange(&mut w.interest, u64[]);
             put_word(&mut packed, w.marked);
             put_text(&mut packed, view(w.out));
             put_word(&mut packed, wlines.len());
