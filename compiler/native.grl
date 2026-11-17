@@ -4443,7 +4443,7 @@ fn arg_slot<a>(c: (&a C), declared: u64, i: u64) -> u64 {
 // after it (kept_slots).
 fn begin_result_dest<a>(c: (&a mut C), ret: u64, count: u64) -> unit {
     exchange(&mut c.result_dest, 0);
-    if (c.raw == 0) & needs_dest(&mut c, ret) {
+    if needs_dest(&mut c, ret) {
         d := fresh(&mut c);
         if d != count {
             fail(&mut c, view("internal: the result address is not the slot after the parameters"));
@@ -4462,7 +4462,9 @@ fn kept_slots<a>(c: (&a C), count: u64) -> u64 {
 // The caller's side of needs_dest: frame words of the call site the callee writes its result to,
 // passed after the declared arguments; 0 when the result needs none.
 fn call_dest<a>(c: (&a mut C), ret: u64) -> u64 {
-    if (c.raw != 0) || !needs_dest(&mut c, ret) {
+    // Layout is the type's, never the module's: an unsafe module calling a function that needs a
+    // destination passes one like anyone else.
+    if !needs_dest(&mut c, ret) {
         return 0;
     }
     return frame_alloc(&mut c, record_words(&mut c, base_type(&mut c, ret)));
@@ -31991,6 +31993,8 @@ fn emit_box_thunks<a>(c: (&a mut C)) -> unit {
         } else {
             o(&mut c, view("movq %rdi,-48(%rbp)\nmovq (%rdi),%rax\nmovq 8(%rdi),%rdi\n"));
         }
+        // A result the runtime can keep as it is (words 0) passes through in rax.
+        pass := words == 0;
         if big {
             o(&mut c, view("movq -40(%rbp),"));
             o(&mut c, view(argreg(args)));
@@ -32000,10 +32004,13 @@ fn emit_box_thunks<a>(c: (&a mut C)) -> unit {
         if !big {
             o(&mut c, view("movq %rax,-40(%rbp)\nmovq %rdx,-32(%rbp)\n"));
         }
-        if kind == 2 {
+        if kind == 3 {
+            o(&mut c, view("movq -48(%rbp),%rax\nmovq 8(%rax),%rdi\ncall rt_free\n"));
+        }
+        if kind >= 2 {
             o(&mut c, view("movq -48(%rbp),%rdi\ncall rt_free\n"));
         }
-        if big {
+        if big || pass {
             o(&mut c, view("movq -40(%rbp),%rax\n"));
         } else {
             o(&mut c, view("leaq -40(%rbp),%rdi\nmovq $"));
@@ -35877,12 +35884,22 @@ fn spawn_builtin<a>(c: (&a mut C), scope: Val) -> Val {
     require_sendable_owned(&mut c, item.ty, view("spawned item"));
     require_sendable_owned(&mut c, result, view("spawned result"));
     mut value = item.t;
+    itemty := item.ty;
     if c.raw == 0 {
         move_out(&mut c, item);
     }
     mut entry = f.t;
-    if (c.raw == 0) & framed(&mut c, result) {
-        words := record_words(&mut c, base_type(&mut c, result));
+    boxed_item := (c.raw == 0) & framed(&mut c, itemty);
+    if boxed_item {
+        // The task runs after this statement, and its item's words are a frame site that may run
+        // again (a spawn in a loop): the item travels in a box of its own, freed by the adapter.
+        value = frame_box(&mut c, value, itemty);
+    }
+    if (c.raw == 0) & (framed(&mut c, result) || boxed_item) {
+        mut words = 0;
+        if framed(&mut c, result) {
+            words = record_words(&mut c, base_type(&mut c, result));
+        }
         // The runtime keeps one word of a task's result: the task runs an adapter, whose item is a
         // cell {function, item} it unpacks, and which returns the result boxed.
         sz := imm(&mut c, 2);
@@ -35890,8 +35907,12 @@ fn spawn_builtin<a>(c: (&a mut C), scope: Val) -> Val {
         rec_store(&mut c, cell, 0, f.t);
         rec_store(&mut c, cell, 1, value);
         value = cell;
+        mut kind = 2;
+        if boxed_item {
+            kind = 3;
+        }
         o(&mut c, view("leaq "));
-        push_bytes(&mut c.out, view(result_adapter(&mut c, 2, count, words)));
+        push_bytes(&mut c.out, view(result_adapter(&mut c, kind, count, words)));
         o(&mut c, view("(%rip),%rax\n"));
         entry = save(&mut c);
     }
