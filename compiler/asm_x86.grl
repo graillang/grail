@@ -1,6 +1,7 @@
 module asm_x86;
 use elf;
 use host;
+use machine;
 
 // The internal x86-64 assembler (docs/design/compile-speed.md, stage 4): the assembly text the
 // compiler writes, in, an ELF relocatable object, out. It reads exactly the subset of AT&T syntax
@@ -91,6 +92,8 @@ pub struct A {
     at: u64,
     le: u64,
     line: u64,
+    // Where the line being read starts, so an error can quote it.
+    ls: u64,
     // The last expression read: an optional symbol (index + 1) with a sign and a divisor, a
     // constant, and a modifier (1: @tpoff).
     ex_sym: u64,
@@ -149,6 +152,8 @@ pub struct A {
     ex_sym2: u64,
     fx_sym2: u64[],
     fx_width: u64[],
+    // How many `atom.` lines were expanded: each expansion's labels get its own prefix.
+    atoms: u64,
     // Whether the line just read may be remembered: an instruction or numeric data, no label.
     cacheable: u64,
     err: u8[]
@@ -356,6 +361,7 @@ pub fn new() -> A {
         at: 0,
         le: 0,
         line: 0,
+        ls: 0,
         ex_sym: 0,
         ex_neg: 0,
         ex_div: 1,
@@ -388,6 +394,7 @@ pub fn new() -> A {
         lc_count: 0,
         lc_pool: u8[],
         cacheable: 0,
+        atoms: 0,
         fl_name: u8[][],
         files_seen: 0,
         loc_pending: 0,
@@ -426,6 +433,13 @@ fn fail<a, b>(o: (&a mut A), what: &b [u8]) {
         num(&mut o.err, o.line);
         o.err.append(view(": "));
         o.err.append(what);
+        o.err.append(view(": `"));
+        a0 := o.ls;
+        e := o.le;
+        if (a0 <= e) && (e <= o.src.len()) {
+            o.err.append(o.src[a0: e]);
+        }
+        o.err.append(view("`"));
     }
 }
 
@@ -1221,6 +1235,54 @@ fn sleb<a>(out: (&a mut u8[]), n: u64) {
     }
 }
 
+fn atom_line<a>(o: (&a mut A)) {
+    o.cacheable = 0;
+    mut line = u8[];
+    line.append(o.src[o.at: o.le]);
+    line.push(10);
+    lowered := machine::atomics_x86(view(line));
+    // The pass numbers its labels from 1 on every call: give this expansion's labels a prefix.
+    o.atoms += 1;
+    mut text = u8[];
+    mut i = 0;
+    pat := view(".Latom");
+    while i < lowered.len() {
+        if (i + pat.len() <= lowered.len()) && at_word(view(lowered), i, i + pat.len(), pat) {
+            text.append(pat);
+            num(&mut text, o.atoms);
+            text.push('_');
+            i += pat.len();
+        } else {
+            text.push(lowered[i]);
+            i += 1;
+        }
+    }
+    // Read the expansion as lines of their own, then carry on with the outer text.
+    outer := exchange(&mut o.src, text);
+    at := o.at;
+    le := o.le;
+    mut a0 = 0;
+    n := o.src.len();
+    while (a0 < n) && (o.err.len() == 0) {
+        mut e = a0;
+        while e < n {
+            c := o.src[e];
+            if c == 10 {
+                break;
+            }
+            e += 1;
+        }
+        o.at = a0;
+        o.ls = a0;
+        o.le = e;
+        read_line(&mut o);
+        a0 = e + 1;
+    }
+    o.src = outer;
+    o.at = le;
+    o.le = le;
+}
+
 fn label<a>(o: (&a mut A), a0: u64, e: u64) {
     id := symbol(&mut o, a0, e);
     if o.sym_sec[id] != 0 {
@@ -1267,6 +1329,12 @@ fn read_line<a>(o: (&a mut A)) {
             }
             i += 1;
         }
+    }
+    // A portable atomic operation (`atom.load ...`): the x86 sequence machine.grl lowers it to,
+    // assembled in place, so the text needs no whole-stream lowering pass before it gets here.
+    if (i - o.at > 5) && at_src(&o, o.at, o.at + 5, view("atom.")) {
+        atom_line(&mut o);
+        return ();
     }
     id := lookup(&o, o.at, i);
     if peek(&o) == '.' {
@@ -1520,6 +1588,7 @@ pub fn assemble(text: u8[]) -> Result {
         start := o.buf.len();
         o.cacheable = 1;
         o.at = a0;
+        o.ls = a0;
         o.le = e;
         read_line(&mut o);
         if (o.cacheable != 0) && (o.err.len() == 0) && (o.cur == sec) && (o.nobits == 0) && (o.fx_sec.len() == nfx) && (o.pt_sec.len() == npt) && (o.it_pos.len() == nit) && (o.sym_name.len() == nsym) && (o.buf.len() > start) && (o.lc_count * 2 < o.lc_hash.len()) {

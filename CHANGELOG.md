@@ -10,7 +10,8 @@
   and the self-compile's 119 MB in 1.1 s against 5.2 s. `--assembler=clang` (and `GRAIL_ASSEMBLER`)
   still choose clang; the flag goes once the oracle has been green through one landing. Debug
   builds go through it too (it writes `.debug_line` from `.file`/`.loc` as LLVM does); the other
-  targets still use clang.
+  targets still use clang. It lowers the portable atomic operations as it reads them, so an x86
+  build no longer rewrites the whole stream for them first.
 
 - **The atomics family.** `Atomic<T>` now holds `u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`,
   `i64` or `bool`. Each width wraps at its own size, and `fetch_min`/`fetch_max` are signed for
