@@ -260,6 +260,13 @@ ok('signature: a one-word result fact for a two-word result fails under --verify
 const quiet = build('signature-quiet', 'signature.grl', { backend: 'llvm', extra: ['--forge-signature=f_main_two:1'] });
 ok('signature: without --verify-facts a forged fact is dropped (six words again) and the program is right', run([quiet.exe]).stdout === '44 7\n' && /^define internal \{i64, i64\} @"f_main_two"\(i64 %a0, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5\)/m.test(readFileSync(quiet.ll, 'utf8')));
 
+// ---- the FFI fact: a C call with floats is lifted, typed as C types it ----
+const ffi = build('ffi-floats', 'ffi_float_calls.grl', { backend: 'llvm', verifyFacts: true });
+const ffiIr = readFileSync(ffi.ll, 'utf8');
+ok('ffi: the C functions are declared with their float types', /^declare double @"scale"\(i64, double, float\)$/m.test(ffiIr) && /^declare float @"half"\(float\)$/m.test(ffiIr));
+ok('ffi: the caller is lifted and calls them typed', /call double @"scale"\(i64 %t\d+, double %t\d+, float %t\d+\)/.test(ffiIr) && /^define [^\n]*@"f_main_main"/m.test(ffiIr));
+ok('ffi: the values are the native build\'s', run([ffi.exe]).stdout === '500\n1.5\n', JSON.stringify(run([ffi.exe]).stdout));
+
 if (failed) {
   console.log(`facts: ${failed} check(s) failed`);
   process.exit(1);

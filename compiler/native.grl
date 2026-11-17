@@ -4034,6 +4034,45 @@ fn release_call_args<a>(c: (&a mut C), area: u64) -> unit {
     }
     return ();
 }
+// The LLVM backend's FFI fact for a C function this body calls (call ABI S8a): its integer argument
+// words, its float arguments in order (bit k of the mask set when the k-th is an f32) and its result
+// (0 an integer word or none, 1 f64, 2 f32). Only for x86-64 SysV calls whose every argument is in
+// a register and whose result is a scalar: the lifter then emits the call with those C types, so
+// the floats travel in the vector registers the platform ABI puts them in.
+fn ffi_signature_fact<a, b, d>(c: (&a mut C), argtypes: (&b u64[]), ret: u64, symbol: &d [u8], abi: u64) -> unit {
+    if (c.backend == 0) || (c.validating != 0) || (c.target != 0) || (abi != 0) {
+        return ();
+    }
+    mut ints = 0;
+    mut floats = 0;
+    mut mask = 0;
+    for i in argtypes.len() {
+        ty := argtypes[i];
+        if is_float(&mut c, ty) {
+            if is_f32(&mut c, ty) {
+                mask = mask | (1 << floats);
+            }
+            floats += 1;
+        } else {
+            if ffi_words(&mut c, ty) != 1 {
+                return ();
+            }
+            ints += 1;
+        }
+    }
+    if (6 < ints) || (8 < floats) {
+        return ();
+    }
+    mut result = 0;
+    if (ret != 1) && is_float(&mut c, ret) {
+        result = 1;
+        if is_f32(&mut c, ret) {
+            result = 2;
+        }
+    }
+    llvm::fact_ffi(&mut c.facts, copy_bytes(view(symbol)), ints, floats, mask, result);
+    return ();
+}
 // The LLVM backend's signature fact for the body being emitted: its argument words, six in
 // registers and the rest on the stack. The lifter defines the body and its calls with exactly
 // these words (llvm.grl `signatures`).
@@ -15404,6 +15443,9 @@ fn ffi_emit_call<a, b, d, e, f>(
         o(&mut c, view("movl $"));
         on(&mut c, floats);
         o(&mut c, view(",%eax\n"));
+    }
+    if (symbol.len() != 0) && (area == 0) && (fixed == args.len()) && (rmode == 0) && (copies == 0) {
+        ffi_signature_fact(&mut c, argtypes, ret, view(symbol), abi);
     }
     if symbol.len() == 0 {
         if c.target == 0 {
