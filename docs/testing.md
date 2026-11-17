@@ -338,11 +338,16 @@ loses the race harmlessly. That is what makes `GATE_JOBS > 1` safe for the tool 
 
 ## Landing on main
 
-Every branch lands through one queue: `bash tools/land.sh BRANCH` (or `just land BRANCH`). The branch
-must already contain `origin/main`: merge main into it and resolve the conflicts on the branch, where
-the owner knows both sides. The queue runs one landing at a time on exactly that tree: the build, the
-self-host fixed point, the x86_64 corpus in three shards and the tool suites, retrying a failure once
-on its own. Green fast-forwards main; anything else leaves main unchanged and says why. The emulated
-aarch64/riscv64 legs then run on the build host and are fixed forward. `tools/land-known.txt` lists
-the failures that do not block, each with an owner; it only ever shrinks. `tools/land.sh --status`
-shows the queue and the last landings.
+Every branch lands through one service: `bash tools/land.sh BRANCH` (or `just land BRANCH`) queues
+it and returns; `--wait` blocks until the verdict, `--status` shows the queue. The service
+(`tools/landsvc/landd.py`, run as a daemon on the build host from `$HOME/grail-landsvc`) takes up to
+four queued branches, merges each onto current `origin/main` in its own worktree (a clean merge, or
+one whose only conflicts are corpus cases and prose, which `tools/merge-cases.mjs` settles), and runs
+the fast gate once on the combined tree: the build, the self-host fixed point, the x86_64 corpus in
+three shards and every tool suite, each failure retried once on its own. Green fast-forwards main and
+each branch; a red train is retried one branch at a time, so one bad branch cannot block the others;
+a branch that does not merge is refused with its conflicting files. Results are in the service's
+`results/BRANCH.txt` and in `landings.txt`. The emulated aarch64/riscv64 legs then run on the remote
+build host and are fixed forward. `tools/land-known.txt` lists the failures that do not block, each
+with an owner; it only ever shrinks. Killing the process that queued a branch does not stop its
+landing: the service owns the gate.

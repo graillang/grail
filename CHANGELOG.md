@@ -76,6 +76,13 @@
   104k-line program does 21% fewer instructions and uses 10% less CPU. And in a release build the
   runtime functions that read the thread pointer - the allocator's threaded path, the current task,
   the mutex - are now optimised by LLVM like the rest; they were left in unoptimised code.
+- Landing on main goes through a service (`tools/landsvc/landd.py`, client `tools/land.sh`): it merges each queued branch onto current main itself, gates up to four together, retries a red train one branch at a time, and cannot be stopped by killing the process that queued a branch.
+- `tools/pkg-test.mjs` passes again and runs in the gate and the landing queue. Its offline-build
+  check called `grail run --offline`, a flag only `add`, `update` and `fetch` have (a build never
+  networks); the stricter option parser refuses it, and nothing ran the suite to notice. Running
+  it found a real bug: `grail test` in a project no longer saw the root's dependencies or its
+  dev-dependencies (`use kit;` in a test failed to resolve) since the test runner was rewritten;
+  each test program now gets the plan's module list, dev-dependencies included.
 
 - **Fixed: an LLVM-backend miscompile of a vector grown through its address.** A call handed `&mut v`
   receives the slot's address, not the header word, so the lifter did not count it as a call that

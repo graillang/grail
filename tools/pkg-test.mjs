@@ -214,7 +214,9 @@ const distDir = join(work, 'dist');
   // With the store filled, a build works even though the remotes are unreachable: it never networks.
   rmSync(marksRemote, { recursive: true, force: true });
   ok(existsSync(join(store, 'git')), 'the git clone stayed in the store');
-  assert.equal(run(['run', '--offline'], demo).stdout.trim(), '10', 'an offline build reuses the store');
+  // `--offline` belongs to the commands that can network (add, update, fetch; docs/packages.md): a
+  // build never does, so it takes no such flag and this is a plain `run` with the remotes gone.
+  assert.equal(run(['run'], demo).stdout.trim(), '10', 'a build with unreachable remotes reuses the store');
   checks++;
 }
 
@@ -333,7 +335,7 @@ const distDir = join(work, 'dist');
   const node = JSON.parse(lockOf(project)).packages.find((p) => p.name === 'kit');
   ok(node.dev === true, 'a package only the root dev-depends on is marked dev in the lock');
   ok(run(['build'], project).status === 0, 'a plain build does not need the dev-dependency');
-  ok(/1 passed, 0 failed/.test(run(['test'], project).stdout), 'grail test sees the dev-dependency');
+  ok(/passed 1 failed 0/.test(run(['test'], project).stdout), 'grail test sees the dev-dependency');
   checks++;
 }
 
