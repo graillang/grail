@@ -1,5 +1,12 @@
 ## Unreleased
 
+- **C calls with floats are optimised in release builds (call ABI S8a).** A function that called a
+  C function with `f64`/`f32` arguments or a float result had to stay unoptimised on the LLVM
+  backend (its floats travel in vector registers a lifted call did not carry). The front end now
+  records each C function's argument and result types, and the lifter emits the call as C types it
+  (`call double @scale(i64, double, float)`), on x86-64 for calls whose arguments are all in
+  registers. Variadic calls, records and stack arguments keep the native body.
+
 - AArch64 and RV64 native code drops moves that move nothing (call ABI S7): the word machine's
   result register is x9 (t0) and its first argument x0 (a0), and moves go through the scratch x10
   (t1), so calls and returns were full of `mov x0,x9` after `mov x9,x10; mov x10,x0`. A value number
