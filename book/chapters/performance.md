@@ -157,14 +157,13 @@ compiler's columns, so a change is measured on the engine the same way.
 
 **What it found.** Every program of the port builds through the store and matches its reference
 (the ImGui program is left out where its library is not built). The figures charted were taken with
-the native-built compiler of the commit named, the one `grail` is during development, because no
-release build of that commit could be made on the shared machine; a release compiler compiles about
-three times faster. After a one-statement edit to `main` a rebuild costs a twentieth or less of a
-cold build, because the store replays every unchanged module and function.
+the release compiler of the commit named. After a one-statement edit to `main` a rebuild costs a
+twentieth or less of a cold build, because the store replays every unchanged module and function:
+`abgeo`, the largest, builds cold in 10.7 billion instructions and again after an edit in 0.25.
 
-`abgeo` (the cluster builder and its reader) is the slowest release run, and its time goes to
-building vectors rather than to geometry: growing them (`rt_grow`) and taking memory for them
-(`rt_alloc_take`) lead the profile, with meshoptimizer's own `simplify` third.
+The release runs are short: `abgeo` (the cluster builder and its reader) takes 0.49 billion
+instructions, and `job`, the slowest for its size, spends its time in the scheduler's stealing
+(`rt_job_steal`, `rt_worker_steal`) rather than in its own work, since its jobs are tiny.
 
 {{perf:abundance#abundance-compile-cpu}}
 
