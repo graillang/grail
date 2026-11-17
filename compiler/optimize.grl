@@ -2093,6 +2093,8 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
     for i in last {
         dhead.push(0);
     }
+    // Several sequences can share one loop head: each links to the one stored before it (+1).
+    mut dchain = u64[];
     // At a drop helper call, the SSE registers (bit per register number) to save around it.
     mut xsave = u64[];
     for i in last {
@@ -2319,6 +2321,11 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
             dregs.push(dlen[k]);
             if ddata[k] != 99 {
                 if dloop[k] != 0 {
+                    while dchain.len() <= k {
+                        dchain.push(0);
+                    }
+                    was := dhead[dwline[k]];
+                    ir::put(&mut dchain, k, was);
                     ir::put(&mut dhead, dwline[k], k + 1);
                 } else {
                     ir::put(&mut dinit, dwline[k], k + 1);
@@ -2441,10 +2448,11 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
                 o.out.push(10);
             }
         }
-        if dhead[i] != 0 {
-            // Into the loop from above: the stable sequence's header from its frame slot (renumbered
-            // by compact), then its fields.
-            k := dhead[i] - 1;
+        // Into the loop from above: each stable sequence's header from its frame slot (renumbered by
+        // compact), then its fields - every sequence whose loop starts here, not only the last one.
+        mut hk = dhead[i];
+        while hk != 0 {
+            k := hk - 1;
             mut n = dslot[k];
             if (n < o.slotmap.len()) && (o.slotmap[n] != 0) {
                 n = o.slotmap[n];
@@ -2464,6 +2472,11 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
             app(&mut o.out, view("),%"));
             reg_name(&mut o, dregs[2 * k]);
             o.out.push(10);
+            if k < dchain.len() {
+                hk = dchain[k];
+            } else {
+                hk = 0;
+            }
         }
         mut saved = 0;
         if (xsave[i] != 0) && (o.del[i] == 0) {

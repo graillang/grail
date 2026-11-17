@@ -333,7 +333,8 @@ fn cond<a>(o: (&a mut asm_x86::A), a0: u64, e: u64) -> u64 {
 
 // A label operand: a fixup of `kind` at the instruction about to be emitted. `1f`/`1b` name the
 // next / previous numeric label 1.
-fn label_ref<a>(o: (&a mut asm_x86::A), kind: u64) {
+fn label_ref<a>(o: (&a mut asm_x86::A), kind0: u64) {
+    mut kind = kind0;
     asm_x86::skip(&mut o);
     a0 := o.at;
     e := asm_x86::name_end(&mut o);
@@ -349,6 +350,7 @@ fn label_ref<a>(o: (&a mut asm_x86::A), kind: u64) {
         sym = asm_x86::symbol(&mut o, a0, e);
     }
     o.at = e;
+    kind = page_modifier(&mut o, kind);
     mut add = 0;
     asm_x86::skip(&mut o);
     if (asm_x86::peek(&o) == '+') || (asm_x86::peek(&o) == '-') {
@@ -361,7 +363,28 @@ fn label_ref<a>(o: (&a mut asm_x86::A), kind: u64) {
             add = n;
         }
     }
+    kind = page_modifier(&mut o, kind);
     asm_x86::fixup(&mut o, sym, kind, add);
+}
+
+// Mach-O's `sym@PAGE` (the adrp page) and `sym@PAGEOFF` (the low 12 bits): the fixup kind.
+fn page_modifier<a>(o: (&a mut asm_x86::A), kind: u64) -> u64 {
+    asm_x86::skip(&mut o);
+    if asm_x86::peek(&o) != '@' {
+        return kind;
+    }
+    o.at += 1;
+    a0 := o.at;
+    e := asm_x86::name_end(&mut o);
+    o.at = e;
+    if asm_x86::at_src(&o, a0, e, view("PAGE")) {
+        return fx_adrp();
+    }
+    if asm_x86::at_src(&o, a0, e, view("PAGEOFF")) {
+        return fx_lo12();
+    }
+    asm_x86::fail(&mut o, view("unsupported symbol modifier"));
+    return kind;
 }
 
 // `:lo12:sym` / `#:tprel_hi12:sym` style operands.
@@ -545,6 +568,15 @@ fn addsub<a>(o: (&a mut asm_x86::A), op0: u64, cmp: bool) {
         );
         return ();
     }
+    // Mach-O `add xD, xN, sym@PAGEOFF`: the immediate form with a PAGEOFF12 fixup.
+    save := o.at;
+    if reg(&mut o) == 0 {
+        o.at = save;
+        label_ref(&mut o, fx_lo12());
+        word(&mut o, 0x11000000 | (op << 29) | (sf(d) << 31) | (rn(n) << 5) | rn(d));
+        return ();
+    }
+    o.at = save;
     m := need_reg(&mut o);
     amount := opt_lsl(&mut o);
     if ((d >> 5) == 3) || ((n >> 5) == 3) {
@@ -989,7 +1021,8 @@ fn vector_instruction<a>(o: (&a mut asm_x86::A), a0: u64, e: u64) -> bool {
         view("and").copy(), view("orr").copy(), view("eor").copy(), view("bic").copy(), view("bsl").copy(),
         view("fcmeq").copy(), view("fcmge").copy(), view("fcmgt").copy(),
         view("cmeq").copy(), view("cmgt").copy(), view("cmge").copy(), view("cmhi").copy(), view("cmhs").copy(),
-        view("smin").copy(), view("smax").copy(), view("umin").copy(), view("umax").copy()
+        view("smin").copy(), view("smax").copy(), view("umin").copy(), view("umax").copy(),
+        view("fmla").copy()
     ];
     bases := u64[
         0x0e20d400, 0x0ea0d400, 0x2e20dc00, 0x2e20fc00,
@@ -997,9 +1030,10 @@ fn vector_instruction<a>(o: (&a mut asm_x86::A), a0: u64, e: u64) -> bool {
         0x0e201c00, 0x0ea01c00, 0x2e201c00, 0x0e601c00, 0x2e601c00,
         0x0e20e400, 0x2e20e400, 0x2ea0e400,
         0x2e208c00, 0x0e203400, 0x0e203c00, 0x2e203400, 0x2e203c00,
-        0x0e206c00, 0x0e206400, 0x2e206c00, 0x2e206400
+        0x0e206c00, 0x0e206400, 0x2e206c00, 0x2e206400,
+        0x0e20cc00
     ];
-    kinds := u64[1, 1, 1, 1, 0, 0, 0, 2, 2, 2, 2, 2, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    kinds := u64[1, 1, 1, 1, 0, 0, 0, 2, 2, 2, 2, 2, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
     for i in names.len() {
         if simple(&o, a0, e, view(names[i])) {
             vector_three(&mut o, bases[i], kinds[i]);
