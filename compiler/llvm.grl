@@ -2397,6 +2397,23 @@ fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> uni
         array_element(&mut l, target);
         return ();
     }
+    if eq(target, view("rt_f32_from_int")) {
+        // An integer to the nearest f32, rounded once (ties to even), held widened: `sitofp` for a
+        // signed source and `uitofp` for an unsigned one, chosen by the type code's signed bit as
+        // the runtime's body chooses. The body halves the value in a loop and calls rt_f32_round;
+        // this is the one instruction it computes.
+        x := get_reg(&mut l, view("rdi"));
+        code := get_reg(&mut l, view("rsi"));
+        bit := def(&mut l, view("and i64 {}, 256"), &u8[][copy(view(code))]);
+        signed := def(&mut l, view("icmp ne i64 {}, 0"), &u8[][bit]);
+        sf := def(&mut l, view("sitofp i64 {} to float"), &u8[][copy(view(x))]);
+        uf := def(&mut l, view("uitofp i64 {} to float"), &u8[][copy(view(x))]);
+        n := def(&mut l, view("select i1 {}, float {}, float {}"), &u8[][signed, sf, uf]);
+        w := def(&mut l, view("fpext float {} to double"), &u8[][n]);
+        word := as_word(&mut l, view(w));
+        set_reg(&mut l, view("rax"), view(word));
+        return ();
+    }
     if eq(target, view("rt_f32_round")) {
         // Rounding a binary64 word to the nearest f32 (ties to even) is fptrunc + fpext.
         x := get_reg(&mut l, view("rdi"));

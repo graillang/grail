@@ -1,5 +1,11 @@
 ## Unreleased
 
+- **Release builds convert integers to `f32` with one instruction.** The LLVM lifter turns
+  `rt_f32_from_int` - which halves the value in a loop and then calls `rt_f32_round` - into
+  `sitofp`/`uitofp` to `float`, chosen by the source's signedness. Both round once to nearest even,
+  as the runtime does, so results are bit-identical (the float matrix pins the edge values). A loop of
+  three million conversions goes from 50 to 32 ms.
+
 - Fixed: the internal assembler refused `.hidden` (the runtime's `rt_sites_fill`), so every LLVM
   release build failed at `grail asm`. It now takes `.hidden`, `.protected`, `.internal` and
   `.comm`, and `.word` is 32 bits on AArch64. `tests/asm/` holds every ELF directive the
