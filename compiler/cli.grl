@@ -2679,6 +2679,42 @@ fn cache_hash_tool() -> u64 {
     return 0;
 }
 // The SHA-256 of a file as 64 lowercase hex characters; empty when the file cannot be read.
+// The compiler's digest, once per binary: the store remembers it beside the binary's path, size and
+// modification time, and a command whose binary matches all three reads it back instead of hashing
+// 30 MB again - which cost more than the whole check of a small program. A binary rewritten in
+// place changes its time, a rebuilt one its size or time.
+fn cache_compiler_id<a, b>(c: (&a mut Cache), exe: &b [u8]) -> u8[] {
+    st := host::stat(view(exe), 1);
+    if (st.len() < 6) || (st[0] != 0) {
+        return cache_digest_file(&mut c, view(exe));
+    }
+    mut stamp = copy(view(exe));
+    stamp.push(10);
+    stamp = cat(view(stamp), view(decimal(st[2])));
+    stamp.push(32);
+    stamp = cat(view(stamp), view(decimal(st[4])));
+    stamp.push(32);
+    stamp = cat(view(stamp), view(decimal(st[5])));
+    stamp.push(10);
+    dir := path_join(view(c.root), view("compiler-id"));
+    host::mkdir(view(dir));
+    note := path_join(view(dir), view(native::iface_digest(&stamp)));
+    if host::exists(view(note)) != 0 {
+        text := host::read_file(view(note));
+        if (text.len() == stamp.len() + 64) && eq(view(text[0..stamp.len()]), view(stamp)) {
+            return text[stamp.len()..text.len()].copy();
+        }
+    }
+    digest := cache_digest_file(&mut c, view(exe));
+    if digest.len() == 64 {
+        // Two commands writing it at once write the same bytes; the reader checks them whole.
+        pending := path_join(view(cache_stage(&mut c)), view(cat(view("cid."), view(native::iface_digest(&stamp)))));
+        if host::write_file(view(pending), view(cat(view(stamp), view(digest)))) == 0 {
+            host::rename(view(pending), view(note));
+        }
+    }
+    return digest;
+}
 fn cache_digest_file<a, b>(c: (&a mut Cache), path: &b [u8]) -> u8[] {
     if host::exists(view(path)) == 0 {
         return u8[];
@@ -3180,7 +3216,7 @@ fn cache_build_id<a, b, d, e, g>(
     }
     id.flags = native::iface_digest(&flagbuf);
     exe := host::exe_path();
-    id.compiler = cache_digest_file(&mut c, view(exe));
+    id.compiler = cache_compiler_id(&mut c, view(exe));
     // The assembler's identity: clang's `--version`, or for the internal assembler (`grail asm`) the
     // compiler's own digest above, which is the same binary.
     id.assembler = cache_tool_id(&mut c, assemble);

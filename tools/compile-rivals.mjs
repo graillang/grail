@@ -1,28 +1,31 @@
-// Compile speed against Go, Zig and Rust (docs/design/compile-speed.md, "Against other languages").
-// The same programs in each language - hello world and the scaling trio of tools/compile-bench.mjs
-// (N copies of a record, its constructor and a 15-line loop function, and a main calling each) at
-// N = 1000 and 4000 - timed four ways:
-//   check, cold     grail check | cargo check | go build -o /dev/null (Go has no check: `go vet`
-//                   runs analyses, not the type checker's verdict, so the check is a build whose
-//                   output is thrown away) | zig build-exe -fno-emit-bin
-//   check, edited   the same after one function body changed (one constant in work{N/2})
-//   build, cold     grail build (the build store) | cargo build (the dev profile) | go build |
-//                   zig build-exe -O Debug
-//   build, edited   the same after the one-body edit
-// "Cold" is a project's first build on a machine whose toolchain caches are warm: every cold run has
-// new source text (a seed in main) and empty project caches (a new target/ for cargo, a new Grail
-// build store filled only with what a hello-world build put there - the runtime, platform and core
-// objects, which a toolchain ships precompiled in the other languages), while Go keeps its compiled
-// standard library in GOCACHE and Zig its compiler_rt in its global cache. "Edited" reuses what the
-// cold build left: cargo's incremental state, Grail's store, Go's and Zig's caches.
-// The figure is CPU seconds (user + sys of the tool and every process it waited for), best of N;
-// wall seconds are in the JSON (.work/compile-rivals.json). Ratios are Grail over the fastest rival.
-//   bun tools/compile-rivals.mjs [--runs N] [--sizes 1000,4000] [--compiler PATH | --branch REF]
+// Compile speed against Go, Zig and rustc (docs/design/compile-speed.md, "Against Go, Zig and rustc";
+// the book's Performance chapter). The same programs in all four languages - hello world, the scaling
+// trio of tools/compile-bench.mjs (N copies of a record, its constructor and a 15-line loop
+// function, and a main calling each) at each --sizes, and the rival twins of bench/ - each measured
+// five ways:
+//   check cold      grail check | go vet (it type-checks, then runs its analyses; go build -o /dev/null
+//                   is measured beside it) | zig build-exe -fno-emit-bin | cargo check
+//   check edited    the same after one function body changed
+//   build cold      grail build (the build store) | go build | zig build-exe -O Debug | cargo build
+//   build edited    the same after the edit
+//   build no-op     the same again with nothing changed
+// "Cold" is a project's first build on a machine whose toolchain caches are warm: new source text
+// (a seed) and empty project caches - a new target/ for cargo, a Grail store holding only what a
+// hello-world build put there (the runtime, platform and core objects the other toolchains ship
+// precompiled) - while Go keeps its standard library in GOCACHE and Zig its compiler_rt. The edit
+// changes one constant in one function body of a generated program, and adds one statement to a
+// twin's main.
+// Two passes: every toolchain in one process (GRAIL_JOBS=1, GOMAXPROCS=1 -p=1, cargo -j1) for the
+// user-space instructions of the tool and every process it started - the primary figure, which load
+// does not move - and every toolchain at four jobs for wall time. Best of --runs (default 2).
+// Ratios are Grail over the fastest of the others. It fails only when a generated program's output
+// differs between the languages.
+//   bun tools/compile-rivals.mjs [--runs N] [--sizes 1000,4000] [--twins a,b] [--compiler PATH | --branch REF] [--json PATH]
 //   --compiler names the Grail compiler, --branch REF builds REF's release compiler
 //   (tools/rivals/common.mjs); default GRAIL_COMPILER, else this tree's release compiler (`bun
-//   tools/native.mjs release`), the one a user runs, as `compile-bench --release` measures.
+//   tools/native.mjs release`), the one a user runs.
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { root } from './platforms.mjs';
 import { scalingProgram } from './compile-bench.mjs';
 import { compilerOptions, grailCompiler, jsonOption, loadavg, measurer, ratio, run, toolchains, versions, writeResults } from './rivals/common.mjs';
@@ -31,10 +34,7 @@ const argv = process.argv.slice(2);
 const chosen = compilerOptions(argv);
 const jsonPath = jsonOption(argv);
 const option = (name, fallback) => { const at = argv.indexOf(name); return at < 0 ? fallback : argv[at + 1]; };
-const runs = Number(option('--runs', 3));
-// --metric instructions charts user-space instructions (the tool and every process it started)
-// instead of CPU time: on a loaded host the count is what does not move.
-const metric = option('--metric', 'cpu');
+const runs = Number(option('--runs', 2));
 const sizes = option('--sizes', '1000,4000').split(',').map(Number);
 const work = join(root, '.work/compile-rivals');
 rmSync(work, { recursive: true, force: true });
@@ -166,45 +166,69 @@ function edit(text, n) {
 }
 
 const goCache = join(work, 'gocache'), zigCache = join(work, 'zigcache');
-const baseEnv = { ...process.env, GOCACHE: goCache, GOFLAGS: '-mod=mod', ZIG_GLOBAL_CACHE_DIR: zigCache, CARGO_NET_OFFLINE: 'true', GRAIL_JOBS: process.env.GRAIL_JOBS };
-if (!baseEnv.GRAIL_JOBS) delete baseEnv.GRAIL_JOBS;
+const baseEnv = { ...process.env, GOCACHE: goCache, ZIG_GLOBAL_CACHE_DIR: zigCache, CARGO_NET_OFFLINE: 'true' };
 const storeTemplate = join(work, 'grail-store-template');
+// Two passes over everything. `single`: every toolchain in one process - GRAIL_JOBS=1, GOMAXPROCS=1
+// with -p=1, cargo with one job (Zig's build-exe has no job flag; its count includes its threads) -
+// for the instruction counts, the primary figure. `jobs4`: four jobs each, the load cap of this host,
+// for wall time.
+const passes = {
+  single: { GRAIL_JOBS: '1', GOMAXPROCS: '1', GOFLAGS: '-mod=mod -p=1', CARGO_BUILD_JOBS: '1' },
+  jobs4: { GRAIL_JOBS: '4', GOMAXPROCS: '4', GOFLAGS: '-mod=mod -p=4', CARGO_BUILD_JOBS: '4' },
+};
 
-// Each language: how to lay out a project, and the four commands.
+// The rival twins (bench/NAME.grl and bench/rivals/NAME.{rs,go,zig}, or NAME-rs/ for a crate): real
+// programs of a few hundred lines, beside the generated ones.
+const twins = option('--twins', 'hashmap,bintrees,strings,json,dyncall,iterchain,ecs').split(',').filter(Boolean);
+const twinText = (lang, name) => lang === 'grail' ? readFileSync(join(root, 'bench', `${name}.grl`), 'utf8')
+  : lang === 'rust' ? readFileSync(existsSync(join(root, 'bench/rivals', `${name}-rs`)) ? join(root, 'bench/rivals', `${name}-rs/src/main.rs`) : join(root, 'bench/rivals', `${name}.rs`), 'utf8')
+  : readFileSync(join(root, 'bench/rivals', `${name}.${lang}`), 'utf8');
+// A twin's one-function edit: a statement added at the top of `main`.
+const twinEdit = {
+  grail: t => t.replace(/^fn main\([^)]*\)[^{]*\{/m, m => `${m}\n    edit_marker := 1;`),
+  rust: t => t.replace(/^fn main\(\)[^{]*\{/m, m => `${m}\n    let _edit_marker = 1;`),
+  go: t => t.replace(/^func main\(\) \{/m, m => `${m}\n\t_ = 1`),
+  zig: t => t.replace(/^pub fn main\(\) !void \{/m, m => `${m}\n    _ = 1;`),
+};
+
+// Each language: how to lay out a project, and the commands.
 const languages = {
   grail: {
-    file: 'main.grl', program: grailProgram, hello: grailHello,
+    file: 'main.grl', comment: '//', program: grailProgram, hello: grailHello,
     fresh(dir) { if (existsSync(storeTemplate)) cpSync(storeTemplate, join(dir, 'store'), { recursive: true }); },
     env: dir => ({ GRAIL_CACHE_DIR: join(dir, 'store') }),
-    check: ['__grail', 'check', 'main.grl'], build: ['__grail', 'build', 'main.grl'],
+    check: ['__grail', 'check', 'main.grl'], build: ['__grail', 'build', 'main.grl'], exe: 'target/main',
   },
   go: {
-    file: 'main.go', program: goProgram, hello: goHello,
+    file: 'main.go', comment: '//', program: goProgram, hello: goHello,
     fresh(dir) { writeFileSync(join(dir, 'go.mod'), 'module syn\n\ngo 1.23\n'); },
     env: () => ({}),
-    check: ['go', 'build', '-o', '/dev/null', '.'], build: ['go', 'build', '-o', 'syn', '.'],
+    // `go vet` type-checks the package and then runs its analyses; `go build -o /dev/null` (the
+    // compiler's verdict without the link) is measured beside it, in a table of its own.
+    check: ['go', 'vet', '.'], checkBuild: ['go', 'build', '-o', '/dev/null', '.'], build: ['go', 'build', '-o', 'syn', '.'], exe: 'syn',
   },
   zig: {
-    file: 'main.zig', program: zigProgram, hello: zigHello,
+    file: 'main.zig', comment: '//', program: zigProgram, hello: zigHello,
     fresh() {},
     env: dir => ({ ZIG_LOCAL_CACHE_DIR: join(dir, 'zig-cache') }),
-    check: ['zig', 'build-exe', '-fno-emit-bin', 'main.zig'], build: ['zig', 'build-exe', '-O', 'Debug', 'main.zig'],
+    check: ['zig', 'build-exe', '-fno-emit-bin', 'main.zig'], build: ['zig', 'build-exe', '-O', 'Debug', 'main.zig'], exe: 'main',
   },
   rust: {
-    file: 'src/main.rs', program: rustProgram, hello: rustHello,
-    fresh(dir) { mkdirSync(join(dir, 'src'), { recursive: true }); writeFileSync(join(dir, 'Cargo.toml'), '[package]\nname = "syn"\nversion = "0.1.0"\nedition = "2021"\n'); },
+    file: 'src/main.rs', comment: '//', program: rustProgram, hello: rustHello,
+    fresh(dir, text) {
+      mkdirSync(join(dir, 'src'), { recursive: true });
+      const deps = /serde_json/.test(text ?? '') ? '\n[dependencies]\nserde_json = "1"\n' : '';
+      writeFileSync(join(dir, 'Cargo.toml'), `[package]\nname = "syn"\nversion = "0.1.0"\nedition = "2021"\n${deps}`);
+    },
     env: () => ({}),
-    check: ['cargo', 'check', '--offline', '-q'], build: ['cargo', 'build', '--offline', '-q'],
+    check: ['cargo', 'check', '--offline', '-q'], build: ['cargo', 'build', '--offline', '-q'], exe: 'target/debug/syn',
   },
 };
-// The built program, run after each build: every language must print the same number, and a build
-// whose program prints something else fails the tool (the one way it fails; ratios never do).
-languages.grail.exe = 'target/main'; languages.go.exe = 'syn'; languages.zig.exe = 'main'; languages.rust.exe = 'target/debug/syn';
 // A language whose toolchain is absent is left out, and toolchains() says so.
 const have = toolchains();
 for (const lang of ['go', 'zig', 'rust']) if (!have[lang]) delete languages[lang];
 const names = Object.keys(languages);
-const headOf = { grail: 'Grail', go: 'Go', zig: 'Zig', rust: 'Rust' };
+const headOf = { grail: 'Grail', go: 'Go', zig: 'Zig', rust: 'Rust', 'go-build': 'Go (build to /dev/null)' };
 let failed = 0;
 
 let serial = 0;
@@ -212,18 +236,20 @@ function project(lang, text) {
   const l = languages[lang];
   const dir = join(work, `${lang}-${serial++}`);
   mkdirSync(dir, { recursive: true });
-  l.fresh(dir);
+  l.fresh(dir, text);
+  mkdirSync(dirname(join(dir, l.file)), { recursive: true });
   writeFileSync(join(dir, l.file), text);
   return dir;
 }
-function timed(lang, which, dir) {
+function timed(lang, argv0, dir, passEnv) {
   const l = languages[lang];
-  const argv = l[which].map(a => a === '__grail' ? grail : a);
-  return measure(argv, { cwd: dir, env: { ...baseEnv, ...l.env(dir) } });
+  const argv = argv0.map(a => a === '__grail' ? grail : a);
+  return measure(argv, { cwd: dir, env: { ...baseEnv, ...passEnv, ...l.env(dir) } });
 }
 
 // Warm the toolchains' own caches once: Go's standard library, Zig's compiler_rt, Grail's runtime
-// and core objects (kept as the template every cold Grail store starts from).
+// and core objects (kept as the template every cold Grail store starts from), cargo's view of the
+// offline registry.
 for (const lang of names) {
   const dir = project(lang, languages[lang].hello('warm'));
   if (lang === 'grail') { mkdirSync(storeTemplate, { recursive: true }); run([grail, 'build', 'main.grl'], { cwd: dir, env: { ...baseEnv, GRAIL_CACHE_DIR: storeTemplate } }); continue; }
@@ -231,79 +257,95 @@ for (const lang of names) {
   rmSync(dir, { recursive: true, force: true });
 }
 
+// The programs: hello world, the scaling trio at each size, and the twins.
+const programs = [
+  { label: 'hello', text: (lang, seed) => languages[lang].hello(seed), edit: (lang, t) => edit(t, 0), check: true },
+  ...sizes.map(n => ({ label: `syn${n}`, text: (lang, seed) => languages[lang].program(n, seed), edit: (lang, t) => edit(t, n), check: true })),
+  // A twin's text is fixed, so a seed comment makes each cold build new text (Go's cache is keyed by
+  // content); its output is checked by bench-rivals, not here.
+  ...twins.map(name => ({ label: name, text: (lang, seed) => `${languages[lang].comment} seed ${seed}\n${twinText(lang, name)}`, edit: (lang, t) => twinEdit[lang](t), check: false })),
+];
+const steps = ['check cold', 'check edited', 'build cold', 'build edited', 'build no-op'];
+
 const load = [loadavg()];
-const rows = [];
-const results = {};
-for (const n of [0, ...sizes]) {
-  const label = n ? `syn${n}` : 'hello';
-  for (const which of ['check', 'build']) {
-    const cold = {}, edited = {};
-    for (const lang of names) {
-      cold[lang] = { cpu: Infinity, wall: Infinity, instructions: Infinity }; edited[lang] = { cpu: Infinity, wall: Infinity, instructions: Infinity };
-    }
+const results = {}; // `${label} ${step}` -> column -> { instructions, cpu, wall }
+const keep = (label, step, col, pass, m) => {
+  const f = ((results[`${label} ${step}`] ??= {})[col] ??= {});
+  if (pass === 'single') { f.instructions = Math.min(f.instructions ?? Infinity, m.instructions / 1e9); f.cpu = Math.min(f.cpu ?? Infinity, m.cpu); }
+  else f.wall = Math.min(f.wall ?? Infinity, m.wall);
+};
+for (const program of programs) {
+  for (const [pass, passEnv] of Object.entries(passes)) {
     for (let r = 0; r < runs; r++) {
-      // One seed per round, the same in every language (so every program prints the same number),
-      // new in every round (so every cold run is new text).
       const seed = 1000 + serial;
       const printed = {};
       for (const lang of names) {
         const l = languages[lang];
-        const text = n ? l.program(n, seed) : l.hello(seed);
-        const dir = project(lang, text);
-        const a = timed(lang, which, dir);
-        const output = () => which === 'build' ? run([join(dir, l.exe)], { cwd: dir }).stdout.trim() : null;
-        const coldOut = output();
-        writeFileSync(join(dir, l.file), edit(text, n));
-        const b = timed(lang, which, dir);
-        if (which === 'build') printed[lang] = [coldOut, output()];
-        for (const [slot, m] of [[cold, a], [edited, b]]) {
-          slot[lang].cpu = Math.min(slot[lang].cpu, m.cpu);
-          slot[lang].wall = Math.min(slot[lang].wall, m.wall);
-          slot[lang].instructions = Math.min(slot[lang].instructions, m.instructions / 1e9);
+        const text = program.text(lang, seed);
+        // check: cold, then after the edit
+        let dir = project(lang, text);
+        keep(program.label, 'check cold', lang, pass, timed(lang, l.check, dir, passEnv));
+        writeFileSync(join(dir, l.file), program.edit(lang, text));
+        keep(program.label, 'check edited', lang, pass, timed(lang, l.check, dir, passEnv));
+        rmSync(dir, { recursive: true, force: true });
+        if (l.checkBuild && pass === 'single') {
+          dir = project(lang, `${l.comment} b\n${text}`);
+          keep(program.label, 'check cold', 'go-build', pass, timed(lang, l.checkBuild, dir, passEnv));
+          writeFileSync(join(dir, l.file), program.edit(lang, `${l.comment} b\n${text}`));
+          keep(program.label, 'check edited', 'go-build', pass, timed(lang, l.checkBuild, dir, passEnv));
+          rmSync(dir, { recursive: true, force: true });
         }
+        // build: cold, after the edit, and again with nothing changed
+        dir = project(lang, text);
+        keep(program.label, 'build cold', lang, pass, timed(lang, l.build, dir, passEnv));
+        const output = () => program.check ? run([join(dir, l.exe)], { cwd: dir }).stdout.trim() : null;
+        const coldOut = output();
+        writeFileSync(join(dir, l.file), program.edit(lang, text));
+        keep(program.label, 'build edited', lang, pass, timed(lang, l.build, dir, passEnv));
+        keep(program.label, 'build no-op', lang, pass, timed(lang, l.build, dir, passEnv));
+        printed[lang] = [coldOut, output()];
         rmSync(dir, { recursive: true, force: true });
       }
       const differ = names.filter(x => JSON.stringify(printed[x]) !== JSON.stringify(printed.grail));
-      if (which === 'build' && differ.length) {
+      if (program.check && differ.length) {
         failed++;
-        console.log(`OUTPUT DIFFERS (${label}, round ${r}): ${names.map(x => `${x} ${JSON.stringify(printed[x])}`).join('; ')}`);
+        console.log(`OUTPUT DIFFERS (${program.label}, ${pass}, round ${r}): ${names.map(x => `${x} ${JSON.stringify(printed[x])}`).join('; ')}`);
       }
     }
-    rows.push([`${label} ${which}, cold`, cold], [`${label} ${which}, edited`, edited]);
-    results[`${label} ${which} cold`] = cold;
-    results[`${label} ${which} edited`] = edited;
-    const show = ([name, figures]) => {
-      const rivals = Math.min(...names.filter(x => x !== 'grail').map(x => figures[x].cpu));
-      console.log(`${name.padEnd(24)} ${names.map(x => `${figures[x].cpu.toFixed(3)} (${figures[x].wall.toFixed(2)})`.padStart(16)).join(' ')}   ${ratio(figures.grail.cpu, rivals).padStart(8)}`);
-    };
-    if (rows.length === 2) console.log(`compile-rivals: CPU s (wall s), best of ${runs}; ratio = Grail CPU / fastest rival's CPU\n${'program, step'.padEnd(24)} ${names.map(x => headOf[x].padStart(16)).join(' ')}   Grail/best`);
-    show(rows[rows.length - 2]); show(rows[rows.length - 1]);
+  }
+  for (const step of steps) {
+    const f = results[`${program.label} ${step}`];
+    const best = Math.min(...names.filter(x => x !== 'grail').map(x => f[x].instructions));
+    console.log(`${`${program.label} ${step}`.padEnd(26)} ${names.map(x => `${f[x].instructions.toFixed(2)}G ${f[x].wall.toFixed(2)}s`.padStart(16)).join(' ')}   ${ratio(f.grail.instructions, best).padStart(8)}`);
   }
 }
+const rows = programs.flatMap(p => steps.map(step => [`${p.label} ${step}`, results[`${p.label} ${step}`]]));
 load.push(loadavg());
 const v = versions();
+console.log(`compile-rivals: instructions in one process (G) and wall time at four jobs (s), best of ${runs}; ratio = Grail's instructions over the fewest of Go, Zig and Rust`);
 console.log(`grail: ${grail}, commit ${measuredGrail.commit}\nload average ${load[0]} at start, ${load[1]} at end; ${Object.values(v).join('; ')}`);
-writeFileSync(join(root, '.work/compile-rivals.json'), JSON.stringify({ runs, sizes, load, versions: v, grail, commit: measuredGrail.commit, results, at: new Date().toISOString() }, null, 2) + '\n');
+writeFileSync(join(root, '.work/compile-rivals.json'), JSON.stringify({ runs, sizes, twins, load, versions: v, grail, commit: measuredGrail.commit, results, at: new Date().toISOString() }, null, 2) + '\n');
 if (jsonPath) {
-  const table = (id, title, field, chart, note) => ({
+  const table = (id, title, field, chart, note, cols = names, keepRow = () => true) => ({
     id, title, chart, note, threshold: 1, primary: 'grail', direction: 'lower',
-    columns: names.map(key => ({ key, label: headOf[key], grail: key === 'grail' })),
-    rows: rows.map(([name, figures]) => ({ name, unit: { cpu: 's CPU', wall: 's wall', instructions: 'G instructions' }[field], values: Object.fromEntries(names.map(k => [k, figures[k][field]])) })),
+    columns: cols.map(key => ({ key, label: headOf[key], grail: key === 'grail' })),
+    rows: rows.filter(([name]) => keepRow(name)).map(([name, figures]) => ({ name, unit: { cpu: 's CPU', wall: 's wall', instructions: 'G instructions' }[field], values: Object.fromEntries(cols.map(k => [k, figures[k]?.[field]])) })),
   });
   writeResults(jsonPath, {
     tool: 'compile-rivals', title: 'Compile speed against Go, Zig and rustc', commit: measuredGrail.commit, versions: v, load,
-    commands: [`bun tools/compile-rivals.mjs --runs ${runs} --sizes ${sizes.join(',')}${metric === 'instructions' ? ' --metric instructions' : ''}${process.env.GRAIL_JOBS ? ` (GRAIL_JOBS=${process.env.GRAIL_JOBS}${process.env.GOFLAGS ? `, GOFLAGS=${process.env.GOFLAGS}` : ''}${process.env.CARGO_BUILD_JOBS ? `, CARGO_BUILD_JOBS=${process.env.CARGO_BUILD_JOBS}` : ''})` : ''}`, ...names.map(n => `${headOf[n]}: check \`${languages[n].check.join(' ').replace('__grail', 'grail')}\`, build \`${languages[n].build.join(' ').replace('__grail', 'grail')}\``)],
+    commands: [`bun tools/compile-rivals.mjs --runs ${runs} --sizes ${sizes.join(',')} --twins ${twins.join(',')}`,
+      'one process: GRAIL_JOBS=1, GOMAXPROCS=1 GOFLAGS=-p=1, CARGO_BUILD_JOBS=1; four jobs: the same at 4',
+      ...names.map(n => `${headOf[n]}: check \`${languages[n].check.join(' ').replace('__grail', 'grail')}\`, build \`${languages[n].build.join(' ').replace('__grail', 'grail')}\``),
+      'edit: the generated programs change one constant in one function body; a twin gets one statement added to main'],
     tables: [
-      ...(metric === 'instructions'
-        ? [table('compile', 'Compile speed: instructions to check and build, cold and after a one-function edit', 'instructions', true, `User-space instructions of the tool and every process it started, fewest of ${runs}; chosen over time because the host was loaded. The bar: the fastest of Go, Zig and rustc.`),
-          table('compile-cpu', 'The same, CPU time', 'cpu', false, `CPU time, best of ${runs}; inflated by the load.`)]
-        : [table('compile', 'Compile speed: check and build, cold and after a one-function edit', 'cpu', true, `CPU time of the tool and every process it waited for, best of ${runs}. The bar: the fastest of Go, Zig and rustc.`),
-          table('compile-instructions', 'The same, instructions', 'instructions', false, 'User-space instructions; not moved by load.')]),
-      table('compile-wall', 'The same, wall time', 'wall', false, 'Wall time: Go spreads a package over every core.'),
+      table('compile', 'Compile speed: instructions, in one process', 'instructions', true, `User-space instructions of the tool and every process it started, every toolchain in one process, fewest of ${runs}. The bar: the fastest of Go, Zig and rustc.`),
+      table('compile-wall', 'Compile speed: wall time at four jobs', 'wall', true, `Wall time with four jobs for every toolchain (this host's cap), best of ${runs}; the load is beside it.`),
+      table('compile-cpu', 'The same builds in one process, CPU time', 'cpu', false, `CPU time, best of ${runs}; inflated by the load.`),
+      table('compile-go-check', "Go's two checks: go vet against a build whose output is thrown away", 'instructions', false, 'go vet type-checks and then runs its analyses; go build -o /dev/null is the compiler without the link.', ['grail', 'go', 'go-build'], name => name.includes('check')),
     ],
   });
 }
-// One line the gate's summary picks up: Grail over the fastest rival, the large program's four steps.
+// One line the gate's summary picks up: Grail over the fastest rival, the large program's steps.
 const big = `syn${sizes[sizes.length - 1]}`;
-console.log(`compile-rivals (${measuredGrail.commit}): Grail/fastest ${['check cold', 'check edited', 'build cold', 'build edited'].map(step => { const f = results[`${big} ${step}`]; return `${big} ${step} ${ratio(f.grail.cpu, Math.min(...names.filter(x => x !== 'grail').map(x => f[x].cpu)))}`; }).join(', ')}`);
+console.log(`compile-rivals (${measuredGrail.commit}): Grail/fastest instructions ${steps.map(step => { const f = results[`${big} ${step}`]; return `${big} ${step} ${ratio(f.grail.instructions, Math.min(...names.filter(x => x !== 'grail').map(x => f[x].instructions)))}`; }).join(', ')}`);
 if (failed) process.exit(1);

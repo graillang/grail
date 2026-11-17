@@ -1,8 +1,7 @@
 // String processing: build a million lines of "name,int,decimal", split them, parse the integers
 // and decimals, format a result line per record and hash the output; prints sums and the hash.
-// Grail's standard library has no float parser (lib/json has one inside it); a two-decimal number
-// is parsed as its integer of hundredths over 100.0, which is the correctly rounded value strtod
-// and Rust's parse give.
+// `split` hands out views of the text, `parse_f64` is correctly rounded (as strtod and Rust's parse
+// are), and `append_format` writes onto the output without a string per record (Rust's `write!`).
 use strings;
 
 fn main() {
@@ -15,7 +14,7 @@ fn main() {
         x = x ^ (x << 17);
         a := x % 100000;
         b := (x >> 20) % 100000;
-        text.append(format("k{},{},{}.{}{}\n", i, a, b / 100, (b % 100) / 10, b % 10));
+        text.append_format("k{},{},{}.{}{}\n", i, a, b / 100, (b % 100) / 10, b % 10);
     }
     mut int_sum: u64 = 0;
     mut float_sum: f64 = 0.0;
@@ -26,12 +25,10 @@ fn main() {
         }
         fields := line.split(44);
         a := fields[1].parse_u64()!;
-        parts := fields[2].split(46);
-        hundredths := parts[0].parse_u64()! * 100 + parts[1].parse_u64()!;
-        f := f64(i64(hundredths)) / 100.0;
+        f := fields[2].parse_f64()!;
         int_sum += a;
         float_sum = float_sum + f;
-        out.append(format("{}:{};", a * 2, fields[0].len()));
+        out.append_format("{}:{};", a * 2, fields[0].len());
     }
     mut h: u64 = 14695981039346656037;
     for i in out.len() {
