@@ -90,20 +90,22 @@ and Zig, written the way each language is usually written:
 
 {{perf:engine#release}}
 
-**Why Grail is behind**, read from the code of the commit charted. The standard map, strings and
-interface calls each got faster in the last round of work (the map is now a single open-addressed
-table, so hashmap fell from 22x the fewest instructions to 3.5x), and what remains is:
+**Why Grail is behind**, read from the code of the commit charted. Most of the gap closed in the last
+round of work: views are two words passed in registers, so `strings` no longer allocates per call
+and is at parity; header and element accesses carry separate alias tags, so `ecs`'s update loop
+vectorises; and release builds inline across modules, so the map's helpers fold into their callers.
+What remains:
 
-- **`iterchain`: the adapters are not types.** `Iter<T>` is the erased form: every element is a call
-  through a boxed closure returning an option, once per adapter, and nothing inlines through it.
-  Rust's chain compiles to the same loop as the hand-written one. Making the adapters types with
-  callable bounds is the plan in `docs/design/dyn-and-callable-bounds.md`.
-- **`ecs`: owned vectors re-read their headers.** The update loop stores through six vectors made
-  in the same function, and after each store the next access reloads a length and a data pointer
-  and checks the index, so the loop stays scalar where C, Rust and Zig vectorise it.
-- **`hashmap`, `strings`, `json`, `dyncall`** are within 2x to 3.5x: what is left is allocation per
-  piece (a new string per split field and per formatted record, a box per interface object) and
-  bounds checks in the inner loops.
+- **`iterchain`: a nested loop the vectoriser cannot see through.** The adapters are types with
+  callable bounds and the whole chain now inlines into one function, but `fold` still drives
+  `next()`, and `Filter::next` loops inside it. Rust overrides `fold` per adapter (internal
+  iteration); Grail needs interface methods generic over a callable to be callable through
+  `I: Iterator` before it can do the same.
+- **`json` and `dyncall`: a box per value.** Each parsed node and each `dyn` object is still a heap
+  allocation; enums whose payloads are stored inline and `dyn` values held in cells are the next
+  steps (`docs/design/unboxed-values.md`).
+- **`hashmap`**: hashing costs what Rust's SipHash-1-3 costs per key; the rest is probing and the
+  growth path.
 - **`bintrees`** is where Grail does best against `malloc` and `Box`; Zig, with its release
   allocator, executes the fewest instructions.
 
