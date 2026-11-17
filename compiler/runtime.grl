@@ -2092,14 +2092,19 @@ fn rt_aslice_into(base: u64, a: u64, b: u64, w: u64, n: u64, dst: u64) -> u64 {
     raw_store(dst + 8, b - a);
     return dst;
 }
+// A heap view record: 8 past a 16-aligned block, whose first word is VIEW_RECORD. Only code from a
+// compiler before two-word views, and the runtime's chunk and zip leaves, make one; a newer compiler's
+// views are two frame words (docs/design/unboxed-values.md).
 fn rt_view_record() -> u64 {
-    return rt_alloc(32) + 8;
+    p := rt_alloc(32);
+    raw_store(p, 6217605130116358433);
+    return p + 8;
 }
-// Drop a view: free its record if it has one.
-// The heap view records a compiler from before two-word views makes (8 past a 16-aligned block). A
-// compiler from after never calls this: its views are frame words (docs/design/unboxed-values.md).
+// Drop a view handed to the runtime: free it only when it is a heap view record. A host function frees
+// its view arguments, and one may be a frame pair (any 8-aligned stack address), so the tag decides.
 fn rt_view_free(v: u64) -> u64 {
-    if (v & 8) != 0 {
+    if ((v & 8) != 0) && (raw_load(v - 8) == 6217605130116358433) {
+        raw_store(v - 8, 0);
         rt_free(v);
     }
     return 0;
