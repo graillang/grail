@@ -50,4 +50,10 @@ b: .zero 16
 t: .zero 8
 .section grail_sites,"a"
 .quad .Ls
+.section .rodata
+.byte 9
+.previous
+.byte 10
+.previous
+.byte 11
 .section .note.GNU-stack,"",@progbits

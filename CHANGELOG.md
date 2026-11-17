@@ -1,5 +1,7 @@
 ## Unreleased
 
+- The internal assembler takes `.previous`.
+
 - **Text costs less to build and parse.** A string literal is checked to be UTF-8 while compiling,
   so making a `string` of it is a copy with no run-time check; appending a `string` onto a `string`
   no longer re-checks it; `format` hands its buffer over as the string instead of copying it, and
