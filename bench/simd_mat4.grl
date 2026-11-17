@@ -2,7 +2,7 @@
 // slices, each column of the product the sum of A's columns scaled by the broadcast lanes of B's
 // column. The C twin is bench/simd_mat4.c (SSE2 intrinsics, the same operations in the same order);
 // `bun tools/bench-simd.mjs` builds and times both.
-//   simd_mat4 ROUNDS
+//   simd_mat4 ROUNDS     (or `check`: three rounds, the result only)
 use host;
 
 fn mul_all<a>(a: (&a [f32]), b: (&a [f32]), out: (&a mut [f32])) -> unit {
@@ -28,9 +28,16 @@ fn mul_all<a>(a: (&a [f32]), b: (&a [f32]), out: (&a mut [f32])) -> unit {
     }
 }
 fn main(arg: &[u8]) {
+    // `check`: three rounds and the result alone, no timing - what the corpus runs, so the program's
+    // answer is pinned on every target and backend (the timing line differs run to run).
+    check_mode := (arg.len() == 5) && (arg[0] == 99) && (arg[1] == 104) && (arg[2] == 101) && (arg[3] == 99) && (arg[4] == 107);
     mut rounds = 0;
-    for i in arg.len() {
-        rounds = rounds * 10 + arg[i] - 48;
+    if check_mode {
+        rounds = 3;
+    } else {
+        for i in arg.len() {
+            rounds = rounds * 10 + arg[i] - 48;
+        }
     }
     if rounds == 0 {
         rounds = 1000;
@@ -54,6 +61,8 @@ fn main(arg: &[u8]) {
         check = check + f64(out[i]);
     }
     println(check);
-    print("ns/matrix ");
-    println(f64(t1 - t0) * 1000.0 / (f64(rounds) * f64(count)));
+    if !check_mode {
+        print("ns/matrix ");
+        println(f64(t1 - t0) * 1000.0 / (f64(rounds) * f64(count)));
+    }
 }

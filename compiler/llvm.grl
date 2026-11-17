@@ -134,8 +134,11 @@ pub fn fact_imported_signature<a>(facts: (&a mut Facts), name: u8[], code: u64) 
     facts.items.push(Fact { kind: FACT_IMPORTED_SIGNATURE, fn: name, a: code, b: 0, callee: u8[], what: 0, width: 0 });
     return ();
 }
-pub fn fact_signature<a>(facts: (&a mut Facts), name: u8[], words: u64) -> unit {
-    facts.items.push(Fact { kind: FACT_SIGNATURE, fn: name, a: words, b: 0, callee: u8[], what: 0, width: 0 });
+// `refs` has bit k set when argument word k (of the first six) is a reference: the lifter types it
+// `ptr` at the call boundary, so a frame slot passed by reference does not escape as an integer
+// and what the caller keeps there - a `&dyn` pair's vtable word - is not reloaded after the call.
+pub fn fact_signature<a>(facts: (&a mut Facts), name: u8[], words: u64, refs: u64) -> unit {
+    facts.items.push(Fact { kind: FACT_SIGNATURE, fn: name, a: words, b: refs & 63, callee: u8[], what: 0, width: 0 });
     return ();
 }
 // The `ord`-th `call *%rax` of the body `name` passes `words` argument words (native.grl
@@ -296,6 +299,10 @@ fn dump_facts<a>(out: (&a mut u8[]), facts: (&a Facts)) -> unit {
         if f.kind == FACT_SIGNATURE {
             put(&mut out, view(" signature "));
             num(&mut out, f.a);
+            if f.b != 0 {
+                put(&mut out, view(" refs "));
+                num(&mut out, f.b);
+            }
             out.push(10);
             continue;
         }
@@ -532,6 +539,13 @@ struct L {
     outeropen: u64,
     // GRAIL_LLVM_WHY: the function whose first refusal is printed (bad).
     why: u8[],
+    // The reference masks of the signature facts (ref_signatures), the body being lowered's, and
+    // the slot pointers the argument registers held when the current call began (lower_call).
+    refsigs: Set,
+    // The frame slot operands whose address the function takes (address_slots; slot_key).
+    takenslots: u8[][],
+    ownrefs: u64,
+    argptrs: u8[][],
     // Every Grail body (a signature fact names it): calls to these pass no vector registers.
     grail_bodies: Set,
     // Vector registers written and not read since (a pending float argument), and ones not written
@@ -746,6 +760,31 @@ fn label_of<a>(line: &a [u8]) -> u8[] {
             return out;
         }
         if !ident_char(ch) {
+            return out;
+        }
+    }
+    return out;
+}
+// The slot symbols of the vtable `name` in the native data lines: the `.quad SYM` lines after
+// `name:`, all of them plain symbols; empty when `name` is not such a table.
+fn vtable_words<a>(data: (&u8[][]), name: &a [u8]) -> u8[][] {
+    mut out = u8[][];
+    if !starts(name, view(".V")) {
+        return out;
+    }
+    mut label = copy(name);
+    label.push(58);
+    for i in data.len() {
+        if eq(view(data[i]), view(label)) {
+            mut k = i + 1;
+            while (k < data.len()) && starts(view(data[k]), view(".quad ")) {
+                sym := sub(view(data[k]), 6, data[k].len());
+                if (sym.len() == 0) || has(view(sym), view("+")) || has(view(sym), view("-")) || ((sym[0] >= 48) && (sym[0] <= 57)) {
+                    return u8[][];
+                }
+                out.push(sym);
+                k += 1;
+            }
             return out;
         }
     }
@@ -1354,6 +1393,14 @@ fn address<a, b>(l: (&a mut L), op: &b [u8]) -> u8[] {
         }
         scaled := def(&mut l, view("mul i64 {}, {}"), &u8[][index, scale]);
         acc = def(&mut l, view("add i64 {}, {}"), &u8[][acc, scaled]);
+    }
+    // `d(%reg)` with no index: the offset is a getelementptr on the register's pointer, not an
+    // integer add before it, so a pointer that came back from a word (a vtable address the pair
+    // stored, `inttoptr (ptrtoint @V)`) stays an offset from its object and a load from a constant
+    // vtable folds to the method (devirtualisation).
+    if (d != 0) && (inner.len() < 2) && !eq(view(base), view("rbp")) {
+        q := def(&mut l, view("inttoptr i64 {} to ptr"), &u8[][acc]);
+        return def(&mut l, view("getelementptr i8, ptr {}, i64 {}"), &u8[][q, dt]);
     }
     if d != 0 {
         acc = def(&mut l, view("add i64 {}, {}"), &u8[][acc, dt]);
@@ -2696,6 +2743,48 @@ fn ends_terminator<a>(l: (&a mut L)) -> unit {
 fn call_args<a>(l: (&a mut L)) -> u8[] {
     return call_args_n(&mut l, 6);
 }
+// The slot pointer a register holds (B1 provenance): the address `getelementptr i8, ptr P, i64 O`,
+// or empty when the register holds no known frame address.
+fn reg_slot_ptr<a, b>(l: (&a mut L), reg: &b [u8]) -> u8[] {
+    k := prov_find(&l, reg);
+    if k == 0 {
+        return u8[];
+    }
+    mut off = u8[];
+    o := l.pvoff[k - 1];
+    if o < 0 {
+        off.push(45);
+        num(&mut off, u64(0 - o));
+    } else {
+        num(&mut off, u64(o));
+    }
+    return def(&mut l, view("getelementptr i8, ptr {}, i64 {}"), &u8[][copy(view(l.pvptr[k - 1])), off]);
+}
+// A call's argument list whose reference words are `ptr`: the slot pointer captured for the
+// register when it has one (lower_call), an `inttoptr` of the word otherwise.
+fn call_args_refs<a>(l: (&a mut L), n: u64, refs: u64) -> u8[] {
+    mut out = u8[];
+    for i in n {
+        if i != 0 {
+            put(&mut out, view(", "));
+        }
+        v := get_reg(&mut l, view(arg_reg(i)));
+        if ((refs >> i) & 1) != 0 {
+            mut p = u8[];
+            if (i < l.argptrs.len()) && (l.argptrs[i].len() != 0) {
+                p = copy(view(l.argptrs[i]));
+            } else {
+                p = def(&mut l, view("inttoptr i64 {} to ptr"), &u8[][v]);
+            }
+            put(&mut out, view("ptr "));
+            put(&mut out, view(p));
+        } else {
+            put(&mut out, view("i64 "));
+            put(&mut out, view(v));
+        }
+    }
+    return out;
+}
 // The first `n` argument registers as a call's argument list.
 fn call_args_n<a>(l: (&a mut L), n: u64) -> u8[] {
     names := u8[][copy(view("rdi")), copy(view("rsi")), copy(view("rdx")), copy(view("rcx")), copy(view("r8")), copy(view("r9"))];
@@ -2888,6 +2977,15 @@ fn array_element<a, b>(l: (&a mut L), target: &b [u8]) -> unit {
     return ();
 }
 fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> unit {
+    // The slot pointers the argument registers hold (B1 provenance), read before the reset: a
+    // reference argument is passed as that pointer, not as an integer (fact_signature's `refs`).
+    mut ptrs = u8[][];
+    if ref_mask(&l, target) != 0 {
+        for i in 6 {
+            ptrs.push(reg_slot_ptr(&mut l, view(arg_reg(i))));
+        }
+    }
+    exchange(&mut l.argptrs, ptrs);
     prov_reset(&mut l);
     // A call hands the argument registers on; passing a stale %rdx is not reading a result.
     l.rdxdead = 0;
@@ -3102,7 +3200,11 @@ fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> uni
         lower_ffi_call(&mut l, target, fcode - 2, fmem_use);
         return ();
     }
-    args := call_args_n(&mut l, nwords);
+    mut args = call_args_n(&mut l, nwords);
+    refs := ref_mask(&l, target);
+    if (refs != 0) && (nwords <= 6) {
+        args = call_args_refs(&mut l, nwords, refs);
+    }
     mut c = u8[];
     put(&mut c, view("call "));
     put(&mut c, view(result_type(rwords)));
@@ -3990,6 +4092,17 @@ fn instruction<a, b, c>(l: (&a mut L), line: &b [u8], facts: (&c Facts)) -> unit
         lift_locked(&mut l, view(rest));
         return ();
     }
+    // Any write to a frame slot other than the word move (which keeps or clears it itself) ends
+    // what the provenance table knew about the slot's contents.
+    if !eq(view(op), view("movq")) && (l.pvreg.len() != 0) {
+        lo := operands(view(rest));
+        if lo.len() != 0 {
+            lk := slot_key(&l, view(lo[lo.len() - 1]));
+            if lk.len() != 0 {
+                prov_clear(&mut l, view(lk));
+            }
+        }
+    }
     // An argument load as load_call_args emits it - a frame slot into an argument register - for
     // lower_indirect_call's check of its word count. The arguments are loaded in one run of moves
     // right before the call, so any other instruction (a division's operand load is followed by its
@@ -4071,14 +4184,41 @@ fn instruction<a, b, c>(l: (&a mut L), line: &b [u8], facts: (&c Facts)) -> unit
         if (sp != 0) && (dstr.len() != 0) {
             prov_set(&mut l, view(dstr), view(sptr), soff);
         }
+        // An address spilled to a frame slot whose own address is never taken, and read back in the
+        // same block: the word keeps its provenance (the front end's unoptimised text routes every
+        // temporary through a slot, a `&dyn` pair's address among them).
+        if dstr.len() == 0 {
+            sk2 := slot_key(&l, view(o[1]));
+            if sk2.len() != 0 {
+                prov_clear(&mut l, view(sk2));
+                if sp != 0 {
+                    prov_set(&mut l, view(sk2), view(sptr), soff);
+                }
+            }
+        } else {
+            sk3 := slot_key(&l, view(o[0]));
+            if sk3.len() != 0 {
+                kk := prov_find(&l, view(sk3));
+                if kk != 0 {
+                    pp := l.pvptr[kk - 1].copy();
+                    po := l.pvoff[kk - 1];
+                    prov_set(&mut l, view(dstr), view(pp), po);
+                }
+            }
+        }
         // A load of an address slot: a fresh getelementptr on the slot it points into, which
         // dominates every block.
         if (dstr.len() != 0) && (l.split != 0) {
             for i in l.asy.len() {
                 if eq(view(l.asy[i]), view(o[0])) {
                     x := l.asx[i].copy();
-                    ptr := address(&mut l, view(x));
-                    prov_set(&mut l, view(dstr), view(ptr), 0);
+                    if starts(view(x), view("%a")) {
+                        // A reference parameter's slot: the parameter itself is the pointer.
+                        prov_set(&mut l, view(dstr), view(x), 0);
+                    } else {
+                        ptr := address(&mut l, view(x));
+                        prov_set(&mut l, view(dstr), view(ptr), 0);
+                    }
                     break;
                 }
             }
@@ -4118,6 +4258,12 @@ fn instruction<a, b, c>(l: (&a mut L), line: &b [u8], facts: (&c Facts)) -> unit
         // that already has provenance: the destination register now points into that slot.
         dst := reg_operand(view(o[1]));
         if (dst.len() != 0) && (l.split != 0) && (has(view(o[0]), view("(%rbp)")) || (prov_base(&l, view(o[0])) != 0)) {
+            prov_set(&mut l, view(dst), view(p), 0);
+        }
+        // `leaq .V<hash>(%rip)`: a vtable, a constant in this module (vtable_words). Loads of its
+        // slots through the register become loads from the constant, which LLVM folds to the
+        // method itself: a `dyn` call whose vtable is known turns direct, and inlinable.
+        if (dst.len() != 0) && starts(view(o[0]), view(".V")) && ends(view(o[0]), view("(%rip)")) && (l.target == 0) {
             prov_set(&mut l, view(dst), view(p), 0);
         }
         set_chain(&mut l, storage_of(&l, view(o[1])), 0, 0, 0);
@@ -4708,8 +4854,55 @@ fn signatures<a, b>(facts: (&a Facts), taken: (&b Set)) -> Set {
     for i in facts.items.len() {
         f := &facts.items[i];
         if (f.kind == FACT_IMPORTED_SIGNATURE) && !set_has(&own, view(f.fn)) && (f.a != 0) {
-            set_put(&mut out, view(f.fn), f.a);
+            // The low 32 bits are the sig_code; above them the defining run's reference mask.
+            set_put(&mut out, view(f.fn), f.a & 4294967295);
         }
+    }
+    return out;
+}
+// The reference masks of the bodies `signatures` kept (fact_signature's `refs`), as mask + 1.
+fn ref_signatures<a, b>(facts: (&a Facts), sigs: (&b Set)) -> Set {
+    mut n = 0;
+    for i in facts.items.len() {
+        if (facts.items[i].kind == FACT_SIGNATURE) || (facts.items[i].kind == FACT_IMPORTED_SIGNATURE) {
+            n += 1;
+        }
+    }
+    mut out = set_new(n + 1);
+    for i in facts.items.len() {
+        f := &facts.items[i];
+        if (f.kind == FACT_SIGNATURE) && (f.b != 0) && (set_get(&sigs, view(f.fn)) != 0) {
+            set_put(&mut out, view(f.fn), f.b + 1);
+        }
+        // Another module's body: its reference mask came with its signature (sig_codes' high bits),
+        // so this run declares and calls it with the same `ptr` parameters it was defined with.
+        if (f.kind == FACT_IMPORTED_SIGNATURE) && ((f.a >> 32) != 0) && (set_get(&out, view(f.fn)) == 0) {
+            set_put(&mut out, view(f.fn), (f.a >> 32) + 1);
+        }
+    }
+    return out;
+}
+// The mask of reference words of `name` (0 for none).
+fn ref_mask<a, b>(l: (&a L), name: &b [u8]) -> u64 {
+    m := set_get(&l.refsigs, name);
+    if m == 0 {
+        return 0;
+    }
+    return m - 1;
+}
+// A parameter list whose reference words are `ptr` (fact_signature's `refs`).
+fn param_list_refs(n: u64, refs: u64) -> u8[] {
+    mut out = u8[];
+    for i in n {
+        if i != 0 {
+            put(&mut out, view(", "));
+        }
+        if ((refs >> i) & 1) != 0 {
+            put(&mut out, view("ptr %a"));
+        } else {
+            put(&mut out, view("i64 %a"));
+        }
+        num(&mut out, i);
     }
     return out;
 }
@@ -5278,7 +5471,8 @@ fn stack_param<a, b>(l: (&a mut L), op: &b [u8]) -> u8[] {
     num(&mut a, index);
     return a;
 }
-// NAME in `.type NAME,@function`.
+// NAME in `.type NAME,@function` or `.size NAME, .-NAME` (both statements about a symbol, not uses;
+// a lifted function's are dropped from the native part, whose labels it no longer has).
 fn type_name<a>(line: &a [u8]) -> u8[] {
     mut e = 6;
     while (e < line.len()) && (line[e] != 44) {
@@ -5557,11 +5751,56 @@ fn frame_split<a>(instrs: (&a u8[][]), deepest: (&a mut u64)) -> u64 {
     exchange(deepest, most);
     return 1;
 }
+// The provenance-table key of frame slot operand `op` (`@-40(%rbp)`), empty when `op` is not a frame
+// slot or its address is taken somewhere in the function (it could be written through a pointer).
+fn slot_key<a, b>(l: &a L, op: &b [u8]) -> u8[] {
+    // Without a split frame the slots are one alloca: any taken address reaches them all.
+    if (l.split == 0) || !ends(op, view("(%rbp)")) || (op.len() < 7) {
+        return u8[];
+    }
+    for i in l.takenslots.len() {
+        if eq(view(l.takenslots[i]), op) {
+            return u8[];
+        }
+    }
+    mut k = copy(view("@"));
+    put(&mut k, op);
+    return k;
+}
+// Whether any of `instrs` before `m` names register `r` as its last (destination) operand.
+fn reg_written_before<a, b>(instrs: (&a u8[][]), m: u64, r: &b [u8]) -> bool {
+    for i in m {
+        line := view(instrs[i]);
+        mut sp = 0;
+        while (sp < line.len()) && (line[sp] != 32) {
+            sp += 1;
+        }
+        if sp >= line.len() {
+            if starts(line, view("call")) {
+                return true;
+            }
+            continue;
+        }
+        if starts(line, view("call")) {
+            return true;
+        }
+        o := operands(view(sub(line, sp + 1, line.len())));
+        if o.len() == 0 {
+            continue;
+        }
+        d := o[o.len() - 1].copy();
+        if (d.len() > 1) && (d[0] == 37) && eq(view(reg_name(view(sub(view(d), 1, d.len())))), view(reg_name(r))) {
+            return true;
+        }
+    }
+    return false;
+}
 // The frame slots of a function that only ever hold the address of one other frame slot (B1): every
 // write to slot Y is `leaq X(%rbp),%R` immediately followed by `movq %R,Y(%rbp)` with the same X,
 // and Y's own address is never taken. A `match` on a two-word option keeps its scrutinee's address
 // so; reading it back must keep pointing into X's alloca, in whatever block it is read.
 fn address_slots<a, b>(l: (&a mut L), instrs: (&b u8[][])) -> unit {
+    exchange(&mut l.takenslots, u8[][]);
     mut ys = u8[][];
     mut xs = u8[][];
     mut bad_ys = u8[][];
@@ -5582,6 +5821,7 @@ fn address_slots<a, b>(l: (&a mut L), instrs: (&b u8[][])) -> unit {
         // The address of a slot taken: it may be written through the pointer.
         if eq(view(op), view("leaq")) && (o.len() == 2) && has(view(o[0]), view("(%rbp)")) {
             bad_ys.push(copy(view(o[0])));
+            l.takenslots.push(copy(view(o[0])));
         }
         last := o[o.len() - 1].copy();
         if !has(view(last), view("(%rbp)")) {
@@ -5600,6 +5840,15 @@ fn address_slots<a, b>(l: (&a mut L), instrs: (&b u8[][])) -> unit {
                 if (po.len() == 2) && eq(view(po[1]), view(o[0])) && has(view(po[0]), view("(%rbp)")) {
                     x = po[0].copy();
                 }
+            }
+        }
+        // A reference parameter spilled at entry (`movq %rdi,Y(%rbp)` with no earlier write of
+        // %rdi): Y holds the `ptr` parameter, which the lifter takes as the address (fact `refs`).
+        if (x.len() == 0) && eq(view(op), view("movq")) && (o.len() == 2) && (o[0].len() > 1) && (o[0][0] == 37) {
+            k := arg_index(view(sub(view(o[0]), 1, o[0].len())));
+            if (k < 6) && (((l.ownrefs >> k) & 1) != 0) && !reg_written_before(instrs, m, view(sub(view(o[0]), 1, o[0].len()))) {
+                x = copy(view("%a"));
+                num(&mut x, k);
             }
         }
         if x.len() == 0 {
@@ -5701,7 +5950,9 @@ fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), fact
     if l.sibwidth == 0 {
         sigcode = set_get(&l.sigs, view(f.name));
     }
+    l.ownrefs = 0;
     if sigcode != 0 {
+        l.ownrefs = ref_mask(&l, view(f.name));
         l.nargs = sigcode / 4;
         l.retw = sigcode % 4;
     }
@@ -5937,6 +6188,10 @@ fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), fact
         if (a == 0) && (l.sibwidth != 0) {
             // The sibling's argument 0 is the typed header pointer; the word machine's word for it
             // is its integer form, so every other use of the parameter is bit-identical.
+            av = def(&mut l, view("ptrtoint ptr {} to i64"), &u8[][copy(view(an))]);
+        }
+        if ((l.ownrefs >> a) & 1) != 0 {
+            // A reference parameter arrives as `ptr`; the word machine holds its integer form.
             av = def(&mut l, view("ptrtoint ptr {} to i64"), &u8[][copy(view(an))]);
         }
         emit(&mut l, view("store i64 {}, ptr {}"), &u8[][av, slot_of(view("%r."), view(args[a]))]);
@@ -8916,7 +9171,7 @@ fn lower_range<a, b, c, d, e, g, h>(l: (&a mut L), lines: (&b u8[][]), funcs: (&
             put(&mut p.functions, view(f.name));
             // A frame over a page is probed as the native backend's is (optimize::probe_frames).
             put(&mut p.functions, view("\"("));
-            put(&mut p.functions, view(param_list(l.nargs)));
+            put(&mut p.functions, view(param_list_refs(l.nargs, l.ownrefs)));
             put(&mut p.functions, view(") \"probe-stack\"=\"inline-asm\""));
             // A runtime fast path stays small only if what it falls back to stays out of it: a
             // `rt_..._slow` function is cold and never inlined, and the threaded allocator paths are
@@ -9243,7 +9498,7 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
             set_add(&mut weak, view(sub(wl, 6, wl.len())));
         }
     }
-    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, pairs: u64[], pair_widths: u64[], fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], edptr: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], hstable: u64[], hesc: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, body_blk: 0, ebase: u64[], eptrs: set_new(16), evals: set_new(16), eslot: u64[], dnames: u8[][], dmap: map_new(16), hmap: map_new(16), cmap: map_new(16), sl_start: u64[], sl_lines: u64[], proof: u64[], rline: 0, ranges: ranges, sigs: set_new(16), nargs: 6, retw: 2, rdxdead: 0, pvreg: u8[][], pvptr: u8[][], pvoff: i64[], asy: u8[][], asx: u8[][], rdxcallee: u8[], curline: u8[], sigerr: u8[], wrong: u8[][], area: u8[][], areaopen: 0, argwritten: 0, ffis: set_new(16), ffimem: set_new(16), entryextra: u8[], outer: u8[][], outeropen: 0, why: host::env(view("GRAIL_LLVM_WHY")), grail_bodies: set_new(16), xpend: 0, xstale: 18446744073709551615 };
+    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, pairs: u64[], pair_widths: u64[], fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], edptr: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], hstable: u64[], hesc: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, body_blk: 0, ebase: u64[], eptrs: set_new(16), evals: set_new(16), eslot: u64[], dnames: u8[][], dmap: map_new(16), hmap: map_new(16), cmap: map_new(16), sl_start: u64[], sl_lines: u64[], proof: u64[], rline: 0, ranges: ranges, sigs: set_new(16), nargs: 6, retw: 2, rdxdead: 0, pvreg: u8[][], pvptr: u8[][], pvoff: i64[], asy: u8[][], asx: u8[][], rdxcallee: u8[], curline: u8[], sigerr: u8[], wrong: u8[][], area: u8[][], areaopen: 0, argwritten: 0, ffis: set_new(16), ffimem: set_new(16), entryextra: u8[], outer: u8[][], outeropen: 0, why: host::env(view("GRAIL_LLVM_WHY")), refsigs: set_new(16), takenslots: u8[][], ownrefs: 0, argptrs: u8[][], grail_bodies: set_new(16), xpend: 0, xstale: 18446744073709551615 };
     // A function whose address is taken (`NAME(%rip)`, or named by data such as a vtable) is
     // called through a pointer by code that does not know its signature, so it keeps the six-word
     // form: an indirect call passes six words and reads rax:rdx, and LLVM must never see a call
@@ -9261,6 +9516,7 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
         set_add(&mut taken, view(excluded[i]));
     }
     l.sigs = signatures(facts, &taken);
+    l.refsigs = ref_signatures(facts, &l.sigs);
     l.ffis = ffi_signatures(facts);
     l.ffimem = ffi_memory(facts);
     mut nb = 0;
@@ -9358,7 +9614,7 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
             native_lines.push(copy(view(pc.native[i])));
             if (kq < pc.kept.len()) && (pc.kept[kq] == i) {
                 // A `.type NAME,@function` line only states what NAME is: it is not a use.
-                if !starts(view(pc.native[i]), view(".type ")) {
+                if !starts(view(pc.native[i]), view(".type ")) && !starts(view(pc.native[i]), view(".size ")) {
                     add_tokens(&mut native_tokens, view(pc.native[i]));
                 }
                 kq += 1;
@@ -9379,7 +9635,7 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
     }
     for i in data.len() {
         // `.type` is a statement about a symbol, not a use of it (see the bodies above).
-        if !starts(view(data[i]), view(".type ")) {
+        if !starts(view(data[i]), view(".type ")) && !starts(view(data[i]), view(".size ")) {
             add_tokens(&mut native_tokens, view(data[i]));
         }
     }
@@ -9447,6 +9703,7 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
             }
         }
     }
+    mut slot_symbols = u8[][];
     for i in l.refs.len() {
         r := view(l.refs[i]);
         if set_has(&lifted, r) || set_has(&exported, r) {
@@ -9491,18 +9748,56 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
                 put(&mut ir, view(".c"));
             }
             put(&mut ir, view("\"("));
+            drefs := ref_mask(&l, r);
             for q in dn {
                 if q != 0 {
                     put(&mut ir, view(", "));
                 }
-                put(&mut ir, view("i64"));
+                if (q < 6) && (((drefs >> q) & 1) != 0) {
+                    put(&mut ir, view("ptr"));
+                } else {
+                    put(&mut ir, view("i64"));
+                }
             }
             put(&mut ir, view(")\n"));
         } else {
+            // A vtable (`.V<hash>`, weak in the native data) is defined here too, with its slots, so
+            // LLVM sees the method a known vtable's slot holds and can call it directly and inline
+            // it (call ABI, devirtualisation). Both copies are weak and identical.
+            table := if target == 0 { vtable_words(&data, r) } else { u8[][] };
+            if table.len() != 0 {
+                put(&mut ir, view("@\""));
+                put(&mut ir, view(name));
+                put(&mut ir, view("\" = weak_odr hidden constant ["));
+                num(&mut ir, table.len());
+                put(&mut ir, view(" x ptr] ["));
+                for k in table.len() {
+                    if k != 0 {
+                        put(&mut ir, view(", "));
+                    }
+                    put(&mut ir, view("ptr @\""));
+                    put(&mut ir, view(table[k]));
+                    ir.push(34);
+                    slot_symbols.push(copy(view(table[k])));
+                }
+                put(&mut ir, view("], align 8\n"));
+                continue;
+            }
             put(&mut ir, view("@\""));
             put(&mut ir, view(name));
             put(&mut ir, view("\" = external hidden global i8\n"));
         }
+    }
+    // The vtables' slots that nothing above declared: functions native code defines.
+    for k in slot_symbols.len() {
+        sym := view(slot_symbols[k]);
+        if set_has(&lifted, sym) || set_has(&exported, sym) {
+            continue;
+        }
+        set_add(&mut exported, sym);
+        put(&mut ir, view("@\""));
+        put(&mut ir, sym);
+        put(&mut ir, view("\" = external hidden global i8\n"));
     }
     // Lifted functions native code does not name are internal (inlinable and removable).
     mut thunks = u8[];
@@ -9655,7 +9950,7 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
             code := set_get(&l.sigs, view(f.fn));
             if code != 0 {
                 sig_names.push(copy(view(f.fn)));
-                sig_codes.push(code);
+                sig_codes.push(code + (ref_mask(&l, view(f.fn)) << 32));
             }
         }
     }

@@ -241,9 +241,9 @@ for (const [fixture, expect] of [['range_long_proof.grl', '300'], ['range_push_l
 // --verify-facts fails the compile naming the fact.
 const signature = build('signature', 'signature.grl', { backend: 'llvm', verifyFacts: true });
 const sigIr = readFileSync(signature.ll, 'utf8');
-ok('signature: the facts are recorded', /^; fact f_main_two signature 2$/m.test(sigIr) && /^; fact f_main_as_shape signature 1$/m.test(sigIr));
+ok('signature: the facts are recorded', /^; fact f_main_two signature 2$/m.test(sigIr) && /^; fact f_main_as_shape signature 1 refs 1$/m.test(sigIr));
 ok('signature: a two-word body takes two words and gives one', /^define internal i64 @"f_main_two"\(i64 %a0, i64 %a1\)/m.test(sigIr), sigIr.match(/^define.*f_main_two.*$/m)?.[0]);
-ok('signature: a `&dyn` result stays two words', /^define internal \{i64, i64\} @"f_main_as_shape"\(i64 %a0\)/m.test(sigIr), sigIr.match(/^define.*f_main_as_shape.*$/m)?.[0]);
+ok('signature: a `&dyn` result stays two words, its reference parameter a ptr', /^define internal \{i64, i64\} @"f_main_as_shape"\(ptr %a0\)/m.test(sigIr), sigIr.match(/^define.*f_main_as_shape.*$/m)?.[0]);
 ok('signature: the right facts run', run([signature.exe]).stdout === '44 7\n', JSON.stringify(run([signature.exe]).stdout));
 const refused = (directory, forge, flag = '--forge-signature=', file = flag === '--forge-signature=' ? 'signature.grl' : 'indirect_words.grl') => {
   try {
