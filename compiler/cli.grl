@@ -1215,7 +1215,18 @@ fn compile_mode<a, b, d, e, g, k>(
             cache
         );
     }
-    if host::command(command) != 0 {
+    // The internal assembler runs inside the compiler run when the build is one object: the run
+    // writes the object itself (`--object`), and the assembly file keeps only the link notes.
+    inproc := internal && (split == 0) && (check_only == 0);
+    mut run = u8[][];
+    for k in command.len() {
+        run.push(item(&command, k));
+        if inproc && (k == 0) {
+            run.push(copy(view("--object")));
+            run.push(object.copy());
+        }
+    }
+    if host::command(run) != 0 {
         return 1;
     }
     if check_only != 0 {
@@ -1250,7 +1261,7 @@ fn compile_mode<a, b, d, e, g, k>(
     assemble.push(copy(view(asm)));
     assemble.push(copy(view("-o")));
     assemble.push(copy(view(object)));
-    if host::command(assemble) != 0 {
+    if !inproc && (host::command(assemble) != 0) {
         say(view("grail: assembling failed (needs clang)"));
         return 1;
     }
@@ -1843,6 +1854,10 @@ fn unit_build_command<a>(args: (&a u8[][])) -> u64 {
         assemble.push(item(&args, i));
         i += 1;
     }
+    // No assembler words: the compiler run wrote the object itself (`--object`).
+    if assemble.len() == 0 {
+        return 0;
+    }
     if host::command(assemble) != 0 {
         say(view("grail: assembling failed (needs clang)"));
         return 1;
@@ -1986,6 +2001,12 @@ fn per_module_build<a, d, e, g, k, m, n, x, y>(
             if !eq(view(name), view(entry_name)) {
                 compile.push(copy(view("--no-entry")));
             }
+            // The internal assembler (`grail asm`) runs inside the module's compiler run.
+            inproc := (prefix.len() == 2) && eq(view(item(&prefix, 1)), view("asm"));
+            if inproc {
+                compile.push(copy(view("--object")));
+                compile.push(cat(view(stem), view(".o")));
+            }
             compile.push(cat(view(stem), view(".s")));
             for f in groups[g].files.len() {
                 compile.push(groups[g].files[f].copy());
@@ -1994,12 +2015,14 @@ fn per_module_build<a, d, e, g, k, m, n, x, y>(
             for k in compile.len() {
                 run.push(compile[k].copy());
             }
-            for k in prefix.len() {
-                run.push(item(&prefix, k));
+            if !inproc {
+                for k in prefix.len() {
+                    run.push(item(&prefix, k));
+                }
+                run.push(cat(view(stem), view(".s")));
+                run.push(copy(view("-o")));
+                run.push(cat(view(stem), view(".o")));
             }
-            run.push(cat(view(stem), view(".s")));
-            run.push(copy(view("-o")));
-            run.push(cat(view(stem), view(".o")));
             pair := host::pipe();
             pid := host::spawn(run, host::environment(), pair[1], pair[1]);
             host::close(pair[1]);

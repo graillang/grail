@@ -8,6 +8,7 @@ use machine;
 use optimize;
 use llvm;
 use cli;
+use asm_x86;
 
 // Direct Linux native compiler: one checked word stream, target instruction selection in machine.grl.
 // Usage: native OUT.s ENTRY.grl [MODULE.grl...]. The first public function of the
@@ -940,6 +941,9 @@ struct C {
     fn_id: u8[],
     // `--fn-cache-quiet`: use the store, print no report line.
     fn_quiet: u64,
+    // `--object PATH`: assemble in this process (compiler/asm_x86.grl) and write the object to PATH;
+    // the assembly file then carries only the `// grail-link:` notes the driver reads.
+    object: u8[],
     fn_flags: u8[],
     fn_surface: u8[],
     fn_at_file: u64,
@@ -1368,6 +1372,21 @@ fn write_parts<a, b, d>(c: (&a mut C), path: &b [u8], text: &d [u8]) -> u64 {
 fn write_image<a, b, d>(c: (&a mut C), path: &b [u8], image: &d [u8]) -> u64 {
     if c.split != 0 {
         return write_parts(&mut c, view(path), view(image));
+    }
+    if c.object.len() != 0 {
+        // In-process assembly: the object is written here and the assembly file keeps the link
+        // notes alone, which is all the driver reads of it.
+        r := asm_x86::assemble(copy_bytes(view(image)));
+        if r.error.len() != 0 {
+            mut said = copy_bytes(view("the internal assembler: "));
+            push_bytes(&mut said, view(r.error));
+            fail(&mut c, view(said));
+            return 1;
+        }
+        if host::write_file(view(c.object), view(r.object)) != 0 {
+            return 1;
+        }
+        return host::write_file(view(path), view(with_link_notes(&c.libs, view(""))));
     }
     return host::write_file(view(path), view(with_link_notes(&c.libs, view(image))));
 }
@@ -16582,13 +16601,13 @@ fn fn_flags_now<a>(c: (&a mut C)) -> u8[] {
         if i == 1 + c.arg_offset {
             skip = 1;
         }
-        if same(view(w), view("--fn-cache")) || same(view(w), view("--fn-cache-id")) || same(view(w), view("--fn-cache-quiet")) {
+        if same(view(w), view("--fn-cache")) || same(view(w), view("--fn-cache-id")) || same(view(w), view("--fn-cache-quiet")) || same(view(w), view("--object")) {
             skip = 1;
         }
         if 0 < i {
             // `&` does not short-circuit, so the guard is its own branch: `i - 1` at 0 would wrap.
             prev := host::arg(i - 1);
-            if same(view(prev), view("--fn-cache")) || same(view(prev), view("--fn-cache-id")) {
+            if same(view(prev), view("--fn-cache")) || same(view(prev), view("--fn-cache-id")) || same(view(prev), view("--object")) {
                 skip = 1;
             }
         }
@@ -47015,6 +47034,7 @@ pub fn main() -> u64 {
         fx_body_hi: u64[],
         fn_dir: u8[],
         fn_id: u8[],
+        object: u8[],
         fn_quiet: 0,
         fn_flags: u8[],
         fn_surface: u8[],
@@ -47283,6 +47303,12 @@ pub fn main() -> u64 {
             // process state is defined once, by the run that holds the entry.
             exchange(&mut c.no_entry, 1);
             offset += 1;
+        } else if same(view(option), view("--object")) {
+            if argc < offset + 3 {
+                fail_option(&mut c, view("--object needs a file"));
+            }
+            exchange(&mut c.object, host::arg(offset + 2));
+            offset += 2;
         } else if same(view(option), view("--separate")) {
             // One object of a program (B1 stage 4): every definition global, so a part call binds
             // through the linker instead of staying a symbol of this stream.

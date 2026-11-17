@@ -5,7 +5,8 @@
 - **Grail assembles its own x86-64 code.** `grail build` and `grail run` on Linux x86-64 no longer
   run clang to assemble. The compiler's own assembler (`grail asm IN.s -o OUT.o`,
   `compiler/asm_x86.grl` and `compiler/elf.grl`) writes the ELF objects. It covers exactly the
-  subset the compiler emits, and its objects are byte-identical to clang's from the same text
+  subset the compiler emits and runs inside the compiler run, so the build no longer writes and
+  re-reads the module's assembly (`--object`), and its objects are byte-identical to clang's from the same text
   (`tools/asm-oracle.mjs`; the gate's `asm-oracle` leg checks every corpus program). In the release
   compiler it assembles the syn4000 program's 35 MB of assembly in 0.41 s against clang's 1.37 s,
   and the self-compile's 119 MB in 1.1 s against 5.2 s. `--assembler=clang` (and `GRAIL_ASSEMBLER`)
