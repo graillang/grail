@@ -341,6 +341,44 @@ Go is the fastest builder of the large programs (2.1 s for syn4000, against Grai
   unchanged body, but the back end's whole-stream work and the assembler still run over the whole
   module (see "An edit to one function compiles one function").
 
+### Parallel bodies, measured against the rivals
+
+`gaps12-parbodies` compiles a module's bodies in forked workers (`grail check` too) and keeps every
+integer widening in line. `bun tools/compile-rivals.mjs --branch gaps12-parbodies` measured
+7b93225; `--compiler` measured this tree's release compiler (`gaps13-int` db2d35e sources) right
+after it, so both runs saw the same load (average 25 to 32 on 24 cores). Each figure is Grail's CPU
+seconds, with wall seconds in brackets. "Best rival" is the fastest of Go, Zig and cargo by CPU in
+each run.
+
+| program, step | db2d35e | parbodies 7b93225 | best rival, each run | CPU ratio before | CPU ratio after | wall ratio before / after |
+| --- | --- | --- | --- | --- | --- | --- |
+| hello check, cold | 0.076 (0.08) | 0.069 (0.05) | 0.073 / 0.062 | 1.03x | 1.12x | 1.03x / 0.80x |
+| hello check, edited | 0.066 (0.07) | 0.064 (0.04) | 0.040 / 0.033 | 1.64x | 1.92x | 1.73x / 1.38x |
+| hello build, cold | 0.208 (0.22) | 0.165 (0.17) | 0.142 / 0.132 | 1.46x | 1.25x | 1.60x / 1.59x |
+| hello build, edited | 0.212 (0.22) | 0.152 (0.15) | 0.099 / 0.092 | 2.15x | 1.66x | 2.54x / 2.14x |
+| syn1000 check, cold | 0.291 (0.29) | 0.578 (0.21) | 0.320 / 0.341 | 0.91x | 1.70x | 1.03x / 0.71x |
+| syn1000 check, edited | 0.214 (0.21) | 0.574 (0.23) | 0.293 / 0.285 | 0.73x | 2.02x | 0.70x / 0.75x |
+| syn1000 build, cold | 2.375 (1.98) | 2.514 (1.64) | 1.454 / 1.391 | 1.63x | 1.81x | 2.61x / 2.72x |
+| syn1000 build, edited | 1.474 (1.40) | 1.421 (1.19) | 1.144 / 1.066 | 1.29x | 1.33x | 1.75x / 1.83x |
+| syn4000 check, cold | 0.949 (0.96) | 3.409 (0.85) | 0.500 / 0.476 | 1.90x | 7.16x | 1.99x / 1.95x |
+| syn4000 check, edited | 1.086 (1.11) | 3.490 (0.95) | 0.545 / 0.498 | 1.99x | 7.00x | 2.13x / 2.05x |
+| syn4000 build, cold | 8.922 (7.65) | 12.100 (6.17) | 6.234 / 5.829 | 1.43x | 2.08x | 2.82x / 3.13x |
+| syn4000 build, edited | 5.876 (4.88) | 5.184 (3.90) | 4.505 / 3.793 | 1.30x | 1.37x | 1.94x / 2.08x |
+
+What it shows:
+
+- **Wall time falls, CPU time rises.** On syn4000 a check takes 0.85 s of wall time instead of 0.96
+  s, and a cold build 6.2 s instead of 7.7 s. The CPU behind the check is 3.6x larger (3.4 s
+  against 0.95 s), because the forked workers do work the single process did not (each re-derives
+  what it needs) on a machine whose cores were already taken. On this host Zig's single-threaded
+  check (0.44 to 0.50 s) is still the fastest on both measures.
+- **An edited check costs what a cold one does, before and after.** The check's units carry only
+  registrations, and nothing reuses them across an edit (the branch's own note: "`grail check` the
+  same way, its units carrying only registrations"). cargo's incremental check (0.97 s on syn4000
+  after an edit, against 3.2 s cold) is the bar this misses.
+- **An edited build improves**: 3.9 s wall against 4.9 s, close to cargo's 3.6 s.
+- Hello world is unchanged, as it should be: one small module has nothing to fork.
+
 ## The order of the remaining work
 
 2. *(done: see above.)* What is left of it is `grail check` reading interfaces from the store.
