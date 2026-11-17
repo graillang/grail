@@ -6,6 +6,7 @@ use explain;
 use bindgen;
 use pkg;
 use jobs;
+use llvm;
 use xxhash;
 use asm_x86;
 
@@ -266,6 +267,18 @@ fn home() -> Home {
     }
     say(view("grail: cannot find the Grail runtime; set GRAIL_HOME"));
     return Home { runtime: u8[], std: u8[] , roots: u8[][] };
+}
+// The runtime and the x86-64 Linux platform module, as home() finds them: what a compile-time probe
+// is compiled with when the compile that asks for it reads them as interfaces (a module of a separate
+// build), so the probe still links on its own. Empty when there is no runtime to find.
+pub fn probe_runtime_sources() -> u8[][] {
+    h := home();
+    if h.runtime.len() == 0 {
+        return u8[][];
+    }
+    mut out = u8[][h.runtime.copy()];
+    out.push(path_join(view(dirname(view(h.runtime))), view("os-linux.grl")));
+    return out;
 }
 fn collect<a, b>(dir: &a [u8], out: (&b mut u8[][])) {
     entries := host::list_dir(view(dir));
@@ -946,14 +959,11 @@ fn release_optimise<a, b>(assemble: (&a u8[][]), asm: &b [u8], object: &b [u8], 
     lifted := cat(view(asm), view(".ll"));
     optimised := cat(view(object), view(".ll.o"));
     native_part := release_part(view(object));
-    mut clang = u8[][];
+    // `grail llvm-compile` runs `clang -O2` over the module cut in parts, in parallel.
+    mut clang = u8[][host::exe_path(), copy(view("llvm-compile")), lifted.copy(), optimised.copy(), copy(view(emulation))];
     for i in assemble.len() {
         clang.push(item(&assemble, i));
     }
-    clang.push(copy(view("-O2")));
-    clang.push(lifted.copy());
-    clang.push(copy(view("-o")));
-    clang.push(optimised.copy());
     merge := u8[][
         tool(view("GRAIL_LINKER"), view("ld.lld")),
         copy(view("-m")),
@@ -2081,6 +2091,124 @@ fn unit_reads<a, b>(groups: (&a ModuleGroup[]), base: (&b u8[][]), g: u64) -> u8
 // `grail unit-build N <N compiler words> <assembler words>`: one module's compiler run and then its
 // assembly, as one process, so a build can start several modules at once and wait for each as a
 // whole. Not a command a person runs.
+// `grail llvm-compile IN.ll OUT.o EMULATION CLANG...`: `CLANG -O2 -c` over the lifted module IN.ll,
+// cut into parts (llvm::split_module) compiled at once - as many as the build's jobserver grants,
+// about one per 4 MB of IR - and linked into one relocatable OUT.o. A release unit's optimisation is
+// then bounded by its largest part rather than by the whole module.
+fn llvm_compile_command<a>(args: (&a u8[][])) -> u64 {
+    if args.len() < 4 {
+        say(view("usage: grail llvm-compile IN.ll OUT.o EMULATION CLANG [ARGS...]"));
+        return 1;
+    }
+    input := item(&args, 0);
+    output := item(&args, 1);
+    emulation := item(&args, 2);
+    mut clang = u8[][];
+    mut i = 3;
+    while i < args.len() {
+        clang.push(item(&args, i));
+        i += 1;
+    }
+    text := host::read_file(view(input));
+    mut wanted = text.len() / 4194304 + 1;
+    mut cap = host::cpus();
+    asked := host::env(view("GRAIL_JOBS"));
+    if asked.len() != 0 {
+        cap = number_of(view(asked));
+    }
+    if 32 < cap {
+        cap = 32;
+    }
+    if cap < wanted {
+        wanted = cap;
+    }
+    mut js = jobs::open();
+    if 1 < wanted {
+        granted := jobs::workers(&mut js, wanted);
+        wanted = granted;
+    }
+    if wanted < 2 {
+        jobs::give_all(&mut js);
+        mut run = u8[][];
+        for c in clang.len() {
+            run.push(item(&clang, c));
+        }
+        run.push(copy(view("-O2")));
+        run.push(copy(view(input)));
+        run.push(copy(view("-o")));
+        run.push(copy(view(output)));
+        return host::command(run);
+    }
+    plan := llvm::split_plan(view(text), wanted);
+    // Unique to this unit's module: internal functions keep their own names in every part of it.
+    suffix := cat(view("u"), view(decimal(xxhash::hash64(view(input), 0))));
+    mut pids = u64[];
+    mut objects = u8[][];
+    mut compiled = u8[][];
+    mut destinations = u8[][];
+    parts_store := path_join(view(cache_base()), view("llvm-parts"));
+    cache_mkdirs(view(parts_store));
+    for k in plan.count {
+        mut name = copy(view(input));
+        push_bytes(&mut name, view("."));
+        push_bytes(&mut name, view(decimal(k)));
+        part := cat(view(name), view(".ll"));
+        object := cat(view(name), view(".o"));
+        part_text := llvm::split_part(view(text), &plan, k, view(suffix));
+        // A part's object is stored under the digest of its text and the compile command, so a
+        // rebuild after an edit compiles only the parts whose functions changed.
+        mut keyed = u8[];
+        for c in clang.len() {
+            push_bytes(&mut keyed, view(item(&clang, c)));
+            keyed.push(0);
+        }
+        push_bytes(&mut keyed, view(part_text));
+        stored := path_join(view(parts_store), view(cat(view(decimal(xxhash::hash64(view(keyed), 0))), view(".o"))));
+        if host::exists(view(stored)) != 0 {
+            objects.push(stored);
+            continue;
+        }
+        host::write_file(view(part), view(part_text));
+        compiled.push(object.copy());
+        destinations.push(stored);
+        mut run = u8[][];
+        for c in clang.len() {
+            run.push(item(&clang, c));
+        }
+        run.push(copy(view("-O2")));
+        run.push(part.copy());
+        run.push(copy(view("-o")));
+        run.push(object.copy());
+        pids.push(host::spawn(run, host::environment(), 2, 2));
+        objects.push(object);
+    }
+    mut bad = 0;
+    for k in pids.len() {
+        if (9223372036854775807 < pids[k]) || (host::wait(pids[k]) != 0) {
+            bad = 1;
+        }
+    }
+    jobs::give_all(&mut js);
+    if bad != 0 {
+        say(view("grail: clang -O2 failed on a part of the LLVM module"));
+        return 1;
+    }
+    // Into the store: copied under a name of this process's, then renamed, so a reader never sees a
+    // half-written object.
+    for q in compiled.len() {
+        bytes := host::read_file(view(item(&compiled, q)));
+        pending := cat(view(item(&destinations, q)), view(cat(view(".tmp"), view(decimal(host::now_ms())))));
+        host::write_file(view(pending), view(bytes));
+        host::rename(view(pending), view(item(&destinations, q)));
+    }
+    mut link = u8[][tool(view("GRAIL_LINKER"), view("ld.lld")), copy(view("-m")), copy(view(emulation)), copy(view("-r"))];
+    for k in objects.len() {
+        link.push(item(&objects, k));
+    }
+    link.push(copy(view("-o")));
+    link.push(copy(view(output)));
+    return host::command(link);
+}
 fn unit_build_command<a>(args: (&a u8[][])) -> u64 {
     if args.len() == 0 {
         return 1;
@@ -2260,6 +2388,10 @@ fn per_module_build<a, d, e, g, k, m, n, x, y, jb, ev>(
             if !eq(view(name), view(base[0])) {
                 compile.push(copy(view("--use")));
                 compile.push(ifaces.copy());
+                // Every interface in that directory was written by a run of this build or restored
+                // from a store blob whose bytes hashed to its name: the run need not hash each one
+                // again to check its trailer.
+                compile.push(copy(view("--use-vouched")));
                 // A module with no interface file has no surface to read (the runtime's is the
                 // compiler's own knowledge of it).
                 compile.push(copy(view("--use-named")));
@@ -3313,10 +3445,13 @@ fn hex_byte(b: u8) -> bool {
 // `grail cache clear` empties the store. Both cover every target under the store (cache_base).
 fn cache_command<a>(args: (&a u8[][])) -> u64 {
     if args.len() == 0 {
-        say(view("usage: grail cache prune [--keep N] | grail cache clear"));
+        say(view("usage: grail cache prune [--keep N] | grail cache clear | grail cache warm [--target T]"));
         return 1;
     }
     sub := item(&args, 0);
+    if eq(view(sub), view("warm")) {
+        return cache_warm(&args);
+    }
     if eq(view(sub), view("clear")) {
         mut run = u8[][copy(view("rm")), copy(view("-rf")), cache_base()];
         host::command(run);
@@ -3324,7 +3459,7 @@ fn cache_command<a>(args: (&a u8[][])) -> u64 {
         return 0;
     }
     if !eq(view(sub), view("prune")) {
-        say(view("usage: grail cache prune [--keep N] | grail cache clear"));
+        say(view("usage: grail cache prune [--keep N] | grail cache clear | grail cache warm [--target T]"));
         return 1;
     }
     mut keep = 10;
@@ -3441,6 +3576,81 @@ fn cache_command<a>(args: (&a u8[][])) -> u64 {
     push_bytes(&mut line, view(" blobs\n"));
     host::print(view(line));
     return 0;
+}
+// `grail cache warm [--target T]`: check and build every standard module into the store, as a
+// toolchain ships its standard library ready (rustup's libstd, Go's std in GOCACHE): a project's
+// first check then compiles only its own modules. One program that `use`s every module of the
+// standard directory is checked and built in the store's stage, through the ordinary commands, so
+// the records it files are exactly the ones a project's build would look up. The install step runs
+// it; running it again is a no-op.
+fn cache_warm<a>(args: (&a u8[][])) -> u64 {
+    h := home();
+    if h.std.len() == 0 {
+        return 1;
+    }
+    mut target = u8[];
+    if (args.len() == 3) && eq(view(item(args, 1)), view("--target")) {
+        target = item(args, 2);
+    }
+    mut store = Cache { root: u8[], cwd: host::cwd(), hits: 0, misses: 0, names: u8[][], quiet: 1 };
+    mut program = u8[];
+    entries := host::list_dir(view(h.std));
+    mut count = 0;
+    for e in entries.len() {
+        name := item(&entries, e);
+        if !ends_with_grl(view(name)) {
+            continue;
+        }
+        info := cache_file_info(&mut store, view(path_join(view(h.std), view(name))), true);
+        if info.module.len() != 0 {
+            push_bytes(&mut program, view("use "));
+            push_bytes(&mut program, view(info.module));
+            push_bytes(&mut program, view(";\n"));
+            count += 1;
+        }
+    }
+    push_bytes(&mut program, view("fn main() {}\n"));
+    // The program lives in the target's stage, which `grail cache prune` empties.
+    mut named = target.copy();
+    if named.len() == 0 {
+        named = target_name(host::target());
+    }
+    stage := path_join(view(cache_root(view(named))), view("stage"));
+    cache_mkdirs(view(stage));
+    dir := path_join(view(stage), view(cat(view("warm."), view(decimal(host::now_us())))));
+    host::mkdir(view(dir));
+    entry := path_join(view(dir), view("main.grl"));
+    host::write_file(view(entry), view(program));
+    exe := host::exe_path();
+    mut failed = 0;
+    for step in 2 {
+        mut run = u8[][exe.copy()];
+        if step == 0 {
+            run.push(copy(view("check")));
+        } else {
+            run.push(copy(view("build")));
+        }
+        run.push(entry.copy());
+        run.push(copy(view("-o")));
+        run.push(path_join(view(dir), view("warm")));
+        if target.len() != 0 {
+            run.push(copy(view("--target")));
+            run.push(target.copy());
+        }
+        if host::command(run) != 0 {
+            failed = 1;
+        }
+    }
+    removal := u8[][copy(view("rm")), copy(view("-rf")), dir];
+    host::command(removal);
+    mut line = copy(view("cache: warm: "));
+    push_bytes(&mut line, view(decimal(count)));
+    push_bytes(&mut line, view(" standard modules checked and built"));
+    if failed != 0 {
+        push_bytes(&mut line, view(" (a step failed; what it filed stays)"));
+    }
+    say(view(line));
+    return failed;
 }
 // File an artifact under the digest of its bytes: one read, then a staging copy renamed into place.
 fn cache_blob_put<a, b>(c: (&a mut Cache), path: &b [u8]) -> u8[] {
@@ -6532,6 +6742,7 @@ fn help() {
         )
     );
     say(view("  grail cache clear                  empty the build cache"));
+    say(view("  grail cache warm [--target T]      check and build the standard library into the cache"));
     say(view("  grail explain CODE                 what an error code means (error[E0004])"));
     say(view("  grail doc [--out DIR] [FILES|DIRS] reference documentation: HTML per module + index.json"));
     say(view("  grail bindgen HEADER.h -o OUT.grl  import a C header as extern \"C\" declarations [-I DIR] [-l LIB]"));
@@ -6604,6 +6815,7 @@ pub fn is_command<a>(name: &a [u8]) -> bool {
         || eq(view(name), view("profile"))
         || eq(view(name), view("cache"))
         || eq(view(name), view("unit-build"))
+        || eq(view(name), view("llvm-compile"))
         || eq(view(name), view("explain"))
         || eq(view(name), view("asm"))
         || eq(view(name), view("doc"))
@@ -6661,6 +6873,9 @@ pub fn run() -> u64 {
     }
     if eq(view(name), view("unit-build")) {
         return unit_build_command(&args);
+    }
+    if eq(view(name), view("llvm-compile")) {
+        return llvm_compile_command(&args);
     }
     if eq(view(name), view("explain")) {
         // `grail explain E0004`: what an error code means and how it is usually fixed.

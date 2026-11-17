@@ -945,7 +945,11 @@ record holds what the driver reads sources for: the module a file declares, the 
 and whether it has an `@embed`. A no-op build therefore reads no source; it stats each input and
 reads a handful of records. The compiler's `--print-inputs` answer is remembered the same way,
 under the stamps of the files it named and of the directories resolution looked in. A tool's
-`--version` is asked once per binary stamp.
+`--version` is asked once per binary stamp. A module run of a store build is told `--use-vouched`: every interface in its
+`--use` directory was written by a run of the same build or restored from a blob that hashed to its
+name, so it does not hash each one again to check its trailer. A user's `--use DIR` keeps the
+check. `grail cache warm` fills the store with every standard module's check and build records,
+which the installers run, so a project's first build compiles only its own modules.
 
 Measured by `tools/cache-test.mjs` (three modules plus runtime and `__start`, five parts; the absolute
 times move with the page cache, the ratio does not):

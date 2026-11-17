@@ -8,6 +8,46 @@
   Measured (callgrind, one worker, minimum of five), against main: a join 2742 -> 2652 instructions,
   a spawn 1631 -> 1583, fib(20) by nested join -1.7%. The compiler's own text is 4.0% larger and
   it compiles 0.85% faster.
+- **The optimiser's liveness is linear in a function's length.** The register and frame-slot
+  liveness behind dead-store removal, prologue zeroing and register colouring looked at every
+  candidate slot on every line of every round; each line's effect is now worked out once per pass
+  and read through a slot-to-candidate table. The output is byte-identical; compiling the compiler
+  takes 20% fewer instructions, and a cold `grail build` of a 1000-function file 5.7% fewer.
+- **Release builds compile a module's LLVM code in parallel.** `grail llvm-compile` cuts a lifted
+  module into parts - shared declarations, each function in one part, internal functions renamed
+  per unit - and runs `clang -O2` on all of them at once under the jobserver, then joins them. A
+  release unit, and the release compiler itself (`tools/native.mjs release`), is no longer bound by
+  one serial `clang -O2` over a gigabyte of IR.
+  A function's part is a hash of its name and a part carries only the declarations it uses, so
+  its text changes only when its own functions do; each part's object is kept in the build store
+  (`llvm-parts/`) under the digest of its text and command, and a rebuild after an edit compiles
+  only the parts holding changed functions.
+
+- **`grail cache warm [--target T]`** checks and builds every standard module into the build store,
+  as rustup ships libstd: a project's first check then compiles only its own modules. The installers
+  run it (not under DESTDIR), and compile-perf's template store is now a warmed one. Dev compiler,
+  GRAIL_JOBS=1, a project's first check: bench/iterchain.grl 0.84G -> 0.24G, hashmap 0.72G -> 0.21G,
+  json 1.33G -> 0.20G.
+- A module run of a store build no longer re-hashes every interface it loads to check its trailer:
+  the driver passes `--use-vouched`, because each one was written by a run of that build or restored
+  from a blob whose bytes matched its content digest. Interfaces from a user's `--use DIR` or
+  `--interface DIR` keep the check. An edited bench/iterchain.grl check: 0.267G -> 0.234G.
+- **SIMD S2.**
+  - New types: `u8x16`, `u8x32`, `u32x4`, `u32x8`, `i64x2`, `i64x4` and the masks `m8x16`, `m8x32`.
+    Unsigned lanes compare, order and widen as unsigned.
+  - `shuffle` and `shuffle2` take literal lane indices.
+  - `to_f32`, and `to_i32`, which truncates, saturates and turns NaN into 0.
+  - `bits` and `T::from_bits` reinterpret lanes.
+  - `load_aligned` and `store_aligned` check the address and stop with it if it is misaligned.
+  - With the LLVM backend, a 4x4 matrix product and an array-of-structs to struct-of-arrays
+    transpose run as the same loops as C with SSE2 intrinsics: 1.04x and 1.17x C's instructions,
+    the same time within the machine's noise.
+- Fixed: the release compiler could be built by an older release compiler's LLVM backend and
+  accepted although it miscompiled its own assembler (programs printed stray zero bytes). The
+  release build now always lowers with the current native compiler, and accepts the result only
+  when it compiles the compiler to the same text and the same objects as the native build and its
+  programs pass a corpus slice (hello, strings, alloc, thread, sched).
+
 - **`host::chmod(path, mode)`**: sets a file's permission bits, 0 or a positive errno (fchmodat on
   Linux, chmod on macOS, and 0 on Windows, which has no bits to set). The build store will use it to
   give a restored executable image its mode without a shell, once the bootstrap seed knows it.
@@ -20,7 +60,8 @@
   build reads no source, the compiler's `--print-inputs` answer is remembered under the stamps of
   what it read (`inputs/`), and a tool's `--version` is asked once per binary (`tool-id/`). A module
   run with in-process assembly is one process, not a `grail unit-build` wrapper and the compiler.
-  `host::read_file` reads straight into its result instead of pushing byte by byte. With the dev
+  `host::read_file` reads straight into its result instead of pushing byte by byte, sized from the
+  file's own size. With the dev
   compiler and GRAIL_JOBS=1, in user-space instructions: hello no-op build 0.235G -> 0.008G, hello
   check 0.310G -> 0.058G, hello build 0.453G -> 0.140G. `grail cache prune` drops `fp/`, `inputs/`
   and `tool-id/` whole.
@@ -75,6 +116,13 @@
   indices; `mid <= len` is checked as it runs.
 - Fix: a bare `return;` in a function that takes a borrow no longer reports "returned borrow escapes
   its declared input lifetime" (its unit value was read from the first parameter's slot).
+- **A closure passed straight to a `Fn(..)` parameter no longer allocates (call ABI S6 B).** A
+  closure literal that is the whole argument for a plain `Fn(..)`/`FnMut(..)` parameter without
+  `Owned` or a lifetime - which the checker keeps inside the call - builds its environment in the
+  caller's frame, with an in-place drop, instead of `rt_rec`/`rt_free`. A 10 M-call loop through
+  such a parameter: native 1,400 M -> 930 M instructions, LLVM 1,400 M -> 450 M.
+- Release builds lift the foreign-call marker's register save around `rt_foreign_lost`;
+  `GRAIL_LLVM_WHY=FUNCTION` prints the instruction that keeps FUNCTION unoptimised.
 
 - **Text costs less to build and parse.** A string literal is checked to be UTF-8 while compiling,
   so making a `string` of it is a copy with no run-time check; appending a `string` onto a `string`
@@ -87,6 +135,10 @@
   a general register (`movq (%rax),%rax; movq %rax,%xmm8`) is `movsd (%rax),%xmm8`, and a store the
   same way back; the internal assembler encodes `movsd`, and AArch64 and RISC-V translate it to
   `ldr`/`str` and `fld`/`fsd`. nbody executes 7% fewer instructions.
+- **Native backend: fixed-size array elements are addressed directly.** An element access reads its
+  base and index from the registers that hold them instead of copies in `%rdi`/`%rsi`, and a load
+  of the element takes the scaled address as its operand (`movsd (%r12,%rbx,8),%xmm9`) instead of
+  computing it with `leaq` first. nbody executes another 10% fewer instructions.
 
 - **Raw address offsets.** In an `unsafe module`, the address operand of `raw_load`/`raw_store`
   and their narrow forms written as `p + k` with a literal `k` has no overflow check and is folded
@@ -415,6 +467,19 @@
   thread instead of moving (`callback_pins_task`: 181 of 200 calls came back on another thread
   before, none now). While it waits, that worker runs nothing else; handing the worker's queue to a
   spare thread is the next step of stage 6.
+- Fixed: **`grail check` (and a default build) of a program with a compile-time value needed a C
+  compiler, or failed.** A probe is now assembled in process and linked with the build's linker, and
+  a module of a separate build - which reads the runtime as an interface - gives its probe the
+  runtime's sources. A value the batch probe cannot compute is computed by its own probe before the
+  interfaces are written, so `check` and `build` report the same error for it (it was an internal
+  "no type" error in a separate build). Module-binding guards in a probe are defined once (the
+  internal assembler has no `.comm`).
+
+- A table static can be a vector literal of constant expressions - `static K: u64[] = u64[0x428a2f98,
+  0x71374491];` - baked with no compile-time probe. The compiler's own sources hold only such
+  constant-tier values (`ci.mjs lint` refuses a run-tier one there, which would compile the whole
+  compiler in a probe on every cold build). The runtime gains `raw_sites`, the site-table helper
+  called by name, ahead of its first use at the next reseed.
 
 - The landing queue's build host runs the aarch64 legs under the patched qemu-aarch64:
   `tools/land-remote.sh` builds it there with `tools/qemu/build.sh` before starting the legs, and
@@ -577,6 +642,24 @@
   CreatePipe's attributes live in process state.
 - Added: sockets on Windows. `lib/net.grl`'s TCP layer now works on `windows-x86_64` instead of reporting `ENOSYS`: Winsock is started once per process (`WSAStartup` 2.2) and cleaned up on exit, a socket is an overlapped `WSASocketW` descriptor in the platform's own record list, and a receive or send is an overlapped `WSARecv`/`WSASend` whose completion the waiter takes from the request's own event - on an offload thread, so a task blocked on a socket parks and never holds a worker. `connect` is ConnectEx, resolved through `WSAIoctl(SIO_GET_EXTENSION_FUNCTION_POINTER)` because no DLL exports it on every stack, with `SO_UPDATE_CONNECT_CONTEXT` and a forced bind (and a blocking fallback), and `raw_win_call` now passes up to eight word arguments with the Win64 caller frame so the extension pointer can be called. `accept` is a blocking `accept` on an offload thread: `AcceptEx` was implemented first and withdrawn, because under Wine - the only host that runs these tests - it and a cooperative accept both complete only for an already-queued connection. Winsock errors map onto the errno space the portable layer reports (`WSAEWOULDBLOCK` never reaches a task, and `WSAECONNRESET`/`WSAECONNABORTED` on a receive are end of stream, not an error). `win-sockets-echo` runs the whole path under Wine, non-ASCII text included. Not implemented: driving sockets from the I/O completion port (it cannot be verified on this host, and the design says what it would need), UDP (`WSARecvFrom`/`WSASendTo` have no portable operation or library API to reach them), and cancellation of a task blocked in a socket call. Design and evidence: *Sockets* and *Sockets: what is verified* in docs/design/windows-backend.md.
 - Added: wide-character paths on Windows. Every file and process entry point is now the `-W` one - `CreateFileW`, `CreateDirectoryW`, `DeleteFileW`, `RemoveDirectoryW`, `GetFileAttributesW`, `GetCurrentDirectoryW`, `GetModuleFileNameW`, `CreateProcessW`, `GetCommandLineW`, `GetEnvironmentStringsW`/`FreeEnvironmentStringsW` - so a file name outside the system code page is no longer mangled into the ANSI code page. One convention holds it together: every entry point in `compiler/os-windows.grl` takes and returns UTF-8, and `rt_win_wide`/`rt_win_utf8_of` convert at the FFI boundary in a fixed 128 KiB arena (five 16 KiB slots, no user allocation), so no call site converts by hand. The encoder refuses invalid UTF-8 with `EINVAL` instead of replacing bytes - overlong forms, bare continuation bytes, truncated sequences, encoded surrogates and code points above U+10FFFF - and encodes a code point past U+FFFF as the surrogate pair UTF-16 requires; text the OS hands back with an unpaired surrogate becomes U+FFFD in the one inbound helper, because refusing `argv[0]` would leave a process with no arguments. `CreateProcessW` gets the MSVC quoting rules applied to UTF-16 units (`rt_win_quote_w`/`rt_win_split_w`), so an argument survives the trip in both directions, and its environment block is UTF-16 with `CREATE_UNICODE_ENVIRONMENT` - without that flag Windows reads a non-NULL block as ANSI and the child sees an empty environment. `host::list_dir` works on Windows for the first time: a read-only open of a directory returns an enumeration backed by `FindFirstFileW`, and `rt_syscall(217)` rewrites the find results into the `dirent64` stream the portable decoder already parses, as the Darwin module does for `getdirentries64`. `GetModuleFileNameW` also wires `host::exe_path` (it answered nothing before). Six dead Win32 import declarations are gone with their entries: `ExitThread`, `GetEnvironmentVariableA`, `SetFilePointerEx`, `FlushFileBuffers`, `MoveFileA` (no portable rename operation calls it) and `GetSystemTimeAsFileTime`. `tools/test-windows.mjs` now fails the suite if any case's object imports an ANSI entry point, and runs `win-unicode-paths` under Wine: Latin-1, CJK and emoji file names, a non-ASCII directory, a non-ASCII working directory and argument, and the `EINVAL` refusal. Design: *Text at the Win32 boundary* in docs/design/windows-backend.md.
+- Bounds checks: an index that is a sum of `term * constant` products and constants - `p[i * 3 +
+  k]` - is proved in bounds when every term has a literal upper bound in the facts and the largest
+  value the sum can take is below the length (a fixed array's constant, or a vector's `len()` the
+  facts know). The sum is bounded far below 2^64, so a release build computes the value that was
+  proved. nbody's own array checks go from 24 to 0. A name the facts equate with a literal (`n := 256`) reads as that literal, and a loop count they make
+  constant (`for i in n * n`) bounds the loop variable and the vectors a push loop fills: matmul's
+  checks go from 6 to 0.
+  The same interval facts prove the index arithmetic itself cannot overflow (`i * 3 + k` with `i < 5`,
+  `k < 3`): `*` and `+` on such operands carry no overflow check in any build (nbody: 44 traps in its
+  own functions -> 2). A proved byte store (`composite[j] = 1`) is one instruction (sieve: 1 -> 0).
+  Under `--verify-facts` a check a proof removed is kept and still not counted as a failure, so
+  `@no_panic` accepts the same functions in both builds (a kept index check and a proved call
+  through the checking wrapper both name the proof).
+
+- Bounds checks: a vector filled from empty by a counted loop - `for i in n { v.push(x); }`, one
+  push per iteration, no `break` or `continue` - has `v.len == n` after the loop, so a later
+  `for i in n { v[i] }` indexes without a check. The ECS benchmark's update loop loses all 18 of its
+  checks. A push inside a branch, an early exit, or a vector that was not empty states nothing.
 
 - **Fixed: an LLVM-backend miscompile of a vector grown through its address.** A call handed `&mut v`
   receives the slot's address, not the header word, so the lifter did not count it as a call that
