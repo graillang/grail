@@ -36955,8 +36955,13 @@ fn view_into<a, b>(c: (&a mut C), f: &b [u8], args: u64[]) -> u64 {
 // The view of a whole vector or string, or of a view: its header (or pair) is already a {pointer,
 // length} pair at the value's address, so the view is that address - no allocation.
 fn view_of<a>(c: (&a mut C), source: u64) -> u64 {
-    get(&mut c, source, view("%rax"));
-    return save(&mut c);
+    // A pair of its own, copied from the header: a view is a value, and swapping or assigning one
+    // (exchange, `*r = v`) must not write into the vector's header.
+    dst := frame_alloc(&mut c, 2);
+    get(&mut c, source, view("%rcx"));
+    get(&mut c, dst, view("%rdx"));
+    o(&mut c, view("movq (%rcx),%rax\nmovq %rax,(%rdx)\nmovq 8(%rcx),%rax\nmovq %rax,8(%rdx)\n"));
+    return dst;
 }
 fn apply<a, b>(c: (&a mut C), f: &b [u8], args: u64[]) -> u64 {
     return invoke(&mut c, f, args);
