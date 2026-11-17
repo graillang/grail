@@ -248,7 +248,14 @@ struct Closure {
     weak: u64,
     // The part (module) its body is emitted into.
     unit: u8[],
-    mode: u64
+    mode: u64,
+    // The function body the closure was written in (`c.body_file`/`c.body_pos` when it was
+    // recorded). Its body is emitted after every function, so an error in it is reported against
+    // that body: the re-run that looks for the next error skips the enclosing function, which drops
+    // the closure with it (next_error). Without it the re-run skipped whichever body happened to be
+    // checked last, met the same error again and chained to the 20-run cap.
+    body_file: u64,
+    body_pos: u64
 }
 struct ImplParams {
     decl: u64,
@@ -1024,6 +1031,11 @@ struct C {
     par_hits: u64,
     // Where the lines the optimiser's cut planning reads were written (optimize::plan_from).
     plan_at: u64[],
+    // The types registrations spelled, already read in this run, by their bytes (fn_reg_type).
+    reg_slots: u64[],
+    reg_keys: u64[],
+    reg_blobs: u8[][],
+    reg_types: u64[],
     // The bodies applied from units, for the optimiser (ir::Known).
     known: ir::Known,
     // Armed (par_start) but not forked yet: the walk forks when it has compiled `par_threshold`
@@ -1424,10 +1436,15 @@ fn write_parts<a, b, d>(c: (&a mut C), path: &b [u8], text: &d [u8]) -> u64 {
         if end > start {
             file := part_file(view(stem), files.len(), view(c.part_names[k]), view(".s"));
             mut wrote = 0;
-            if x86_atomics(&mut c, view(text[start: end])) {
-                wrote = host::write_file(view(file), view(machine::atomics_x86(view(text[start: end]))));
+            // A part's frames are its own functions', so it is probed on its own (see write_image).
+            mut piece = text[start: end].copy();
+            if (c.probes != 0) & (c.backend == 0) {
+                piece = optimize::probe_frames(view(piece), u64((c.target == 3) || (c.target == 4)));
+            }
+            if x86_atomics(&mut c, view(piece)) {
+                wrote = host::write_file(view(file), view(machine::atomics_x86(view(piece))));
             } else {
-                wrote = host::write_file(view(file), view((text[start: end])));
+                wrote = host::write_file(view(file), view(piece));
             }
             if wrote != 0 {
                 status = 1;
@@ -6347,6 +6364,14 @@ fn drop_hook_symbol<a>(c: (&a mut C), ty: u64) -> u8[] {
     module := c.funcs[actual].module.copy();
     unit := symbol_unit(&mut c, view(module));
     return body_label(&c, view(unit), view(label), view(""), 0);
+}
+// drop_symbol's memo filled for `ty`, without a copy of the name.
+fn drop_symbol_known<a>(c: (&a mut C), ty: u64) -> unit {
+    if (ty < c.drop_names.len()) && (c.drop_names[ty].len() != 0) {
+        return ();
+    }
+    drop_symbol(&mut c, ty);
+    return ();
 }
 fn drop_symbol<a>(c: (&a mut C), ty: u64) -> u8[] {
     while c.drop_names.len() <= ty {
@@ -16993,11 +17018,18 @@ struct FnReg {
 // not one this compiler writes, and then nothing of the unit may be applied.
 fn fn_regs_read<a, b, d>(c: (&a mut C), data: &b [u8], ok: (&d mut u64)) -> FnReg[] {
     mut out = FnReg[];
+    if data.len() == 0 {
+        return out;
+    }
+    return fn_regs_decode(&mut c, data, ok);
+}
+fn fn_regs_decode<a, b, d>(c: (&a mut C), data: &b [u8], ok: (&d mut u64)) -> FnReg[] {
+    mut out = FnReg[];
     mut p = IR { data: data.copy(), at: 0, stop: data.len(), path: copy_bytes(view("the unit store")), phase: 2, rtext: u8[], what: u8[] };
     while p.at < p.stop {
         kind := iface_r1(&mut p);
         if kind == 1 {
-            ty := iface_r_type(&mut p, &mut c);
+            ty := fn_reg_type(&mut p, &mut c);
             out.push(FnReg { kind: 1, template: 0, types: u64[ty], data: u8[] });
         } else if kind == 2 {
             template := iface_rv(&mut p);
@@ -17008,7 +17040,7 @@ fn fn_regs_read<a, b, d>(c: (&a mut C), data: &b [u8], ok: (&d mut u64)) -> FnRe
             }
             mut types = u64[];
             for i in n {
-                types.push(iface_r_type(&mut p, &mut c));
+                types.push(fn_reg_type(&mut p, &mut c));
             }
             out.push(FnReg { kind: 2, template: template, types: types, data: u8[] });
         } else if kind == 3 {
@@ -17020,6 +17052,40 @@ fn fn_regs_read<a, b, d>(c: (&a mut C), data: &b [u8], ok: (&d mut u64)) -> FnRe
         }
     }
     return out;
+}
+// One type of a registration. Bodies name the same types over and over (a string's drop helper,
+// `same<u64>`), and reading a spelling interns it: the same bytes are the same type every time in
+// a run, so a spelling read once is looked up by its bytes after that.
+fn fn_reg_type<a, b>(p: (&a mut IR), c: (&b mut C)) -> u64 {
+    start := p.at;
+    // A type record is its tag, its length and that many bytes (iface_w_type).
+    mut at = start + 1;
+    mut len = 0;
+    mut scale = 1;
+    while (at < p.stop) && (scale < 72057594037927936) {
+        b := u64(p.data[at]);
+        at += 1;
+        len = len + (b & 127) * scale;
+        if (b & 128) == 0 {
+            break;
+        }
+        scale = scale * 128;
+    }
+    end := at + len;
+    if (p.stop < end) || (p.stop <= start) {
+        return iface_r_type(&mut p, &mut c);
+    }
+    found := names_find(&mut c.reg_slots, &mut c.reg_keys, &c.reg_blobs, p.data[start..end]);
+    if found != 0 {
+        p.at = end;
+        return c.reg_types[found - 1];
+    }
+    ty := iface_r_type(&mut p, &mut c);
+    if p.at == end {
+        c.reg_blobs.push(p.data[start..end].copy());
+        c.reg_types.push(ty);
+    }
+    return ty;
 }
 // PRODUCE, the last step: what the body just emitted handed the run, as a unit. The text starts
 // after the body's `.gbase` line; the facts are the ones recorded since `fact_mark`; the
@@ -17074,6 +17140,21 @@ fn fn_apply<a, b, d>(c: (&a mut C), u: (&b fncache::Unit), regs: (&d FnReg[]), l
                 p -= 1;
             }
             if (q - p > 6) & (u.text[p] == 46) & (u.text[p + 1] == 115) & (u.text[p + 2] == 101) & (u.text[p + 3] == 116) & (u.text[p + 4] == 32) & (u.text[p + 5] == 46) {
+                // The frame's size is the number after the comma: a frame over a page asks the run
+                // for stack probes (frame_limit), which a body compiled here would have asked for.
+                mut size = 0;
+                mut after = false;
+                for x in p..q {
+                    ch := u.text[x];
+                    if ch == 44 {
+                        after = true;
+                    } else if after & (48 <= ch) & (ch <= 57) {
+                        size = size * 10 + u64(ch - 48);
+                    }
+                }
+                if 4096 < size {
+                    exchange(&mut c.probes, 1);
+                }
                 c.known.open.push(open);
                 c.known.end.push(c.out.len() + q);
                 c.known.key.push(fncache::hash(view(u.key)));
@@ -17093,7 +17174,11 @@ fn fn_apply<a, b, d>(c: (&a mut C), u: (&b fncache::Unit), regs: (&d FnReg[]), l
         template := regs[i].template;
         types := regs[i].types.copy();
         if kind == 1 {
-            drop_ref_name(&mut c, types[0]);
+            // What drop_ref_name does, without the copy of the name it returns: the helper is
+            // requested, and its name is made now - making it can ask for a generic `Drop`
+            // implementation's specialisation, and that request has to come at this point.
+            c.drop_refs.push(types[0]);
+            drop_symbol_known(&mut c, types[0]);
         } else if kind == 3 {
             fx_unit_replay(&mut c, view(regs[i].data), text_at, at, claim_alloc, claim_panic);
         } else {
@@ -22829,10 +22914,42 @@ fn mod_from_iface<a>(c: (&a C), name: &a [u8]) -> bool {
     path := iface_join(view(c.iface_use), view(name), view(".iface"));
     return host::exists(view(path)) != 0;
 }
-// A `use` line no root answers for. The message names the module, the file that asked, and every
-// root that was searched; the behaviour it replaces was an unknown type inside a module the reader
-// did not write.
-fn unresolved_module<a>(c: (&a mut C), name: &a [u8], from: &a [u8]) -> unit {
+// Where `use NAME` is written in `text`: the offset of NAME on a line that starts with `use` (after
+// indentation), or the length of `text` when no such line is there.
+fn use_offset<a, b>(text: &a [u8], name: &b [u8]) -> u64 {
+    mut at = 0;
+    while at < text.len() {
+        mut i = at;
+        while (i < text.len()) && ((text[i] == 32) || (text[i] == 9)) {
+            i += 1;
+        }
+        if (i + 4 + name.len() <= text.len()) && same(view(text[i: i + 4]), view("use ")) {
+            mut j = i + 4;
+            while (j < text.len()) && (text[j] == 32) {
+                j += 1;
+            }
+            if (j + name.len() <= text.len()) && same(view(text[j: j + name.len()]), view(name)) {
+                after := j + name.len();
+                if (after == text.len()) || !use_name_byte(text[after]) {
+                    return j;
+                }
+            }
+        }
+        while (at < text.len()) && (text[at] != 10) {
+            at += 1;
+        }
+        at += 1;
+    }
+    return text.len();
+}
+fn use_name_byte(b: u8) -> bool {
+    return ((97 <= b) && (b <= 122)) || ((65 <= b) && (b <= 90)) || ((48 <= b) && (b <= 57)) || (b == 95);
+}
+// A `use` line no root answers for. The message names the module and every root that was searched,
+// and points at the `use` line in the file that asked, so it reads as the error it is - a module name
+// the program got wrong - rather than as the driver failing. The behaviour it replaces was an unknown
+// type inside a module the reader did not write.
+fn unresolved_module<a>(c: (&a mut C), name: &a [u8], from: &a [u8], text: &a [u8]) -> unit {
     mut msg = u8[];
     push_bytes(&mut msg, view("cannot resolve module `"));
     push_bytes(&mut msg, view(name));
@@ -22853,7 +22970,33 @@ fn unresolved_module<a>(c: (&a mut C), name: &a [u8], from: &a [u8]) -> unit {
             push_bytes(&mut msg, view(c.mod_roots[i]));
         }
     }
-    fail_option(&mut c, view(msg));
+    at := use_offset(view(text), view(name));
+    if at == text.len() {
+        fail_option(&mut c, view(msg));
+        return ();
+    }
+    source := text.copy();
+    here := diag_pos(&source, at);
+    width := diag_digits(here.line);
+    exchange(&mut c.src, source);
+    o(&mut c, view("error: "));
+    o(&mut c, view(msg));
+    c.out.push(10);
+    for i in width {
+        c.out.push(32);
+    }
+    o(&mut c, view("--> "));
+    o(&mut c, view(from));
+    c.out.push(58);
+    on(&mut c, here.line);
+    c.out.push(58);
+    on(&mut c, here.column);
+    c.out.push(10);
+    diag_gutter(&mut c, width);
+    c.out.push(10);
+    diag_excerpt(&mut c, width, &here, name.len(), 94, view("no module root holds this module"));
+    host::print(view(c.out));
+    host::exit(1);
     return ();
 }
 // The module set of a program: the command line's own files, then every module their `use` lines
@@ -22943,7 +23086,7 @@ fn resolve_modules<a>(c: (&a mut C), offset: u64) -> unit {
             }
             found := mod_find(&c, view(name));
             if found.len() == 0 {
-                unresolved_module(&mut c, view(name), view(file));
+                unresolved_module(&mut c, view(name), view(file), view(text));
                 return ();
             }
             // In the set before its own `use` lines are read: that is what ends a cycle.
@@ -35357,6 +35500,8 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
                     weak: weak,
                     unit: owner_unit,
                     mode: mode,
+                    body_file: c.body_file,
+                    body_pos: c.body_pos,
                 }
             );
     }
@@ -35582,6 +35727,10 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
         symbol := cl.symbol.copy();
         names := copy_names(&cl.names);
         params := copy_numbers(&cl.params);
+        body_file := cl.body_file;
+        body_pos := cl.body_pos;
+        exchange(&mut c.body_file, body_file);
+        exchange(&mut c.body_pos, body_pos);
         load_file(&mut c, file);
         exchange(&mut c.file, file);
         exchange(&mut c.raw, 0);
@@ -50911,6 +51060,10 @@ pub fn main() -> u64 {
         par_jobs: jobs::none(),
         par_hits: 0,
         plan_at: u64[],
+        reg_slots: u64[],
+        reg_keys: u64[],
+        reg_blobs: u8[][],
+        reg_types: u64[],
         known: ir::no_known(),
         par_armed: 0,
         par_misses: 0,
@@ -51850,7 +52003,10 @@ pub fn main() -> u64 {
     // Stack probes for frames over a page. The LLVM backend probes the functions it lifts itself
     // (`probe-stack`); the native remainder it hands back is probed below. Windows probes after the
     // frame line, which its unwind description ends with.
-    if (c.probes != 0) & (c.backend == 0) {
+    // With --split the parts are slices of this text at the offsets the optimiser recorded, so the
+    // probes go into each part as it is written (write_parts) rather than here, where the lines they
+    // add would move every later part's start.
+    if (c.probes != 0) & (c.backend == 0) & (c.split == 0) {
         out = optimize::probe_frames(view(out), u64((target == 3) || (target == 4)));
     }
     if (target == 0) || (target == 3) {

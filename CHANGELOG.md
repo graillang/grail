@@ -20,6 +20,14 @@
   takes stale, and they are read again. `vector-grown-through-its-address-is-reread` covers the
   direct call, a loop, a method on a record holding the vector and a record passed by `&mut`.
 
+- Fixed: an error inside a closure made the compiler re-run itself up to 20 times. To report the
+  next error it re-runs with the failing body skipped, and for a closure it skipped the wrong body,
+  met the same error again and chained to the cap: an eight-line program took 14 s to reject
+  (30 s with a second error), now under 2 s with the same diagnostics. Found as two "hangs" of the
+  front-end fuzzer.
+- A `use` naming a module no root holds is an ordinary diagnostic: `error: cannot resolve module
+  ...` with the `use` line's location and the name underlined, instead of a bare `grail:` line.
+- `tools/fuzz-frontend.mjs` names its five slowest cases in the summary and in `report.json`.
 - **The atomics family.** `Atomic<T>` now holds `u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`,
   `i64` or `bool`. Each width wraps at its own size, and `fetch_min`/`fetch_max` are signed for
   `i*` types.
@@ -124,6 +132,7 @@
     not claim.
   - Fixed: a closure whose result type was inferred by a trial emission left that emission's calls
     in the effect record.  inlined with that local turned into a scratch register, so split and cached builds of programs
+- `tools/land.sh BRANCH` (`just land`) lands a branch on main through one queue: the branch must already contain main, the fast gate runs on exactly its tree, and green fast-forwards main. Emulated targets run after the landing on the build host.
 - Fixed: the native optimiser took an `f32` constant whose 64-bit immediate it cannot read (2.0 is
   `$4611686018427387904`, more than 18 digits) for zero, held the variable as binary32 and read 2.0
   back as 0.0. It changed Abundance's abgeo mesh digests (meshopt's `quadric_error_attr`);
