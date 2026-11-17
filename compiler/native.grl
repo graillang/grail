@@ -1581,6 +1581,10 @@ fn write_image<a, b, d>(c: (&a mut C), path: &b [u8], image: &d [u8]) -> u64 {
 // replays the ones whose text did not move (asm_x86, function units). `GRAIL_ASM_UNITS_VERIFY=1`
 // also assembles without them and refuses a difference.
 fn assemble_object<a, b>(c: (&a mut C), image: &b [u8]) -> asm_x86::Result {
+    // AArch64 (Linux): the same reader with asm_a64's encoder; no function units yet.
+    if ((c.target == 1) || (c.target == 2)) && (c.plat == 0) {
+        return asm_x86::assemble_for(c.target, copy_bytes(view(image)));
+    }
     if c.fn_id.len() == 0 {
         return asm_x86::assemble(copy_bytes(view(image)));
     }
@@ -4487,6 +4491,45 @@ fn release_call_args<a>(c: (&a mut C), area: u64) -> unit {
     }
     return ();
 }
+// The LLVM backend's FFI fact for a C function this body calls (call ABI S8a): its integer argument
+// words, its float arguments in order (bit k of the mask set when the k-th is an f32) and its result
+// (0 an integer word or none, 1 f64, 2 f32). Only for x86-64 SysV calls whose every argument is in
+// a register and whose result is a scalar: the lifter then emits the call with those C types, so
+// the floats travel in the vector registers the platform ABI puts them in.
+fn ffi_signature_fact<a, b, d>(c: (&a mut C), argtypes: (&b u64[]), ret: u64, symbol: &d [u8], abi: u64) -> unit {
+    if (c.backend == 0) || (c.validating != 0) || (c.target != 0) || (abi != 0) {
+        return ();
+    }
+    mut ints = 0;
+    mut floats = 0;
+    mut mask = 0;
+    for i in argtypes.len() {
+        ty := argtypes[i];
+        if is_float(&mut c, ty) {
+            if is_f32(&mut c, ty) {
+                mask = mask | (1 << floats);
+            }
+            floats += 1;
+        } else {
+            if ffi_words(&mut c, ty) != 1 {
+                return ();
+            }
+            ints += 1;
+        }
+    }
+    if (6 < ints) || (8 < floats) {
+        return ();
+    }
+    mut result = 0;
+    if (ret != 1) && is_float(&mut c, ret) {
+        result = 1;
+        if is_f32(&mut c, ret) {
+            result = 2;
+        }
+    }
+    llvm::fact_ffi(&mut c.facts, copy_bytes(view(symbol)), ints, floats, mask, result);
+    return ();
+}
 // The LLVM backend's signature fact for the body being emitted: its argument words, six in
 // registers and the rest on the stack (with the hidden result address when it has one). The lifter
 // defines the body and its calls with exactly these words (llvm.grl `signatures`).
@@ -4716,7 +4759,7 @@ fn needs_drop<a>(c: (&a mut C), ty: u64) -> bool {
         // A plain or extern record element is its bytes inline, owning nothing.
         elem := ty_arg(&mut c, ty);
         if array_record_elem(&mut c, elem) {
-            return false;
+            return (is_c_record(&mut c, elem) == 0) && frame_drops(&mut c, elem);
         }
         return needs_drop(&mut c, elem);
     }
@@ -6896,6 +6939,29 @@ fn drop_symbol_known<a>(c: (&a mut C), ty: u64) -> unit {
     drop_symbol(&mut c, ty);
     return ();
 }
+// A struct's or tuple's in-place drop (unboxed-values.md, stage 4): the user's `drop`, then the
+// owners its words hold, at their offsets from the address in %rdi; it frees nothing. The boxed
+// helper (`drop_symbol`) is this and `rt_free`; a record held inline - in a frame, in another
+// record's words, flat in a vector - is dropped by this alone. For an array the helper already is
+// in place, so its name is the array's drop symbol.
+fn drop_in_place_symbol<a>(c: (&a mut C), ty: u64) -> u8[] {
+    if is_array(&mut c, ty) {
+        return drop_symbol(&mut c, ty);
+    }
+    mut name = drop_symbol(&mut c, ty);
+    name[1] = 80;
+    return name;
+}
+// Whether `ty` has a separate in-place drop: a Grail struct or tuple (not an enum, whose payload
+// is a word, nor a C record, whose bytes own nothing).
+fn in_place_record<a>(c: (&a mut C), ty: u64) -> bool {
+    if ty_kind(&mut c, ty) != 8 {
+        return false;
+    }
+    index := ty_arg(&mut c, ty);
+    d := &c.decls[index];
+    return (d.is_enum == 0) && (d.c_layout == 0);
+}
 fn drop_symbol<a>(c: (&a mut C), ty: u64) -> u8[] {
     while c.drop_names.len() <= ty {
         c.drop_names.push(u8[]);
@@ -6943,8 +7009,9 @@ fn drop_taken<a>(c: (&a mut C), ty: u64) -> u64 {
 }
 
 fn drop_name<a>(c: (&a mut C), ty: u64) -> unit {
-    // Named as a dropper, a framed record is always a holder's box (a dyn cell, a task result).
-    if framed(&mut c, ty) {
+    // Named as a dropper, a framed record is always a holder's box (a dyn cell, a task result): freed,
+    // after its owners are dropped in place (the boxed helper) when it has any.
+    if framed(&mut c, ty) && !frame_drops(&mut c, ty) {
         push_bytes(&mut c.out, view("rt_free"));
         return ();
     }
@@ -6970,7 +7037,12 @@ fn drop_ref_name<a>(c: (&a mut C), ty: u64) -> u8[] {
 fn drop_call_out<a>(c: (&a mut C), ty: u64) -> unit {
     // A framed record's words belong to a frame or to the place that holds them: nothing to free.
     // An array that owns its elements still drops them, in place (its helper frees no storage).
-    if framed(&mut c, ty) && !array_owned(&mut c, ty) {
+    if framed(&mut c, ty) && !frame_drops(&mut c, ty) {
+        return ();
+    }
+    // A framed value's words are where it is held, so it is dropped in place.
+    if framed(&mut c, ty) {
+        call_out(&mut c, view(drop_in_place_ref(&mut c, ty)));
         return ();
     }
     name := drop_ref_name(&mut c, ty);
@@ -13337,7 +13409,7 @@ fn emit_vtables<a>(c: (&a mut C)) -> unit {
         mut entries = copy_bytes(view(".quad "));
         if needs_drop(&mut c, concrete) {
             drop_name(&mut c, concrete);
-            if framed(&mut c, concrete) {
+            if framed(&mut c, concrete) && !frame_drops(&mut c, concrete) {
                 // The cell's value is the box dyn_box made: freeing it is the whole drop.
                 push_bytes(&mut entries, view("rt_free"));
             } else {
@@ -13380,9 +13452,19 @@ fn emit_vtables<a>(c: (&a mut C)) -> unit {
                 push_bytes(&mut thunks, view(cell));
                 thunks.push(95);
                 decimal(&mut thunks, j);
-                push_bytes(&mut thunks, view(":\npushq %rbp\nmovq %rsp,%rbp\nmovq (%rdi),%rdi\ncall "));
-                push_bytes(&mut thunks, view(target));
-                push_bytes(&mut thunks, view("\nleave\nret\n"));
+                // The receiver is the record the cell's first word holds; the method returns to the
+                // dispatch site itself, so the adapter is a load and a jump (no frame of its own).
+                // On the LLVM backend the method may be in the other object, which a direct `jmp`
+                // cannot reach (`grail asm` relocates calls and RIP-relative operands, not jumps).
+                if (c.backend != 0) && (c.target == 0) {
+                    push_bytes(&mut thunks, view(":\nmovq (%rdi),%rdi\nleaq "));
+                    push_bytes(&mut thunks, view(target));
+                    push_bytes(&mut thunks, view("(%rip),%r11\njmp *%r11\n"));
+                } else {
+                    push_bytes(&mut thunks, view(":\nmovq (%rdi),%rdi\njmp "));
+                    push_bytes(&mut thunks, view(target));
+                    thunks.push(10);
+                }
             }
         }
         if boxed {
@@ -17107,6 +17189,9 @@ fn ffi_emit_call<a, b, d, e, f>(
         on(&mut c, floats);
         o(&mut c, view(",%eax\n"));
     }
+    if (symbol.len() != 0) && (area == 0) && (fixed == args.len()) && (rmode == 0) && (copies == 0) {
+        ffi_signature_fact(&mut c, argtypes, ret, view(symbol), abi);
+    }
     if symbol.len() == 0 {
         if c.target == 0 {
             // A C call through a `cfn` value. %r11 is no argument register, %al may already hold
@@ -19446,6 +19531,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                     && public != 0
                     && count < 2
                     && typecount == 0
+                    && entry_shaped(&mut c, count, first)
             );
         file := c.file;
         raw := c.raw;
@@ -20057,6 +20143,21 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         par_record(&mut c, at_off, 0, &none);
     }
     return ();
+}
+// Whether a function with `count` parameters starting at `first` can be the program's entry when it
+// was picked rather than written as `main`: no parameter, or the one readonly byte view argv is.
+// A library's first public function is usually neither, and picking it made the build fail at the
+// entry check - located wherever the compiler had last read, often an imported interface - instead
+// of saying the program has no `main`.
+fn entry_shaped<a>(c: (&a mut C), count: u64, first: u64) -> bool {
+    if count == 0 {
+        return true;
+    }
+    if first >= c.params.len() {
+        return false;
+    }
+    param := c.params[first];
+    return (ty_kind(&mut c, param) == 5) && (ty_mode(&mut c, param) == 0);
 }
 fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
     if c.raw != 0 {
@@ -24002,7 +24103,7 @@ fn static_bake<a>(c: (&a mut C), ty: u64, text: &a [u8], at: (&a mut u64), is_la
         // vector of plain records holds its elements' words inline instead (flat_bytes).
         mut words = u64[];
         mut kinds = u64[];
-        flat := (ty_kind(&mut c, base_type(&mut c, elem)) == 8) && plain(&mut c, elem);
+        flat := (ty_kind(&mut c, base_type(&mut c, elem)) == 8) && framable(&mut c, elem);
         for j in n {
             if flat {
                 static_bake_fields(&mut c, base_type(&mut c, elem), text, &mut at, &mut words, &mut kinds);
@@ -27630,7 +27731,7 @@ fn field_layout<a>(c: (&a mut C), alias: u64) -> u64 {
     mut word = 0;
     for i in count {
         ft := field_type(&mut c, ty, i);
-        if plain(&mut c, ft) {
+        if framable(&mut c, ft) {
             table.push(word * 2 + 1);
             word = word + record_words(&mut c, base_type(&mut c, ft));
         } else {
@@ -27659,7 +27760,7 @@ fn flat_bytes<a>(c: (&a mut C), elem: u64) -> u64 {
     if is_array(&mut c, ty) {
         return array_bytes(&mut c, ty);
     }
-    if plain(&mut c, ty) {
+    if framable(&mut c, ty) {
         return record_words(&mut c, ty) * 8;
     }
     if is_c_record(&mut c, ty) != 0 {
@@ -27772,9 +27873,36 @@ fn layout_bits<a>(c: (&a mut C), alias: u64) -> u64 {
         if holds {
             bits = bits | 2;
         }
+        // Framable (unboxed-values.md, stage 4): held as its words wherever it is held - in a frame,
+        // inline in another record, flat in a vector - whatever it owns. Every struct and tuple is,
+        // but one being worked out is not to itself (a by-value field of its own type would be
+        // infinite), so such a field stays a boxed word.
+        bits = bits | 4;
+        for i in c.decls[d].count {
+            ft := base_type(&mut c, field_type(&mut c, ty, i));
+            if framable(&mut c, ft) {
+                bits = bits | 2;
+            }
+        }
     }
     c.layout_memo[ty] = bits + 1;
     return bits;
+}
+// Whether `ty` is held as its own words (layout bit 4): a struct, a tuple or an array.
+fn framable<a>(c: (&a mut C), alias: u64) -> bool {
+    ty := base_type(&mut c, alias);
+    if is_array(&mut c, ty) {
+        return true;
+    }
+    return (layout_bits(&mut c, ty) & 4) != 0;
+}
+// A framed value that owns something, so its words have an in-place drop: a struct or tuple that is
+// not plain, or an array of owners.
+fn frame_drops<a>(c: (&a mut C), ty: u64) -> bool {
+    if is_array(&mut c, ty) {
+        return array_owned(&mut c, ty);
+    }
+    return framed(&mut c, ty) && !plain(&mut c, ty);
 }
 // A plain record field read as a value: the address of its words inside the container.
 fn inline_address<a>(c: (&a mut C), base: u64, ty: u64, k: u64) -> u64 {
@@ -27835,11 +27963,11 @@ fn enum_frame<a>(c: (&a mut C), tag: u64, payload: u64) -> u64 {
 // its value is the address of frame words, its drop frees nothing, and a holder that keeps it past
 // the statement boxes it.
 fn framed<a>(c: (&a mut C), ty: u64) -> bool {
-    // An array is always frame storage (docs/design/fixed-arrays.md).
+    // An array is always frame storage (docs/design/fixed-arrays.md), whatever the switch says.
     if is_array(&mut c, ty) {
         return true;
     }
-    return plain(&mut c, ty);
+    return framable(&mut c, ty);
 }
 // N adjacent fresh frame slots holding one value, declared to every pass by an aggregate fact
 // (llvm::fact_aggregate), laid out as a DynPair is: word 0 is the slot allocated last, the lowest
@@ -27953,8 +28081,13 @@ fn unbox_into_frame<a>(c: (&a mut C), slot: u64, ty: u64) -> unit {
 // The drop of a holder's word that holds `ty`: for a framed record it is the holder's box, freed;
 // for anything else the type's drop.
 fn holder_drop<a>(c: (&a mut C), ty: u64) -> unit {
-    if framed(&mut c, ty) {
+    if framed(&mut c, ty) && !frame_drops(&mut c, ty) {
         call_out(&mut c, view("rt_free"));
+        return ();
+    }
+    if framed(&mut c, ty) {
+        // The holder's box: its owners dropped in place, then the box freed (the boxed helper).
+        call_out(&mut c, view(drop_ref_name(&mut c, ty)));
         return ();
     }
     drop_call(&mut c, ty);
@@ -27995,6 +28128,17 @@ fn materialise<a>(c: (&a mut C), slot: u64, ty: u64) -> unit {
     c.interior[found] = 18446744073709551615;
     if framed(&mut c, ty) {
         copy := frame_copy(&mut c, slot, ty);
+        if frame_drops(&mut c, ty) {
+            // The words moved: the place they came from (a field held inline, an element) is left
+            // all zero, which its holder's in-place drop reads as nothing to drop (a live word of 0).
+            words := record_words(&mut c, base_type(&mut c, ty));
+            get(&mut c, slot, view("%rcx"));
+            for j in words {
+                o(&mut c, view("movq $0,"));
+                on(&mut c, j * 8);
+                o(&mut c, view("(%rcx)\n"));
+            }
+        }
         get(&mut c, copy, view("%rax"));
         o(&mut c, view("movq %rax,"));
         stack_slot(&mut c, slot);
@@ -28048,12 +28192,26 @@ fn record_words<a>(c: (&a mut C), ty: u64) -> u64 {
     if c.decls[d].c_layout != 0 {
         return ffi_record_words(&mut c, d);
     }
+    live := u64(live_word(&mut c, ty));
     if (layout_bits(&mut c, ty) & 2) == 0 {
-        return c.decls[d].count;
+        return c.decls[d].count + live;
     }
     at := field_layout(&mut c, ty);
     count := c.layout_offsets[at].len() - 1;
-    return c.layout_offsets[at][count] / 2;
+    return c.layout_offsets[at][count] / 2 + live;
+}
+// Whether the struct `ty` carries a live word after its fields (unboxed-values.md, stage 4): one
+// with its own `Drop`. Its constructor sets the word to 1; moving it out of the place that holds it
+// leaves every word 0, and its in-place drop does nothing - its `drop` included - when the word is 0.
+// A struct without its own `Drop` needs none: its owners' words are 0 when absent.
+fn live_word<a>(c: (&a mut C), alias: u64) -> bool {
+    ty := base_type(&mut c, alias);
+    if (ty == 0) || (ty_kind(&mut c, ty) != 8) || (c.raw != 0) {
+        return false;
+    }
+    index := ty_arg(&mut c, ty);
+    d := &c.decls[index];
+    return (d.drop != 0) && (d.is_enum == 0) && (d.c_layout == 0);
 }
 fn field_store<a>(c: (&a mut C), base: u64, ty: u64, k: u64, value: u64) -> unit {
     if inline_field(&mut c, ty, k) {
@@ -30138,7 +30296,7 @@ fn array_elem_bytes<a>(c: (&a mut C), alias: u64) -> u64 {
     if is_c_record(&mut c, ty) != 0 {
         return ffi_record_size(&mut c, ty_arg(&mut c, ty));
     }
-    if plain(&mut c, ty) {
+    if framable(&mut c, ty) {
         return record_words(&mut c, ty) * 8;
     }
     if (k == 19) || (k == 22) {
@@ -30168,7 +30326,7 @@ fn array_read_elem<a>(c: (&a mut C), elem: u64) -> bool {
 // bytes, reached through its address.
 fn array_record_elem<a>(c: (&a mut C), elem: u64) -> bool {
     ty := base_type(&mut c, elem);
-    return (ty != 0) && (ty_kind(&mut c, ty) == 8) && ((is_c_record(&mut c, ty) != 0) || plain(&mut c, ty));
+    return (ty != 0) && (ty_kind(&mut c, ty) == 8) && ((is_c_record(&mut c, ty) != 0) || framable(&mut c, ty));
 }
 // An element read as its value by `a[i]`: a number, a bool-free scalar, or a C word.
 fn array_scalar_elem<a>(c: (&a mut C), elem: u64) -> bool {
@@ -30995,6 +31153,12 @@ fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
                 ref_field_cross(&mut c, d, j, ty, &by_slot, &by_term, lit_at, view("a value is not a name or a constant"));
             }
         }
+    }
+    if live_word(&mut c, ty) {
+        get(&mut c, n, view("%rax"));
+        o(&mut c, view("movq $1,"));
+        on(&mut c, (record_words(&mut c, ty) - 1) * 8);
+        o(&mut c, view("(%rax)\n"));
     }
     own(&mut c, n, ty);
     root := place_of(&mut c, n);
@@ -36581,7 +36745,7 @@ fn task_scope_builtin<a>(c: (&a mut C), context: Val) -> Val {
     get(&mut c, context.t, view("%rsi"));
     get(&mut c, body.t, view("%rax"));
     call_slot_out(&mut c, view("call *%rax\n"), view("a call through a value the compiler did not name"));
-    slot := save(&mut c);
+    slot := save_result(&mut c, result);
     invoke(&mut c, view("rt_scope_end"), one(handle));
     observe(&mut c, context.t);
     release_temporary(&mut c, input);
@@ -39544,7 +39708,8 @@ fn mutex_method<a, b>(c: (&a mut C), value: Val, name: &b [u8]) -> Val {
     get(&mut c, heldslot, view("%rsi"));
     get(&mut c, target, view("%rax"));
     call_slot_out(&mut c, view("call *%rax\n"), view("a call through a value the compiler did not name"));
-    slot := save(&mut c);
+    // The callback's result as any call's is: a framed one in registers or its box (save_result).
+    slot := save_result(&mut c, result);
     invoke(&mut c, view("rt_mutex_unlock"), one(cell));
     own(&mut c, slot, result);
     if keeper != 0 {
@@ -41311,8 +41476,19 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
                 dropper = save(&mut c);
             }
             require_write(&mut c, xt);
+            if (width != 0) && frame_drops(&mut c, elem) {
+                // Inline elements that own something are dropped in place as they go.
+                o(&mut c, view("leaq "));
+                push_bytes(&mut c.out, view(drop_in_place_ref(&mut c, elem)));
+                o(&mut c, view("(%rip),%rax\n"));
+                inplace := save(&mut c);
+                mut args = three(xt, keep, imm(&mut c, width));
+                args.push(inplace);
+                invoke(&mut c, view("rt_vec_truncatew"), args);
+                return val(imm(&mut c, 0), 1);
+            }
             if (code != 0) || (width != 0) {
-                // 4-byte and inline elements own nothing: shortening is setting the length.
+                // 4-byte and plain inline elements own nothing: shortening is setting the length.
                 invoke(&mut c, view("rt_vec_truncate4"), two(xt, keep));
                 return val(imm(&mut c, 0), 1);
             }
@@ -41879,8 +42055,9 @@ fn ref_store<a>(c: (&a mut C), r: u64, ty: u64, value: u64) -> unit {
         caddr_store(&mut c, r, narrow, value);
         return ();
     }
-    if plain(&mut c, ty) & embedded_place(&mut c, r) {
-        // An inline plain record's place: the new value's words replace the old ones.
+    if framed(&mut c, ty) & embedded_place(&mut c, r) {
+        // An inline record's place: the new value's words replace the old ones (an owning one was
+        // dropped in place first, by the assignment).
         get(&mut c, r, view("%rax"));
         o(&mut c, view("movq (%rax),%rax\n"));
         dst := save(&mut c);
@@ -48386,8 +48563,9 @@ fn assignment_tail<a, b>(c: (&a mut C), l: u64, id: u64, ty: u64, target: u64, t
     // is either the interior address itself (an address slot) or the proxy slot that holds it.
     embedded := ((is_c_record(&mut c, fieldty) != 0)
         & ((caddr_ty(&mut c, target) != 0) | embedded_place(&mut c, target)))
-        | (plain(&mut c, fieldty) & embedded_place(&mut c, target));
-    if through != 0 && !embedded {
+        | (framed(&mut c, fieldty) & embedded_place(&mut c, target));
+    // An inline record that owns something is dropped in place before its words are replaced.
+    if through != 0 && (!embedded || frame_drops(&mut c, fieldty)) {
         if needs_drop(&mut c, fieldty) {
             get(&mut c, target, view("%rax"));
             o(&mut c, view("movq (%rax),%rdi\n"));
@@ -49095,7 +49273,7 @@ fn host_fn<a, b>(c: (&a mut C), name: &b [u8], ret: u64) -> unit {
 fn drop_call<a>(c: (&a mut C), ty: u64) -> unit {
     // A framed record's words belong to a frame or to the place that holds them: nothing to free.
     // An array that owns its elements still drops them, in place (its helper frees no storage).
-    if framed(&mut c, ty) && !array_owned(&mut c, ty) {
+    if framed(&mut c, ty) && !frame_drops(&mut c, ty) {
         return ();
     }
     // A body emitted without its bindings (a template's validation replay) cannot name a helper: the
@@ -49169,6 +49347,25 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
                 // needs the name visible across parts, and a build made of several objects needs it
                 // too (B1 stage 3).
                 fx_end(&mut c);
+                if in_place_record(&mut c, ty) {
+                    emit_drop_in_place(&mut c, ty, view(hook));
+                    helper_sym := drop_symbol(&mut c, ty);
+                    fx_helper(&mut c, view(helper_sym));
+                    weak_def(&mut c);
+                    push_bytes(&mut c.out, view(helper_sym));
+                    c.out.push(10);
+                    push_bytes(&mut c.out, view(helper_sym));
+                    o(&mut c, view(":\ntestq %rdi,%rdi\n"));
+                    jump(&mut c, view("jz"), done);
+                    o(&mut c, view("pushq %rbp\nmovq %rsp,%rbp\npushq %r12\npushq %r13\nmovq %rdi,%r12\n"));
+                    call_out(&mut c, view(drop_in_place_symbol(&mut c, ty)));
+                    o(&mut c, view("movq %r12,%rdi\n"));
+                    call_out(&mut c, view("rt_free"));
+                    o(&mut c, view("popq %r13\npopq %r12\nleave\n"));
+                    mark(&mut c, done);
+                    o(&mut c, view("ret\n"));
+                    continue;
+                }
                 helper_sym := drop_symbol(&mut c, ty);
                 fx_helper(&mut c, view(helper_sym));
                 weak_def(&mut c);
@@ -49262,7 +49459,8 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
                     o(&mut c, view("movq %r13,%rax\nimulq $"));
                     on(&mut c, w);
                     o(&mut c, view(",%rax\naddq %r12,%rax\n"));
-                    if is_array(&mut c, arg) {
+                    if is_array(&mut c, arg) || array_record_elem(&mut c, arg) {
+                        // An inline element is dropped in place, at its address.
                         o(&mut c, view("movq %rax,%rdi\n"));
                     } else {
                         o(&mut c, view("movq (%rax),%rdi\n"));
@@ -49273,7 +49471,24 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
                     mark(&mut c, end);
                 }
                 if kind == 6 {
-                    // Inline elements (plain or C records) own nothing: only the buffer is freed.
+                    // Inline elements that own something are dropped in place, each at its address;
+                    // plain or C records own nothing. Then the buffer is freed.
+                    fw := flat_bytes(&mut c, arg);
+                    if (fw != 0) && frame_drops(&mut c, arg) {
+                        head := label(&mut c);
+                        end := label(&mut c);
+                        o(&mut c, view("xorq %r13,%r13\n"));
+                        mark(&mut c, head);
+                        o(&mut c, view("cmpq 8(%r12),%r13\n"));
+                        jump(&mut c, view("jae"), end);
+                        o(&mut c, view("movq %r13,%rdi\nimulq $"));
+                        on(&mut c, fw);
+                        o(&mut c, view(",%rdi\naddq (%r12),%rdi\n"));
+                        drop_call(&mut c, arg);
+                        o(&mut c, view("incq %r13\n"));
+                        jump(&mut c, view("jmp"), head);
+                        mark(&mut c, end);
+                    }
                     if needs_drop(&mut c, arg) & (flat_bytes(&mut c, arg) == 0) {
                         head := label(&mut c);
                         end := label(&mut c);
@@ -49329,6 +49544,65 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
         }
     }
     return ();
+}
+// The in-place drop of the struct or tuple `ty` (drop_in_place_symbol): with its address in %rdi,
+// the user's `drop` runs on it as `&mut self`, then each field that owns something is dropped - a
+// word that holds an owner by that owner's drop, an inline record or array by its own in-place
+// drop at its address. A zero owner word is an owner moved out (a partial move leaves 0 behind), so
+// the word's drop - which starts by testing for 0 - skips it. Nothing is freed.
+fn emit_drop_in_place<a, b>(c: (&a mut C), ty: u64, hook: &b [u8]) -> unit {
+    sym := drop_in_place_symbol(&mut c, ty);
+    fx_helper(&mut c, view(sym));
+    weak_def(&mut c);
+    push_bytes(&mut c.out, view(sym));
+    c.out.push(10);
+    push_bytes(&mut c.out, view(sym));
+    o(&mut c, view(":\npushq %rbp\nmovq %rsp,%rbp\npushq %r12\npushq %r13\nmovq %rdi,%r12\n"));
+    done := label(&mut c);
+    if live_word(&mut c, ty) {
+        // Moved out of the place that held it: nothing is here to drop.
+        o(&mut c, view("cmpq $0,"));
+        on(&mut c, (record_words(&mut c, ty) - 1) * 8);
+        o(&mut c, view("(%r12)\n"));
+        jump(&mut c, view("je"), done);
+    }
+    if hook.len() != 0 {
+        o(&mut c, view("movq %r12,%rdi\n"));
+        call_out(&mut c, hook);
+    }
+    index := ty_arg(&mut c, ty);
+    count := c.decls[index].count;
+    for i in count {
+        t := field_type(&mut c, ty, i);
+        if needs_drop(&mut c, t) {
+            if inline_field(&mut c, ty, i) {
+                // A plain record or array held inline owns nothing; one that owns has its own
+                // in-place drop.
+                if !frame_drops(&mut c, t) {
+                    continue;
+                }
+                o(&mut c, view("leaq "));
+                on(&mut c, field_word(&mut c, ty, i) * 8);
+                o(&mut c, view("(%r12),%rdi\n"));
+                call_out(&mut c, view(drop_in_place_ref(&mut c, t)));
+            } else {
+                o(&mut c, view("movq "));
+                on(&mut c, field_word(&mut c, ty, i) * 8);
+                o(&mut c, view("(%r12),%rdi\n"));
+                holder_drop(&mut c, t);
+            }
+        }
+    }
+    mark(&mut c, done);
+    o(&mut c, view("popq %r13\npopq %r12\nleave\nret\n"));
+    return ();
+}
+// Names the in-place drop of `ty` and asks for it to be emitted (its boxed helper is emitted with it).
+fn drop_in_place_ref<a>(c: (&a mut C), alias: u64) -> u8[] {
+    // An alias (a bound type parameter) names the helper of the type it stands for.
+    ty := base_type(&mut c, alias);
+    drop_ref_name(&mut c, ty);
+    return drop_in_place_symbol(&mut c, ty);
 }
 fn emit_exit<a, b>(c: (&a mut C), argument: &b [u8]) -> unit {
     if c.target == 4 {
@@ -49859,14 +50133,17 @@ fn iface_rv<a>(p: (&a mut IR)) -> u64 {
     mut done = 0;
     while done == 0 {
         b := iface_r1(&mut p);
+        // Ten bytes carry 64 bits: the tenth, at scale 2^63, holds bit 63 alone and ends the number.
+        // (Refusing at 2^56 refused every u64 from 2^63 up, and every negative signed constant.)
+        if (scale == 9223372036854775808) && (1 < b) {
+            iface_bad(&mut p, view("carries a number wider than 64 bits"));
+            return 0;
+        }
         n = n + (b & 127) * scale;
         if (b & 128) == 0 {
             done = 1;
         } else {
             scale = scale * 128;
-            if 72057594037927936 < scale {
-                iface_bad(&mut p, view("carries a number wider than 64 bits"));
-            }
         }
     }
     return n;
@@ -55749,7 +56026,10 @@ pub fn main() -> u64 {
             exchange(&mut c.file, at);
             exchange(&mut c.pos, 0);
         }
-        fail(&mut c, view("no `main` and no public function with at most one parameter to use as the entry: add `pub fn main()`"));
+        mut said = copy_bytes(view("no `main` in "));
+        push_bytes(&mut said, view(input_path(&c, at)));
+        push_bytes(&mut said, view(": a program needs `pub fn main()` (or a public function taking nothing or the argument view); a module without one is a library, used from a program"));
+        fail(&mut c, view(said));
     }
     f := &c.funcs[e - 1];
     m := f.module.copy();

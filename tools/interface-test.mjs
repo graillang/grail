@@ -1319,8 +1319,36 @@ report(
   `${closureKey.key} emitted by both under one name, output ${closureKey.stdout} as built from source`,
 );
 
+// Constants with bit 63 set travel through an interface: u64::MAX, 2^63, an FNV offset basis,
+// i64::MIN and -1 are written as ten-byte LEB128 numbers, and the reader must take all ten bytes
+// back (it once refused anything from 2^56 up as "wider than 64 bits").
+function proveWideConstants() {
+  const directory = join(work, 'wide');
+  mkdirSync(directory, { recursive: true });
+  const fixtures = name => join(root, 'tests/interfaces', name);
+  const all = [fixtures('wide_main.grl'), fixtures('wide_consts.grl'), runtime, platform];
+  const source = compile(all, join(directory, 'source'));
+  assert.equal(source.status, 0, `wide: source build failed\n${source.output}`);
+  const expected = run(link(all, join(directory, 'source')));
+  assert.equal(expected.stdout, '18446744073709551615\n9223372036854775808\n14695981039346656037\n-9223372036854775808\n-1\n', 'wide: the source build prints the wrong constants');
+  const ifaces = emit(all, directory);
+  const mainDir = join(directory, 'main');
+  const constsDir = join(directory, 'consts');
+  const main = compile([fixtures('wide_main.grl'), runtime, platform], mainDir, ['--use', ifaces, '--split']);
+  assert.equal(main.status, 0, `wide: the entry module does not compile against the interface\n${main.output}`);
+  const consts = compile([fixtures('wide_consts.grl'), runtime, platform], constsDir, ['--use', ifaces, '--split', '--no-entry']);
+  assert.equal(consts.status, 0, `wide: wide_consts does not compile against interfaces\n${consts.output}`);
+  const linked = [...parts(mainDir).files, ...partsOfModule(constsDir, 'wide_consts')];
+  const ran = run(linkParts(linked, directory, 'program', mainDir));
+  assert.equal(ran.stdout, expected.stdout, `wide: read through the interface the constants print ${JSON.stringify(ran.stdout)}`);
+  return JSON.stringify(ran.stdout);
+}
+
 const units = proveUnitsAcrossModules();
 report('methods, implementations and nested generics across separately compiled modules', `output ${units} as built from source`);
+
+const wide = proveWideConstants();
+report('u64 and i64 constants with bit 63 set travel in an interface', `output ${wide} as built from source`);
 
 const naming = proveNamingIsTotal();
 report(

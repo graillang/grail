@@ -1164,6 +1164,20 @@ Consequences, stated rather than discovered:
 - the single-file build keeps cross-module inlining only where the optimizer knows no unit
   boundaries; it emits the same markers, so both shapes inline identically.
 
+### Site markers in an inlined copy
+
+A candidate's body may hold the site markers a build with error locations writes for every
+statement (`.gpos`, `.gkind`); any other directive still keeps it from being inlined. The copy keeps
+them, its positions made absolute when it is filed (`ir::absolute_positions`), and `inline_calls`
+writes the caller's last `.gpos` again after each copy, so the caller's code after the call is
+attributed to the caller's statement. The rule for inlined code is therefore: **a failure inside an
+inlined copy reports the line it was written on, in its caller's frame** - the copy is not a frame,
+so the backtrace goes from that line straight to the caller's caller. A synthesised caller with no
+statement of its own (a refined function's checking wrapper, whose `.proved` body is inlined into it)
+is why the copy's own positions are kept: with only the caller's, such a failure had no position at
+all. Inline-site numbers continue per unit across all of its parts, since a unit can stand in the
+stream more than once.
+
 ### The frame constant, which was a latent miscompile
 
 The per-unit change found a real defect that had nothing to do with caching. A function's frame

@@ -1,5 +1,36 @@
 ## Unreleased
 
+- **The optimiser inlines small functions in ordinary builds again.** A small leaf (at most 24
+  instructions, no call but a failure exit) was only inlined when it carried no statement-position
+  marker, and every statement of a build with error locations carries one, so outside
+  `--no-error-sites` almost nothing was inlined (3 bodies on the scheduler's join probe, 57 with the
+  flag). The markers now travel with the copy. A failure inside an inlined function still reports
+  the line it was written on, but the inlined function is no longer a frame of its own: its caller's
+  `= called from` line is the next one shown. Measured (callgrind, one worker): a join 3406 -> 3355
+  instructions, a spawn 2089 -> 1858; the compiler's own text +0.4%.
+
+- Fixed: a module exporting a `u64` constant at or above 2^63, or a negative signed constant, could
+  not be read back from its interface ("carries a number wider than 64 bits"), so `grail build` of a
+  program using such a module failed. The reader now accepts the tenth LEB128 byte that holds bit 63.
+- Fixed: builds sharing one store at once (the per-module runs of one `grail check`, or several
+  builds) wrote their `sha256sum` output to one file in the store, and one run could take another's
+  digest and file a module under another module's interface ("core.iface describes module `io`").
+  Each such command now writes to a directory it claims for itself.
+- **C calls with floats are optimised in release builds (call ABI S8a).** A function that called a
+  C function with `f64`/`f32` arguments or a float result had to stay unoptimised on the LLVM
+  backend (its floats travel in vector registers a lifted call did not carry). The front end now
+  records each C function's argument and result types, and the lifter emits the call as C types it
+  (`call double @scale(i64, double, float)`), on x86-64 for calls whose arguments are all in
+  registers. Variadic calls, records and stack arguments keep the native body.
+- **Records that own data are no longer boxed** (unboxed-values.md, stage 4). Every struct and
+  tuple - strings, vectors and `impl Drop` included - is held as its words in the frame, inline in
+  the record that contains it and flat in vectors; each type gets an in-place drop, and the boxes
+  that remain (enum payloads, closures, `Mutex`, `dyn`, task results) drop in place and free.
+  `check syn1000`: record boxes 404 k -> 71 k, peak memory 53 -> 41 MB.
+- A `dyn` call on a record now costs one call: the vtable adapter that loads the record out of
+  its cell was a function with its own frame calling the method; it is a load and a tail jump.
+  dyncall (20 M dispatches): native 1,645 M -> 1,565 M instructions, LLVM 779 M -> 719 M (Rust -O:
+  648 M).
 - **Field predicates may relate fields of the same record:** `struct Span { lo: u64, hi: u64 where
   lo <= hi }`. A literal owes the predicate once every field has its value, every write of a field it
   reads owes it over the new value and the other fields, a mutable borrow of any such field is
@@ -62,12 +93,27 @@
   declaration changes nothing. x86-64 Linux for now; elsewhere `blocking` is a plain call. The old
   `rt_blocking_enter` warning ("a blocking foreign call is running on a green task's scheduler
   thread") is gone with the unsafe hook that produced it.
+- **Release builds convert integers to `f32` with one instruction.** The LLVM lifter turns
+  `rt_f32_from_int` - which halves the value in a loop and then calls `rt_f32_round` - into
+  `sitofp`/`uitofp` to `float`, chosen by the source's signedness. Both round once to nearest even,
+  as the runtime does, so results are bit-identical (the float matrix pins the edge values). A loop of
+  three million conversions goes from 50 to 32 ms.
+- **The internal assembler covers AArch64 and RISC-V.** `grail build --target aarch64` and
+  `--target riscv64` (Linux) assemble in the compiler run too (`compiler/asm_a64.grl`,
+  `compiler/asm_rv64.grl`; `grail asm --target T`), debug builds included. Their objects are
+  byte-identical to clang's: the syn4000 program on both targets, and all 540 single-source corpus
+  programs on AArch64 (`bun tools/asm-oracle.mjs --target aarch64 --corpus`).
 
 - Fixed: the internal assembler refused `.hidden` (the runtime's `rt_sites_fill`), so every LLVM
   release build failed at `grail asm`. It now takes `.hidden`, `.protected`, `.internal` and
   `.comm`, and `.word` is 32 bits on AArch64. `tests/asm/` holds every ELF directive the
   compiler, runtime and LLVM backend write, checked byte-for-byte against clang by the landing
   suite `asm-oracle` (`bun tools/asm-oracle.mjs --suite`).
+- Fixed: `grail check` of a library file (no `main`) failed with "executable entry requires readonly
+  argv view", located in an imported module's interface (`result.iface`). A module with no `main`
+  makes its first public function the entry, and that rule picked a function no entry can be (one
+  taking a `u64` or a `&dyn Shape`). It now picks only a public function taking nothing or the
+  argument view; a module with neither is told `no `main` in FILE`, located in the file.
 
 - Fixed two compiler aborts on malformed input found by the front-end fuzzer: an unmatched `)` or
   `>` in an `extern` signature (an arithmetic overflow), and a file ending in a `//` comment or a `/`
@@ -224,6 +270,12 @@
   and multiplying. And a float operation on values held in SSE registers works on them directly
   (`subsd %xmm9,%xmm8`) instead of copying both into the scratch pair and the result back. nbody
   executes 27% fewer instructions.
+- **Native backend: three small rewrites.** A local whose address is taken only to load it at once
+  (`leaq -N(%rbp),%R` ... `movq (%R),%R`) is loaded directly, so it can be kept in a register; a
+  shift by a constant uses the immediate, and the run-time check of a constant shift count (or any
+  comparison of two constants) is decided at compile time; an accumulator worked on in %rax
+  (`movq %r12,%rax; xorq ...,%rax; imulq ...,%rax; movq %rax,%r12`) is worked on in its own
+  register. fnv executes 15% fewer instructions, sieve 3%.
 
 - **Native backend: a slice's `data` and `len` live in registers.** The type facts are recorded on
   the native path too, and the optimiser reads F1's slice-descriptor fact: a slice written once at

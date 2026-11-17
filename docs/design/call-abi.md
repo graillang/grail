@@ -268,3 +268,22 @@ optimiser_labels, then S6 after unboxed 3a lands (it builds on 3a's frame aggreg
   difference on LLVM is the GPR<->xmm moves at each edge. S8a lifts C-boundary float calls with a
   typed call from a per-symbol FFI fact; S8b gives internal lifted bodies `double` parameters where
   the signature fact says a word is a float. Neither changes the native convention.
+- **S8a (C-boundary float calls lifted, x86-64).** native.grl `ffi_signature_fact` records, per C
+  symbol, the integer words, the float arguments (f32 mask) and the result kind for a call whose
+  arguments are all in registers (no stack area, not variadic, no records); llvm.grl
+  `lower_ffi_call` passes the floats from %xmm0-7 as `double`/`float` and puts the result back in
+  %rax or %xmm0, and the symbol is declared with those types. Disagreeing call sites leave a symbol
+  untyped. The stay-native rule remains for every other shape (it now fires only there).
+  Fixture: compiler/tests/ffi_float_calls.grl in tools/test-facts.mjs.
+- **S8b (internal float parameters on LLVM): built, measured, dropped.** Bodies with float words
+  were defined as `NAME.d(double ...)` with a word-form shim `NAME`, and lifted direct calls went to
+  `.d`. Measured against main (user instructions): nbody 1,340,697,902 -> 1,340,697,610, xform_f64
+  716,595,875 -> 716,595,208, dot_f64 1,063,971,042 -> 1,063,970,836, matmul unchanged; outputs
+  identical. Direct calls to small float functions are inlined, so the GPR<->xmm moves vanish
+  either way. The cost measured in the microbenchmark (19 vs 12 instructions per call) comes from
+  calls through function values, which must keep the word form for native and dyn callers. Not
+  worth the second entry per float function. If it matters later, it belongs in the closure
+  convention (S6: `{code, env}` with a typed code pointer), not in direct calls.
+- **Dyn dispatch (record vtable adapters).** The adapter is a load and a tail jump instead of a
+  framed call (landed 3fe042c). dyncall: native 1,645 M -> 1,565 M, LLVM 779 M -> 719 M; Rust -O
+  648 M.
