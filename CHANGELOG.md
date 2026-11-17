@@ -1,5 +1,12 @@
 ## Unreleased
 
+- `bun tools/abundance-perf.mjs`: every Abundance port program built through the build store (cold and
+  after a one-statement edit), run (dev and release, checked against the parity reference) and the
+  slowest profiled, on the current compiler and `--branch REF`; `bench/results/abundance.json` and a
+  section of the Performance chapter. It found that a module exporting a `u64` constant above 2^63
+  cannot be read back from its interface file, so eight of the ten programs do not build through
+  the store.
+
 - Engine-shaped benchmarks against C, Rust, Go and Zig (`bench/hashmap`, `bintrees`, `strings`, `json`,
   `dyncall`, `iterchain`, `ecs`, each with matched outputs in all five languages), with a section of
   their own in the book's Performance chapter naming why Grail is behind on each
