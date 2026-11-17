@@ -557,6 +557,10 @@ struct C {
     forge_words: u64,
     // 1 when the forged signature also drops the body's `dyn_result` fact.
     forge_result: u64,
+    // The token position + 1 of a call argument that is passed to a parameter of a plain, non-Owned
+    // `Fn(..)` type, which the checker gives the call's scope (init_parameter): a closure literal
+    // that is that whole argument gets its environment in the caller's frame (call ABI S6 (B)).
+    lent_arg_at: u64,
     // The argument words of the call load_call_args last set up and where the text was then; the
     // next `call *%rax` with no call between records them (indirect_fact). And where the function
     // being emitted begins, to number its indirect calls as the lifter does.
@@ -33177,11 +33181,15 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
             // checker still sees each call's loan.
             mut v = val(0, 0);
             reborrow := reborrow_argument(&mut c);
+            if (argi < count) && (context != NO_TYPE) && (c.raw == 0) && lent_parameter(&mut c, c.params[template_first + argi]) {
+                exchange(&mut c.lent_arg_at, astart + 1);
+            }
             if reborrow != 0 {
                 v = place(&mut c, reborrow - 1, 0);
             } else {
                 v = expr_expected(&mut c, 0, context);
             }
+            exchange(&mut c.lent_arg_at, 0);
             aend := c.pos;
             if argi < count {
                 spans[2 * argi] = astart;
@@ -40214,7 +40222,26 @@ fn tok_is_return<a>(c: (&a mut C), i: u64) -> bool {
     }
     return (c.src[st] == 114) && (c.src[st + 1] == 101) && (c.src[st + 2] == 116) && (c.src[st + 3] == 117) && (c.src[st + 4] == 114) && (c.src[st + 5] == 110);
 }
+// A parameter of an erased closure type (`Fn(..)`/`FnMut(..)`, no environment, not a type
+// parameter, no lifetime) whose bounds do not say `Owned`: the checker keeps such a parameter
+// inside the call (init_parameter's call scope), so the closure given for it cannot outlive it.
+fn lent_parameter<a>(c: (&a mut C), ty: u64) -> bool {
+    if ty_kind(&mut c, ty) != 20 {
+        return false;
+    }
+    if ty_env(&mut c, ty) != 0 {
+        return false;
+    }
+    // Exactly init_parameter's call-scope condition: no `Owned`, built, and no lifetime (`Fn<s>()`
+    // may be stored in a value of that lifetime - it is not call-scoped).
+    if (ty_mode(&mut c, ty) & (CLOSURE_OWNED + CLOSURE_UNBUILT)) != 0 {
+        return false;
+    }
+    return type_regions(&mut c, ty).len() == 0;
+}
 fn closure_literal<a>(c: (&a mut C)) -> Val {
+    // The whole argument of a lent parameter (lent_arg_at), decided again once the literal ends.
+    lent_start := exchange(&mut c.lent_arg_at, 0) == c.pos + 1;
     // Inside a generic function the closure is compiled once per specialization, with its bindings.
     if (c.tnames.len() != 0) & (c.bindings.len() == 0) & (c.validating == 0) {
         fail(&mut c, view("closures inside generic functions are not supported here"));
@@ -40554,9 +40581,16 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
     decl := c.decls.len() - 1;
     envty := intern_args(&mut c, 8, decl, 0, u64[], u64[]);
     fnty := intern_env(&mut c, 20, ret, mode, caps, copy_numbers(&params), envty);
-    // Build the object.
-    sz := imm(&mut c, count);
-    obj := invoke(&mut c, view("rt_rec"), one(sz));
+    // Build the object: in the caller's frame when it is the whole argument of a lent parameter
+    // (the literal ends the argument), else on the heap.
+    frame_env := lent_start && ((kind(&mut c) == 44) || (kind(&mut c) == 41)) && (c.validating == 0);
+    mut obj = 0;
+    if frame_env {
+        obj = frame_alloc(&mut c, count);
+    } else {
+        sz := imm(&mut c, count);
+        obj = invoke(&mut c, view("rt_rec"), one(sz));
+    }
     // The environment's place exists before the captures are stored, so a borrowed capture can
     // record its loan against the field it lands in.
     own(&mut c, obj, fnty);
@@ -40595,7 +40629,13 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
     code := save(&mut c);
     rec_store(&mut c, obj, 0, code);
     o(&mut c, view("leaq "));
-    drop_name(&mut c, envty);
+    if frame_env {
+        // The environment is frame words: its drop drops the captures in place and frees nothing.
+        inplace := drop_in_place_ref(&mut c, envty);
+        push_bytes(&mut c.out, view(inplace));
+    } else {
+        drop_name(&mut c, envty);
+    }
     o(&mut c, view("(%rip),%rax\n"));
     dropper := save(&mut c);
     rec_store(&mut c, obj, 1, dropper);
@@ -57324,6 +57364,7 @@ pub fn main() -> u64 {
         forge_sig: u8[],
         forge_words: 0,
         forge_result: 0,
+        lent_arg_at: 0,
         pending_words: 0,
         forge_indirect: u8[],
         pending_at: 0,

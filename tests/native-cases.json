@@ -18473,5 +18473,11 @@
       "riscv64"
     ],
     "note": "operands bounded only by 2*10^12 (past the interval reading's 2^40) keep the overflow check, which fires"
+  },
+  {
+    "name": "callabi-lent-closure-frame-env",
+    "source": "fn apply(f: Fn(u64) -> u64, x: u64) -> u64 {\n    return f(x) + f(x + 1);\n}\nfn each(n: u64, f: FnMut(u64) -> unit) -> unit {\n    mut call = f;\n    for i in n { call(i); }\n}\nfn main() -> u64 {\n    k := host::argc();\n    v := u64[10, 20, 30];\n    mut total = 0;\n    for i in 1000 {\n        owned := u64[i, i + 1];\n        r := &v;\n        total += apply(|x: u64| -> u64 x + r[0] + owned.len() + k, i);\n    }\n    mut seen = 0;\n    each(5, |i: u64| { seen += i * k; });\n    println(\"{} {} {}\", total, seen, v.len());\n    return 0;\n}\n",
+    "stdout": "1026000 0 3\n",
+    "note": "call ABI S6 (B): a closure literal passed to a plain non-Owned Fn(..) / FnMut(..) parameter gets its environment in the caller's frame (frame_alloc with an aggregate fact, an in-place drop as its drop word); it captures an owned vector made per iteration, a borrowed vector and a scalar, and is called twice; the FnMut closure mutates its own copy of a captured variable (captures are by value). valgrind-clean on both backends."
   }
 ]

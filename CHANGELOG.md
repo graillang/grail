@@ -104,6 +104,13 @@
   indices; `mid <= len` is checked as it runs.
 - Fix: a bare `return;` in a function that takes a borrow no longer reports "returned borrow escapes
   its declared input lifetime" (its unit value was read from the first parameter's slot).
+- **A closure passed straight to a `Fn(..)` parameter no longer allocates (call ABI S6 B).** A
+  closure literal that is the whole argument for a plain `Fn(..)`/`FnMut(..)` parameter without
+  `Owned` or a lifetime - which the checker keeps inside the call - builds its environment in the
+  caller's frame, with an in-place drop, instead of `rt_rec`/`rt_free`. A 10 M-call loop through
+  such a parameter: native 1,400 M -> 930 M instructions, LLVM 1,400 M -> 450 M.
+- Release builds lift the foreign-call marker's register save around `rt_foreign_lost`;
+  `GRAIL_LLVM_WHY=FUNCTION` prints the instruction that keeps FUNCTION unoptimised.
 
 - **Text costs less to build and parse.** A string literal is checked to be UTF-8 while compiling,
   so making a `string` of it is a copy with no run-time check; appending a `string` onto a `string`

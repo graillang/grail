@@ -293,3 +293,10 @@ optimiser_labels, then S6 after unboxed 3a lands (it builds on 3a's frame aggreg
   among the function's `call *%rax` lines); lower_indirect_call passes `poison` past it. The check:
   the frame-slot loads into argument registers in the run of moves just before the call must not
   reach past the count. dyncall LLVM 719 M -> 679 M.
+- **S6 (B), lent frame environments.** native.grl `lent_parameter` is init_parameter's call-scope
+  condition exactly (kind 20, no env, not Owned or unbuilt, no lifetime: `Fn<s>()` may be stored in
+  a value of `s`). `call` marks such an argument's start; a closure literal that is the whole
+  argument takes `frame_alloc(2 + captures)` (aggregate fact, so the escaped-slot check covers it)
+  and the in-place drop as its drop word. Generic `F` is S6 (A), closure_bounds_design's. Closure
+  loop (10 M calls): native 1,400 M -> 930 M, LLVM 1,400 M -> 450 M; callabi-lent-closure-frame-env
+  is valgrind-clean on both backends.

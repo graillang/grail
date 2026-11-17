@@ -454,6 +454,8 @@ struct L {
     argwritten: u64,
     // The FFI facts (ffi_signatures).
     ffis: Set,
+    // GRAIL_LLVM_WHY: the function whose first refusal is printed (bad).
+    why: u8[],
     // Vector registers written and not read since (a pending float argument), and ones not written
     // since the entry or the last call (xmm_read).
     xpend: u64,
@@ -813,6 +815,15 @@ fn expand_into<a, b, c>(out: (&a mut u8[]), tmpl: &b [u8], args: (&c u8[][])) ->
     return ();
 }
 fn bad<a>(l: (&a mut L)) -> unit {
+    if (l.fail == 0) && (l.why.len() != 0) && eq(view(l.why), view(l.fname)) {
+        // GRAIL_LLVM_WHY=FUNCTION: say which instruction keeps FUNCTION native.
+        mut msg = copy(view("llvm: "));
+        put(&mut msg, view(l.fname));
+        put(&mut msg, view(" stays native at `"));
+        put(&mut msg, view(l.curline));
+        put(&mut msg, view("`\n"));
+        host::print(view(msg));
+    }
     l.fail = 1;
     return ();
 }
@@ -2545,8 +2556,9 @@ fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> uni
     if !typed_ffi {
         xmm_call(&mut l);
     }
-    if l.areaopen != 0 {
-        // Words on the stack: only a callee whose signature fact says it takes them.
+    if (l.areaopen != 0) && !eq(target, view("rt_foreign_lost")) {
+        // Words on the stack: only a callee whose signature fact says it takes them. The foreign-call
+        // marker's area is a save area: rt_foreign_lost takes nothing from it.
         code := set_get(&l.sigs, target);
         if (code == 0) || (code / 4 <= 6) || (code / 4 - 6 > l.area.len()) {
             bad(&mut l);
@@ -3503,6 +3515,41 @@ fn lift_atom<a, b>(l: (&a mut L), line: &b [u8]) -> unit {
     set_reg(&mut l, view("rax"), view(old));
     return ();
 }
+// `lock incq M` / `lock decq M` (the foreign-call marker's counter, native.grl ffi_marker_leave):
+// an atomic add of 1 or -1 to the word at M, sequentially consistent, whose flags are the new
+// value's (Z, S; O when it wrapped past the signed range; C is untouched by inc/dec - here left as
+// it was, which no Grail sequence reads after one).
+fn lift_locked<a, b>(l: (&a mut L), rest: &b [u8]) -> unit {
+    mut sp = 0;
+    while (sp < rest.len()) && (rest[sp] != 32) {
+        sp += 1;
+    }
+    inner := sub(rest, 0, sp);
+    if (sp >= rest.len()) || !(eq(view(inner), view("incq")) || eq(view(inner), view("decq"))) {
+        bad(&mut l);
+        return ();
+    }
+    operand := trim(view(sub(rest, sp + 1, rest.len())));
+    if (operand.len() == 0) || (operand[operand.len() - 1] != 41) {
+        bad(&mut l);
+        return ();
+    }
+    p := address(&mut l, view(operand));
+    mut rmw = copy(view("atomicrmw add ptr {}, i64 1 seq_cst, align 8"));
+    mut step = copy(view("add i64 {}, 1"));
+    mut edge = copy(view("icmp eq i64 {}, 9223372036854775807"));
+    if eq(view(inner), view("decq")) {
+        rmw = copy(view("atomicrmw sub ptr {}, i64 1 seq_cst, align 8"));
+        step = copy(view("sub i64 {}, 1"));
+        edge = copy(view("icmp eq i64 {}, 9223372036854775808"));
+    }
+    old := def(&mut l, view(rmw), &u8[][p]);
+    new := def(&mut l, view(step), &u8[][copy(view(old))]);
+    over := def(&mut l, view(edge), &u8[][old]);
+    set_flag(&mut l, view("O"), view(over));
+    zero_sign(&mut l, view(new));
+    return ();
+}
 fn instruction<a, b, c>(l: (&a mut L), line: &b [u8], facts: (&c Facts)) -> unit {
     mut space = line.len();
     for i in line.len() {
@@ -3540,11 +3587,25 @@ fn instruction<a, b, c>(l: (&a mut L), line: &b [u8], facts: (&c Facts)) -> unit
     if area_instruction(&mut l, view(op), view(rest)) {
         return ();
     }
+    if eq(view(op), view("lock")) {
+        lift_locked(&mut l, view(rest));
+        return ();
+    }
     // An argument load as load_call_args emits it - a frame slot into an argument register - for
     // lower_indirect_call's check of its word count. The arguments are loaded in one run of moves
     // right before the call, so any other instruction (a division's operand load is followed by its
     // `idivq`, a compare by its jump) starts the count again.
-    if !starts(view(op), view("mov")) && !starts(view(op), view("lea")) && !eq(view(op), view("call")) {
+    // A move into memory (a store through a register just loaded) ends the run too: the registers
+    // it used were the store's, not the call's.
+    mut into_memory = false;
+    if starts(view(op), view("mov")) {
+        mut lc = rest.len();
+        while (lc > 0) && (rest[lc - 1] != 44) {
+            lc -= 1;
+        }
+        into_memory = (lc < rest.len()) && (rest[lc] != 37);
+    }
+    if (!starts(view(op), view("mov")) && !starts(view(op), view("lea")) && !eq(view(op), view("call"))) || into_memory {
         l.argwritten = 0;
     }
     if eq(view(op), view("movq")) && has(view(rest), view("(%rbp),%")) {
@@ -4329,8 +4390,11 @@ fn lower_ffi_call<a, b>(l: (&a mut L), target: &b [u8], code: u64) -> unit {
             word = def(&mut l, view("zext i32 {} to i64"), &u8[][b]);
         }
         emit(&mut l, view("store i64 {}, ptr {}"), &u8[][word, slot_of(view("%x."), view("xmm0"))]);
-        l.xstale = l.xstale & (18446744073709551615 - 1);
     }
+    // The call's result is a scalar (a fact is only made for one), so the other vector registers
+    // hold nothing it returned: code that saves them across the foreign-call marker (rt_foreign_lost)
+    // reads a dead value, which their slots' old contents are as good as.
+    l.xstale = 0;
     set_chain(&mut l, reg_index(view("rax")) + 1, 0, 0, 0);
     clear_args(&mut l);
     refresh(&mut l);
@@ -4493,6 +4557,10 @@ fn area_line<a>(line: &a [u8]) -> bool {
     if (starts(line, view("subq $")) || starts(line, view("addq $"))) && ends(line, view(",%rsp")) {
         return parse_int(view(sub(line, 6, line.len() - 5))).ok != 0;
     }
+    // The foreign-call marker's save of the result registers around rt_foreign_lost reads them back.
+    if starts(line, view("movq ")) && has(line, view("(%rsp),%")) {
+        return true;
+    }
     if starts(line, view("movq %")) && ends(line, view("(%rsp)")) {
         mut comma = 0;
         for i in line.len() {
@@ -4500,7 +4568,8 @@ fn area_line<a>(line: &a [u8]) -> bool {
                 comma = i;
             }
         }
-        return (comma != 0) && (parse_int(view(sub(line, comma + 1, line.len() - 6))).ok != 0);
+        off := sub(line, comma + 1, line.len() - 6);
+        return (comma != 0) && ((off.len() == 0) || (parse_int(view(off)).ok != 0));
     }
     return false;
 }
@@ -4541,6 +4610,33 @@ fn area_instruction<a, b, c>(l: (&a mut L), op: &b [u8], rest: &c [u8]) -> bool 
         }
         return true;
     }
+    // A word read back from the area: the foreign-call marker (native.grl, blocking externs) saves
+    // the C result registers below %rsp across `call rt_foreign_lost` and restores them.
+    if eq(op, view("movq")) && has(rest, view("(%rsp),%")) && !ends(rest, view("(%rsp)")) {
+        o := operands(rest);
+        if (o.len() != 2) || (o[1][0] != 37) {
+            bad(&mut l);
+            return true;
+        }
+        at := sub(view(o[0]), 0, o[0].len() - 6);
+        mut k = 0;
+        mut ok = true;
+        if at.len() != 0 {
+            kk := parse_int(view(at));
+            ok = kk.ok != 0;
+            if ok {
+                k = u64(kk.v);
+            }
+        }
+        if (l.areaopen == 0) || !ok || (k % 8 != 0) || (k / 8 >= l.area.len()) {
+            bad(&mut l);
+            return true;
+        }
+        word := copy(view(l.area[k / 8]));
+        dreg := sub(view(o[1]), 1, o[1].len());
+        set_reg(&mut l, view(dreg), view(word));
+        return true;
+    }
     store := eq(op, view("cstarg")) || (eq(op, view("movq")) && ends(rest, view("(%rsp)")));
     if !store {
         return false;
@@ -4556,13 +4652,20 @@ fn area_instruction<a, b, c>(l: (&a mut L), op: &b [u8], rest: &c [u8]) -> bool 
         src = sub(view(o[0]), 1, o[0].len());
         at = sub(view(o[1]), 0, o[1].len() - 6);
     }
-    k := parse_int(view(at));
-    if (l.areaopen == 0) || (k.ok == 0) || (k.v < 0) || (k.v % 8 != 0) || (u64(k.v) / 8 >= l.area.len()) {
+    // `(%rsp)` with no displacement is word 0.
+    mut kv: i64 = 0;
+    mut kok = true;
+    if at.len() != 0 {
+        k := parse_int(view(at));
+        kok = k.ok != 0;
+        kv = k.v;
+    }
+    if (l.areaopen == 0) || !kok || (kv < 0) || (kv % 8 != 0) || (u64(kv) / 8 >= l.area.len()) {
         bad(&mut l);
         return true;
     }
     v := get_reg(&mut l, view(src));
-    l.area[u64(k.v) / 8] = v;
+    l.area[u64(kv) / 8] = v;
     return true;
 }
 // A load of `16 + 8k(%rbp)`, word 6 + k of the arguments (native.grl `stack_params`): the body's
@@ -5210,7 +5313,7 @@ fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), fact
             begin_block(&mut l, view(next));
         }
         l.rline = m;
-        if l.verify != 0 {
+        if (l.verify != 0) || (l.why.len() != 0) {
             exchange(&mut l.curline, copy(line));
         }
         instruction(&mut l, line, &facts);
@@ -8358,7 +8461,7 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
             set_add(&mut weak, view(sub(wl, 6, wl.len())));
         }
     }
-    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, pairs: u64[], pair_widths: u64[], fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], edptr: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], hstable: u64[], hesc: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, body_blk: 0, dnames: u8[][], dmap: map_new(16), hmap: map_new(16), cmap: map_new(16), sl_start: u64[], sl_lines: u64[], proof: u64[], rline: 0, ranges: ranges, sigs: set_new(16), nargs: 6, retw: 2, rdxdead: 0, rdxcallee: u8[], curline: u8[], sigerr: u8[], wrong: u8[][], area: u8[][], areaopen: 0, argwritten: 0, ffis: set_new(16), xpend: 0, xstale: 18446744073709551615 };
+    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, pairs: u64[], pair_widths: u64[], fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], edptr: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], hstable: u64[], hesc: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, body_blk: 0, dnames: u8[][], dmap: map_new(16), hmap: map_new(16), cmap: map_new(16), sl_start: u64[], sl_lines: u64[], proof: u64[], rline: 0, ranges: ranges, sigs: set_new(16), nargs: 6, retw: 2, rdxdead: 0, rdxcallee: u8[], curline: u8[], sigerr: u8[], wrong: u8[][], area: u8[][], areaopen: 0, argwritten: 0, ffis: set_new(16), why: host::env(view("GRAIL_LLVM_WHY")), xpend: 0, xstale: 18446744073709551615 };
     // A function whose address is taken (`NAME(%rip)`, or named by data such as a vtable) is
     // called through a pointer by code that does not know its signature, so it keeps the six-word
     // form: an indirect call passes six words and reads rax:rdx, and LLVM must never see a call
