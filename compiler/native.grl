@@ -499,6 +499,12 @@ struct C {
     // checks --verify-facts emits can be shown to fire (docs/design/typed-ir.md, "Tests that catch
     // a wrong fact"). 0, the default, records the type the front end actually has.
     f1_what: u64,
+    // --forge-signature=SYMBOL:WORDS: a test aid that records SYMBOL's signature fact with WORDS
+    // argument words, so the lifter's signature checks can be shown to fire. Empty by default.
+    forge_sig: u8[],
+    forge_words: u64,
+    // 1 when the forged signature also drops the body's `dyn_result` fact.
+    forge_result: u64,
     debug_funcs: DebugFunc[],
     debug_vars: DebugVar[],
     debug_types: DebugType[],
@@ -3984,6 +3990,23 @@ fn load_call_args<a, b>(c: (&a mut C), args: (&b u64[]), shift: u64) -> unit {
         get(&mut c, args[i], view(r));
     }
     get(&mut c, record, view("%r9"));
+    return ();
+}
+// The LLVM backend's signature fact for the body being emitted: its argument words, the registers
+// store_params reads (six at most: past six the sixth carries the record). The lifter defines the
+// body and its calls with exactly these words (llvm.grl `signatures`).
+fn signature_fact<a>(c: (&a mut C), count: u64) -> unit {
+    if (c.backend == 0) || (c.validating != 0) || (c.facts_fn.len() == 0) {
+        return ();
+    }
+    mut words = count;
+    if 6 < count {
+        words = 6;
+    }
+    if (c.forge_sig.len() != 0) && same(view(c.forge_sig), view(c.facts_fn)) {
+        words = c.forge_words;
+    }
+    llvm::fact_signature(&mut c.facts, copy_bytes(view(c.facts_fn)), words);
     return ();
 }
 // Prologue: parameter i of `count` into frame slot i (see load_call_args for more than six).
@@ -11697,6 +11720,9 @@ fn dyn_pair_of_words<a, b, d>(c: (&a mut C), data: &b [u8], table: &d [u8]) -> u
 // in the returning frame. The fact keeps the second word live at the `ret`; the caller rebuilds the
 // pair in its own frame (save_result).
 fn dyn_result<a>(c: (&a mut C)) -> unit {
+    if (c.forge_result != 0) && same(view(c.forge_sig), view(c.facts_fn)) {
+        return ();
+    }
     if c.facts_fn.len() != 0 {
         llvm::fact_dyn_result(&mut c.facts, copy_bytes(view(c.facts_fn)));
     }
@@ -15337,8 +15363,16 @@ fn ffi_emit_call<a, b, d, e, f>(
         o(&mut c, view(",%eax\n"));
     }
     if symbol.len() == 0 {
-        get(&mut c, target, view("%rax"));
-        call_slot_out(&mut c, view("call *%rax\n"), view("a closure call"));
+        if c.target == 0 {
+            // A C call through a `cfn` value. %r11 is no argument register, %al may already hold
+            // the vector count of a variadic callee, and `call *%r11` is the spelling the LLVM
+            // lifter keeps native: it lifts `call *%rax`, which is always the Grail convention.
+            get(&mut c, target, view("%r11"));
+            call_slot_out(&mut c, view("call *%r11\n"), view("a call through a C function pointer"));
+        } else {
+            get(&mut c, target, view("%rax"));
+            call_slot_out(&mut c, view("call *%rax\n"), view("a closure call"));
+        }
     } else {
         call_out(&mut c, view(symbol));
     }
@@ -17277,6 +17311,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     } else {
         exchange(&mut c.export_fret, 0);
         store_params(&mut c, count);
+        signature_fact(&mut c, count);
     }
     // The parameter refinements hold here, where the parameters are the arguments they were given.
     // Before the frame zeroing on purpose: the check's own return address must stay inside the
@@ -46746,6 +46781,9 @@ pub fn main() -> u64 {
         no_sites: 0,
         check_only: 0,
         f1_what: 0,
+        forge_sig: u8[],
+        forge_words: 0,
+        forge_result: 0,
         debug_funcs: DebugFunc[],
         debug_vars: DebugVar[],
         debug_types: DebugType[],
@@ -47390,7 +47428,40 @@ pub fn main() -> u64 {
                                     exchange(&mut c.backend, 1);
                                     offset += 1;
                                 } else {
-                                    if starts_with(view(option), view("--f1-what=")) {
+                                    if starts_with(view(option), view("--forge-signature=")) {
+                                        // A test aid: record SYMBOL's signature fact with WORDS
+                                        // argument words instead of its real count, so the lifter's
+                                        // checks of a wrong signature can be shown to fire.
+                                        // `:1` after WORDS also records a one-word result for a
+                                        // body that returns two (no `dyn_result` fact).
+                                        mut colon = 0;
+                                        mut second = 0;
+                                        for d in option.len() - 18 {
+                                            if option[18 + d] == 58 {
+                                                if colon == 0 {
+                                                    colon = 18 + d;
+                                                } else {
+                                                    second = 18 + d;
+                                                }
+                                            }
+                                        }
+                                        mut end = option.len();
+                                        if second != 0 {
+                                            end = second;
+                                            exchange(&mut c.forge_result, 1);
+                                        }
+                                        mut n = 0;
+                                        for d in end - colon - 1 {
+                                            n = n * 10 + u64(option[colon + 1 + d]) - 48;
+                                        }
+                                        mut sym = u8[];
+                                        for d in colon - 18 {
+                                            sym.push(option[18 + d]);
+                                        }
+                                        exchange(&mut c.forge_sig, sym);
+                                        exchange(&mut c.forge_words, n);
+                                        offset += 1;
+                                    } else if starts_with(view(option), view("--f1-what=")) {
                                         // A test aid: record a deliberately wrong F1 kind so the
                                         // --verify-facts checks can be shown to fire.
                                         mut n = 0;
@@ -47940,6 +48011,10 @@ pub fn main() -> u64 {
         if c.backend != 0 {
             // LLVM IR for the lifted functions beside the native remainder: PATH.ll and PATH.
             lowered := llvm::lower(view(out), view("x86_64-unknown-linux-gnu"), &c.facts, c.verify_facts, c.range_facts);
+            if lowered.error.len() != 0 {
+                host::print(view(lowered.error));
+                return 1;
+            }
             mut ir_path = copy_bytes(view(path));
             push_bytes(&mut ir_path, view(".ll"));
             written := host::write_file(view(ir_path), view(lowered.ir));
@@ -47959,6 +48034,10 @@ pub fn main() -> u64 {
         // LLVM IR (PATH.ll) for the lifted functions; the remainder goes through the usual
         // instruction selection, followed by the calling-convention thunks.
         lowered := llvm::lower_for(view(out), target, &c.facts, c.verify_facts, c.range_facts);
+        if lowered.error.len() != 0 {
+            host::print(view(lowered.error));
+            return 1;
+        }
         mut ir_path = copy_bytes(view(path));
         push_bytes(&mut ir_path, view(".ll"));
         written := host::write_file(view(ir_path), view(lowered.ir));

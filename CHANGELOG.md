@@ -1,5 +1,15 @@
 ## Unreleased
 
+- **Release builds call like C (LLVM backend, call ABI S1-S2).** A lifted function used to take and
+  pass all six argument registers and return two words, and was almost never internal, so LLVM
+  kept unused words alive across every call: fib(32) ran 112.8 M instructions against clang's 67.1 M.
+  The front end now records each function's argument words; the lifter defines and calls it with
+  exactly those and one result word (two for a `&dyn` result), and functions native code does not
+  call are internal. fib(32) is 74.9 M, the shape clang emits. A wrong signature fact is refused, and
+  an error under `--verify-facts`. Calls through closures, vtables and function values are lifted on
+  x86-64 too, so the functions that make them are optimised instead of shipping as unoptimised
+  text (`&Fn` call loop: 430 M -> 120 M instructions).
+
 - **A failure allocates nothing, on every route.** A failed check inside a parallel job used to build
   its failure record and texts on the heap where it failed, so every `@no_alloc` function that
   could index, cast or unwrap was refused once the job-failure path existed. The failing stack now
