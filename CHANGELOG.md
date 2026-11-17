@@ -1,5 +1,12 @@
 ## Unreleased
 
+- **Closures given for a generic `F` live in the frame (S6(A)).** A closure whose type is its own
+  literal's - a local closure, or one passed for a callable-bound parameter - is now held as its
+  environment's words in the caller's frame, copied on a move and dropped in place, and called
+  directly: no heap object, as in Rust. It is boxed once, where it meets an erased `Fn(..)` type, a job
+  or thread payload, or a `&Fn(..)` parameter. A closure written inside a generic function sees that
+  specialisation's types, so it may call a captured callable-bound `f` (`|i| f()` inside `pool::run`'s
+  adapters). Bound violations through a generic `F` now give the same messages as through `Fn(..)`.
 - **Fix: every closure expression is a type of its own.** Two closure literals with the same
   signature and environment shape compared equal inside a generic type, so `k = keep(|| ..)` could
   replace a `Keep<F>` built from another literal; calls through it then ran the first literal's body
