@@ -1,5 +1,16 @@
 ## Unreleased
 
+- **The standard map is one open-addressed table** (`lib/hashmap.grl`). Keys, values and their
+  hashes are stored densely in insertion order (iteration order and `key_at`/`value_at` are
+  unchanged), indexed by one table of slot words (a 32-bit hash tag and the entry index) with
+  Robin Hood linear probing and backward-shift deletion, at most half full; the per-bucket vectors
+  are gone. `hash::hash` (what the maps use) is now SipHash-1-3, as Rust's and CPython's tables
+  are; `hash::hasher` stays SipHash-2-4. The hasher compresses a word at a time (`write_num`,
+  `write_bytes`) instead of byte by byte, and `hash::table_hasher`/`hash::hash_from` hash from a
+  prepared state. bench/hashmap.grl: Grail-LLVM 4.49G -> 1.10G instructions (Rust 0.64G),
+  Grail-native 28.3G -> 4.6G (best development rival 8.1G). The LLVM backend emits generic
+  specialisations `weak_odr` instead of `weak`, so LLVM may inline them, and pushing a record of
+  whole words copies words rather than calling the byte copier.
 - **Small runtime functions are inlined into every module.** A small runtime body (the scheduler's
   `rt_current`, `rt_list_set`, `rt_list_head`, ...) is now inlined where another module calls it,
   in every build shape: a per-module build carries the bodies in `runtime.facts`. A failure inside
