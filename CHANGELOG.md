@@ -31,6 +31,11 @@
   program's own sources against them, then links with the base. The fixed cost of recomputing a
   value fell from +1.1 s to +0.07-0.11 s of CPU (the probe's function cache was invalidated by any
   change to the program's declarations, so the runtime was recompiled after every edit).
+- `grail build --report checks` prints every runtime check left in the program's own functions,
+  one line each: the function, `file:line:col`, and the kind (index, overflow, divide, conversion,
+  refinement, ...). A check the prover removed is not listed, so what stays in a hot loop is
+  visible. The report run is uncached, so a module from the build store cannot hide its checks.
+  The compiler's own flag is `--report-checks`.
 
 - **`grail cache warm [--target T]`** checks and builds every standard module into the build store,
   as rustup ships libstd: a project's first check then compiles only its own modules. The installers
