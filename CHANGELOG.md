@@ -47,6 +47,10 @@
   worker count with every runtime told its threads. `bash tools/quiet-window.sh` takes the wall-time
   measurements (sched-rivals, the parallel benchmark, the kernels) in one command, pinned with
   taskset, when the machine has been quietened.
+- **Native backend: unchecked multiplies by a constant are cheap.** A multiply the prover bounded
+  (an array index `i * 3`) no longer loads the constant and uses `mulq`: it is
+  `leaq (%r12,%r12,2),%rax` for 3, 5 and 9, a shift for a power of two, else `imulq $c`. nbody
+  executes 13% fewer instructions.
 
 - An effect refusal over a callee the run cannot see (compiling a program to assembly without the
   runtime's sources) names it - "the target is `rt_len`, whose body and effect summary this run does
