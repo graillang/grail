@@ -1,0 +1,67 @@
+use btree;
+// Guards on layout decisions that have regressed silently before: small enums held inside framed
+// records and returned through iteration (stage 4 once re-boxed them), struct literals bound and
+// passed straight from their constructor's words, and pops that land in the caller's frame.
+struct Slot {
+    key: u64,
+    hit: u64?,
+    note: char?
+}
+struct P {
+    x: u64,
+    y: u64,
+    z: u64
+}
+fn mid(p: P) -> u64 {
+    return p.y;
+}
+fn main() -> u64 {
+    mut slots = Slot[];
+    for i in 6 {
+        mut s = Slot { key: i, hit: None, note: None };
+        if i % 2 == 0 {
+            s.hit = Some(i * 10);
+        }
+        slots.push(s);
+    }
+    mut hits = 0;
+    for s in &slots {
+        match &s.hit {
+            Some(h) => { hits = hits + h; },
+            None => {},
+        }
+    }
+    println(hits);
+    mut m = btree::new<u64, u64>();
+    for i in 20 {
+        m.insert((i * 7) % 20, i);
+    }
+    mut prior = 0;
+    mut n = 0;
+    for pair in m.iter() {
+        k := pair.0;
+        if (n > 0) && (*k <= prior) {
+            println("order broken at {}", n);
+        }
+        prior = *k;
+        n += 1;
+    }
+    println(n);
+    mut keep = P[];
+    for i in 4 {
+        mut p = P { x: i, y: i * 2, z: i * 3 };
+        p.z = p.z + 1;
+        keep.push(p);
+        println(mid(P { x: 0, y: i, z: 0 }));
+    }
+    last := keep.pop()!;
+    println("{} {} {}", last.x, last.y, last.z);
+    mut sum = 0;
+    while let Some(q) = keep.pop() {
+        sum = sum + q.x + q.y + q.z;
+    }
+    println(sum);
+    gone := slots.remove(1);
+    println("{} {}", gone.key, slots.len());
+    return 0;
+}

@@ -1,0 +1,29 @@
+// The help decision itself, asked where it matters: a green task with a stealable job waiting asks
+// rt_job_may_help on a fresh stack (it may help) and again with less than an eighth of its stack
+// left (it must decline, and park instead, whatever is queued). Without the room check the second
+// answer is 1 and a helped job runs into the guard page.
+unsafe module runtime;
+fn deep(depth: u64, w: u64) -> u64 {
+    t := rt_current();
+    base := raw_load(t + 8);
+    size := raw_load(t + 16);
+    mut probe = base;
+    at := &mut probe;
+    if at < base + size / 10 {
+        return rt_job_may_help(w);
+    }
+    return deep(depth + 1, w) + 0 * depth;
+}
+fn ask(n: u64, unused: u64) -> u64 {
+    w := rt_worker_self();
+    fresh := rt_job_may_help(w);
+    low := deep(0, w);
+    return fresh * 10 + low;
+}
+fn body<s>(sc: (&s Scope<u64>), unused: u64) -> u64 {
+    t := spawn(sc, 0, ask);
+    return join(t);
+}
+fn main() {
+    println(task_scope(0, body));
+}

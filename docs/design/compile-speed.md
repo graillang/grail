@@ -268,6 +268,11 @@ compiling the bodies that miss need.
 
 ## Against Go, Zig and rustc
 
+The current figures - instructions in one process and wall time at four jobs, for a check, an
+edited check, a cold build, an edited build and a no-op rebuild, on the generated programs and the
+rival twins - are `bench/results/compile.json`, drawn in the book's Performance chapter with the cause
+of every gap. The tables below are the first measurement, kept for the record.
+
 The bar, since 2026-11-16: **the fastest of Go, Zig and rustc on equivalent programs**, checking
 and building, cold and after a one-function edit.
 

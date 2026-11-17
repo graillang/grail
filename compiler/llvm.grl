@@ -646,13 +646,12 @@ fn is_local_label<a>(name: &a [u8]) -> bool {
 // ---- function splitting ----
 
 // The stream's text functions: a non-.L label in .text up to its `.set .Fn,SIZE` (or the next
-// label or section change for frameless functions). Inline constant pools (`.pushsection` ...
-// `.popsection`) are moved to the data lines.
+// label or section change for frameless functions). Pushed sections (`.pushsection` ...
+// `.popsection`: constant pools, statics) are moved to the data lines.
 fn split<a>(lines: (&a u8[][]), funcs: (&a mut Func[]), data: (&a mut u8[][])) -> unit {
     mut text = 1;
     mut open = 0;
     mut pool = false;
-    mut pushed = u64[];
     for i in lines.len() {
         line := view(lines[i]);
         if eq(line, view(".text")) {
@@ -666,20 +665,9 @@ fn split<a>(lines: (&a u8[][]), funcs: (&a mut Func[]), data: (&a mut u8[][])) -
                 open = 0;
             }
         }
-        // A `.pushsection` outside a function (a static's data) leaves .text until its
-        // `.popsection`: the labels inside are data, not functions.
-        if (open == 0) && starts(line, view(".pushsection")) {
-            pushed.push(text);
-            text = 0;
-            data.push(copy(line));
-            continue;
-        }
-        if (open == 0) && starts(line, view(".popsection")) && (pushed.len() != 0) {
-            text = pushed.pop()!;
-            data.push(copy(line));
-            continue;
-        }
-        if open != 0 && (pool || starts(line, view(".pushsection"))) {
+        // A pushed section is data wherever it appears: inside a function (a constant pool) or
+        // between two (a static's storage, whose label must not open a function).
+        if pool || starts(line, view(".pushsection")) {
             if starts(line, view(".pushsection")) {
                 pool = true;
                 mut d = u8[];
@@ -2852,6 +2840,372 @@ fn atom_cas<a, b, c, d>(l: (&a mut L), weak: u64, p: &b [u8], expected: &c [u8],
     put(&mut t, view(", align 8"));
     return def(&mut l, view(t), &u8[][copy(p), copy(expected), copy(new)]);
 }
+// ---- SIMD -------------------------------------------------------------------------------------
+// A `simd.` line (machine.grl, "SIMD") as vector IR: each operand a load of `<N x T>` from its frame
+// aggregate or element address, the result one store, so SROA keeps a vector the function does not
+// let escape in a register and the target's lowering picks the instructions. The semantics are the
+// ones the native lowering computes lane by lane: ordered compares (une for ne), min/max with the
+// NaN and tie rule of the scalar min/max, and `sum` as the fixed halving tree.
+fn simd_elem<a>(s: (&a machine::Simd)) -> u8[] {
+    if s.elem == 1 {
+        if s.bits == 32 {
+            return copy(view("float"));
+        }
+        return copy(view("double"));
+    }
+    if s.bits == 32 {
+        return copy(view("i32"));
+    }
+    return copy(view("i64"));
+}
+fn simd_int_elem<a>(s: (&a machine::Simd)) -> u8[] {
+    if s.bits == 32 {
+        return copy(view("i32"));
+    }
+    return copy(view("i64"));
+}
+fn simd_vec<a>(lanes: u64, e: &a [u8]) -> u8[] {
+    mut t = copy(view("<"));
+    num(&mut t, lanes);
+    put(&mut t, view(" x "));
+    put(&mut t, e);
+    put(&mut t, view(">"));
+    return t;
+}
+fn simd_align<a>(s: (&a machine::Simd)) -> u8[] {
+    mut t = copy(view(", align "));
+    num(&mut t, s.bits / 8);
+    return t;
+}
+fn simd_load<a, b, d>(l: (&a mut L), vt: &b [u8], p: &d [u8], s: (&machine::Simd)) -> u8[] {
+    mut t = copy(view("load "));
+    put(&mut t, vt);
+    put(&mut t, view(", ptr {}"));
+    put(&mut t, view(simd_align(&s)));
+    return def(&mut l, view(t), &u8[][copy(p)]);
+}
+fn simd_store<a, b, d, e>(l: (&a mut L), vt: &b [u8], v: &d [u8], p: &e [u8], s: (&machine::Simd)) -> unit {
+    mut t = copy(view("store "));
+    put(&mut t, vt);
+    put(&mut t, view(" {}, ptr {}"));
+    put(&mut t, view(simd_align(&s)));
+    emit(&mut l, view(t), &u8[][copy(v), copy(p)]);
+    return ();
+}
+fn simd_op2<a, b, d, e, f>(l: (&a mut L), instr: &b [u8], vt: &d [u8], x: &e [u8], y: &f [u8]) -> u8[] {
+    mut t = copy(instr);
+    put(&mut t, view(" "));
+    put(&mut t, vt);
+    put(&mut t, view(" {}, {}"));
+    return def(&mut l, view(t), &u8[][copy(x), copy(y)]);
+}
+fn simd_select<a, b, d, e, f, g>(l: (&a mut L), lanes: u64, cond: &b [u8], vt: &d [u8], x: &e [u8], y: &f [u8], unused: &g [u8]) -> u8[] {
+    mut t = copy(view("select "));
+    put(&mut t, view(simd_vec(lanes, view("i1"))));
+    put(&mut t, view(" {}, "));
+    put(&mut t, vt);
+    put(&mut t, view(" {}, "));
+    put(&mut t, vt);
+    put(&mut t, view(" {}"));
+    return def(&mut l, view(t), &u8[][copy(cond), copy(x), copy(y)]);
+}
+// A vector constant of `lanes` copies of `value` of element type `e`.
+fn simd_splat_const<a, b>(lanes: u64, e: &a [u8], value: &b [u8]) -> u8[] {
+    mut t = copy(view("<"));
+    for i in lanes {
+        if i != 0 {
+            put(&mut t, view(", "));
+        }
+        put(&mut t, e);
+        put(&mut t, view(" "));
+        put(&mut t, value);
+    }
+    put(&mut t, view(">"));
+    return t;
+}
+fn simd_indices(from: u64, count: u64) -> u8[] {
+    mut t = copy(view("<"));
+    for i in count {
+        if i != 0 {
+            put(&mut t, view(", "));
+        }
+        put(&mut t, view("i32 "));
+        num(&mut t, from + i);
+    }
+    put(&mut t, view(">"));
+    return t;
+}
+// A lane value (an element of type `e`) as the word %rax holds: an f32 widened to binary64, an f64's
+// bits, an i32 sign-extended.
+fn simd_word<a, b, d>(l: (&a mut L), s: (&b machine::Simd), e: &d [u8]) -> unit {
+    mut v = copy(e);
+    if (s.elem == 1) & (s.bits == 32) {
+        d := def(&mut l, view("fpext float {} to double"), &u8[][v]);
+        v = def(&mut l, view("bitcast double {} to i64"), &u8[][d]);
+    } else if s.elem == 1 {
+        v = def(&mut l, view("bitcast double {} to i64"), &u8[][v]);
+    } else if s.bits == 32 {
+        v = def(&mut l, view("sext i32 {} to i64"), &u8[][v]);
+    }
+    set_reg(&mut l, view("rax"), view(v));
+    return ();
+}
+fn lift_simd<a, b>(l: (&a mut L), line: &b [u8]) -> unit {
+    s := machine::simd_parse(line);
+    n := s.lanes;
+    e := simd_elem(&s);
+    ie := simd_int_elem(&s);
+    vt := simd_vec(n, view(e));
+    vi := simd_vec(n, view(ie));
+    float := s.elem == 1;
+    op := s.op;
+    pd := address(&mut l, view("(%rdi)"));
+    if op <= 9 {
+        pa := address(&mut l, view("(%rsi)"));
+        pb := address(&mut l, view("(%rdx)"));
+        mut ty = copy(view(vt));
+        if (5 <= op) && (op <= 7) {
+            ty = copy(view(vi));
+        }
+        a := simd_load(&mut l, view(ty), view(pa), &s);
+        b := simd_load(&mut l, view(ty), view(pb), &s);
+        mut r = u8[];
+        if op <= 4 {
+            mut name = "add";
+            if op == 2 {
+                name = "sub";
+            }
+            if op == 3 {
+                name = "mul";
+            }
+            if op == 4 {
+                name = "div";
+            }
+            mut instr = u8[];
+            if float {
+                instr.push(102);
+            }
+            put(&mut instr, view(name));
+            r = simd_op2(&mut l, view(instr), view(ty), view(a), view(b));
+        } else if op <= 7 {
+            mut name = "and";
+            if op == 6 {
+                name = "or";
+            }
+            if op == 7 {
+                name = "xor";
+            }
+            r = simd_op2(&mut l, view(name), view(ty), view(a), view(b));
+        } else if float {
+            mut lt = u8[];
+            if op == 8 {
+                lt = simd_op2(&mut l, view("fcmp olt"), view(vt), view(b), view(a));
+            } else {
+                lt = simd_op2(&mut l, view("fcmp olt"), view(vt), view(a), view(b));
+            }
+            r1 := simd_select(&mut l, n, view(lt), view(vt), view(b), view(a), view(""));
+            nb := simd_op2(&mut l, view("fcmp uno"), view(vt), view(b), view(b));
+            r2 := simd_select(&mut l, n, view(nb), view(vt), view(a), view(r1), view(""));
+            na := simd_op2(&mut l, view("fcmp uno"), view(vt), view(a), view(a));
+            r = simd_select(&mut l, n, view(na), view(vt), view(b), view(r2), view(""));
+        } else {
+            mut lt = u8[];
+            if op == 8 {
+                lt = simd_op2(&mut l, view("icmp slt"), view(vt), view(b), view(a));
+            } else {
+                lt = simd_op2(&mut l, view("icmp slt"), view(vt), view(a), view(b));
+            }
+            r = simd_select(&mut l, n, view(lt), view(vt), view(b), view(a), view(""));
+        }
+        simd_store(&mut l, view(ty), view(r), view(pd), &s);
+        return ();
+    }
+    if op <= 15 {
+        pa := address(&mut l, view("(%rsi)"));
+        pb := address(&mut l, view("(%rdx)"));
+        a := simd_load(&mut l, view(vt), view(pa), &s);
+        b := simd_load(&mut l, view(vt), view(pb), &s);
+        mut pred = u8[];
+        if float {
+            fp := u8[][copy(view("fcmp oeq")), copy(view("fcmp une")), copy(view("fcmp olt")), copy(view("fcmp ole")), copy(view("fcmp ogt")), copy(view("fcmp oge"))];
+            pred = fp[op - 10].copy();
+        } else {
+            ip := u8[][copy(view("icmp eq")), copy(view("icmp ne")), copy(view("icmp slt")), copy(view("icmp sle")), copy(view("icmp sgt")), copy(view("icmp sge"))];
+            pred = ip[op - 10].copy();
+        }
+        c := simd_op2(&mut l, view(pred), view(vt), view(a), view(b));
+        mut t = copy(view("sext "));
+        put(&mut t, view(simd_vec(n, view("i1"))));
+        put(&mut t, view(" {} to "));
+        put(&mut t, view(vi));
+        m := def(&mut l, view(t), &u8[][c]);
+        simd_store(&mut l, view(vi), view(m), view(pd), &s);
+        return ();
+    }
+    if op == 16 {
+        pm := address(&mut l, view("(%rsi)"));
+        pa := address(&mut l, view("(%rdx)"));
+        pb := address(&mut l, view("(%rcx)"));
+        m := simd_load(&mut l, view(vi), view(pm), &s);
+        c := simd_op2(&mut l, view("icmp ne"), view(vi), view(m), view("zeroinitializer"));
+        a := simd_load(&mut l, view(vt), view(pa), &s);
+        b := simd_load(&mut l, view(vt), view(pb), &s);
+        r := simd_select(&mut l, n, view(c), view(vt), view(a), view(b), view(""));
+        simd_store(&mut l, view(vt), view(r), view(pd), &s);
+        return ();
+    }
+    if op == 17 {
+        pa := address(&mut l, view("(%rsi)"));
+        a := simd_load(&mut l, view(vi), view(pa), &s);
+        r := simd_op2(&mut l, view("xor"), view(vi), view(a), view(simd_splat_const(n, view(ie), view("-1"))));
+        simd_store(&mut l, view(vi), view(r), view(pd), &s);
+        return ();
+    }
+    if (op == 18) || (op == 24) {
+        w := get_reg(&mut l, view("rax"));
+        mut x = copy(view(w));
+        if s.elem == 3 {
+            x = def(&mut l, view("sub i64 0, {}"), &u8[][x]);
+        }
+        if float & (s.bits == 32) {
+            d := def(&mut l, view("bitcast i64 {} to double"), &u8[][x]);
+            x = def(&mut l, view("fptrunc double {} to float"), &u8[][d]);
+        } else if float {
+            x = def(&mut l, view("bitcast i64 {} to double"), &u8[][x]);
+        } else if s.bits == 32 {
+            x = def(&mut l, view("trunc i64 {} to i32"), &u8[][x]);
+        }
+        if op == 24 {
+            old := simd_load(&mut l, view(vt), view(pd), &s);
+            mut t = copy(view("insertelement "));
+            put(&mut t, view(vt));
+            put(&mut t, view(" {}, "));
+            put(&mut t, view(e));
+            put(&mut t, view(" {}, i32 "));
+            num(&mut t, s.k);
+            v := def(&mut l, view(t), &u8[][old, x]);
+            simd_store(&mut l, view(vt), view(v), view(pd), &s);
+            return ();
+        }
+        mut t = copy(view("insertelement "));
+        put(&mut t, view(vt));
+        put(&mut t, view(" poison, "));
+        put(&mut t, view(e));
+        put(&mut t, view(" {}, i32 0"));
+        v0 := def(&mut l, view(t), &u8[][x]);
+        mut u = copy(view("shufflevector "));
+        put(&mut u, view(vt));
+        put(&mut u, view(" {}, "));
+        put(&mut u, view(vt));
+        put(&mut u, view(" poison, "));
+        put(&mut u, view(simd_vec(n, view("i32"))));
+        put(&mut u, view(" zeroinitializer"));
+        v := def(&mut l, view(u), &u8[][v0]);
+        simd_store(&mut l, view(vt), view(v), view(pd), &s);
+        return ();
+    }
+    if op == 19 {
+        pa := address(&mut l, view("(%rsi)"));
+        v := simd_load(&mut l, view(vt), view(pa), &s);
+        mut t = copy(view("extractelement "));
+        put(&mut t, view(vt));
+        put(&mut t, view(" {}, i32 "));
+        num(&mut t, s.k);
+        x := def(&mut l, view(t), &u8[][v]);
+        simd_word(&mut l, &s, view(x));
+        return ();
+    }
+    if op == 20 {
+        pa := address(&mut l, view("(%rsi)"));
+        mut v = simd_load(&mut l, view(vt), view(pa), &s);
+        mut m = n;
+        while 1 < m {
+            h := m / 2;
+            mvt := simd_vec(m, view(e));
+            hvt := simd_vec(h, view(e));
+            mut t = copy(view("shufflevector "));
+            put(&mut t, view(mvt));
+            put(&mut t, view(" {}, "));
+            put(&mut t, view(mvt));
+            put(&mut t, view(" poison, "));
+            put(&mut t, view(simd_vec(h, view("i32"))));
+            put(&mut t, view(" "));
+            mut lo_t = copy(view(t));
+            put(&mut lo_t, view(simd_indices(0, h)));
+            mut hi_t = copy(view(t));
+            put(&mut hi_t, view(simd_indices(h, h)));
+            lo := def(&mut l, view(lo_t), &u8[][copy(view(v))]);
+            hi := def(&mut l, view(hi_t), &u8[][copy(view(v))]);
+            if float {
+                v = simd_op2(&mut l, view("fadd"), view(hvt), view(lo), view(hi));
+            } else {
+                v = simd_op2(&mut l, view("add"), view(hvt), view(lo), view(hi));
+            }
+            m = h;
+        }
+        mut t = copy(view("extractelement "));
+        put(&mut t, view(simd_vec(1, view(e))));
+        put(&mut t, view(" {}, i32 0"));
+        x := def(&mut l, view(t), &u8[][v]);
+        simd_word(&mut l, &s, view(x));
+        return ();
+    }
+    if op == 21 {
+        pa := address(&mut l, view("(%rsi)"));
+        v := simd_load(&mut l, view(vt), view(pa), &s);
+        simd_store(&mut l, view(vt), view(v), view(pd), &s);
+        return ();
+    }
+    if op == 25 {
+        // The vector as the two words of a result, by a bitcast: every access to the vector's
+        // storage stays `<N x T>`, which is what lets SROA keep it in a register across an inlined
+        // call.
+        pa := address(&mut l, view("(%rsi)"));
+        v := simd_load(&mut l, view(vt), view(pa), &s);
+        mut t = copy(view("bitcast "));
+        put(&mut t, view(vt));
+        put(&mut t, view(" {} to <2 x i64>"));
+        w := def(&mut l, view(t), &u8[][v]);
+        lo := def(&mut l, view("extractelement <2 x i64> {}, i32 0"), &u8[][copy(view(w))]);
+        hi := def(&mut l, view("extractelement <2 x i64> {}, i32 1"), &u8[][w]);
+        set_reg(&mut l, view("rax"), view(lo));
+        set_reg(&mut l, view("rdx"), view(hi));
+        return ();
+    }
+    if op == 26 {
+        lo := get_reg(&mut l, view("rax"));
+        hi := get_reg(&mut l, view("rdx"));
+        w0 := def(&mut l, view("insertelement <2 x i64> poison, i64 {}, i32 0"), &u8[][lo]);
+        w := def(&mut l, view("insertelement <2 x i64> {}, i64 {}, i32 1"), &u8[][w0, hi]);
+        mut t = copy(view("bitcast <2 x i64> {} to "));
+        put(&mut t, view(vt));
+        v := def(&mut l, view(t), &u8[][w]);
+        simd_store(&mut l, view(vt), view(v), view(pd), &s);
+        return ();
+    }
+    pa := address(&mut l, view("(%rsi)"));
+    m := simd_load(&mut l, view(vi), view(pa), &s);
+    c := simd_op2(&mut l, view("icmp ne"), view(vi), view(m), view("zeroinitializer"));
+    mut t = copy(view("bitcast "));
+    put(&mut t, view(simd_vec(n, view("i1"))));
+    put(&mut t, view(" {} to i"));
+    num(&mut t, n);
+    bitsv := def(&mut l, view(t), &u8[][c]);
+    mut u = copy(view("icmp "));
+    if op == 22 {
+        put(&mut u, view("ne i"));
+        num(&mut u, n);
+        put(&mut u, view(" {}, 0"));
+    } else {
+        put(&mut u, view("eq i"));
+        num(&mut u, n);
+        put(&mut u, view(" {}, -1"));
+    }
+    r := def(&mut l, view(u), &u8[][bitsv]);
+    z := def(&mut l, view("zext i1 {} to i64"), &u8[][r]);
+    set_reg(&mut l, view("rax"), view(z));
+    return ();
+}
 fn lift_atom<a, b>(l: (&a mut L), line: &b [u8]) -> unit {
     a := machine::atom_parse(line);
     ord := atom_order_name(a.order);
@@ -3000,11 +3354,54 @@ fn instruction<a, b, c>(l: (&a mut L), line: &b [u8], facts: (&c Facts)) -> unit
         lift_atom(&mut l, view(line));
         return ();
     }
+    if starts(view(op), view("simd.")) {
+        lift_simd(&mut l, view(line));
+        // The line consumes its address registers (the native expansion uses them as scratch, and
+        // native.grl loads all four again before the next line). Leaving the vectors' addresses in
+        // them would hand them to every later call the lifter writes - a check's cold `rt_trap` gets
+        // the registers as arguments - and an alloca whose address escapes is never promoted.
+        s := machine::simd_parse(view(line));
+        set_reg(&mut l, view("rdi"), view("0"));
+        set_reg(&mut l, view("rsi"), view("0"));
+        if s.op != 25 {
+            set_reg(&mut l, view("rdx"), view("0"));
+        }
+        set_reg(&mut l, view("rcx"), view("0"));
+        if (s.op != 19) & (s.op != 20) & (s.op != 22) & (s.op != 23) & (s.op != 25) {
+            set_reg(&mut l, view("rax"), view("0"));
+        }
+        return ();
+    }
     if area_instruction(&mut l, view(op), view(rest)) {
         return ();
     }
     o := operands(view(rest));
     n := o.len();
+    if eq(view(op), view("movq")) && (n == 2) && (l.target == 0) && starts(view(o[0]), view("%fs:")) {
+        // The thread pointer (raw_tp_get): `%fs:0` is the Grail record, `%fs:SYM@tpoff` a TLS word.
+        // It is inline assembly with a side effect so LLVM never merges two reads: a green task
+        // can resume on another OS thread between them. Without this the whole function stayed in
+        // the unoptimised native stream - rt_current, the mutex fast path, the allocator's threaded
+        // path among them. The memory clobber keeps loads and stores of the thread's record on the
+        // right side of the read, too. (The pool::split crash once blamed on this lift was an
+        // escaped two-word slot lowered as one word: escaped_overreach.)
+        mut asm = copy(view("call i64 asm sideeffect \"movq "));
+        put(&mut asm, view(o[0]));
+        put(&mut asm, view(", $0\", \"=r,~{memory}\"()"));
+        v := def(&mut l, view(asm), &u8[][]);
+        store(&mut l, view(o[1]), view(v), 64);
+        return ();
+    }
+    if eq(view(op), view("movq")) && (n == 2) && (l.target == 0) && starts(view(o[1]), view("%fs:")) {
+        // Publishing this thread's record (raw_tp_set with libc loaded): a TLS word written by
+        // inline assembly, ordered like the reads above.
+        v := value(&mut l, view(o[0]), 64);
+        mut asm = copy(view("call void asm sideeffect \"movq $0, "));
+        put(&mut asm, view(o[1]));
+        put(&mut asm, view("\", \"r,~{memory}\"(i64 {})"));
+        emit(&mut l, view(asm), &u8[][v]);
+        return ();
+    }
     if eq(view(op), view("movq")) || eq(view(op), view("movabsq")) {
         if n != 2 {
             bad(&mut l);
@@ -4043,6 +4440,177 @@ fn body_lines<a, b>(lines: (&a u8[][]), f: (&b Func)) -> u8[][] {
     }
     return out;
 }
+// Whether the body reads or writes through the address of a frame slot past the extent the facts
+// give that slot: one word for a plain slot, the whole object for a multi-word value (kind-3 fact).
+// The address is followed from its `leaq -N(%rbp)` through register copies and frame-slot spills
+// until something else writes the holder; a label or a call forgets what it is not sure of, so this
+// reports no false overreach, only real ones. The lifter gives each slot its own alloca unless a
+// fact joins them, so an access past the fact's width would land in an unrelated object.
+fn escaped_overreach<a, b>(l: (&a L), instrs: (&b u8[][])) -> bool {
+    mut regs = u64[];
+    for i in 14 {
+        regs.push(0);
+    }
+    mut spill_at = u8[][];
+    mut spill_k = u64[];
+    for m in instrs.len() {
+        line := view(instrs[m]);
+        if (line.len() == 0) || (line[line.len() - 1] == 58) {
+            for i in 14 {
+                regs[i] = 0;
+            }
+            spill_at.clear();
+            spill_k.clear();
+            continue;
+        }
+        mut sp = line.len();
+        for i in line.len() {
+            if (line[i] == 32) & (sp == line.len()) {
+                sp = i;
+            }
+        }
+        op := sub(line, 0, sp);
+        mut rest = u8[];
+        if sp < line.len() {
+            rest = sub(line, sp + 1, line.len());
+        }
+        o := operands(view(rest));
+        if !eq(view(op), view("leaq")) {
+            for q in o.len() {
+                if overreach_operand(&l, &regs, view(o[q])) {
+                    return true;
+                }
+            }
+        }
+        n := o.len();
+        if eq(view(op), view("call")) {
+            // The caller-saved registers do not survive; rbx and r12..r15 do.
+            for i in 14 {
+                if (i != 1) & (i < 10) {
+                    regs[i] = 0;
+                }
+            }
+            spill_at.clear();
+            spill_k.clear();
+            continue;
+        }
+        if n == 0 {
+            continue;
+        }
+        dst := view(o[n - 1]);
+        mut held: u64 = 0;
+        if eq(view(op), view("leaq")) && (n == 2) {
+            held = rbp_slot_plus_one(view(o[0]));
+        } else if eq(view(op), view("movq")) && (n == 2) {
+            src := view(o[0]);
+            if (src.len() > 1) && (src[0] == 37) {
+                sr := reg_index(view(sub(src, 1, src.len())));
+                if sr < 14 {
+                    held = regs[sr];
+                }
+            } else {
+                for i in spill_at.len() {
+                    if eq(view(spill_at[i]), src) {
+                        held = spill_k[i];
+                    }
+                }
+            }
+        }
+        if (dst.len() > 1) && (dst[0] == 37) {
+            dr := reg_index(view(sub(dst, 1, dst.len())));
+            if dr < 14 {
+                regs[dr] = held;
+            }
+        } else if ends(dst, view("(%rbp)")) {
+            mut found = spill_at.len();
+            for i in spill_at.len() {
+                if eq(view(spill_at[i]), dst) {
+                    found = i;
+                }
+            }
+            if found == spill_at.len() {
+                spill_at.push(copy(dst));
+                spill_k.push(held);
+            } else {
+                spill_k[found] = held;
+            }
+        }
+    }
+    return false;
+}
+// `-N(%rbp)` as slot N/8 - 1, plus one; 0 for any other operand.
+fn rbp_slot_plus_one<a>(t: &a [u8]) -> u64 {
+    if !starts(t, view("-")) || !ends(t, view("(%rbp)")) {
+        return 0;
+    }
+    mut v: u64 = 0;
+    mut i = 1;
+    while (i < t.len()) && (t[i] != 40) {
+        if (t[i] < 48) || (57 < t[i]) {
+            return 0;
+        }
+        v = v * 10 + u64(t[i] - 48);
+        i += 1;
+    }
+    if (v < 8) || (v % 8 != 0) {
+        return 0;
+    }
+    return v / 8;
+}
+// A memory operand `D(%r)` whose base register holds the address of slot k, and whose constant
+// displacement reaches outside k's object.
+fn overreach_operand<a, b>(l: (&a L), regs: (&b u64[]), t: &[u8]) -> bool {
+    mut lp = t.len();
+    for i in t.len() {
+        if (t[i] == 40) & (lp == t.len()) {
+            lp = i;
+        }
+    }
+    if lp == t.len() {
+        return false;
+    }
+    mut rp = lp + 1;
+    while (rp < t.len()) && (t[rp] != 41) && (t[rp] != 44) {
+        rp += 1;
+    }
+    if (rp >= t.len()) || (t[rp] != 41) || (lp + 2 > rp) || (t[lp + 1] != 37) {
+        // Not `D(%r)`: an indexed access's extent is not a constant, so it is not judged here.
+        return false;
+    }
+    r := reg_index(view(sub(t, lp + 2, rp)));
+    if (r >= 14) || (regs[r] == 0) {
+        return false;
+    }
+    k := regs[r] - 1;
+    mut d: i64 = 0;
+    mut neg = false;
+    mut i = 0;
+    if (lp != 0) && (t[0] == 45) {
+        neg = true;
+        i = 1;
+    }
+    while i < lp {
+        ch := t[i];
+        if (ch < 48) || (57 < ch) {
+            return false;
+        }
+        d = d * 10 + i64(ch - 48);
+        i += 1;
+    }
+    if neg {
+        d = 0 - d;
+    }
+    // Slot k's object: its first word's slot b (the lowest address) and `w` words; k is word b - k.
+    b := pair_base(&l, k);
+    mut lo: i64 = 0;
+    mut hi: i64 = 0;
+    if b != 0 {
+        at := i64(b - 1 - k);
+        lo = 0 - 8 * at;
+        hi = 8 * (i64(pair_words(&l, b)) - 1 - at);
+    }
+    return (d < lo) || (hi < d);
+}
 // The `DynPair` slots of the function being lowered, from the typed-IR facts (docs/design/fat-dyn.md):
 // each is the first word of a 16-byte, 8-aligned `{data, vtable}` value whose second word is the slot
 // above it, lowered as one `[2 x i64]` alloca so the two words stay one addressable value.
@@ -4315,6 +4883,19 @@ fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), fact
         index_slot_lines(&mut l, &instrs, slots);
         accept_slots(&mut l, &instrs, &facts, view(f.name), slots);
         accept_headers(&mut l, &instrs, &facts, view(f.name), slots);
+        if escaped_overreach(&l, &instrs) {
+            // An address-taken slot is used past the width the facts give it: lowered as separate
+            // allocas, the access would land in another object. The body stays native, where the
+            // frame is one block (and --verify-facts says so).
+            if l.verify != 0 {
+                mut msg = copy(view("verify-facts: "));
+                put(&mut msg, view(f.name));
+                put(&mut msg, view(" accesses an address-taken frame slot past its declared width (a multi-word value without its kind-3 fact)\n"));
+                host::print(view(msg));
+                host::exit(1);
+            }
+            bad(&mut l);
+        }
         mut count = slots;
         if deepest + 1 > count {
             count = deepest + 1;
@@ -5421,6 +6002,17 @@ fn rg_step(rc: (&RC), st: (&mut u64[]), line: (&[u8]), seed: u64, trip: u64, at:
         rg_wrote(&rc, &mut st, view(o[0]));
         return ();
     }
+    if starts(view(op), view("simd.")) {
+        // A SIMD op names no operands: it may write %rax and %rdx (a result word, `topair`), uses
+        // %rcx and the address registers, and writes memory through %rdi.
+        rg_clear(&mut st, 0);
+        rg_clear(&mut st, 2);
+        rg_clear(&mut st, 3);
+        rg_clear(&mut st, 4);
+        rg_clear(&mut st, 5);
+        rg_clear_escaped(&rc, &mut st);
+        return ();
+    }
     if starts(view(op), view("atom.")) {
         // An atomic op names no operands: it writes %rax (and uses %rcx/%rsi as scratch on
         // x86-64), and writes memory through %rdi, which may be a frame slot whose address escaped.
@@ -5465,7 +6057,7 @@ fn rg_written(rc: (&RC), line: (&[u8])) -> u64 {
         }
     }
     op := view(sub(line, 0, space));
-    if eq(op, view("mulq")) || eq(op, view("divq")) || eq(op, view("idivq")) || eq(op, view("cqto")) || starts(op, view("atom.")) {
+    if eq(op, view("mulq")) || eq(op, view("divq")) || eq(op, view("idivq")) || eq(op, view("cqto")) || starts(op, view("atom.")) || starts(op, view("simd.")) {
         return 0;
     }
     mut writes = 0;
@@ -7549,6 +8141,12 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
             name = pool_name(r);
         }
         set_add(&mut exported, r);
+        // The module defines these itself (weak, beside the intrinsics it lowers to them), so a
+        // C declaration of the same name - an `extern "C"` memcpy a program calls - must not
+        // declare them again: with opaque pointers the call needs no matching declaration.
+        if (target == 0) && (eq(r, view("memcpy")) || eq(r, view("memset")) || eq(r, view("memmove"))) {
+            continue;
+        }
         if set_has(&callset, r) {
             // A native body with a signature fact is called with exactly its words (lower_call).
             mut dn = 6;
@@ -7655,7 +8253,9 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
         if at != 0 {
             // A body the stream declared `.weak` (a generic specialisation, a content-addressed
             // drop helper) may be defined by every module that instantiates it, so its lifted body
-            // is weak too, or a release build of two such modules fails to link.
+            // is weak too, or a release build of two such modules fails to link. `weak_odr`, not
+            // `weak`: every definition is the same code, so LLVM may inline it (a plain weak body is
+            // interposable and never inlined, which kept every generic call a call).
             mut e = at;
             while (e < line.len()) && (line[e] != 34) {
                 e += 1;
@@ -7665,7 +8265,7 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
                 base = sub(view(base), 0, base.len() - 3);
             }
             if set_has(&weak, view(base)) {
-                put(&mut ir, view("define weak "));
+                put(&mut ir, view("define weak_odr "));
                 put(&mut ir, view(rename_line(view(sub(line, 7, line.len())), &exported)));
                 ir.push(10);
                 continue;

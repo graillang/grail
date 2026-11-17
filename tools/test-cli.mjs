@@ -56,6 +56,15 @@ for (const [i, file] of sources.entries()) {
   formatted.set(file, copy);
 }
 checks += sources.length;
+// Wrapped output parses again: tests/fmt/wide.grl has expressions the formatter must break at a
+// binary operator, comparisons included, and a continuation line that opens with `<` reads as
+// generic brackets (asm_x86.grl once came out of `grail fmt` refused that way).
+{
+  const wide = formatted.get(join(root, 'tests/fmt/wide.grl'));
+  assert.ok(readFileSync(wide, 'utf8') !== readFileSync(join(root, 'tests/fmt/wide.grl'), 'utf8'), 'tests/fmt/wide.grl was expected to need wrapping');
+  const reparsed = run(['check', wide], undefined, false);
+  assert.equal(reparsed.status, 0, `formatted tests/fmt/wide.grl does not check:\n${reparsed.stdout ?? ''}${reparsed.stderr ?? ''}`); checks++;
+}
 const original = join(work, 'original.s'), reformatted = join(work, 'reformatted.s');
 // Both builds are given the same module root: `lib/xxhash.grl` is one of the compiler's own sources,
 // which makes `lib/` a module root by location, and the formatted copies live somewhere else - so
@@ -135,7 +144,7 @@ checks += 10;
   assert.match(bytes?.members.find(member => member.name === 'find')?.type ?? '', /^pub fn find\(&self, needle: \(&\[u8\]\)\) -> u64\?$/, 'a method\'s signature is the text up to its body');
   assert.equal(bytes?.doc, '', 'the module block is not also the first declaration\'s doc');
   const fields = item('hashmap', 'struct', 'Map')?.members ?? [];
-  assert.ok(fields.some(field => field.name === 'entries' && field.type === 'Slot<K, V>[]'), `a record lists its fields: ${JSON.stringify(fields)}`);
+  assert.ok(fields.some(field => field.name === 'keys' && field.type === 'K[]'), `a record lists its fields: ${JSON.stringify(fields)}`);
   assert.ok((item('io', 'enum', 'Error')?.members ?? []).some(variant => variant.name === 'Other' && variant.type === 'u64'), 'an enum lists its variants and payloads');
   assert.ok(module('hashmap')?.items.some(entry => entry.kind === 'impl' && entry.name.startsWith('Map')), 'an implementation is listed');
   assert.ok(fs.readdirSync(outA).filter(name => name.endsWith('.html')).length >= 25, 'one page per module');
