@@ -456,4 +456,22 @@ const fast = ['--interval', '40', '--debounce', '60'];
     assert.match(dyn.stdout + dyn.stderr, /the drop of a `dyn Speak` value, whose implementations this module cannot see: `Speak` is public/, dyn.stdout + dyn.stderr); checks++;
   }
 }
+// `grail check` proves effect claims as a build does: every module of lib/ that claims one must check
+// (each module's run reads the runtime's summary, which the runtime's own check run writes), and so
+// must a program that uses one.
+{
+  const dir = join(work, 'check-claims'); mkdirSync(dir, { recursive: true });
+  const store = { ...process.env, GRAIL_CACHE_DIR: join(dir, 'store') };
+  const check = (file) => spawnSync(grail, ['check', file], { cwd: dir, encoding: 'utf8', env: store });
+  for (const entry of readdirSync(join(root, 'lib')).filter((f) => f.endsWith('.grl')).sort()) {
+    const name = entry.slice(0, -4);
+    writeFileSync(join(dir, `use_${name}.grl`), `use ${name};\nfn main() {\n    println(1);\n}\n`);
+    const r = check(`use_${name}.grl`);
+    assert.equal(r.status, 0, `grail check of a program using \`${name}\` failed\n${r.stdout}${r.stderr}`);
+  }
+  checks++;
+  writeFileSync(join(dir, 'claim_loop.grl'), '@no_alloc\nfn total(v: &u64[]) -> u64 {\n    mut t = 0;\n    for x in v {\n        t = wrapping_add(t, *x);\n    }\n    return t;\n}\nfn main() {\n    v := u64[1, 2];\n    println(total(&v));\n}\n');
+  const loop = check('claim_loop.grl');
+  assert.equal(loop.status, 0, `grail check of a claimed loop over a borrowed vector failed\n${loop.stdout}${loop.stderr}`); checks++;
+}
 console.log(`cli: ${checks} formatter/tool checks passed`);

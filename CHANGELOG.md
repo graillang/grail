@@ -1,5 +1,20 @@
 ## Unreleased
 
+- Fixed (windows-x86_64): the failure path reached the socket arms of the Windows syscall emulation,
+  so every `@no_alloc` function that indexes was refused there. The failure path and the scheduler
+  use `rt_syscall_low` (write to a handle, exit, park, wake, yield, sleep, clock, unmap), and the
+  profile dump creates and closes its file with `rt_create_file`/`rt_close_file`.
+- An effect refusal over a callee the run cannot see (compiling a program to assembly without the
+  runtime's sources) names it - "the target is `rt_len`, whose body and effect summary this run does
+  not have" - instead of calling it an indirect call.
+
+- Fixed: `grail check` refused every program using a module that claims an effect (`use strings;`
+  alone: "`is_char_boundary` ... makes an indirect call the compiler cannot follow"). Check runs go
+  per module, and a check-only run recorded no effect facts, so the runtime's run wrote no
+  `runtime.facts` and every claim that reaches the runtime met an unknown callee. A check run that
+  writes interfaces records its bodies now; `tools/test-cli.mjs` checks a program using each lib/
+  module.
+
 - **Writing interfaces no longer costs the square of the declarations.** The interface writer put
   each list of names in order with a selection sort, and looked up every type's inherent methods
   by scanning every function of the program. A stable merge sort and a by-module index of the
