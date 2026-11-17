@@ -1209,6 +1209,26 @@ and an optimiser memo entry are taken before the inline pass (`one_body` remembe
 `inline_calls` runs over the whole output afterwards), so neither depends on another module's bodies
 and neither key names them; the object-encoding chunks are keyed on the final text and see the copy.
 
+### Small library bodies across modules: measured, deferred
+
+Carrying a small *library* body (not the runtime's) in a module's interface, so another module's
+calls to it are inlined, would need an interface format bump and a new edge (a body edit reruns the
+importers). Measured before building it, as the number of call sites it would reach - a candidate
+filed in another unit that is not the runtime: the scheduler's join probe 0, the typed iterator
+chain 0, `bench/hashmap.grl` 2 (`hash`'s `table_hash` and `equal`, called from `main`). The library's
+small accessors are generic, so their specialisations are emitted in the caller's own unit and are
+inlined already; a release build gets the rest from ThinLTO across modules. Deferred until a program
+shows the sites.
+
+### Copies inside copies, and promoted registers
+
+A candidate keeps a call only when it does not return or is the last thing the body does, so
+nothing of the copy is live across it: `inline_calls` expands such a call in turn when it names a
+candidate (`expand_copy`, three levels, a site number per copy). A leaf whose slots were promoted to
+callee-saved registers is a candidate too: those registers are the caller's in a copy, so the copy
+holds the values in free scratch registers (`rename_register`; a body that also uses a narrower name
+of the register is refused). The size cap is 32 IR lines.
+
 ### The frame constant, which was a latent miscompile
 
 The per-unit change found a real defect that had nothing to do with caching. A function's frame

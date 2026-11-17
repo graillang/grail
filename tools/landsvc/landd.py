@@ -8,7 +8,7 @@ once, and on green fast-forwards main and each branch. A branch that does not me
 its conflicting files. A red train is retried one branch at a time, so one bad branch cannot block
 the others. Results go to results/<branch>.txt and ../grail-land-logs/landings.txt.
 """
-import os, sys, time, subprocess, fcntl, shutil, re, glob, tempfile, json
+import os, shlex, sys, time, subprocess, fcntl, shutil, re, glob, tempfile, json
 
 SVC = os.path.dirname(os.path.abspath(__file__))
 REQ = os.path.join(SVC, 'requests'); RES = os.path.join(SVC, 'results')
@@ -166,12 +166,15 @@ def remote_legs(C, stamp):
     if not REMOTE: return 'no remote'
     # One batch at a time: a newer main supersedes the emulated legs still running for an older one
     # (every landing starting its own batch put 13 batches on the 8-core box at once).
-    stop_old = ('for s in $(ps -eo sid,args | awk \'/land-remote.sh [0-9-]+ --detached/ {print $1}\' | sort -u); '
-                'do pkill -TERM -s $s; done; ')
+    # Each batch's legs share the launcher's session: stop every session that runs a dated leg
+    # (agents' own legs, named <agent>/<leg>, are left alone). Emulated legs compile with one job each,
+    # since forked optimiser workers per leg put hundreds of processes on the 8-core box.
+    stop_old = ("for s in $(ps -eo sid=,args= | awk '/run-leg[.]sh 20[0-9]+-[0-9]+[/]/ {print $1}' | sort -u); "
+                "do pkill -TERM -s $s; done; sleep 3; export GRAIL_JOBS=1; ")
     script = (stop_old + 'cd /srv/grail/w && git fetch -q origin && git checkout -q -f origin/main && '
               f'if [ -f tools/land-remote.sh ]; then bash tools/land-remote.sh {stamp}; else mkdir -p /srv/grail/logs/{stamp} && '
               f'for t in aarch64 riscv64; do for i in 1 2 3; do GRAIL_LEG_COMPILER=/srv/grail/grail-main nohup setsid /srv/grail/run-leg.sh {stamp}/${{t}}_$i env GRAIL_TEST_SHARD=$i/3 bun tools/test-native.mjs $t --jobs 2 >/dev/null 2>&1 & done; done; fi')
-    r = sh(f'git push -q {REMOTE}:/srv/grail/repo.git HEAD:refs/heads/main && rsync -az {C} {REMOTE}:/srv/grail/grail-main && ssh -o BatchMode=yes {REMOTE} {json.dumps(script)}')
+    r = sh(f'git push -q {REMOTE}:/srv/grail/repo.git HEAD:refs/heads/main && rsync -az {C} {REMOTE}:/srv/grail/grail-main && ssh -o BatchMode=yes {REMOTE} {shlex.quote(script)}')
     return 'emulated legs started' if r.returncode == 0 else 'could not start the emulated legs: ' + r.stdout[-200:]
 
 def run_once():
