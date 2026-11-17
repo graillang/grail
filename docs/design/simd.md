@@ -1,6 +1,6 @@
 # SIMD types: the decision record
 
-Status: S1, S2 and S3a (x86-64 SSE2) built. S3b (AArch64 NEON) and S4-S6 approved and staged below. This supersedes the
+Status: S1-S3 and S4a (`mul_add`) built. S4b (`--cpu` levels), S4c (the `extern "C"` vector ABI), S5 and S6 approved and staged below. This supersedes the
 SIMD parts of `simd-layout-parallel-loops.md` where they differ (marked), and the
 pre-design note of the same name from commit ac15c72.
 
@@ -207,6 +207,62 @@ The remaining gap is that every native vector op goes through memory: two `movup
 store per operation, and the stream's vectors live in frame slots. Keeping vectors in xmm registers
 across ops is S5. The LLVM backend is unchanged.
 
+## As built (S3b: native NEON on AArch64)
+
+`machine.grl` `simd_a64_packed` is the AArch64 counterpart of S3a, with the same coverage. It uses
+`ldr q`/`str q` and v0..v5 as scratch: the optimiser keeps floats in v17..v23 and the conversions
+use d16.
+- **Packed:** lane arithmetic (`fadd`/`fsub`/`fmul`/`fdiv`, `add`/`sub`, `mul` for 8- and 32-bit
+  lanes), `and`/`orr`/`eor`, compares (`fcmeq`/`fcmgt`/`fcmge`, `cmeq`/`cmgt`/`cmge`, unsigned
+  `cmhi`/`cmhs`, `not` for `ne`), select (`bsl`), splat (`dup`), copies, `to_f32` (`scvtf`),
+  integer min/max for 8- and 32-bit lanes (`smin`/`smax`/`umin`/`umax`).
+- **Float min/max** use `fcmgt` + `bsl`, then `fcmeq a,a` + `bsl` for a NaN `a`. NEON's `fmin`
+  propagates NaN, which the scalar rule does not.
+- **`any`/`all`:** `umaxv`/`uminv` over the mask's bytes. A mask lane is all ones or all zeros, so
+  that answers for any lane width.
+- **The float `sum`:** `ext #8` + `fadd`, then `faddp`. That is `(l0 + l2) + (l1 + l3)`, the same
+  tree as every other lowering.
+- **Still scalar lanes:** 64-bit multiplies and min/max, `to_i32`, lane reads, shuffles. NEON's `tbl`
+  needs an index vector from memory; the shuffles the benchmarks use (`zip`/`uzp`/`ext`/`dup`) are
+  the next step if AArch64 native shuffles matter.
+
+`asm_a64` learned the `q` registers, `vN.T` and `vN.T[K]` operands, and these forms. The 41 forms of
+the test file are byte-identical to clang's, and so is the aarch64 SIMD corpus
+(`tools/asm-oracle.mjs --target aarch64`). Both SIMD oracles and every `simd-*` case give the same
+results under qemu-aarch64 as on x86-64 and with LLVM. RV64 stays on scalar lanes (the V extension
+is not in the RV64GC baseline).
+
+There are no native timings for AArch64: under qemu-user they measure the emulator, not the code.
+The x86-64 numbers above show what packed code buys over the lanes.
+
+## As built (S4a: `mul_add`)
+
+`a.mul_add(b, c)` on f32 and f64 vectors computes `a * b + c` in each lane with one rounding, and
+gives the same bits on every target and backend:
+- **AArch64:** NEON `fmla`.
+- **RV64:** `fmadd.s`/`fmadd.d` per lane. RV64GC has them in F and D.
+- **LLVM on those two:** `@llvm.fma.v4f32` and friends, which lower to the same instructions.
+- **Baseline x86-64:** it has no fused instruction, so each lane calls the runtime's software fused
+  multiply-add, `rt_fma32`/`rt_fma64`. That is what C's `fma()` does there through libm. Calling
+  per lane also keeps LLVM from turning `llvm.fma` into a call to a libm the program does not link.
+
+The software routine uses integers only:
+- the exact product of the significands is 128 bits, built from 32-bit halves;
+- `c` is aligned to it with a sticky bit;
+- the sum is rounded once to nearest-even, with subnormals and overflow;
+- infinities, NaN and zero products are decided on the bits, and exact cancellation gives +0.
+
+It is slow, tens of instructions per lane, and documented as such. `--cpu` levels with FMA use
+`vfmadd` (S4b).
+
+**Tested.** `tests/simd/fma.grl` runs 200,000 f32 and 100,000 f64 lanes against
+`tests/simd/fma_reference.c` (C's `fmaf`/`fma` on the host): random bit patterns, edge values
+(zeros, infinities, NaN, subnormals, the largest finite values) and `c = -(a * b)`. With that `c`
+the result is exactly the product's rounding error, so an unfused multiply-add gives 0 and fails.
+The checksum is identical on x86_64, aarch64 and riscv64 with both backends. `fmla` and the RV64 R4
+`fmadd` encodings are in `tests/asm/simd-aarch64.s` and `simd-riscv64.s` (byte-identical to clang),
+together with S3b's NEON forms.
+
 ## Stages
 
 Each stage lands through the landing service.
@@ -215,7 +271,7 @@ Each stage lands through the landing service.
 - **S2 (built):** `u8x16` `u8x32` `u32x4` `i64x2` `m8x*`; shuffles; conversions and `bits()`;
   `load_aligned`/`store_aligned`; the mat4 and AoS-to-SoA benchmarks. Swizzle sugar (`.xyzw`) is
   left for when a program wants it; `shuffle` covers it.
-- **S3:** native packed SSE2 (S3a, built) and NEON (S3b) for `simd.` lines (the internal assemblers
+- **S3 (built):** native packed SSE2 (S3a) and NEON (S3b) for `simd.` lines (the internal assemblers
   learn their encodings); RV64 stays scalar lanes.
 - **S4:** `extern "C"` vector ABI; `--cpu` levels and `target.features`; `mul_add`.
 - **S5:** native vector registers and register passing.

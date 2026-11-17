@@ -131,8 +131,11 @@ pub fn fact_indirect<a>(facts: (&a mut Facts), name: u8[], ord: u64, words: u64)
 // The C function `name` takes `ints` integer words and `floats` float arguments (bit k of `mask`
 // set when the k-th is an f32) and returns `result` (0 a word or nothing, 1 f64, 2 f32): native.grl
 // `ffi_signature_fact`. A lifted call to it is typed accordingly (lower_call, call ABI S8a).
-pub fn fact_ffi<a>(facts: (&a mut Facts), name: u8[], ints: u64, floats: u64, mask: u64, result: u64) -> unit {
-    facts.items.push(Fact { kind: FACT_FFI, fn: name, a: ints, b: floats, callee: u8[], what: mask, width: result });
+// `memory` lists, in argument order, the word counts of the records passed byval in MEMORY (SysV:
+// over 16 bytes, or out of registers): they are the call's outgoing-area words, passed as
+// `ptr byval([N x i64])`.
+pub fn fact_ffi<a>(facts: (&a mut Facts), name: u8[], ints: u64, floats: u64, mask: u64, result: u64, memory: u8[]) -> unit {
+    facts.items.push(Fact { kind: FACT_FFI, fn: name, a: ints, b: floats, callee: memory, what: mask, width: result });
     return ();
 }
 // `slot` holds an f32 when `f32` is 1, and an untyped word otherwise.
@@ -479,6 +482,13 @@ struct L {
     argwritten: u64,
     // The FFI facts (ffi_signatures).
     ffis: Set,
+    // The byval MEMORY records of each FFI fact: `1 + sum(words_k << 8k)` (ffi_signatures).
+    ffimem: Set,
+    // Allocas the entry block needs that the body made known late (a byval copy's buffer).
+    entryextra: u8[],
+    // The outgoing area under a nested one (area_instruction).
+    outer: u8[][],
+    outeropen: u64,
     // GRAIL_LLVM_WHY: the function whose first refusal is printed (bad).
     why: u8[],
     // Every Grail body (a signature fact names it): calls to these pass no vector registers.
@@ -2579,7 +2589,11 @@ fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> uni
     // lowers this one.
     loaded := exchange(&mut l.argwritten, 0);
     fcode := set_get(&l.ffis, target);
-    typed_ffi := (fcode > 1) && (set_get(&l.sigs, target) == 0) && (l.target == 0) && (l.areaopen == 0);
+    fmem := set_get(&l.ffimem, target);
+    mem_ok := (fmem > 1) && (fmem != 18446744073709551615) && (l.areaopen != 0) && (ffi_memory_words(fmem) <= l.area.len());
+    // A fact with MEMORY records needs their area open, and one without needs none.
+    mem_match := ((fmem <= 1) && (l.areaopen == 0)) || mem_ok;
+    typed_ffi := (fcode > 1) && (set_get(&l.sigs, target) == 0) && (l.target == 0) && mem_match;
     if !typed_ffi {
         // Grail's own symbols are mangled (`f_...`, the runtime's `rt_...`); a C function, even one
         // Grail defines with `extern "C"`, keeps its C name.
@@ -2592,7 +2606,7 @@ fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> uni
             xmm_call(&mut l);
         }
     }
-    if (l.areaopen != 0) && !eq(target, view("rt_foreign_lost")) {
+    if (l.areaopen != 0) && !eq(target, view("rt_foreign_lost")) && !typed_ffi {
         // Words on the stack: only a callee whose signature fact says it takes them. The foreign-call
         // marker's area is a save area: rt_foreign_lost takes nothing from it.
         code := set_get(&l.sigs, target);
@@ -2772,7 +2786,11 @@ fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> uni
             sig_wrong(&mut l, view(fname), view(why));
             return ();
         }
-        lower_ffi_call(&mut l, target, fcode - 2);
+        mut fmem_use = 0;
+        if mem_ok {
+            fmem_use = fmem;
+        }
+        lower_ffi_call(&mut l, target, fcode - 2, fmem_use);
         return ();
     }
     args := call_args_n(&mut l, nwords);
@@ -3299,6 +3317,32 @@ fn lift_simd<a, b>(l: (&a mut L), line: &b [u8]) -> unit {
         pa := address(&mut l, view("(%rsi)"));
         v := simd_load(&mut l, view(vt), view(pa), &s);
         simd_store(&mut l, view(vt), view(v), view(pd), &s);
+        return ();
+    }
+    if op == 32 {
+        pa := address(&mut l, view("(%rsi)"));
+        pb := address(&mut l, view("(%rdx)"));
+        pc := address(&mut l, view("(%rcx)"));
+        a := simd_load(&mut l, view(vt), view(pa), &s);
+        b := simd_load(&mut l, view(vt), view(pb), &s);
+        cv := simd_load(&mut l, view(vt), view(pc), &s);
+        mut t = copy(view("call "));
+        put(&mut t, view(vt));
+        put(&mut t, view(" @llvm.fma.v"));
+        num(&mut t, n);
+        if s.bits == 32 {
+            put(&mut t, view("f32("));
+        } else {
+            put(&mut t, view("f64("));
+        }
+        put(&mut t, view(vt));
+        put(&mut t, view(" {}, "));
+        put(&mut t, view(vt));
+        put(&mut t, view(" {}, "));
+        put(&mut t, view(vt));
+        put(&mut t, view(" {})"));
+        r := def(&mut l, view(t), &u8[][a, b, cv]);
+        simd_store(&mut l, view(vt), view(r), view(pd), &s);
         return ();
     }
     if op == 27 {
@@ -4348,6 +4392,45 @@ fn ffi_signatures<a>(facts: (&a Facts)) -> Set {
     }
     return out;
 }
+// The byval MEMORY records of the FFI facts (fact_ffi's `memory`), as `1 + sum(words_k << 8k)`;
+// a symbol whose call sites disagree is left out (its calls stay native).
+fn ffi_memory<a>(facts: (&a Facts)) -> Set {
+    mut n = 0;
+    for i in facts.items.len() {
+        if facts.items[i].kind == FACT_FFI {
+            n += 1;
+        }
+    }
+    mut out = set_new(n + 1);
+    for i in facts.items.len() {
+        f := &facts.items[i];
+        if f.kind == FACT_FFI {
+            mut code = 1;
+            for k in f.callee.len() {
+                if k < 7 {
+                    code = code + (u64(f.callee[k]) << (8 * k));
+                }
+            }
+            was := set_get(&out, view(f.fn));
+            if (was != 0) && (was != code) {
+                set_put(&mut out, view(f.fn), 18446744073709551615);
+            } else {
+                set_put(&mut out, view(f.fn), code);
+            }
+        }
+    }
+    return out;
+}
+// The total words of an ffi_memory code's records.
+fn ffi_memory_words(code: u64) -> u64 {
+    mut n = 0;
+    mut v = code - 1;
+    while v != 0 {
+        n += v & 255;
+        v = v >> 8;
+    }
+    return n;
+}
 // The LLVM type of float argument `k` of an FFI code, or of its result.
 fn ffi_arg_type(code: u64, k: u64) -> u8[] {
     if (((code >> 7) >> k) & 1) != 0 {
@@ -4366,10 +4449,11 @@ fn ffi_ret_type(code: u64) -> u8[] {
     return copy(view("i64"));
 }
 // `(i64, i64, double)`: an FFI code's parameter list, typed or (`names` set) with the values.
-fn ffi_params(code: u64) -> u8[] {
+fn ffi_params(code: u64, mem: u64) -> u8[] {
     ints := code & 7;
     floats := (code >> 3) & 15;
     mut out = u8[];
+    mut first = true;
     for i in ints {
         if i != 0 {
             put(&mut out, view(", "));
@@ -4382,12 +4466,25 @@ fn ffi_params(code: u64) -> u8[] {
         }
         put(&mut out, view(ffi_arg_type(code, k)));
     }
+    if (mem > 1) && (mem != 18446744073709551615) {
+        mut v = mem - 1;
+        while v != 0 {
+            if (ints + floats != 0) || !first {
+                put(&mut out, view(", "));
+            }
+            first = false;
+            put(&mut out, view("ptr byval(["));
+            num(&mut out, v & 255);
+            put(&mut out, view(" x i64]) align 8"));
+            v = v >> 8;
+        }
+    }
     return out;
 }
 // A call to a C function with an FFI fact (call ABI S8a): integer words from the argument
 // registers, float arguments from the vector registers the ABI puts them in, the result back in
 // %rax or %xmm0 as the word machine expects to read it.
-fn lower_ffi_call<a, b>(l: (&a mut L), target: &b [u8], code: u64) -> unit {
+fn lower_ffi_call<a, b>(l: (&a mut L), target: &b [u8], code: u64, mem: u64) -> unit {
     ints := code & 7;
     floats := (code >> 3) & 15;
     names := u8[][copy(view("rdi")), copy(view("rsi")), copy(view("rdx")), copy(view("rcx")), copy(view("r8")), copy(view("r9"))];
@@ -4415,6 +4512,40 @@ fn lower_ffi_call<a, b>(l: (&a mut L), target: &b [u8], code: u64) -> unit {
             put(&mut args, view(def(&mut l, view("bitcast i32 {} to float"), &u8[][n])));
         } else {
             put(&mut args, view(def(&mut l, view("bitcast i64 {} to double"), &u8[][w])));
+        }
+    }
+    // Records in MEMORY: the outgoing area's words in order, each record copied into an entry-block
+    // buffer passed `byval` (LLVM puts it on the stack where the native call stored it).
+    if (mem > 1) && (mem != 18446744073709551615) {
+        mut v = mem - 1;
+        mut at = 0;
+        mut first = true;
+        while v != 0 {
+            w := v & 255;
+            mut buf = copy(view("%byv"));
+            num(&mut buf, l.t);
+            l.t += 1;
+            put(&mut l.entryextra, view("  "));
+            put(&mut l.entryextra, view(buf));
+            put(&mut l.entryextra, view(" = alloca ["));
+            num(&mut l.entryextra, w);
+            put(&mut l.entryextra, view(" x i64], align 8\n"));
+            for j in w {
+                mut gep = copy(view("getelementptr inbounds i64, ptr {}, i64 "));
+                num(&mut gep, j);
+                q := def(&mut l, view(gep), &u8[][copy(view(buf))]);
+                emit(&mut l, view("store i64 {}, ptr {}"), &u8[][copy(view(l.area[at + j])), q]);
+            }
+            at += w;
+            if (ints + floats != 0) || !first {
+                put(&mut args, view(", "));
+            }
+            first = false;
+            put(&mut args, view("ptr byval(["));
+            num(&mut args, w);
+            put(&mut args, view(" x i64]) align 8 "));
+            put(&mut args, view(buf));
+            v = v >> 8;
         }
     }
     // The fact says which vector registers are arguments (just loaded above); any other written one
@@ -4640,8 +4771,15 @@ fn area_instruction<a, b, c>(l: (&a mut L), op: &b [u8], rest: &c [u8]) -> bool 
         }
         if open {
             if l.areaopen != 0 {
-                bad(&mut l);
-                return true;
+                // One level of nesting: the foreign-call marker saves registers below a C call's
+                // own outgoing area, which is released after it.
+                if l.outeropen != 0 {
+                    bad(&mut l);
+                    return true;
+                }
+                outer := exchange(&mut l.area, u8[][]);
+                exchange(&mut l.outer, outer);
+                l.outeropen = 1;
             }
             mut words = u8[][];
             for i in u64(n.v) / 8 {
@@ -4654,8 +4792,14 @@ fn area_instruction<a, b, c>(l: (&a mut L), op: &b [u8], rest: &c [u8]) -> bool 
                 bad(&mut l);
                 return true;
             }
-            exchange(&mut l.area, u8[][]);
-            l.areaopen = 0;
+            if l.outeropen != 0 {
+                outer := exchange(&mut l.outer, u8[][]);
+                exchange(&mut l.area, outer);
+                l.outeropen = 0;
+            } else {
+                exchange(&mut l.area, u8[][]);
+                l.areaopen = 0;
+            }
         }
         return true;
     }
@@ -5072,6 +5216,9 @@ fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), fact
     exchange(&mut l.sigerr, u8[]);
     exchange(&mut l.curline, u8[]);
     exchange(&mut l.area, u8[][]);
+    exchange(&mut l.entryextra, u8[]);
+    exchange(&mut l.outer, u8[][]);
+    l.outeropen = 0;
     l.areaopen = 0;
     l.argwritten = 0;
     l.xpend = 0;
@@ -7804,6 +7951,11 @@ fn header<a>(out: (&a mut u8[])) -> unit {
     put(&mut out, view("declare {i64, i1} @llvm.ssub.with.overflow.i64(i64, i64)\n"));
     put(&mut out, view("declare {i64, i1} @llvm.smul.with.overflow.i64(i64, i64)\n"));
     put(&mut out, view("declare double @llvm.sqrt.f64(double)\n"));
+    // The SIMD mul_add (lift_simd): only for targets with a fused instruction, where it is one.
+    put(&mut out, view("declare <4 x float> @llvm.fma.v4f32(<4 x float>, <4 x float>, <4 x float>)\n"));
+    put(&mut out, view("declare <8 x float> @llvm.fma.v8f32(<8 x float>, <8 x float>, <8 x float>)\n"));
+    put(&mut out, view("declare <2 x double> @llvm.fma.v2f64(<2 x double>, <2 x double>, <2 x double>)\n"));
+    put(&mut out, view("declare <4 x double> @llvm.fma.v4f64(<4 x double>, <4 x double>, <4 x double>)\n"));
     put(&mut out, view("define internal void @\"rt_abort.cold\"() noreturn cold noinline nounwind {\n  call {i64, i64} @\"rt_abort\"(i64 0, i64 0, i64 0, i64 0, i64 0, i64 0)\n  unreachable\n}\n"));
     // LLVM may turn copy and fill loops into these calls; Grail programs have no libc.
     put(&mut out, view("define weak ptr @memset(ptr %d, i32 %c, i64 %n) #1 {\nentry:\n  %b = trunc i32 %c to i8\n  br label %loop\nloop:\n  %i = phi i64 [0, %entry], [%i1, %body]\n  %done = icmp eq i64 %i, %n\n  br i1 %done, label %exit, label %body\nbody:\n  %p = getelementptr i8, ptr %d, i64 %i\n  store i8 %b, ptr %p\n  %i1 = add i64 %i, 1\n  br label %loop\nexit:\n  ret ptr %d\n}\n"));
@@ -8297,7 +8449,18 @@ fn lower_range<a, b, c, d, e, g, h>(l: (&a mut L), lines: (&b u8[][]), funcs: (&
             }
             atomics_inline(&mut p.functions, l.target);
             put(&mut p.functions, view(" {\n"));
-            put(&mut p.functions, view(l.body));
+            if l.entryextra.len() != 0 {
+                // The entry block's first line is its label: the late allocas go right after it.
+                mut nl = 0;
+                while (nl < l.body.len()) && (l.body[nl] != 10) {
+                    nl += 1;
+                }
+                put(&mut p.functions, view(sub(view(l.body), 0, nl + 1)));
+                put(&mut p.functions, view(l.entryextra));
+                put(&mut p.functions, view(sub(view(l.body), nl + 1, l.body.len())));
+            } else {
+                put(&mut p.functions, view(l.body));
+            }
             put(&mut p.functions, view("}\n"));
             l.lifted.push(copy(view(f.name)));
             continue;
@@ -8601,7 +8764,7 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
             set_add(&mut weak, view(sub(wl, 6, wl.len())));
         }
     }
-    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, pairs: u64[], pair_widths: u64[], fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], edptr: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], hstable: u64[], hesc: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, body_blk: 0, dnames: u8[][], dmap: map_new(16), hmap: map_new(16), cmap: map_new(16), sl_start: u64[], sl_lines: u64[], proof: u64[], rline: 0, ranges: ranges, sigs: set_new(16), nargs: 6, retw: 2, rdxdead: 0, rdxcallee: u8[], curline: u8[], sigerr: u8[], wrong: u8[][], area: u8[][], areaopen: 0, argwritten: 0, ffis: set_new(16), why: host::env(view("GRAIL_LLVM_WHY")), grail_bodies: set_new(16), xpend: 0, xstale: 18446744073709551615 };
+    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, pairs: u64[], pair_widths: u64[], fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], edptr: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], hstable: u64[], hesc: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, body_blk: 0, dnames: u8[][], dmap: map_new(16), hmap: map_new(16), cmap: map_new(16), sl_start: u64[], sl_lines: u64[], proof: u64[], rline: 0, ranges: ranges, sigs: set_new(16), nargs: 6, retw: 2, rdxdead: 0, rdxcallee: u8[], curline: u8[], sigerr: u8[], wrong: u8[][], area: u8[][], areaopen: 0, argwritten: 0, ffis: set_new(16), ffimem: set_new(16), entryextra: u8[], outer: u8[][], outeropen: 0, why: host::env(view("GRAIL_LLVM_WHY")), grail_bodies: set_new(16), xpend: 0, xstale: 18446744073709551615 };
     // A function whose address is taken (`NAME(%rip)`, or named by data such as a vtable) is
     // called through a pointer by code that does not know its signature, so it keeps the six-word
     // form: an indirect call passes six words and reads rax:rdx, and LLVM must never see a call
@@ -8620,6 +8783,7 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
     }
     l.sigs = signatures(facts, &taken);
     l.ffis = ffi_signatures(facts);
+    l.ffimem = ffi_memory(facts);
     mut nb = 0;
     for i in facts.items.len() {
         if facts.items[i].kind == FACT_SIGNATURE {
@@ -8836,7 +9000,7 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
                 put(&mut ir, view(" @\""));
                 put(&mut ir, view(name));
                 put(&mut ir, view("\"("));
-                put(&mut ir, view(ffi_params(fdecl - 2)));
+                put(&mut ir, view(ffi_params(fdecl - 2, set_get(&l.ffimem, r))));
                 put(&mut ir, view(")\n"));
                 continue;
             }
