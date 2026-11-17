@@ -19030,5 +19030,74 @@
     "source": "fn main() {\n    v := i32x4::splat(1);\n    println(v.mul_add(v, v).sum());\n}\n",
     "reject": true,
     "diagnostic": "`i32x4` has no method `mul_add`"
+  },
+  {
+    "name": "bce-field-mut-ref",
+    "source": "struct Z {\n    data: u8[],\n    at: u64,\n    out: u64[]\n}\nfn drain(z: &mut Z) -> u64 {\n    while z.at < z.data.len() {\n        z.out.push(u64(z.data[z.at]));\n        z.at += 1;\n    }\n    return z.out.len();\n}\nfn main() {\n    mut z = Z { data: u8[1, 2, 3, 4, 5], at: 1, out: u64[] };\n    println(drain(&mut z));\n}\n",
+    "stdout": "4\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "asmAbsent": [
+      {
+        "in": "f_main_drain",
+        "text": "movq $1,%rdx\ncall rt_trap"
+      },
+      {
+        "in": "f_main_drain",
+        "text": "call rt_atb\n"
+      }
+    ],
+    "note": "facts on fields of a `&mut` record: `z.at < z.data.len` from the guard holds at `z.data[z.at]`; `z.out.push` lends `z.out` only, and `z.at += 1` writes `z.at` only, so the read is proved"
+  },
+  {
+    "name": "bce-field-mut-ref-pop-kept",
+    "source": "struct Z {\n    data: u8[],\n    at: u64,\n    out: u64[]\n}\nfn bad(z: &mut Z) -> u64 {\n    while z.at < z.data.len() {\n        z.data.pop()!;\n        z.out.push(u64(z.data[z.at]));\n        z.at += 1;\n    }\n    return z.out.len();\n}\nfn main() {\n    mut z = Z { data: u8[1, 2, 3, 4, 5], at: 2, out: u64[] };\n    println(bad(&mut z));\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "",
+    "stderr": [
+      "out of bounds"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "`z.data.pop()` lends `z.data`: its length fact ends, and the read keeps its check, which fires"
+  },
+  {
+    "name": "bce-field-mut-ref-call-kept",
+    "source": "struct Z {\n    data: u8[],\n    at: u64,\n    out: u64[]\n}\nfn shrink(z: &mut Z) {\n    z.data.pop()!;\n}\nfn bad(z: &mut Z) -> u64 {\n    while z.at < z.data.len() {\n        shrink(z);\n        z.out.push(u64(z.data[z.at]));\n        z.at += 1;\n    }\n    return z.out.len();\n}\nfn main() {\n    mut z = Z { data: u8[1, 2, 3, 4, 5], at: 2, out: u64[] };\n    println(bad(&mut z));\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "",
+    "stderr": [
+      "out of bounds"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "handing `z` itself to a call ends every fact about it: the read keeps its check, which fires"
+  },
+  {
+    "name": "bce-field-mut-ref-write-kept",
+    "source": "struct Z {\n    data: u8[],\n    at: u64,\n    out: u64[]\n}\nfn bad(z: &mut Z) -> u64 {\n    while z.at < z.data.len() {\n        z.at += 1;\n        z.out.push(u64(z.data[z.at]));\n    }\n    return z.out.len();\n}\nfn main() {\n    mut z = Z { data: u8[1, 2, 3], at: 0, out: u64[] };\n    println(bad(&mut z));\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "",
+    "stderr": [
+      "out of bounds"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "`z.at += 1` writes the path: the guard's `z.at < z.data.len` ends there, and the read after it in the same iteration keeps its check, which fires at z.at == 3"
   }
 ]

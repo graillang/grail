@@ -53,6 +53,12 @@
   little-endian word read), instead of a byte per loop step, while eight input bytes remain. The 4K
   png: Grail-LLVM 7.47G -> 6.44G instructions (0.85 -> 0.71 s; libpng 0.41 s, stb_image 0.41 s),
   Grail-native 19.8G -> 17.7G.
+- Bounds checks on decoder state: facts about the fields of a `&mut` record or a `mut` record
+  binding (`z.at < z.data.len()`) are kept until something can change that field - a write of the
+  path (`z.at += 1`), a mutable loan of it (`z.data.pop()`), or a call or method that receives `z`
+  itself. A loan of one field (`z.out.push(..)`) ends that field's facts only, so
+  `while z.at < z.data.len() { z.out.push(z.data[z.at]); z.at += 1; }` reads unchecked.
+
 - Bounds checks: an index `t & L` is at most `L`, so a table lookup through a mask that matches the
   table (`next[s & 511]` on a 512-entry table) needs no check. The loop-invariant pass runs only in
   a body `func()` compiles, where a failed kept fact can recompile the function; a closure body
