@@ -1,5 +1,12 @@
 ## Unreleased
 
+- Fixed: a module exporting a `u64` constant at or above 2^63, or a negative signed constant, could
+  not be read back from its interface ("carries a number wider than 64 bits"), so `grail build` of a
+  program using such a module failed. The reader now accepts the tenth LEB128 byte that holds bit 63.
+- Fixed: builds sharing one store at once (the per-module runs of one `grail check`, or several
+  builds) wrote their `sha256sum` output to one file in the store, and one run could take another's
+  digest and file a module under another module's interface ("core.iface describes module `io`").
+  Each such command now writes to a directory it claims for itself.
 - **Writing interfaces no longer costs the square of the declarations.** The interface writer put
   each list of names in order with a selection sort, and looked up every type's inherent methods
   by scanning every function of the program. A stable merge sort and a by-module index of the
