@@ -2,6 +2,7 @@ module asm_x86;
 use elf;
 use host;
 use machine;
+use asm_a64;
 
 // The internal x86-64 assembler (docs/design/compile-speed.md, stage 4): the assembly text the
 // compiler writes, in, an ELF relocatable object, out. It reads exactly the subset of AT&T syntax
@@ -33,6 +34,13 @@ const IT_JMP: u64 = 2;
 const IT_ALU: u64 = 3;
 
 pub struct A {
+    // 0 x86-64, 1 AArch64.
+    target: u64,
+    // AArch64 mapping symbols: what each section last held ($x code, $d data; 0 nothing yet).
+    map_state: u64[],
+    // Numeric labels (`1:`, `1f`, `1b`): how many of each digit string were defined.
+    num_names: u8[][],
+    num_count: u64[],
     // The text, and which bytes may be part of a name.
     src: u8[],
     nc: u8[],
@@ -236,7 +244,7 @@ fn fnv_src<a>(o: (&a A), a0: u64, e: u64) -> u64 {
     return h;
 }
 
-fn at_src<a, c>(o: (&a A), a0: u64, e: u64, w: &c [u8]) -> bool {
+pub fn at_src<a, c>(o: (&a A), a0: u64, e: u64, w: &c [u8]) -> bool {
     if e - a0 != w.len() {
         return false;
     }
@@ -349,6 +357,10 @@ pub fn new() -> A {
         }
     }
     mut o = A {
+        target: 0,
+        map_state: u64[],
+        num_names: u8[][],
+        num_count: u64[],
         src: u8[],
         nc: nc,
         nh: 0,
@@ -502,7 +514,7 @@ pub fn new() -> A {
     return o;
 }
 
-fn fail<a, b>(o: (&a mut A), what: &b [u8]) {
+pub fn fail<a, b>(o: (&a mut A), what: &b [u8]) {
     if o.err.len() == 0 {
         o.err.append(view("line "));
         num(&mut o.err, o.line);
@@ -567,7 +579,7 @@ fn new_symbol<a>(o: (&a mut A), a0: u64, e: u64, h: u64) -> u64 {
 }
 
 // The symbol named by o.src[a0..e], created on first mention.
-fn symbol<a>(o: (&a mut A), a0: u64, e: u64) -> u64 {
+pub fn symbol<a>(o: (&a mut A), a0: u64, e: u64) -> u64 {
     if (o.sym_name.len() + 1) * 2 > o.st_id.len() {
         rehash(&mut o);
     }
@@ -653,6 +665,7 @@ fn section<a, b>(o: (&a mut A), s: &b [u8], a0: u64, e: u64, ty: u64, flags: u64
     o.sec_data.push(u8[]);
     o.sec_size.push(0);
     o.sec_entsize.push(0);
+    o.map_state.push(0);
     // The section symbol: unnamed, local, created with the section, so it takes its place in the
     // creation order of the symbol table the way LLVM's does.
     sid := o.sym_name.len();
@@ -712,7 +725,7 @@ fn at_word<b, c>(s: &b [u8], a0: u64, e: u64, w: &c [u8]) -> bool {
 
 // ---- reading ----------------------------------------------------------------------------------
 
-fn skip<a>(o: (&a mut A)) {
+pub fn skip<a>(o: (&a mut A)) {
     mut i = o.at;
     e := o.le;
     while i < e {
@@ -727,7 +740,7 @@ fn skip<a>(o: (&a mut A)) {
 
 // The byte at the cursor, or 256 at the line's end. (An index that is itself a field read makes
 // the compiler build a view of the vector; a local index does not.)
-fn peek<a>(o: (&a A)) -> u64 {
+pub fn peek<a>(o: (&a A)) -> u64 {
     i := o.at;
     if i < o.le {
         return o.src[i];
@@ -735,7 +748,7 @@ fn peek<a>(o: (&a A)) -> u64 {
     return 256;
 }
 
-fn peek1<a>(o: (&a A)) -> u64 {
+pub fn peek1<a>(o: (&a A)) -> u64 {
     i := o.at + 1;
     if i < o.le {
         return o.src[i];
@@ -750,7 +763,7 @@ fn name_char(c: u64) -> bool {
 // A name at the cursor: its end.
 // The end of the name at the cursor. Its hash is left in `nh` (for the range `nh_a..nh_e`), so a
 // symbol lookup right after does not read the name again.
-fn name_end<a>(o: (&a mut A)) -> u64 {
+pub fn name_end<a>(o: (&a mut A)) -> u64 {
     mut i = o.at;
     e := o.le;
     mut h: u64 = 0xcbf29ce484222325;
@@ -768,7 +781,7 @@ fn name_end<a>(o: (&a mut A)) -> u64 {
     return i;
 }
 
-fn expect<a>(o: (&a mut A), c: u64) {
+pub fn expect<a>(o: (&a mut A), c: u64) {
     skip(&mut o);
     if (peek(&o) == c) {
         o.at += 1;
@@ -778,7 +791,7 @@ fn expect<a>(o: (&a mut A), c: u64) {
 }
 
 // A decimal or hexadecimal number at the cursor, with an optional minus sign.
-fn number<a>(o: (&a mut A)) -> u64 {
+pub fn number<a>(o: (&a mut A)) -> u64 {
     skip(&mut o);
     mut neg = false;
     if (peek(&o) == '-') {
@@ -920,7 +933,7 @@ fn expr<a>(o: (&a mut A)) {
     }
 }
 
-fn emit_le<a>(o: (&a mut A), v: u64, width: u64) {
+pub fn emit_le<a>(o: (&a mut A), v: u64, width: u64) {
     for i in width {
         o.buf.push((v >> (8 * i)) & 255);
     }
@@ -993,6 +1006,7 @@ fn const_name<a>(o: (&a A), sym: u64) -> bool {
 
 fn data<a>(o: (&a mut A), width: u64) {
     take_loc(&mut o);
+    map_to(&mut o, 2);
     if o.nobits != 0 {
         fail(&mut o, view("data in a section without contents"));
         return ();
@@ -1020,6 +1034,7 @@ fn data<a>(o: (&a mut A), width: u64) {
 }
 
 fn string<a>(o: (&a mut A), zero: bool) {
+    map_to(&mut o, 2);
     expect(&mut o, '"');
     while (o.at < o.le) && (peek(&o) != '"') {
         mut c = peek(&o);
@@ -1221,6 +1236,7 @@ fn directive<a>(o: (&a mut A), id: u64) {
             note_attr(&mut o, sym);
         }
     } else if id == 13 {
+        map_to(&mut o, 2);
         n := number(&mut o);
         if o.nobits != 0 {
             o.sec_size[o.cur] = o.sec_size[o.cur] + n;
@@ -1375,7 +1391,12 @@ fn atom_line<a>(o: (&a mut A)) {
 }
 
 fn label<a>(o: (&a mut A), a0: u64, e: u64) {
-    id := symbol(&mut o, a0, e);
+    mut id = 0;
+    if (o.target == 1) && all_digits(&o, a0, e) {
+        id = numeric_def(&mut o, a0, e);
+    } else {
+        id = symbol(&mut o, a0, e);
+    }
     if o.sym_sec[id] != 0 {
         fail(&mut o, view("symbol defined twice"));
         return ();
@@ -1439,6 +1460,11 @@ fn read_line<a>(o: (&a mut A)) {
             o.cacheable = 0;
         }
         directive(&mut o, id);
+    } else if o.target == 1 {
+        take_loc(&mut o);
+        map_to(&mut o, 1);
+        o.cacheable = 0;
+        asm_a64::instruction(&mut o, o.at, i);
     } else {
         if (id < 100) || (id >= 1000) {
             fail(&mut o, view("unsupported instruction"));
@@ -1608,6 +1634,39 @@ pub fn command<a>(args: (&a u8[][])) -> u64 {
     if (args.len() == 1) && at_word(view(args[0]), 0, args[0].len(), view("--version")) {
         host::print(view("grail asm: the internal x86-64 ELF assembler\n"));
         return 0;
+    }
+    // `--target aarch64` first: the AArch64 encoder (asm_a64).
+    if (args.len() > 2) && at_word(view(args[0]), 0, args[0].len(), view("--target")) {
+        mut rest = u8[][];
+        for i in args.len() - 2 {
+            rest.push(args[i + 2].copy());
+        }
+        if at_word(view(args[1]), 0, args[1].len(), view("aarch64")) {
+            if rest.len() != 3 {
+                host::print(view("usage: grail asm --target aarch64 IN.s -o OUT.o\n"));
+                return 2;
+            }
+            text := host::read_file(view(rest[0]));
+            r := assemble_for(1, text);
+            if r.error.len() != 0 {
+                mut said = view("grail asm: ").copy();
+                said.append(view(rest[0]));
+                said.append(view(": "));
+                said.append(view(r.error));
+                said.push(10);
+                host::print(view(said));
+                return 1;
+            }
+            if host::write_file(view(rest[2]), view(r.object)) != 0 {
+                return 1;
+            }
+            return 0;
+        }
+        if !at_word(view(args[1]), 0, args[1].len(), view("x86_64")) {
+            host::print(view("grail asm: --target is x86_64 or aarch64\n"));
+            return 2;
+        }
+        return command(&rest);
     }
     // `--units PACK`: replay the function units PACK holds and write this build's there (S5).
     mut pack = u8[];
@@ -1799,6 +1858,10 @@ fn run<a>(o: (&a mut A)) -> Result {
     mut r_sym = u64[];
     mut r_add = u64[];
     for i in o.fx_sec.len() {
+        if o.target == 1 {
+            a64_fixup(&mut o, &pre, i, &mut r_sec, &mut r_off, &mut r_type, &mut r_sym, &mut r_add);
+            continue;
+        }
         sec := o.fx_sec[i];
         mut at = o.fx_pos[i];
         if sec == 0 {
@@ -2161,7 +2224,11 @@ fn line_table<a, b, c>(o: (&a mut A), pre: (&b u64[]), r_sec: (&c mut u64[]), r_
 }
 
 fn object<a, b, c>(o: (&a mut A), pre: (&b u64[]), r_sec: (&c u64[]), r_off: (&c u64[]), r_type: (&c u64[]), r_sym: (&c u64[]), r_add: (&c u64[])) -> u8[] {
-    mut out = elf::new(62);
+    mut machine = 62;
+    if o.target == 1 {
+        machine = 183;
+    }
+    mut out = elf::new(machine);
     for k in o.sec_name.len() {
         out.sec_name.push(o.sec_name[k].copy());
         out.sec_type.push(o.sec_type[k]);
@@ -3612,4 +3679,223 @@ fn unit_replay<a>(o: (&a mut A), u: u64) -> bool {
         fail(&mut o, view("a damaged function unit"));
     }
     return true;
+}
+
+// ---- AArch64 support in the shared reader -----------------------------------------------------
+
+pub fn abs_section() -> u64 {
+    return ABS;
+}
+
+pub fn all_digits<a>(o: (&a A), a0: u64, e: u64) -> bool {
+    if e <= a0 {
+        return false;
+    }
+    mut i = a0;
+    while i < e {
+        c := o.src[i];
+        if (c < '0') || (c > '9') {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+// The hidden symbol of numeric label `N`'s n-th definition (`.Ltmp.N.n`).
+fn numeric_symbol<a>(o: (&a mut A), digits: &a [u8], n: u64) -> u64 {
+    mut name = view(".Lnum.").copy();
+    name.append(digits);
+    name.push('.');
+    num(&mut name, n);
+    outer := exchange(&mut o.src, name);
+    o.nh_a = 1;
+    o.nh_e = 0;
+    id := symbol(&mut o, 0, o.src.len());
+    o.src = outer;
+    o.nh_a = 1;
+    o.nh_e = 0;
+    return id;
+}
+
+fn numeric_slot<a>(o: (&a mut A), a0: u64, e: u64) -> u64 {
+    for i in o.num_names.len() {
+        if at_src(&o, a0, e, view(o.num_names[i])) {
+            return i;
+        }
+    }
+    mut n = u8[];
+    n.append(o.src[a0: e]);
+    o.num_names.push(n);
+    o.num_count.push(0);
+    return o.num_names.len() - 1;
+}
+
+// `Nf` (forward) or `Nb` (backward) for the digits at a0..e.
+pub fn numeric_ref<a>(o: (&a mut A), a0: u64, e: u64, forward: bool) -> u64 {
+    k := numeric_slot(&mut o, a0, e);
+    digits := o.num_names[k].copy();
+    mut n = o.num_count[k];
+    if forward {
+        n += 1;
+    }
+    return numeric_symbol(&mut o, view(digits), n);
+}
+
+fn numeric_def<a>(o: (&a mut A), a0: u64, e: u64) -> u64 {
+    k := numeric_slot(&mut o, a0, e);
+    o.num_count[k] = o.num_count[k] + 1;
+    digits := o.num_names[k].copy();
+    return numeric_symbol(&mut o, view(digits), o.num_count[k]);
+}
+
+// A mapping symbol ($x before code, $d before data) when the current section changes what it holds.
+pub fn map_to<a>(o: (&a mut A), kind: u64) {
+    if (o.target != 1) || (o.map_state[o.cur] == kind) {
+        return ();
+    }
+    o.map_state[o.cur] = kind;
+    id := o.sym_name.len();
+    if kind == 1 {
+        o.sym_name.push(view("$x").copy());
+    } else {
+        o.sym_name.push(view("$d").copy());
+    }
+    o.sym_hash.push(0);
+    o.sym_sec.push(o.cur + 1);
+    o.sym_pos.push(pos(&o));
+    o.sym_k.push(o.it_pos.len());
+    o.sym_bind.push(0);
+    o.sym_type.push(0);
+    o.sym_ref.push(0);
+    o.sym_seen.push(0);
+    o.sym_slot.push(0);
+    mention(&mut o, id);
+}
+
+// A fixup of `kind` against `sym` at the current position (AArch64: the instruction word that
+// follows).
+pub fn fixup<a>(o: (&a mut A), sym: u64, kind: u64, add: u64) {
+    o.fx_sec.push(o.cur);
+    o.fx_pos.push(o.buf.len());
+    o.fx_k.push(o.it_pos.len());
+    o.fx_kind.push(kind);
+    o.fx_sym.push(sym);
+    o.fx_sym2.push(0);
+    o.fx_width.push(4);
+    o.fx_add.push(add);
+    o.sym_ref[sym] = 1;
+    if (kind == asm_a64::fx_tprel_hi12()) || (kind == asm_a64::fx_tprel_lo12()) {
+        if o.sym_type[sym] == 0 {
+            o.sym_type[sym] = 6;
+            note_attr(&mut o, sym);
+        }
+    }
+}
+
+pub fn new_target(target: u64) -> A {
+    mut o = new();
+    o.target = target;
+    return o;
+}
+
+pub fn assemble_for(target: u64, text: u8[]) -> Result {
+    mut o = new_target(target);
+    o.src = text;
+    return run(&mut o);
+}
+
+fn get32<a>(b: (&a u8[]), at: u64) -> u64 {
+    return b[at] | (b[at + 1] << 8) | (b[at + 2] << 16) | (b[at + 3] << 24);
+}
+
+// An AArch64 fixup resolved in place (a label of the same section), or false.
+fn a64_local<a>(o: (&a mut A), sec: u64, at: u64, kind: u64, delta: u64) -> bool {
+    mut w = get32(&o.sec_data[sec], at);
+    if (kind == asm_a64::fx_call26()) || (kind == asm_a64::fx_jump26()) {
+        w = w | ((delta >> 2) & 0x3ffffff);
+    } else if kind == asm_a64::fx_cond19() {
+        w = w | (((delta >> 2) & 0x7ffff) << 5);
+    } else if kind == asm_a64::fx_adr21() {
+        w = w | ((delta & 3) << 29) | (((delta >> 2) & 0x7ffff) << 5);
+    } else {
+        return false;
+    }
+    put_le(&mut o.sec_data[sec], at, w, 4);
+    return true;
+}
+
+fn a64_type(kind: u64) -> u64 {
+    if kind == asm_a64::fx_call26() {
+        return 283;
+    }
+    if kind == asm_a64::fx_jump26() {
+        return 282;
+    }
+    if kind == asm_a64::fx_cond19() {
+        return 280;
+    }
+    if kind == asm_a64::fx_adrp() {
+        return 275;
+    }
+    if kind == asm_a64::fx_lo12() {
+        return 277;
+    }
+    if kind == asm_a64::fx_tprel_hi12() {
+        return 549;
+    }
+    if kind == asm_a64::fx_tprel_lo12() {
+        return 551;
+    }
+    if kind == asm_a64::fx_adr21() {
+        return 274;
+    }
+    if kind == FX_ABS64 {
+        return 257;
+    }
+    if kind == FX_ABS32 {
+        return 258;
+    }
+    return 0;
+}
+
+fn a64_fixup<a, b, c>(o: (&a mut A), pre: (&b u64[]), i: u64, r_sec: (&c mut u64[]), r_off: (&c mut u64[]), r_type: (&c mut u64[]), r_sym: (&c mut u64[]), r_add: (&c mut u64[])) {
+    sec := o.fx_sec[i];
+    at := o.fx_pos[i];
+    sym := o.fx_sym[i];
+    kind := o.fx_kind[i];
+    add := o.fx_add[i];
+    if kind == FX_DIFF {
+        other := o.fx_sym2[i];
+        v := wrapping_add(wrapping_sub(o.sym_pos[sym], o.sym_pos[other]), add);
+        put_le(&mut o.sec_data[sec], at, v, o.fx_width[i]);
+        return ();
+    }
+    if o.sym_sec[sym] == ABS {
+        put_le(&mut o.sec_data[sec], at, wrapping_add(o.sym_pos[sym], add), o.fx_width[i]);
+        return ();
+    }
+    defined := o.sym_sec[sym] != 0;
+    local := o.sym_bind[sym] == 0;
+    if defined && local && (o.sym_sec[sym] == sec + 1) {
+        delta := wrapping_sub(wrapping_add(o.sym_pos[sym], add), at);
+        if a64_local(&mut o, sec, at, kind, delta) {
+            return ();
+        }
+    }
+    r_sec.push(sec);
+    r_off.push(at);
+    r_type.push(a64_type(kind));
+    // A local label is named through its section's symbol (what LLVM does for .L and local data),
+    // except where the relocation needs the symbol itself (TLS).
+    if defined && local && temporary(&o, sym) {
+        r_sym.push(o.sec_sym[o.sym_sec[sym] - 1]);
+        r_add.push(wrapping_add(add, o.sym_pos[sym]));
+    } else if defined && local && (kind != asm_a64::fx_tprel_hi12()) && (kind != asm_a64::fx_tprel_lo12()) {
+        r_sym.push(o.sec_sym[o.sym_sec[sym] - 1]);
+        r_add.push(wrapping_add(add, o.sym_pos[sym]));
+    } else {
+        r_sym.push(sym);
+        r_add.push(add);
+    }
 }

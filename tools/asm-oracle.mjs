@@ -4,7 +4,7 @@
 // alignment, the relocation lists (section, offset, type, symbol, addend) and the symbol tables as
 // sets. A difference prints the first differing section and, for code, objdump's view of where.
 //
-//   bun tools/asm-oracle.mjs FILE.s...   compare the two objects of each file
+//   bun tools/asm-oracle.mjs [--target aarch64] FILE.s...   compare the two objects of each file
 //   GRAIL_ASM selects the assembler command (default: the tree's compiler, `grail asm`)
 // Over the corpus, the same comparison runs inside every x86-64 assembly when GRAIL_ASM_ORACLE=1
 // (tools/native.mjs `assemble`): `GRAIL_ASM_ORACLE=1 bun tools/test-native.mjs x86_64` checks each
@@ -100,27 +100,30 @@ function run(argv) {
   return r;
 }
 
-export function checkFile(source, work, assembler) {
+export function checkFile(source, work, assembler, target = 'x86_64') {
   const stem = join(work, basename(source).replace(/\.s$/, ''));
-  const clang = run(['clang', '--target=x86_64-linux-gnu', '-c', source, '-o', `${stem}.clang.o`]);
+  const clang = run(['clang', `--target=${target}-linux-gnu`, '-c', source, '-o', `${stem}.clang.o`]);
   if (clang.status !== 0) return `clang failed: ${clang.stderr}`;
-  const ours = run([...assembler, source, '-o', `${stem}.grail.o`]);
+  const ours = run([...assembler, ...(target === 'x86_64' ? [] : ['--target', target]), source, '-o', `${stem}.grail.o`]);
   if (ours.status !== 0) return `internal assembler failed: ${ours.stdout}${ours.stderr}`;
   const diff = compareObjects(readFileSync(`${stem}.clang.o`), readFileSync(`${stem}.grail.o`));
   if (!diff) return null;
   if (typeof diff === 'string') return diff;
-  const window = o => run(['objdump', '-d', '-r', `--start-address=${Math.max(0, diff.offset - 32)}`, `--stop-address=${diff.offset + 32}`, '-j', diff.section, o]).stdout.split('\n').slice(6).join('\n');
+  const window = o => run(['llvm-objdump', '-d', '-r', `--start-address=${Math.max(0, diff.offset - 32)}`, `--stop-address=${diff.offset + 32}`, '-j', diff.section, o]).stdout.split('\n').slice(6).join('\n');
   return `${diff.message}\n--- clang\n${window(`${stem}.clang.o`)}\n--- internal\n${window(`${stem}.grail.o`)}`;
 }
 
 if (import.meta.main) {
-  const args = process.argv.slice(2);
+  let args = process.argv.slice(2);
+  // `--target aarch64`: compare AArch64 objects (clang --target=aarch64-linux-gnu).
+  let target = 'x86_64';
+  if (args[0] === '--target') { target = args[1]; args = args.slice(2); }
   const assembler = process.env.GRAIL_ASM ? process.env.GRAIL_ASM.split(' ') : [(await import('./native.mjs')).buildCompiler(), 'asm'];
   const work = join(import.meta.dir, '..', '.work/asm-oracle');
   mkdirSync(work, { recursive: true });
   let failed = 0;
   for (const file of args) {
-    const result = checkFile(file, work, assembler);
+    const result = checkFile(file, work, assembler, target);
     if (result) {
       failed++;
       console.log(`FAIL ${file}: ${result}`);
