@@ -12,6 +12,8 @@ f:
 addi sp,sp,-64
 lla t0,g_guard
 call h
+sext.w t2,t2
+.4byte 0x0100000f
 ret
 .weak h
 .globl g
@@ -48,4 +50,10 @@ b: .zero 16
 t: .zero 8
 .section grail_sites,"a"
 .quad .Ls
+.section .rodata
+.byte 9
+.previous
+.byte 10
+.previous
+.byte 11
 .section .note.GNU-stack,"",@progbits

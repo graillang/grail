@@ -1,5 +1,6 @@
-// A waiter with little stack left must not run other work on it. A task recurses through about
-// 85% of its 1 MiB stack and joins there; the branch it forks is stolen by another worker and forks
+// A waiter with little stack left must not run other work on it. A task recurses until a tenth of
+// its stack is left (host::stack_left, so the depth does not depend on how big a backend makes each
+// frame) and joins there; the branch it forks is stolen by another worker and forks
 // eight children, each of which recurses about 290 KiB. Those children are exactly what the waiter
 // may help with (they are its own job's work), but there is no room for one of them on what is
 // left of its stack: it must park and let the workers run them, instead of running one into the
@@ -32,12 +33,17 @@ fn bottom(seed: u64) -> u64 {
     });
     return p.first + p.second;
 }
-fn down(n: u64, seed: u64) -> u64 {
-    if n == 0 { return bottom(seed); }
-    return down(n - 1, seed) + 1;
+fn down(depth: u64, seed: u64, deepest: &Atomic<u64>) -> u64 {
+    if host::stack_left() < 1048576 / 10 {
+        deepest.store(depth);
+        return bottom(seed);
+    }
+    return down(depth + 1, seed, deepest) + 1;
 }
 fn task(n: u64, unused: u64) -> u64 {
-    return down(n, 0) - n;
+    deepest := Atomic::new(0);
+    r := down(0, 0, &deepest);
+    return r - deepest.load();
 }
 fn body<s>(sc: (&s Scope<u64>), n: u64) -> u64 {
     t := spawn(sc, n, task);

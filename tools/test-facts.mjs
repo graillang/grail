@@ -245,9 +245,9 @@ ok('signature: the facts are recorded', /^; fact f_main_two signature 2$/m.test(
 ok('signature: a two-word body takes two words and gives one', /^define internal i64 @"f_main_two"\(i64 %a0, i64 %a1\)/m.test(sigIr), sigIr.match(/^define.*f_main_two.*$/m)?.[0]);
 ok('signature: a `&dyn` result stays two words', /^define internal \{i64, i64\} @"f_main_as_shape"\(i64 %a0\)/m.test(sigIr), sigIr.match(/^define.*f_main_as_shape.*$/m)?.[0]);
 ok('signature: the right facts run', run([signature.exe]).stdout === '44 7\n', JSON.stringify(run([signature.exe]).stdout));
-const refused = (directory, forge) => {
+const refused = (directory, forge, flag = '--forge-signature=', file = flag === '--forge-signature=' ? 'signature.grl' : 'indirect_words.grl') => {
   try {
-    build(directory, 'signature.grl', { backend: 'llvm', verifyFacts: true, extra: [`--forge-signature=${forge}`] });
+    build(directory, file, { backend: 'llvm', verifyFacts: true, extra: [`${flag}${forge}`] });
     return '';
   } catch (error) {
     return String(error.message);
@@ -266,6 +266,15 @@ const ffiIr = readFileSync(ffi.ll, 'utf8');
 ok('ffi: the C functions are declared with their float types', /^declare double @"scale"\(i64, double, float\)$/m.test(ffiIr) && /^declare float @"half"\(float\)$/m.test(ffiIr));
 ok('ffi: the caller is lifted and calls them typed', /call double @"scale"\(i64 %t\d+, double %t\d+, float %t\d+\)/.test(ffiIr) && /^define [^\n]*@"f_main_main"/m.test(ffiIr));
 ok('ffi: the values are the native build\'s', run([ffi.exe]).stdout === '500\n1.5\n', JSON.stringify(run([ffi.exe]).stdout));
+
+// ---- the indirect-call fact: a closure call passes only its words; a short fact is refused ----
+const indirect = build('indirect-words', 'indirect_words.grl', { backend: 'llvm', verifyFacts: true });
+const indirectIr = readFileSync(indirect.ll, 'utf8');
+ok('indirect: the fact is recorded', /^; fact f_main_apply indirect 0 words 2$/m.test(indirectIr), indirectIr.match(/^; fact f_main_apply.*$/gm));
+ok('indirect: the call passes poison past its words', /call \{i64, i64\} %t\d+\(i64 %t\d+, i64 %t\d+, i64 poison, i64 poison, i64 poison, i64 poison\)/.test(indirectIr));
+ok('indirect: the values are right', run([indirect.exe]).stdout === '30\n', JSON.stringify(run([indirect.exe]).stdout));
+const shortFact = refused('indirect-short', 'f_main_apply', '--forge-indirect=');
+ok('indirect: a fact one word short fails under --verify-facts', /the signature fact of f_main_apply is wrong: an indirect call passes 1 words but %rsi was loaded for it/.test(shortFact), shortFact.slice(0, 400));
 
 if (failed) {
   console.log(`facts: ${failed} check(s) failed`);

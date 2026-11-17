@@ -25,10 +25,11 @@ unsafety). Panics abort the process, so no lock is left held by an unwinding thr
 ## `[K: V]` maps (lib/hashmap.grl, lib/hash.grl)
 
 Keys implement the `hash::Hash` and `hash::Equal` interfaces (`num`, sized integers, `u8[]`,
-`string` provided; user records implement them). Hashing is keyed SipHash-2-4 with explicit seeds
-(`hashmap::with_seed`), verified against all 64 reference vectors. The map is compact and
-insertion-ordered (like Python's dict): entries are stored densely and buckets hold entry indices,
-growing at 3/4 load. `insert`/`get`/`get_mut`/`remove`/`contains`/`len`; iterate by position with
+`string` provided; user records implement them). Hashing is keyed SipHash-1-3 with explicit seeds
+(`hashmap::with_seed`); `hash::hasher` is SipHash-2-4, verified against all 64 reference vectors.
+The map is compact and insertion-ordered (like Python's dict): keys and values are stored densely
+and one open-addressed index (Robin Hood, backward-shift deletion) holds entry indices, growing at
+1/2 load. `insert`/`get`/`get_mut`/`remove`/`contains`/`len`; iterate by position with
 `key_at(map, i)`, `value_at(map, i)` and `value_at_mut(map, i)` for `i` in `0..len`. Removal moves the
 last entry into the hole. Lookups return borrows tied to the map, so it cannot be mutated or dropped
 while one is live. Not yet: an entry API and random default seeds.

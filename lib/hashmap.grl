@@ -4,13 +4,16 @@ use iter;
 use hash;
 use core;
 
-// Compact, insertion-ordered hash map (like Python's dict / indexmap): entries live densely in
-// `entries`; each bucket lists entry indices. Iterate with `len`, `key_at`, `value_at`.
-// Removal moves the last entry into the hole, so order is insertion order until a removal.
-struct Slot<K, V> {
-    key: K,
-    value: V
-}
+// Compact, insertion-ordered hash map (like Python's dict / indexmap). The pairs live densely, in
+// insertion order, in three flat vectors: each key's full hash in `codes`, the keys, the values.
+// `slots` is one open-addressed index over them: linear probing with Robin Hood placement and
+// backward-shift deletion, so there are no tombstones, and a miss stops as soon as it meets a slot
+// nearer its home than the probe is. A slot word is 0 when empty, else (low 32 bits of the hash) <<
+// 32 | (entry index + 1): the tag picks the home slot and rejects a mismatch before a key is read, and
+// the stored hashes mean growth and relinking never rehash a key. The index is at most half full
+// (measured against 3/4 and 7/8 on bench/hashmap.grl). Iterate with `len`, `key_at`, `value_at`.
+// Removal moves the last entry into the hole, so order is insertion order until a removal. At most
+// 2^32 - 1 entries.
 // A borrowed view of one stored pair: the key is shared, the value is exclusive, and no operation
 // yields a mutable key, so a live view can never invalidate the hash.
 pub struct Entry<a, K, V> {
@@ -18,176 +21,204 @@ pub struct Entry<a, K, V> {
     value: (&a mut V)
 }
 pub struct Map<K: hash::Hash + hash::Equal, V> {
-    entries: Slot<K,
-    V>[],
-    buckets: u64[][],
-    seed0: u64,
-    seed1: u64
+    codes: u64[],
+    keys: K[],
+    values: V[],
+    slots: u64[],
+    // The seeded SipHash-1-3 state every key's hash starts from.
+    base: hash::Hasher
 }
-fn empty_buckets(capacity: u64) -> u64[][] {
-    mut out = u64[][];
-    for i in capacity {
-        out.push(u64[]);
-    }
-    return out;
-}
+const LOW: u64 = 4294967295;
 pub fn with_seed<K: hash::Hash + hash::Equal, V>(seed0: u64, seed1: u64) -> [K: V] {
-    return Map { entries: Slot<K, V>[], buckets: empty_buckets(16), seed0: seed0, seed1: seed1 };
+    return Map { codes: u64[], keys: K[], values: V[], slots: u64[], base: hash::table_hasher(seed0, seed1) };
 }
 pub fn map_len<a, K: hash::Hash + hash::Equal, V>(map: (&a [K: V])) -> u64 {
-    return map.entries.len();
+    return map.codes.len();
 }
-fn bucket_of<a, b, K: hash::Hash + hash::Equal, V>(map: (&a [K: V]), key: (&b K)) -> u64 {
-    return hash::hash(key, map.seed0, map.seed1) % map.buckets.len();
-}
-// Entry index of key, or len() when absent.
-fn find<a, b, K: hash::Hash + hash::Equal, V>(map: (&a [K: V]), key: (&b K)) -> u64 {
-    slot := bucket_of(&map, &key);
-    bucket := &map.buckets[slot];
-    for index in bucket {
-        entry := &map.entries[*index];
-        if hash::equal(&entry.key, &key) {
-            return *index;
-        }
+// The slot holding key (whose hash is code), or slots.len() when absent.
+fn locate<a, b, K: hash::Hash + hash::Equal, V>(map: (&a [K: V]), key: (&b K), code: u64) -> u64 {
+    n := map.slots.len();
+    if n == 0 {
+        return 0;
     }
-    return map.entries.len();
+    mask := n - 1;
+    tag := code & LOW;
+    mut pos = tag & mask;
+    mut dist: u64 = 0;
+    while true {
+        w := map.slots[pos];
+        if w == 0 {
+            return n;
+        }
+        if (w >> 32) == tag {
+            if hash::equal(&map.keys[(w & LOW) - 1], &key) {
+                return pos;
+            }
+        }
+        if (wrapping_sub(pos, w >> 32) & mask) < dist {
+            return n;
+        }
+        pos = (pos + 1) & mask;
+        dist += 1;
+    }
+    return n;
+}
+// Robin Hood placement of a word that is not in the table: it takes the slot of any resident
+// nearer its own home than the word is to its home, and that resident moves on.
+fn place<a>(slots: (&a mut u64[]), word: u64) {
+    mask := slots.len() - 1;
+    mut w = word;
+    mut pos = (w >> 32) & mask;
+    mut dist: u64 = 0;
+    while true {
+        current := slots[pos];
+        if current == 0 {
+            slots[pos] = w;
+            return ();
+        }
+        theirs := wrapping_sub(pos, current >> 32) & mask;
+        if theirs < dist {
+            slots[pos] = w;
+            w = current;
+            dist = theirs;
+        }
+        pos = (pos + 1) & mask;
+        dist += 1;
+    }
 }
 fn rebuild<a, K: hash::Hash + hash::Equal, V>(map: (&a mut [K: V]), capacity: u64) {
-    exchange(&mut map.buckets, empty_buckets(capacity));
-    for i in map.entries.len() {
-        entry := &map.entries[i];
-        slot := bucket_of(&map, &entry.key);
-        target := &mut map.buckets[slot];
-        target.push(i);
+    exchange(&mut map.slots, u64[0; capacity]);
+    for i in map.codes.len() {
+        place(&mut map.slots, ((map.codes[i] & LOW) << 32) | (i + 1));
+    }
+}
+// Empty slot pos, pulling the run after it back one step until a slot that is already home or empty.
+fn erase<a>(slots: (&a mut u64[]), pos: u64) {
+    mask := slots.len() - 1;
+    mut hole = pos;
+    mut next = (pos + 1) & mask;
+    while true {
+        w := slots[next];
+        if (w == 0) || ((wrapping_sub(next, w >> 32) & mask) == 0) {
+            slots[hole] = 0;
+            return ();
+        }
+        slots[hole] = w;
+        hole = next;
+        next = (next + 1) & mask;
     }
 }
 pub fn map_contains<a, b, K: hash::Hash + hash::Equal, V>(map: (&a [K: V]), key: (&b K)) -> bool {
-    return find(&map, key) < map.entries.len();
+    return map.contains(key);
 }
 pub fn map_get<a, b, K: hash::Hash + hash::Equal, V>(map: (&a [K: V]), key: (&b K)) -> (&a V)? {
-    index := find(&map, key);
-    if index < map.entries.len() {
-        entry := &map.entries[index];
-        return Some(&entry.value);
-    }
-    return None;
+    return map.get(key);
 }
 pub fn map_get_mut<a, b, K: hash::Hash
     + hash::Equal, V>(map: (&a mut [K: V]), key: (&b K)) -> (&a mut V)? {
-    index := find(&map, key);
-    if index < map.entries.len() {
-        entry := &mut map.entries[index];
-        return Some(&mut entry.value);
-    }
-    return None;
+    return map.get_mut(key);
 }
 pub fn map_insert<a, K: hash::Hash + hash::Equal, V>(map: (&a mut [K: V]), key: K, value: V) -> V? {
-    index := find(&map, &key);
-    if index < map.entries.len() {
-        entry := &mut map.entries[index];
-        old := exchange(&mut entry.value, value);
-        return Some(old);
-    }
-    slot := bucket_of(&map, &key);
-    next := map.entries.len();
-    map.entries.push(Slot { key: key, value: value });
-    bucket := &mut map.buckets[slot];
-    bucket.push(next);
-    capacity := map.buckets.len();
-    if map.entries.len() >= capacity * 3 / 4 {
-        rebuild(&mut map, capacity * 2);
-    }
-    return None;
-}
-fn unlink<a, K: hash::Hash + hash::Equal, V>(map: (&a mut [K: V]), slot: u64, index: u64) {
-    bucket := &mut map.buckets[slot];
-    for i in bucket.len() {
-        if bucket[i] == index {
-            last := bucket.pop()!;
-            if i < bucket.len() {
-                bucket[i] = last;
-            }
-            return ();
-        }
-    }
-}
-fn relink<a, K: hash::Hash + hash::Equal, V>(map: (&a mut [K: V]), slot: u64, from: u64, to: u64) {
-    bucket := &mut map.buckets[slot];
-    for i in bucket.len() {
-        if bucket[i] == from {
-            bucket[i] = to;
-            return ();
-        }
-    }
+    return map.insert(key, value);
 }
 pub fn map_remove<a, b, K: hash::Hash + hash::Equal, V>(map: (&a mut [K: V]), key: (&b K)) -> V? {
-    index := find(&map, &key);
-    if index >= map.entries.len() {
-        return None;
-    }
-    slot := bucket_of(&map, &key);
-    unlink(&mut map, slot, index);
-    last := map.entries.len() - 1;
-    if index == last {
-        removed := map.entries.pop()!;
-        return Some(removed.value);
-    }
-    moved := map.entries.pop()!;
-    moved_slot := bucket_of(&map, &moved.key);
-    removed := exchange(&mut map.entries[index], moved);
-    relink(&mut map, moved_slot, last, index);
-    return Some(removed.value);
+    return map.remove(key);
 }
 // Borrowed view of an existing pair, or none. Holding it keeps the exclusive map borrow alive.
 pub fn map_entry<a, b, K: hash::Hash
     + hash::Equal, V>(map: (&a mut [K: V]), key: (&b K)) -> Entry<a, K, V>? {
-    index := find(&map, key);
-    if index >= map.entries.len() {
+    pos := locate(&map, &key, hash::hash_from(key, &map.base));
+    if pos >= map.slots.len() {
         return None;
     }
-    entry := &mut map.entries[index];
-    view := Entry { key: &entry.key, value: &mut entry.value };
-    return Some(view);
+    index := (map.slots[pos] & LOW) - 1;
+    return Some(Entry { key: &map.keys[index], value: &mut map.values[index] });
 }
 // Iteration by position: `for k, v in &m` lowers to these (`for i in map_len(&m) { k := key_at(&m, i); ... }`).
 pub fn key_at<a, K: hash::Hash + hash::Equal, V>(map: (&a [K: V]), index: u64) -> (&a K) {
-    entry := &map.entries[index];
-    return &entry.key;
+    return &map.keys[index];
 }
 pub fn value_at<a, K: hash::Hash + hash::Equal, V>(map: (&a [K: V]), index: u64) -> (&a V) {
-    entry := &map.entries[index];
-    return &entry.value;
+    return &map.values[index];
 }
 pub fn value_at_mut<a, K: hash::Hash
     + hash::Equal, V>(map: (&a mut [K: V]), index: u64) -> (&a mut V) {
-    entry := &mut map.entries[index];
-    return &mut entry.value;
+    return &mut map.values[index];
 }
 // Both halves of one stored pair: the shared key and the exclusive value, like `entry`, so an
 // exclusive iteration can update values without losing the key it is walking.
 pub fn entry_at<a, K: hash::Hash
     + hash::Equal, V>(map: (&a mut [K: V]), index: u64) -> Entry<a, K, V> {
-    entry := &mut map.entries[index];
-    return Entry { key: &entry.key, value: &mut entry.value };
+    return Entry { key: &map.keys[index], value: &mut map.values[index] };
 }
 impl<K: hash::Hash + hash::Equal, V> Map<K, V> {
     pub fn len<a>(self: (&a Map<K, V>)) -> u64 {
-        return hashmap::map_len(self);
+        return self.codes.len();
     }
+    // The operations live here and the map_* functions call them: one call fewer on the hot path.
     pub fn contains<a, b>(self: (&a Map<K, V>), key: (&b K)) -> bool {
-        return hashmap::map_contains(self, key);
+        return hashmap::locate(&self, key, hash::hash_from(key, &self.base)) < self.slots.len();
     }
     pub fn get<a, b>(self: (&a Map<K, V>), key: (&b K)) -> (&a V)? {
-        return hashmap::map_get(self, key);
+        pos := hashmap::locate(&self, key, hash::hash_from(key, &self.base));
+        if pos < self.slots.len() {
+            return Some(&self.values[(self.slots[pos] & hashmap::LOW) - 1]);
+        }
+        return None;
     }
     pub fn get_mut<a, b>(self: (&a mut Map<K, V>), key: (&b K)) -> (&a mut V)? {
-        return hashmap::map_get_mut(self, key);
+        pos := hashmap::locate(&self, key, hash::hash_from(key, &self.base));
+        if pos < self.slots.len() {
+            return Some(&mut self.values[(self.slots[pos] & hashmap::LOW) - 1]);
+        }
+        return None;
     }
     pub fn insert<a>(self: (&a mut Map<K, V>), key: K, value: V) -> V? {
-        return hashmap::map_insert(self, key, value);
+        code := hash::hash_from(&key, &self.base);
+        pos := hashmap::locate(&self, &key, code);
+        if pos < self.slots.len() {
+            old := exchange(&mut self.values[(self.slots[pos] & hashmap::LOW) - 1], value);
+            return Some(old);
+        }
+        next := self.codes.len();
+        capacity := self.slots.len();
+        if (next + 1) * 2 > capacity {
+            if capacity == 0 {
+                hashmap::rebuild(self, 8);
+            } else {
+                hashmap::rebuild(self, capacity * 2);
+            }
+        }
+        self.codes.push(code);
+        self.keys.push(key);
+        self.values.push(value);
+        hashmap::place(&mut self.slots, ((code & hashmap::LOW) << 32) | (next + 1));
+        return None;
     }
     pub fn remove<a, b>(self: (&a mut Map<K, V>), key: (&b K)) -> V? {
-        return hashmap::map_remove(self, key);
+        pos := hashmap::locate(&self, key, hash::hash_from(key, &self.base));
+        if pos >= self.slots.len() {
+            return None;
+        }
+        index := (self.slots[pos] & hashmap::LOW) - 1;
+        hashmap::erase(&mut self.slots, pos);
+        last := self.codes.len() - 1;
+        code := self.codes.pop()!;
+        moved_key := self.keys.pop()!;
+        moved_value := self.values.pop()!;
+        if index == last {
+            return Some(moved_value);
+        }
+        // The last entry moves into the hole: its slot now names index.
+        mask := self.slots.len() - 1;
+        mut at = code & mask;
+        while (self.slots[at] & hashmap::LOW) != last + 1 {
+            at = (at + 1) & mask;
+        }
+        self.slots[at] = ((self.slots[at] >> 32) << 32) | (index + 1);
+        self.codes[index] = code;
+        self.keys[index] = moved_key;
+        return Some(exchange(&mut self.values[index], moved_value));
     }
     pub fn entry<a, b>(self: (&a mut Map<K, V>), key: (&b K)) -> Entry<a, K, V>? {
         return hashmap::map_entry(self, key);
