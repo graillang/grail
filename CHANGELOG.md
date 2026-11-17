@@ -345,6 +345,11 @@
   optimiser kept one register per promoted local for the whole function, so the variables of a
   function's first loop held the registers its later loops needed. Locals are now coloured by
   interference, as float locals already were. fnv executes 4% fewer instructions, nbody 3%.
+- **Native backend: a call to a Grail function keeps alive only the registers it takes.** The
+  signature fact (the argument words LLVM's `define` uses) is now recorded for native builds too,
+  and a direct call to a body with one reads only that many argument registers instead of all six,
+  so a value left in, say, `%rcx` before a one-argument call is no longer kept for it. fib(32):
+  112.8M -> 105.8M instructions (Go 102.9M).
 
 - **Native backend: a slice's `data` and `len` live in registers.** The type facts are recorded on
   the native path too, and the optimiser reads F1's slice-descriptor fact: a slice written once at
