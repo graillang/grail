@@ -3836,7 +3836,9 @@ fn rt_thread_spawn_detached(entry: u64, arg: u64) -> u64 {
 // thread's allocator cache (rt_cache_make; 0 until it allocates), 72 frees made with no cache
 // (rt_cache_for_free), 80 the record of the dedicated thread whose closure this thread is running
 // (rt_uthread_main; 0 on every other thread), 88 the thread's locals (rt_locals), 96 the thread's
-// waiter block (rt_waiter; 0 until it waits or holds a lock), 104..120 unused}. Word 24 is
+// waiter block (rt_waiter; 0 until it waits or holds a lock), 104 the external scheduler slot's
+// block while this thread, not a worker, holds it (rt_external_take), 112 its pool::with_class
+// setting plus one (0 none), 120 unused}. Word 24 is
 // the entry only until rt_thread_main has read it; a scheduler worker then stores a non-zero
 // marker there so rt_abort_signals can tell a runtime worker from any other thread. Word 56 is this thread's libc TCB,
 // which every foreign call made on the thread switches to (0: there is none, the call runs on the
@@ -4585,13 +4587,14 @@ fn rt_job_wait(j: u64) -> u64 {
 // address otherwise.
 fn rt_parallel_with(f1: u64, env1: u64, f2: u64, env2: u64, combine: u64) -> u64 {
     rt_jobs_sched();
-    r := rt_job_fork(rt_job_call0, f1, env1, 0);
     // A green stack counts its region through the stack list (the fork is on it); only a thread
-    // that is not running a task keeps a count of its own (rt_region_step).
+    // that is not running a task keeps a count of its own (rt_region_step), and takes the external
+    // slot as it enters - before the fork, so the fork goes on the slot's deque.
     plain := rt_current() == 0;
     if plain {
         rt_region_enter();
     }
+    r := rt_job_fork(rt_job_call0, f1, env1, 0);
     mut second = 0;
     if env2 == 0 {
         second = raw_call2(f2, 0, 0);
@@ -4716,7 +4719,8 @@ fn rt_env_is(name: u64, value: u64) -> u64 {
 //  32 worker count  40 reactor handle  48 fence descriptor  56 reactor batch epoch
 //  64 blocking-call warning flag  72 worker array  80 injection ring  88 injection capacity
 //  96 parked workers (atomic)  104 timer lock  112 timer count  120 timer capacity
-// 128 timer heap (Windows: one entry per pending sleep)
+// 128 timer heap (Windows: one entry per pending sleep)  136 holder of the external slot (0 none);
+// the worker array has one block more than the worker count, the external slot's
 // Worker block (raw_map, one page per worker):
 //   0 deque buffer  8 deque head (atomic)  16 deque tail (atomic)  24 deque mask
 //  32 scheduler  40 index  48 thread record  56 free-stack list head  64 free-stack count
@@ -4772,13 +4776,16 @@ fn rt_sched() -> u64 {
         raw_store(made + 32, workers);
         raw_store(made + 80, raw_map(65536));
         raw_store(made + 88, 8192);
-        array := raw_map(workers * 8);
+        // One block more than there are workers: the external slot (rt_external_take), which a
+        // thread that is not a worker - main, a render thread - holds while it is inside a
+        // parallel call, so its forks go on a deque of their own instead of the locked ring.
+        array := raw_map((workers + 1) * 8);
         if rt_error(array) {
             rt_abort();
         }
         raw_store(made + 72, array);
         mut i = 0;
-        while i < workers {
+        while i <= workers {
             raw_store(array + i * 8, rt_sched_worker_new(made, i));
             i += 1;
         }
@@ -5378,6 +5385,39 @@ fn rt_job_carve(j: u64, list: u64, size: u64) -> u64 {
     raw_store(j + 48, raw_load(j + 48) - size);
     return made;
 }
+// The block whose job deques and free records this code uses: its worker's, or the external slot
+// when a thread that is not a worker holds it (thread-record word 104).
+fn rt_job_block() -> u64 {
+    tp := raw_tp_get();
+    if tp == 0 {
+        return 0;
+    }
+    if raw_load(tp + 24) == 2 {
+        return raw_load(tp + 32);
+    }
+    return raw_load(tp + 104);
+}
+// A thread that is not a worker, entering its outermost parallel region: take the external slot if
+// it is free. The slot's deques may hold stale entries from its last holder; they are hints, and
+// the acquire here orders this thread after that holder's release.
+fn rt_external_take(tp: u64) -> u64 {
+    s := raw_atomic_load(raw_state() + 72);
+    if s == 0 {
+        return 0;
+    }
+    if raw_atomic_cas(s + 136, 0, tp) == 0 {
+        raw_store(tp + 104, raw_load(raw_load(s + 72) + raw_load(s + 32) * 8));
+    }
+    return 0;
+}
+fn rt_external_give(tp: u64) -> u64 {
+    if raw_load(tp + 104) == 0 {
+        return 0;
+    }
+    raw_store(tp + 104, 0);
+    raw_atomic_store_release(raw_atomic_load(raw_state() + 72) + 136, 0);
+    return 0;
+}
 fn rt_job_new() -> u64 {
     return rt_job_new_on(rt_worker_self());
 }
@@ -5407,7 +5447,7 @@ fn rt_job_release(r: u64) -> u64 {
         rt_abort();
     }
     raw_atomic_store(r + 32, 0);
-    w := rt_worker_self();
+    w := rt_job_block();
     if (w != 0) && (raw_load(w + 248) < 1024) {
         raw_store(r + 48, raw_load(w + 240));
         raw_store(w + 240, r);
@@ -5443,7 +5483,7 @@ fn rt_list_set(t: u64, head: u64) -> u64 {
 }
 // The claim word a caller writes: which worker's deque the job's own forks will land on.
 fn rt_job_claim_word() -> u64 {
-    w := rt_worker_self();
+    w := rt_job_block();
     if w == 0 {
         return 2;
     }
@@ -5462,7 +5502,7 @@ fn rt_job_make(f: u64, a: u64, b: u64, c: u64, listed: u64) -> u64 {
 }
 // `class` 3: inherit (the parent's class, else the stack's, else Normal).
 fn rt_job_make_class(f: u64, a: u64, b: u64, c: u64, listed: u64, class: u64) -> u64 {
-    w := rt_worker_self();
+    w := rt_job_block();
     r := rt_job_new_on(w);
     raw_store(r, f);
     raw_store(r + 8, a);
@@ -5615,8 +5655,9 @@ fn rt_job_reserve_background() -> u64 {
 fn rt_now_us() -> u64 {
     return f_host_now_us();
 }
+// The victims are every worker and the external slot.
 fn rt_job_steal(s: u64, w: u64, class: u64) -> u64 {
-    workers := raw_load(s + 32);
+    workers := raw_load(s + 32) + 1;
     if 1 < workers {
         array := raw_load(s + 72);
         start := rt_worker_random(w) % workers;
@@ -5761,7 +5802,7 @@ fn rt_job_leap(s: u64, r: u64, claimed: u64) -> u64 {
         return 0;
     }
     index := claimed / 8 - 1;
-    if raw_load(s + 32) <= index {
+    if raw_load(s + 32) < index {
         return 0;
     }
     // r's descendants are r's class, so they are in that class's deque.
@@ -5796,7 +5837,7 @@ fn rt_job_await(r: u64) -> u64 {
         if st == 3 {
             return 0;
         }
-        w := rt_worker_self();
+        w := rt_job_block();
         if st == 1 {
             if raw_atomic_cas(r + 32, 1, rt_job_claim_word()) == 1 {
                 if w != 0 {
@@ -6156,7 +6197,13 @@ fn rt_region_step(by: u64) -> u64 {
     }
     tp := raw_tp_get();
     if tp != 0 {
-        raw_store(tp + 24, wrapping_add(raw_load(tp + 24), by));
+        before := raw_load(tp + 24);
+        raw_store(tp + 24, wrapping_add(before, by));
+        if before == 0 {
+            rt_external_take(tp);
+        } else if wrapping_add(before, by) == 0 {
+            rt_external_give(tp);
+        }
     }
     return 0;
 }
