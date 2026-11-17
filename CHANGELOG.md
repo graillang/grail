@@ -65,6 +65,10 @@
   are held to clang's structurally (`GRAIL_ASM_ORACLE=1` now covers macOS builds). Fixed: `.data` in
   a macOS build crashed the assembler, and C-string sections had the wrong Mach-O type.
 
+- SIMD vectors cross `extern "C"` by value, as `__m128`/`__m128d`/`__m128i` on x86-64 Linux and macOS,
+  `__m256` at `--cpu=x86-64-v3`, and `float32x4_t`/`float64x2_t`/`int32x4_t` on AArch64, in arguments and
+  results. A 4-lane dot product in C costs half the instructions per call of the scalar-argument
+  version. Windows x64, RV64 and a 256-bit vector without AVX are refused with a diagnostic.
 - **`bench-rivals` no longer charts a build that printed the wrong answer.** It already failed the
   run when a build's output differed from C's, but still wrote that build's figures into the
   results, so a miscompiled program could chart as the fastest. Such a figure is now left out and

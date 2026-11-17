@@ -18316,7 +18316,7 @@ fn ffi_direct_type<a>(c: (&a mut C), ty: u64) -> bool {
     return false;
 }
 fn ffi_direct_param<a, b>(c: (&a mut C), ty: u64, what: &b [u8]) -> unit {
-    if ffi_byval(&mut c, ty) {
+    if ffi_byval(&mut c, ty) || is_simd(&mut c, ty) {
         return ();
     }
     if ffi_direct_type(&mut c, ty) {
@@ -18327,7 +18327,7 @@ fn ffi_direct_param<a, b>(c: (&a mut C), ty: u64, what: &b [u8]) -> unit {
 }
 fn ffi_direct_result<a, b>(c: (&a mut C), ty: u64, what: &b [u8]) -> unit {
     if ty != 1 {
-        if ffi_direct_type(&mut c, ty) {
+        if ffi_direct_type(&mut c, ty) || is_simd(&mut c, ty) {
             return ();
         }
         // A C-layout record result is returned by value (registers or a hidden result pointer,
@@ -18340,6 +18340,43 @@ fn ffi_direct_result<a, b>(c: (&a mut C), ty: u64, what: &b [u8]) -> unit {
         }
     }
     ffi_result(&mut c, ty, what);
+    return ();
+}
+// A SIMD vector passed to or returned from C by value (docs/design/simd.md, S4c): __m128/__m256 on
+// x86-64 SysV in one xmm/ymm register, float32x4_t and the other 128-bit vectors on AAPCS64 in one
+// q register, sharing the float registers' count. What no target here supports is refused.
+fn simd_c_check<a>(c: (&a mut C), ty: u64, abi: u64, variadic: bool) -> unit {
+    if variadic {
+        fail(&mut c, view("a SIMD vector cannot be a variadic C argument"));
+    }
+    if abi == 1 {
+        fail(&mut c, view("SIMD vectors cross to C by value on x86-64 Linux and macOS and on AArch64; Windows x64 passes __m128 by reference, which is not built: pass a pointer to the vector's elements"));
+    }
+    if abi == 3 {
+        fail(&mut c, view("RISC-V's C ABI here has no vector registers: pass a pointer to the vector's elements"));
+    }
+    if simd_words(&mut c, ty) == 4 {
+        if abi == 2 {
+            fail(&mut c, view("AArch64 C has no 256-bit vector type: pass two 128-bit vectors or a pointer"));
+        }
+        if c.cpu < 2 {
+            fail(&mut c, view("a 256-bit vector crosses to C in a ymm register, which needs AVX: build with --cpu=x86-64-v3"));
+        }
+    }
+    return ();
+}
+// The `simd.` line moving a C vector argument into register `k` (cvarg) or the result out (cvret).
+fn simd_c_line<a, b>(c: (&a mut C), op: &b [u8], ty: u64, k: u64) -> unit {
+    mut line = copy_bytes(view("simd."));
+    push_bytes(&mut line, op);
+    line.push(32);
+    push_bytes(&mut line, view(simd_shape(&mut c, ty)));
+    if same(view(op), view("cvarg")) {
+        line.push(32);
+        decimal(&mut line, k);
+    }
+    line.push(10);
+    o(&mut c, view(line));
     return ();
 }
 // %rax -> the outgoing stack argument word at `offset` bytes above the stack pointer.
@@ -18441,6 +18478,16 @@ fn ffi_emit_call<a, b, d, e, f>(
             }
         }
     }
+    // A SIMD vector result comes back in xmm0/ymm0/q0 and is stored into a frame vector.
+    mut vret = false;
+    mut vdst = 0;
+    mut vector_call = false;
+    if (ret != 1) && is_simd(&mut c, ret) {
+        simd_c_check(&mut c, ret, abi, false);
+        vret = true;
+        vector_call = true;
+        vdst = frame_alloc(&mut c, simd_words(&mut c, ret));
+    }
     mut shift = 0;
     if (rmode == 2) & (abi != 2) {
         shift = 1;
@@ -18472,6 +18519,15 @@ fn ffi_emit_call<a, b, d, e, f>(
             continue;
         }
         plans.push(ffi_empty_plan());
+        if (formals.len() > i) && is_simd(&mut c, formals[i]) {
+            simd_c_check(&mut c, formals[i], abi, fixed < i + 1);
+            if 8 <= floats {
+                fail(&mut c, view("a C call with more than eight float and vector arguments passes the rest on the stack, which a vector argument does not support yet"));
+            }
+            floats = floats + 1;
+            vector_call = true;
+            continue;
+        }
         if apple_var {
             for w in ffi_words(&mut c, ty) {
                 stack = stack + 1;
@@ -18579,6 +18635,12 @@ fn ffi_emit_call<a, b, d, e, f>(
             ints = plans[i].ints;
             floats = plans[i].floats;
             next = plans[i].stack;
+            continue;
+        }
+        if (formals.len() > i) && is_simd(&mut c, formals[i]) {
+            get(&mut c, args[i], view("%rax"));
+            simd_c_line(&mut c, view("cvarg"), formals[i], floats);
+            floats = floats + 1;
             continue;
         }
         if apple_arm & variadic_arg {
@@ -18728,7 +18790,7 @@ fn ffi_emit_call<a, b, d, e, f>(
         on(&mut c, floats);
         o(&mut c, view(",%eax\n"));
     }
-    if (symbol.len() != 0) && (fixed == args.len()) && (rmode == 0) && (copies == 0) {
+    if (symbol.len() != 0) && (fixed == args.len()) && (rmode == 0) && (copies == 0) && !vector_call {
         ffi_signature_fact(&mut c, argtypes, formals, ret, view(symbol), abi, area);
     }
     if symbol.len() == 0 {
@@ -18754,6 +18816,26 @@ fn ffi_emit_call<a, b, d, e, f>(
                 c.fx_edge_kind[last] = c.fx_edge_kind[last] | 64;
             }
         }
+    }
+    if vret {
+        get(&mut c, vdst, view("%rdi"));
+        simd_c_line(&mut c, view("cvret"), ret, 0);
+        if area != 0 {
+            if x86 {
+                o(&mut c, view("addq $"));
+                on(&mut c, area);
+                o(&mut c, view(",%rsp\n"));
+            } else {
+                o(&mut c, view("cunstack "));
+                on(&mut c, area);
+                c.out.push(10);
+            }
+        }
+        if tls != 0 {
+            tls_leave(&mut c, tls);
+        }
+        ffi_hooks_leave(&mut c, mk, block_here, view(symbol));
+        return val(vdst, ret);
     }
     if (ret != 1) & (rmode == 0) {
         if is_float(&mut c, ret) {

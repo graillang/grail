@@ -1384,7 +1384,7 @@ fn simd_ops() -> u8[][] {
         copy_text(view("copy")), copy_text(view("any")), copy_text(view("all")), copy_text(view("insert")),
         copy_text(view("topair")), copy_text(view("frompair")), copy_text(view("shuffle")),
         copy_text(view("tof32")), copy_text(view("toi32")), copy_text(view("copya")), copy_text(view("copyd")),
-        copy_text(view("fma"))
+        copy_text(view("fma")), copy_text(view("cvarg")), copy_text(view("cvret"))
     ];
 }
 fn simd_number<a>(s: &a [u8]) -> u64 {
@@ -2642,6 +2642,27 @@ fn simd_x86_packed<a>(o: (&a mut Out), s: (&Simd)) -> bool {
         simd_movups(&mut o, view("%rdi"), 0, view("%xmm0"), false);
         return true;
     }
+    if op == 33 {
+        // cvarg K: the vector at (%rax) into the C argument register K (S4c): xmmK, or ymmK for a
+        // 256-bit vector (the front end allows that only at --cpu=x86-64-v3 and above).
+        if chunks == 2 {
+            put(&mut o, view("vmovups (%rax),%ymm"));
+        } else {
+            put(&mut o, view("movups (%rax),%xmm"));
+        }
+        u64(&mut o, s.k);
+        put(&mut o, view("\n"));
+        return true;
+    }
+    if op == 34 {
+        // cvret: the C result register into the vector at (%rdi).
+        if chunks == 2 {
+            put(&mut o, view("vmovups %ymm0,(%rdi)\nvzeroupper\n"));
+        } else {
+            put(&mut o, view("movups %xmm0,(%rdi)\n"));
+        }
+        return true;
+    }
     if op == 32 {
         // fma, at --cpu=x86-64-v3 and above (the front end sends it only there): vfmadd231 adds the
         // product into the accumulator with one rounding.
@@ -2881,6 +2902,17 @@ fn simd_a64_packed<a>(o: (&a mut Out), s: (&Simd)) -> bool {
             }
         }
         put(&mut o, view("cmp x9,#0\ncset x9,ne\n"));
+        return true;
+    }
+    if op == 33 {
+        // cvarg K: the vector at x9 (%rax) into the AAPCS64 argument register vK.
+        put(&mut o, view("ldr q"));
+        u64(&mut o, s.k);
+        put(&mut o, view(",[x9,#0]\n"));
+        return true;
+    }
+    if op == 34 {
+        put(&mut o, view("str q0,[x0,#0]\n"));
         return true;
     }
     if op == 32 {

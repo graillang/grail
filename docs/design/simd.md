@@ -1,6 +1,6 @@
 # SIMD types: the decision record
 
-Status: S1-S3 and S4a (`mul_add`) built. S4b (`--cpu` levels), S4c (the `extern "C"` vector ABI), S5 and S6 approved and staged below. This supersedes the
+Status: S1-S4 built. S5 and S6 approved and staged below. This supersedes the
 SIMD parts of `simd-layout-parallel-loops.md` where they differ (marked), and the
 pre-design note of the same name from commit ac15c72.
 
@@ -278,7 +278,48 @@ from /proc/cpuinfo.
   both.
 - Other targets refuse `--cpu`.
 
-Not done: the `extern "C"` vector ABI (S4c), stopped here by the wrap-up order.
+
+## As built (S4c: vectors by value across `extern "C"`)
+
+An `extern "C"` declaration may take and return SIMD vectors by value:
+`extern "C" lib "x.o" fn f(a: f32x4, b: f32x4) -> f32x4;`. Each vector is passed the way C passes
+the intrinsic type of the same size:
+- **x86-64 SysV:** `__m128`, `__m128d`, `__m128i` and friends travel in one xmm register. `__m256`
+  travels in one ymm register, so a 256-bit vector needs `--cpu=x86-64-v3` (AVX); without it the
+  call is refused rather than passed some other way.
+- **AAPCS64:** `float32x4_t`, `float64x2_t`, `int32x4_t` travel in one `q` register.
+- **The register count:** vectors share it with float arguments, so the eighth float-or-vector
+  argument is the last that fits. A ninth vector is refused (stack-passed vectors are not built).
+- **Results:** come back in xmm0/ymm0/q0 and are stored into a frame vector.
+- **Not built:** Windows x64 passes `__m128` by reference, RV64 has no C vector type here, and
+  AArch64 C has no 256-bit vector. Each is refused with a diagnostic that says to pass a pointer.
+  Variadic vectors and C callbacks taking vectors are refused too.
+
+How it is lowered:
+- Two stream ops move the vectors: `simd.cvarg SHAPE K` (the vector at `%rax` into argument register
+  K: `movups`/`vmovups` on x86-64, `ldr qK` on AArch64) and `simd.cvret SHAPE` (`movups`/`vmovups`
+  plus `vzeroupper`, `str q0`).
+- The internal x86 assembler learned the ymm registers, VEX `vmovups` (two- or three-byte prefix, as
+  clang writes it) and `vzeroupper`, under named ids with `tests/asm` lines.
+- The LLVM lifter's call lowering carries 8-byte float registers, so a function that makes such a
+  call stays native under `--release`. That is correct, but it is not lifted.
+
+**Tested.** `tools/test-ffi.mjs` has two fixtures against real intrinsics C:
+- `vectors` (x86-64 and AArch64, `tests/ffi/vector_shim.c`): vectors mixed with doubles and
+  integers, eight vector arguments, `i32x4`/`f64x2` results.
+- `vectors256` (x86-64, `vector_avx_shim.c` built with `-mavx`, the program with
+  `--cpu=x86-64-v3`). A function-level `target("avx")` does not change clang's convention in a
+  translation unit built without AVX: such a callee reads `__m256` arguments from the stack, which is
+  why the AVX shim is its own object.
+
+**Measured** (x86-64, one core, load 57): a 4-lane dot product in C called a million times, with
+the vectors passed by value (`c_dot4(a: f32x4, b: f32x4)`) against the only way before S4c, eight
+scalar `f32` arguments (`c_dot4s`). Both print the same total.
+
+| | instructions per call (callgrind) | ns per call, fastest of 7 (median) |
+|---|---|---|
+| by value | 72.5 | 6.4 (14.8) |
+| eight scalars | 143.5 | 11.9 (16.8) |
 
 ## Stages
 

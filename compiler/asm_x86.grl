@@ -383,6 +383,10 @@ fn regs<a>(o: (&a mut A)) {
         mut x = view("xmm").copy();
         num(&mut x, n);
         def(&mut o, view(x), R_BASE + n + 32 * 16);
+        // The 256-bit registers (class 17): the AVX moves of a C vector argument or result.
+        mut y = view("ymm").copy();
+        num(&mut y, n);
+        def(&mut o, view(y), R_BASE + n + 32 * 17);
     }
     def(&mut o, view("rip"), R_RIP);
     def(&mut o, view("fs"), R_FS);
@@ -3049,6 +3053,10 @@ const I_CVTDQ2PS: u64 = 303;
 // FMA3, VEX-encoded: the SIMD mul_add at --cpu=x86-64-v3 and above (docs/design/simd.md, S4b).
 const I_VFMADD231PS: u64 = 304;
 const I_VFMADD231PD: u64 = 305;
+// AVX: a 256-bit vector to and from a ymm register at the C boundary (S4c), and the upper-half
+// clear after one.
+const I_VMOVUPS: u64 = 306;
+const I_VZEROUPPER: u64 = 307;
 const I_JCC: u64 = 160;
 const I_SETCC: u64 = 180;
 const I_CMOV: u64 = 250;
@@ -3175,6 +3183,8 @@ fn mnemonics<a>(o: (&a mut A)) {
     def(&mut o, view("cvtdq2ps"), I_CVTDQ2PS);
     def(&mut o, view("vfmadd231ps"), I_VFMADD231PS);
     def(&mut o, view("vfmadd231pd"), I_VFMADD231PD);
+    def(&mut o, view("vmovups"), I_VMOVUPS);
+    def(&mut o, view("vzeroupper"), I_VZEROUPPER);
     // Conditions: 160 + cc for jumps, 180 + cc for set.
     cc := u8[][view("o").copy(), view("no").copy(), view("b").copy(), view("ae").copy(), view("e").copy(), view("ne").copy(), view("be").copy(), view("a").copy(), view("s").copy(), view("ns").copy(), view("p").copy(), view("np").copy(), view("l").copy(), view("ge").copy(), view("le").copy(), view("g").copy()];
     alias := u8[][view("c").copy(), view("nae").copy(), view("nb").copy(), view("nc").copy(), view("z").copy(), view("nz").copy(), view("na").copy(), view("nbe").copy(), view("pe").copy(), view("po").copy(), view("nge").copy(), view("nl").copy(), view("ng").copy(), view("nle").copy()];
@@ -3395,6 +3405,12 @@ fn enc<a>(o: (&a mut A), pfx: u64, w: u64, opc: u64, opn: u64, reg: u64, rmop: u
     for i in opn {
         o.buf.push((opc >> (8 * i)) & 255);
     }
+    modrm_tail(&mut o, reg, rmop, imm);
+}
+// The ModRM byte, SIB and displacement of an instruction whose prefixes and opcode are written:
+// `reg` in the reg field, operand slot `rmop` the register or memory operand.
+fn modrm_tail<a>(o: (&a mut A), reg: u64, rmop: u64, imm: u64) {
+    mem := o.ok[rmop] == 3;
     r := (reg & 7) << 3;
     if !mem {
         o.buf.push(0xc0 | r | (rn(&o, rmop) & 7));
@@ -3966,6 +3982,54 @@ fn execute<a>(o: (&a mut A), id: u64) {
         rm2(&mut o, 1, 0, 0xd70f, 2, 1, 0);
     } else if id == I_CVTDQ2PS {
         rm2(&mut o, 0, 0, 0x5b0f, 2, 1, 0);
+    } else if id == I_VZEROUPPER {
+        o.buf.push(0xc5);
+        o.buf.push(0xf8);
+        o.buf.push(0x77);
+    } else if id == I_VMOVUPS {
+        // `vmovups MEM,%ymmN` (VEX.256.0F 10) or `vmovups %ymmN,MEM` (11): the two-byte VEX prefix
+        // when neither the base nor the index is r8-r15, the three-byte one otherwise, as clang
+        // writes them.
+        if o.nops != 2 {
+            shape(&mut o);
+            return ();
+        }
+        mut regop = 1;
+        mut memop = 0;
+        mut opc = 0x10;
+        if (o.ok[0] == 1) && (o.ok[1] == 3) {
+            regop = 0;
+            memop = 1;
+            opc = 0x11;
+        }
+        if (o.ok[regop] != 1) || (o.ok[memop] != 3) || ((cls(&o, regop) != 16) && (cls(&o, regop) != 17)) {
+            shape(&mut o);
+            return ();
+        }
+        reg := rn(&o, regop);
+        mut l = 0;
+        if cls(&o, regop) == 17 {
+            l = 1;
+        }
+        xb := ((o.m_index != NONE) && (o.m_index >= 8)) || ((o.m_base != NONE) && (o.m_base >= 8));
+        if xb {
+            mut xbit = 1;
+            if (o.m_index != NONE) && (o.m_index >= 8) {
+                xbit = 0;
+            }
+            mut bbit = 1;
+            if (o.m_base != NONE) && (o.m_base >= 8) {
+                bbit = 0;
+            }
+            o.buf.push(0xc4);
+            o.buf.push(((1 - ((reg >> 3) & 1)) << 7) | (xbit << 6) | (bbit << 5) | 1);
+            o.buf.push((15 << 3) | (l << 2));
+        } else {
+            o.buf.push(0xc5);
+            o.buf.push(((1 - ((reg >> 3) & 1)) << 7) | (15 << 3) | (l << 2));
+        }
+        o.buf.push(opc);
+        modrm_tail(&mut o, reg, memop, 0);
     } else if (id == I_VFMADD231PS) || (id == I_VFMADD231PD) {
         // `vfmadd231ps %xmmS2,%xmmS1,%xmmD`: D = S1 * S2 + D, three xmm registers. VEX.128.66.0F38
         // (C4, R X B mmmmm=00010, W vvvv L=0 pp=01), opcode B8, ModRM 11 D S2; W is the pd form.

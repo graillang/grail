@@ -1,0 +1,35 @@
+module ffi_vectors;
+
+// SIMD vectors by value to and from C (docs/design/simd.md, S4c): __m128/__m128d/__m128i on x86-64,
+// float32x4_t/float64x2_t/int32x4_t on AArch64, in arguments mixed with scalars, eight at once, and as
+// results.
+extern "C" lib "shim.o" fn c_vec_add(a: f32x4, b: f32x4) -> f32x4;
+extern "C" lib "shim.o" fn c_vec_madd(a: f32x4, b: f32x4, c: f32x4) -> f32x4;
+extern "C" lib "shim.o" fn c_vec_mix(x: f64, a: f32x4, n: i64, b: f64x2, m: i64) -> f64;
+extern "C" lib "shim.o" fn c_vec_eight(a: f32x4, b: f32x4, c: f32x4, d: f32x4, e: f32x4, f: f32x4, g: f32x4, h: f32x4) -> f64;
+extern "C" lib "shim.o" fn c_vec_ints(k: i64) -> i32x4;
+extern "C" lib "shim.o" fn c_vec_swap(v: f64x2) -> f64x2;
+
+fn main() {
+    unsafe {
+        a := f32x4::new(1.0, 2.0, 3.0, 4.0);
+        b := f32x4::new(0.5, 0.25, 0.125, 8.0);
+        s := c_vec_add(a, b);
+        println(s.lane(0));
+        println(s.lane(3));
+        m := c_vec_madd(a, b, f32x4::splat(100.0));
+        println(m.sum());
+        println(c_vec_mix(0.5, a, 7, f64x2::new(4.0, 8.0), 3));
+        mut v = f32x4::splat(0.0);
+        println(c_vec_eight(a, b, a + b, a * b, b, a, f32x4::splat(9.0), f32x4::new(1.0, 1.0, 1.0, 2.0)));
+        i := c_vec_ints(41);
+        println(i.lane(0));
+        println(i.lane(2));
+        println(i.lane(3));
+        w := c_vec_swap(f64x2::new(-1.5, 2.75));
+        println(w.lane(0));
+        println(w.lane(1));
+        v = c_vec_add(c_vec_add(a, a), v);
+        println(v.sum());
+    }
+}

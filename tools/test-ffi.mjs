@@ -97,6 +97,23 @@ const fixtures = [
     symbols: ['c_vsum', 'c_vmix'],
   },
   {
+    // SIMD vectors by value (docs/design/simd.md, S4c): __m128/float32x4_t and friends in vector
+    // registers, mixed with scalars, eight at once, and as results.
+    name: 'vectors',
+    stdout: '1.5\n12\n433.375\n311325.5\n788\n41\n-41\n2147483647\n2.75\n-1.5\n20\n',
+    symbols: ['c_vec_add', 'c_vec_madd', 'c_vec_mix', 'c_vec_eight', 'c_vec_ints', 'c_vec_swap'],
+    targets: ['x86_64', 'aarch64'],
+  },
+  {
+    // __m256 in ymm registers, which the caller passes only when built for AVX.
+    name: 'vectors256',
+    stdout: '1.5\n8.5\n222\n',
+    symbols: ['c_vec8_add', 'c_vec8_sum'],
+    targets: ['x86_64'],
+    extra: ['--cpu=x86-64-v3'],
+    linkNote: '// grail-link: shim_avx.o',
+  },
+  {
     // Records passed to C by value (`v: byval R`): 4, 8, 12, 16, 24 and 40 bytes, mixed int/float
     // fields, an ImVec2-shaped float pair and an embedded array, plus a byval parameter after six
     // integer arguments, a byval record sharing the stack area with a following scalar, and a call
@@ -310,6 +327,14 @@ function shim(target) {
     '-fno-stack-protector', '-fno-pic', join(root, 'tests/ffi/shim.c'), '-o', object,
   ], { cwd: root, maxBuffer: 16 * 1024 * 1024, timeout: 900_000 });
   if (result.status !== 0) throw new Error(`shim.c for ${target} failed: ${result.stderr}`);
+  if (target === 'x86_64') {
+    // The __m256 functions, built for AVX so their vectors travel in ymm registers (vectors256).
+    const avx = spawnSync(process.env.GRAIL_ASSEMBLER ?? 'clang', [
+      `--target=${triples[target]}`, '-mavx', '-c', '-O1', '-ffreestanding', '-fno-stack-protector', '-fno-pic',
+      join(root, 'tests/ffi/vector_avx_shim.c'), '-o', join(directory, 'shim_avx.o'),
+    ], { cwd: root, maxBuffer: 16 * 1024 * 1024, timeout: 900_000 });
+    if (avx.status !== 0) throw new Error(`vector_avx_shim.c failed: ${avx.stderr}`);
+  }
   return object;
 }
 
@@ -345,7 +370,7 @@ for (const target of selected) {
     if (threadShim.status !== 0) throw new Error(`thread_shim.c for ${target} failed: ${threadShim.stderr}`);
   }
   for (const { name, stdout, symbols, defines = [], linkNote = '// grail-link: shim.o', hostOnly = false,
-    modules = [], signal = null, targets: onlyTargets = null, env = null } of fixtures) {
+    modules = [], signal = null, targets: onlyTargets = null, env = null, extra = [] } of fixtures) {
     // A fixture whose shape one target refuses is compiled and executed only where it is valid; the
     // refusal itself is asserted at the end of this file.
     if (onlyTargets && !onlyTargets.includes(target)) continue;
@@ -369,7 +394,7 @@ for (const target of selected) {
     // relative to the declaring source, which is the documented rule.
     const source = join(directory, `${name}.grl`);
     copyFileSync(join(root, `tests/ffi/${name}.grl`), source);
-    const executable = compileProgram(compiler, [source, ...modules.map(m => join(root, m))], directory, { target, name });
+    const executable = compileProgram(compiler, [source, ...modules.map(m => join(root, m))], directory, { target, name, extra });
     // On the LLVM backend a lifted caller's C call is in the IR module, not the native text.
     const lifted = existsSync(join(directory, `${name}.s.ll`)) ? readFileSync(join(directory, `${name}.s.ll`), 'utf8') : '';
     const assembly = readFileSync(join(directory, `${name}.s`), 'utf8') + lifted.split('\n').filter(l => / call [^@]*@"/.test(l)).map(l => `call ${l.match(/@"([^"]+)"/)[1]}`).join('\n') + '\n';

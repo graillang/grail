@@ -110,6 +110,7 @@ long long c_apply_preserving(grail_callback callback, long long value) {
 #include "narrow_shim.c"
 #include "out_shim.c"
 #include "words_shim.c"
+#include "vector_shim.c"
 
 /* ---- bare data pointers (CPtr / CMutPtr) ---- */
 long long c_ptr_sum(const unsigned char *p, long long n) { long long s = 0; for (long long i = 0; i < n; i++) s += p[i]; return s; }
