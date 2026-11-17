@@ -263,6 +263,23 @@ The checksum is identical on x86_64, aarch64 and riscv64 with both backends. `fm
 `fmadd` encodings are in `tests/asm/simd-aarch64.s` and `simd-riscv64.s` (byte-identical to clang),
 together with S3b's NEON forms.
 
+## As built (S4b: `--cpu` levels)
+
+`grail build --cpu=x86-64|x86-64-v2|x86-64-v3|x86-64-v4|native`. `native` reads the machine's flags
+from /proc/cpuinfo.
+- The driver packs the level into the build flags. The compiler receives `--cpu=x86-64-vN`, which is
+  in the cache key. A release build's clang gets `-march=x86-64-vN`.
+- Every lifted function says `"target-cpu"="x86-64-vN"`, because a ThinLTO link's code generation
+  does not see `-march`; without it `llvm.fma` became calls to libm's `fma`/`fmaf`.
+- `@if target.features.NAME` answers by target and level: x86-64-v2/v3/v4 per the psABI, `neon` and
+  `fma` on AArch64, `d` and `fma` on RV64. An unknown name is an error that lists the known ones.
+- At v3 and above, `mul_add` is `vfmadd231ps`/`pd` natively (VEX-encoded by the internal assembler,
+  in `tests/asm/simd-x86_64.s`) and `llvm.fma` under LLVM. `tests/simd/fma.grl` still matches C on
+  both.
+- Other targets refuse `--cpu`.
+
+Not done: the `extern "C"` vector ABI (S4c), stopped here by the wrap-up order.
+
 ## Stages
 
 Each stage lands through the landing service.

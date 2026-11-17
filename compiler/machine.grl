@@ -2642,6 +2642,20 @@ fn simd_x86_packed<a>(o: (&a mut Out), s: (&Simd)) -> bool {
         simd_movups(&mut o, view("%rdi"), 0, view("%xmm0"), false);
         return true;
     }
+    if op == 32 {
+        // fma, at --cpu=x86-64-v3 and above (the front end sends it only there): vfmadd231 adds the
+        // product into the accumulator with one rounding.
+        for c in chunks {
+            simd_movups(&mut o, view("%rsi"), 16 * c, view("%xmm0"), true);
+            simd_movups(&mut o, view("%rdx"), 16 * c, view("%xmm1"), true);
+            simd_movups(&mut o, view("%rcx"), 16 * c, view("%xmm2"), true);
+            put(&mut o, view("vfmadd231"));
+            put(&mut o, view(ps));
+            put(&mut o, view(" %xmm1,%xmm0,%xmm2\n"));
+            simd_movups(&mut o, view("%rdi"), 16 * c, view("%xmm2"), false);
+        }
+        return true;
+    }
     if op == 28 {
         for c in chunks {
             simd_movups(&mut o, view("%rsi"), 16 * c, view("%xmm0"), true);
