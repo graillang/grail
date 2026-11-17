@@ -1443,11 +1443,36 @@ pub fn probe_frames<a>(s: &a [u8], after: u64) -> u8[] {
             e += 1;
         }
         mut name = u8[];
+        // The frame line is `subq $.F<n>,%rsp`, or `subq $.F<n>+K,%rsp` when the frame also saves
+        // callee-saved registers below the slots: the probe then covers the K bytes too.
+        mut extra: u64 = 0;
         if (e - a > 12) && ir::at(view(s), a, view("subq $.F")) && ir::at(view(s), e - 5, view(",%rsp")) {
-            name = s[a + 6: e - 5].copy();
+            mut stop = a + 6;
+            while (stop < e - 5) && (s[stop] != 43) {
+                stop += 1;
+            }
+            name = s[a + 6: stop].copy();
+            if stop < e - 5 {
+                for x in stop + 1..e - 5 {
+                    if (48 <= s[x]) & (s[x] <= 57) {
+                        extra = extra * 10 + u64(s[x] - 48);
+                    }
+                }
+            }
         }
         if (after != 0) && (e - a > 11) && ir::at(view(s), a, view("framesub .F")) {
-            name = s[a + 9: e].copy();
+            mut stop = a + 9;
+            while (stop < e) && (s[stop] != 43) {
+                stop += 1;
+            }
+            name = s[a + 9: stop].copy();
+            if stop < e {
+                for x in stop + 1..e {
+                    if (48 <= s[x]) & (s[x] <= 57) {
+                        extra = extra * 10 + u64(s[x] - 48);
+                    }
+                }
+            }
         }
         if after != 0 {
             for x in e - a {
@@ -1465,7 +1490,7 @@ pub fn probe_frames<a>(s: &a [u8], after: u64) -> u8[] {
                         }
                     }
                     if same {
-                        pages := (sizes[i] + 4095) / 4096;
+                        pages := (sizes[i] + extra + 4095) / 4096;
                         if after != 0 {
                             out.append(view("movq %rbp,%rax\nmovq $"));
                             put_num(&mut out, pages);
@@ -4076,6 +4101,13 @@ fn inline_calls<a, b>(o: (&a mut ir::Body), split: u64, marks: (&a mut u64[]), l
     mut seen = u8[][];
     mut counts = u64[];
     mut cur = 0;
+    // The form each body crosses a unit in (crossing), worked out when a call first asks for it.
+    mut cross = u8[][];
+    mut cross_known = u64[];
+    for i in o.inl_names.len() {
+        cross.push(u8[]);
+        cross_known.push(0);
+    }
     // Only the lines that can matter are visited: the calls and the unit markers, whose offsets
     // were noted when the text was made (lines_of_interest). Everything between is copied.
     for at in lines.len() {
@@ -4105,11 +4137,19 @@ fn inline_calls<a, b>(o: (&a mut ir::Body), split: u64, marks: (&a mut u64[]), l
                                 here = 0;
                             }
                         }
-                        if (here != 0) & ir::same_range(view(text), a + 5, e, view(n)) {
+                        mut copy = here != 0;
+                        if !copy && ir::same_range(view(text), a + 5, e, view(n)) {
+                            copy = crossing(&o, k - 1, &mut cross, &mut cross_known);
+                        }
+                        if copy & ir::same_range(view(text), a + 5, e, view(n)) {
                             site += 1;
                             o.out.append(text[pend..a]);
                             pend = start;
-                            emit_body(&mut o, k - 1, site, view(uprefix));
+                            if here != 0 {
+                                emit_body(&mut o, k - 1, site, view(uprefix));
+                            } else {
+                                emit_text(&mut o, view(cross[k - 1]), site, view(uprefix));
+                            }
                             // The caller's code after the copy is the caller's statement again.
                             p := caller_position(view(text), a);
                             if p < a {
@@ -4201,11 +4241,122 @@ fn caller_position<a>(text: &a [u8], call: u64) -> u64 {
     }
     return call;
 }
+// Cross-module inlining (docs/design/separate-compilation.md, "Inlining across a module boundary").
+// The runtime is in every program and every run, so a small runtime body may stand in a call from
+// any unit: in a run that emits the runtime the body is in the stream, in a run of another module it
+// comes from the runtime's summary file (`runtime.facts`, an INLINE record), and both give the same
+// bytes because both are its exported form. Other modules' bodies do not cross yet.
+pub struct Shared {
+    // In: the bodies a run of another module reads. Out: the runtime bodies a run that emitted them
+    // exports.
+    names: u8[][],
+    bodies: u8[][]
+}
+pub fn new_shared() -> Shared {
+    return Shared { names: u8[][], bodies: u8[][] };
+}
+fn crossing_unit<a>(unit: &a [u8]) -> bool {
+    return ir::same_range(unit, 0, unit.len(), view("runtime")) && (unit.len() == 7);
+}
+// Whether the body filed at `k` may stand in a call from another unit, and its crossing form in
+// `cross[k]` if so.
+fn crossing<a>(o: (&a ir::Body), k: u64, cross: (&mut u8[][]), known: (&mut u64[])) -> bool {
+    if known[k] == 0 {
+        exchange(&mut known[k], 1);
+        if crossing_unit(view(o.inl_units[k])) {
+            exchange(&mut cross[k], export_form(view(o.inl_bodies[k])));
+        }
+    }
+    return cross[k].len() != 0;
+}
+// A filed body as it crosses a unit, or nothing when it cannot: its positions (`.gposa`) name a file
+// of the run that wrote it, so they go, and a failure inside the copy reports the caller's
+// statement; a body that names a local label it does not define (a constant, a string) cannot be
+// copied out of its own object. Applying it twice changes nothing.
+fn export_form<a>(body: &a [u8]) -> u8[] {
+    mut out = u8[];
+    mut defined = u8[][];
+    mut start = 0;
+    n := body.len();
+    for i in n {
+        if body[i] == 10 {
+            a := start;
+            start = i + 1;
+            if ir::at(view(body), a, view(".gposa ")) || ir::at(view(body), a, view(".gpos ")) {
+                continue;
+            }
+            if (i - a > 3) && (body[a] == 46) && (body[a + 1] == 76) && (body[i - 1] == 58) {
+                defined.push(body[a..i - 1].copy());
+            }
+            out.append(body[a..i + 1]);
+        }
+    }
+    // Every `.L` the body names must be one it defines.
+    mut i = 0;
+    m := out.len();
+    while i + 1 < m {
+        if (out[i] == 46) && (out[i + 1] == 76) && ((i == 0) || (!ir::alnum(out[i - 1]) && (out[i - 1] != 95))) {
+            mut e = i;
+            while (e < m) && (ir::alnum(out[e]) || (out[e] == 95) || (out[e] == 46)) {
+                e += 1;
+            }
+            mut found = false;
+            for d in defined.len() {
+                dl := defined[d].len();
+                if (dl == e - i) && ir::same_range(view(out), i, e, view(defined[d])) {
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                return u8[];
+            }
+            i = e;
+        } else {
+            i += 1;
+        }
+    }
+    return out;
+}
+// The bodies this run reads from the runtime's summary, filed as the runtime's. A name this run
+// files itself (it emits the runtime) keeps its own.
+fn import_bodies<a, b>(o: (&a mut ir::Body), shared: (&b Shared)) {
+    own := o.inl_names.len();
+    for i in shared.names.len() {
+        mut mine = false;
+        for k in own {
+            if (o.inl_names[k].len() == shared.names[i].len()) && ir::same_range(view(o.inl_names[k]), 0, shared.names[i].len(), view(shared.names[i])) {
+                mine = true;
+                break;
+            }
+        }
+        if !mine {
+            inl_file(&mut o, shared.names[i].copy(), shared.bodies[i].copy(), copy_text(view("runtime")));
+        }
+    }
+}
+// The runtime bodies this run filed itself that can cross a unit, in the order it filed them.
+fn export_bodies<a, b>(o: (&a ir::Body), own: u64, shared: (&b mut Shared)) {
+    shared.names.clear();
+    shared.bodies.clear();
+    for k in own {
+        if crossing_unit(view(o.inl_units[k])) {
+            form := export_form(view(o.inl_bodies[k]));
+            if form.len() != 0 {
+                shared.names.push(o.inl_names[k].copy());
+                shared.bodies.push(form);
+            }
+        }
+    }
+}
 // `_i<unit prefix>_<site>` on every `.L` in the body: the site number disambiguates two copies of
 // one body, and the unit prefix keeps a body label without a prefix of its own (`.Lret`) apart from
 // the same label minted by another unit of the same file.
 fn emit_body<a, b>(o: (&a mut ir::Body), k: u64, site: u64, prefix: &b [u8]) {
     body := o.inl_bodies[k].copy();
+    emit_text(&mut o, view(body), site, prefix);
+}
+fn emit_text<a, b, d>(o: (&a mut ir::Body), body: &d [u8], site: u64, prefix: &b [u8]) {
     mut i = 0;
     n := body.len();
     while i < n {
@@ -4367,10 +4518,10 @@ fn compact<a, b>(o: (&a mut ir::Body), s: &b [u8], prologue: u64, ns: u64) -> u6
     }
     return (used * 8 + 15) / 16 * 16;
 }
-pub fn optimize<b, c, d, m, q, r>(s: &b [u8], facts: (&c llvm::Facts), want_ir: u64, ir_text: (&mut u8[]), call_syms: (&mut u8[][]), call_counts: (&mut u64[]), memo_dir: &m [u8], memo_id: &m [u8], starts: (&q u64[]), known: (&r ir::Known)) -> u8[] {
+pub fn optimize<b, c, d, m, q, r, t>(s: &b [u8], facts: (&c llvm::Facts), want_ir: u64, ir_text: (&mut u8[]), call_syms: (&mut u8[][]), call_counts: (&mut u64[]), memo_dir: &m [u8], memo_id: &m [u8], starts: (&q u64[]), known: (&r ir::Known), shared: (&t mut Shared)) -> u8[] {
     mut marks = u64[];
     mut names = u8[][];
-    return optimize_parts(view(s), 0, &mut marks, &mut names, facts, want_ir, ir_text, call_syms, call_counts, memo_dir, memo_id, starts, known);
+    return optimize_parts(view(s), 0, &mut marks, &mut names, facts, want_ir, ir_text, call_syms, call_counts, memo_dir, memo_id, starts, known, shared);
 }
 // `optimize` plus the positions of the `--split` module markers it kept: for each marker line, the
 // output offset of the line and the module name it carries. A single-file build passes `split` 0 and
@@ -4378,7 +4529,7 @@ pub fn optimize<b, c, d, m, q, r>(s: &b [u8], facts: (&c llvm::Facts), want_ir: 
 // `starts`: where the emitter wrote the lines the cut planning reads (plan_from) - a body's `.type`
 // line, a part's marker, a function's `.gbase` - so it does not scan the stream for them. Possibly
 // stale (the emitter takes text back on a retry) and in no particular order; empty means scan.
-pub fn optimize_parts<b, c, d, e, m, q, r>(s: &b [u8], split: u64, marks: (&mut u64[]), names: (&mut u8[][]), facts: (&c llvm::Facts), want_ir: u64, ir_text: (&mut u8[]), call_syms: (&mut u8[][]), call_counts: (&mut u64[]), memo_dir: &m [u8], memo_id: &m [u8], starts: (&q u64[]), known: (&r ir::Known)) -> u8[] {
+pub fn optimize_parts<b, c, d, e, m, q, r, t>(s: &b [u8], split: u64, marks: (&mut u64[]), names: (&mut u8[][]), facts: (&c llvm::Facts), want_ir: u64, ir_text: (&mut u8[]), call_syms: (&mut u8[][]), call_counts: (&mut u64[]), memo_dir: &m [u8], memo_id: &m [u8], starts: (&q u64[]), known: (&r ir::Known), shared: (&t mut Shared)) -> u8[] {
     // The type facts, indexed by body symbol once: the table is complete before any body is walked.
     ix := ir::index_facts(facts);
     mut o = ir::new_body();
@@ -4426,9 +4577,12 @@ pub fn optimize_parts<b, c, d, e, m, q, r>(s: &b [u8], split: u64, marks: (&mut 
     lines_of_interest(view(o.out), tail, &mut lines);
     // Either something inlines, or the markers have to be taken out of a single-file build.
     jobs::phase(view("optimiser-workers"));
+    own := o.inl_names.len();
+    import_bodies(&mut o, &shared);
     if (o.inl_names.len() != 0) || (o.marked != 0) {
         inline_calls(&mut o, split, marks, &lines);
     }
+    export_bodies(&o, own, &mut shared);
     jobs::phase(view("optimiser-inline"));
     return exchange(&mut o.out, u8[]);
 }
