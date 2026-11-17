@@ -234,8 +234,9 @@ optimiser_labels, then S6 after unboxed 3a lands (it builds on 3a's frame aggreg
   error under `--verify-facts`; forged-fact tests in tools/test-facts.mjs. fib(32) LLVM: 112.8 M ->
   74.9 M instructions (clang -O2 67.1 M).
 - **S2 (indirect calls lifted, x86-64).** `call *%rax` becomes a six-word IR call through the
-  pointer; a `cfn` call is spelled `call *%r11` and stays native, and so do the runtime's own `rt_`
-  callers through a pointer (the job/task/thread runners, whose stacks are switched and abandoned). `apply(&g, x)` loop (10 M): 430 M ->
+  pointer; a `cfn` call is spelled `call *%r11` and stays native. The runtime's own `rt_` runners
+  were kept native for a while (lifting them raced on the thread pointer); with every %fs read made
+  opaque (gaps12-join, gaps12-llvm-tp) they are lifted again. `apply(&g, x)` loop (10 M): 430 M ->
   120 M instructions on LLVM.
 - **S3 (more than six words on the stack, all targets).** `load_call_args` reserves an outgoing
   area (`subq $N,%rsp`; `cstack` on AArch64/RV64), stores words 6.. at 8k(%rsp), and
