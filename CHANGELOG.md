@@ -5,11 +5,35 @@
   with one correctly rounded operation (Clinger), with the same text as before; longer ones still
   go through Burger & Dybvig. Decimal-shaped values print about twice as fast (LLVM 729M -> 384M
   instructions for 6,000 of them).
+- Fixed: `grail fmt` could break a long expression inside `<<` or `>>` (each is two `<`/`>` tokens),
+  or start a continuation line with `<`, and the output then read as a generic argument list and no
+  longer parsed. A wrapped line now never starts with `<` or `>`.
+- **Faster rebuilds after an edit: unchanged functions' optimised code comes from the store.** A
+  body replayed from the function store carried its parameters' type facts twice, so its key in the
+  optimiser's memo differed from the one it was filed under and every body of an edited module was
+  optimised again. The facts are now the fresh emission's, and the memo hits for every unchanged
+  body: `grail build` of a 4000-function file after a one-function edit went from 95.7G to 34.0G
+  instructions (GRAIL_JOBS=1). The stack-probe check reads the assembly once with no per-line
+  copies, and the inlining pass's call lines travel with each remembered body instead of being found
+  by a scan of the whole output.
+- The internal assembler takes `.previous`.
 - **Integer map keys hash in registers.** `hash::Hash` has a defaulted `table_hash`, the SipHash-1-3
   value a map uses (the default streams through `hash`, as before); the integer types give it as
   `hash::word_hash`, the same value computed straight-line with no hasher state in memory. User
   `Hash` impls need no change. bench/hashmap.grl: Grail-LLVM 0.88G -> 0.77G instructions and 0.30
   -> 0.27 s user (Rust 0.64G, 0.21 s), Grail-native 3.21G -> 2.69G.
+- **Fix: every closure expression is a type of its own.** Two closure literals with the same
+  signature and environment shape compared equal inside a generic type, so `k = keep(|| ..)` could
+  replace a `Keep<F>` built from another literal; calls through it then ran the first literal's body
+  (callable-bound calls are direct), and a borrowing closure could outlive what it borrowed. It is now
+  a type mismatch, as in Rust.
+- `left, right := split_at_mut(s, mid)`: two exclusive halves of one slice, usable at once
+  (simd-layout-parallel-loops.md 4.3). The borrow checker gains sibling loan groups - halves of one
+  split never conflict with each other or with what is reborrowed from them - and nothing about
+  indices; `mid <= len` is checked as it runs.
+- Fix: a bare `return;` in a function that takes a borrow no longer reports "returned borrow escapes
+  its declared input lifetime" (its unit value was read from the first parameter's slot).
+
 - **Text costs less to build and parse.** A string literal is checked to be UTF-8 while compiling,
   so making a `string` of it is a copy with no run-time check; appending a `string` onto a `string`
   no longer re-checks it; `format` hands its buffer over as the string instead of copying it, and
@@ -22,6 +46,10 @@
   into the load's addressing (`movq 16(%rax),%rax`); other integer arithmetic there still follows
   the build's overflow mode. The runtime loses about 950 of its 2,664 overflow checks
   (docs/ffi.md; decision record "Raw address offsets").
+- SIMD loads and stores take fixed-size array fields in place (`f32x4::load(&mat.m, 4)` on a
+  `[f32; 16]` field, a row of `[[f32; 4]; 4]`); test-simd checks the loop over a vector of such
+  structs stays in registers on LLVM.
+
 - **Soundness: a callable bound's reference parameters are fresh on every call.** In
   `F: FnMut((&mut T), C) -> R` the `&mut T` has a lifetime the bound names nowhere else, so - as in
   Rust's `for<'a>` elision - the closure or function given for `F` must accept any lifetime there. One
@@ -73,6 +101,12 @@
   failure kind before its own check; when the optimiser removed that check (a divisor it proved
   non-zero), the kind stayed pending and named the next check in the function. A pending kind now
   ends with its statement, and an inlined bounds check is recognised by its shape first.
+- **`extern "C" nonblocking fn`**: a foreign function promised never to block is called bare, with
+  no foreign-call marker - the cost of a C-to-C call. The monitor cannot hand such a call off, so a
+  wrong promise costs latency (a held worker), never safety. `blocking` and `nonblocking` now travel
+  in interface files, so a call from another module behaves as declared. `docs/ffi.md`, "Blocking
+  foreign calls", has the three forms and their costs.
+
 - **A foreign call that holds a worker for more than 10 ms is handed off.** Every `extern "C"`
   call on x86-64 Linux counts itself in and out on its worker (about 1.2 ns a call, measured on
   10M calls of `labs`), and a scheduler monitor thread looks every 5 ms: a worker inside one foreign
@@ -127,6 +161,11 @@
   `I: Iterator`. `iter::Iter<T>` is unchanged (the erased form for `from_fn`, `dyn Iterator` or a
   field). Callable bounds now work on an impl's own parameters (`impl<U, F: FnMut(u64) -> U> W<U, F>`)
   and through interface files.
+- Release builds pass only the words a call through a closure, function value or `dyn` slot uses:
+  the other argument registers are `poison` rather than whatever they held, so LLVM no longer
+  keeps stale values alive to fill them. dyncall: 719 M -> 679 M instructions (Rust -O: 648 M). A
+  wrong word count is refused (an error under `--verify-facts`; `--forge-indirect=SYMBOL` shows it).
+
 - Release builds optimise the runtime's job, task and thread runners again: they make calls
   through code pointers and were kept unoptimised after lifting them raced on the thread pointer.
   That race is fixed (every thread-pointer read is now an opaque one), and

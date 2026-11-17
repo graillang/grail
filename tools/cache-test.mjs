@@ -924,7 +924,13 @@ function proveMemoKeys() {
   const store = ['--fn-cache', join(dir, 'fn'), '--fn-cache-id', 'memo-test'];
   run('plain.s', [], { GRAIL_JOBS: '1' });
   run('cold.s', store);
+  // The optimiser's entries (`opt-*`) a store holds: a warm rebuild of unchanged sources must find
+  // every body's entry, so it files none. A replayed body whose facts differ from a fresh
+  // emission's (its parameters' facts taken twice) is keyed apart and files a new one.
+  const memoEntries = () => readdirSync(join(dir, 'fn')).filter(name => name.startsWith('opt-')).length;
+  const filed = memoEntries();
   const warm = run('warm.s', store, { GRAIL_MEMO_VERIFY: '1' });
+  assert.equal(memoEntries(), filed, 'a warm rebuild missed the optimiser memo for unchanged bodies');
   const plain = readFileSync(join(dir, 'plain.s'));
   assert.ok(plain.equals(readFileSync(join(dir, 'cold.s'))), 'a cold store changed the assembly');
   assert.ok(plain.equals(readFileSync(join(dir, 'warm.s'))), 'a warm store changed the assembly');
