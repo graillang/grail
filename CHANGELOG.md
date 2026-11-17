@@ -1,5 +1,10 @@
 ## Unreleased
 
+- Fixed: a failed index check could be reported as `division by zero`. A `%` or `/` states its
+  failure kind before its own check; when the optimiser removed that check (a divisor it proved
+  non-zero), the kind stayed pending and named the next check in the function. A pending kind now
+  ends with its statement, and an inlined bounds check is recognised by its shape first.
+
 - **Small runtime functions are inlined into every module.** A small runtime body (the scheduler's
   `rt_current`, `rt_list_set`, `rt_list_head`, ...) is now inlined where another module calls it,
   in every build shape: a per-module build carries the bodies in `runtime.facts`. A failure inside
