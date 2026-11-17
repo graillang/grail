@@ -12034,6 +12034,47 @@ fn spec_callable_signature<a>(c: (&a mut C), alias: u64) -> u64 {
     }
     return NO_TYPE;
 }
+// In a specialisation, a value typed by a closure expression's own type that a callable-bound
+// parameter was bound to - a capture of it, or a closure body's copy of it - is typed by that
+// binding (the alias), as the body's other types are; closure types are unique per literal.
+fn spec_closure_alias<a>(c: (&a mut C), ty: u64) -> u64 {
+    if (c.current_spec == 0) || (ty_kind(&mut c, ty) != 20) || (ty_env(&mut c, ty) == 0) {
+        return ty;
+    }
+    for j in c.bindings.len() {
+        b := c.bindings[j];
+        if (b != NO_TYPE) && (ty_kind(&mut c, b) == 10) && (base_type(&mut c, b) == ty) {
+            return b;
+        }
+    }
+    return ty;
+}
+// The type a call of a callable-bound value takes: in a specialisation the closure's own environment
+// (so the call is direct) with the bound's signature under the specialisation's bindings (`T`, `U`
+// as the body sees them, so arguments and result line up); in a template the bound itself.
+fn callable_calltype<a>(c: (&a mut C), pty: u64, bound: u64) -> u64 {
+    if ty_kind(&mut c, pty) != 10 {
+        // A capture of the parameter inside a specialisation's closure: its type is the template's,
+        // so the bound is read with the specialisation's bindings.
+        if (c.current_spec != 0) && (c.validating == 0) && (c.bindings.len() != 0) {
+            bindings := copy_numbers(&c.bindings);
+            return bind_types(&mut c, bound, &bindings);
+        }
+        return bound;
+    }
+    sig := spec_callable_signature(&mut c, pty);
+    if sig == NO_TYPE {
+        return bound;
+    }
+    if ty_kind(&mut c, bound) == 20 {
+        return intern_env(&mut c, 20, ty_arg(&mut c, sig), ty_mode(&mut c, bound), type_regions(&mut c, bound), type_args(&mut c, sig), ty_env(&mut c, bound));
+    }
+    // A named function given for F: called through its pointer with the bound's signature.
+    if ty_kind(&mut c, bound) == 12 {
+        return intern_args(&mut c, 12, ty_arg(&mut c, sig), 0, u64[], type_args(&mut c, sig));
+    }
+    return bound;
+}
 // The callable bound of the type parameter `formal` of function `f` (index), or NO_TYPE.
 fn callable_formal<a>(c: (&a mut C), f: u64, formal: u64) -> u64 {
     if ty_kind(&mut c, formal) != 9 {
@@ -13112,6 +13153,18 @@ fn require_interfaces<a, b, d>(c: (&a mut C), arguments: (&b u64[]), sets: (&d u
                 }
                 if (same_type(&mut c, given, bound) == 0) && (closure_converts(&mut c, given, bound) == 0)
                     && (same_type(&mut c, given, aliased) == 0) && (closure_converts(&mut c, given, aliased) == 0) {
+                    // The precise reasons first, as for an erased closure parameter: the call mode,
+                    // then the bounds on what it captured.
+                    if (ty_kind(&mut c, given) == 20) && (ty_kind(&mut c, bound) == 20) && (ty_env(&mut c, given) != 0) {
+                        gm := ty_mode(&mut c, given);
+                        bm := ty_mode(&mut c, bound);
+                        if ((gm & CLOSURE_FNMUT) != 0) & ((bm & CLOSURE_FNMUT) == 0) {
+                            fail(&mut c, view("a closure that mutates a captured value is FnMut, not Fn: this callable bound is `Fn`"));
+                        }
+                        if !closure_bounds_hold(&mut c, given, bm & CLOSURE_BOUNDS) {
+                            closure_bound_fail(&mut c, given, bm & CLOSURE_BOUNDS);
+                        }
+                    }
                     if !((ty_kind(&mut c, given) == 12) && (ty_kind(&mut c, bound) == 20)) {
                         mut msg = copy_bytes(view("this argument does not meet the callable bound `"));
                         push_bytes(&mut msg, view(source_type_name(&mut c, bound)));
@@ -38694,6 +38747,26 @@ fn adopt_value<a>(c: (&a mut C), v: Val, start: u64, end: u64, expected: u64) ->
             }
         }
         if (ty_kind(&mut c, v.ty) == 7) & (ty_kind(&mut c, expected) == 7) {
+            // `&g` of a framed closure (its environment's address) where `&Fn(..)` is expected (the
+            // address of a word holding the object): the address is spilled into a frame word, whose
+            // address is the erased reference. The frame outlives the borrow.
+            inner := ty_arg(&mut c, v.ty);
+            want := ty_arg(&mut c, expected);
+            if (ty_kind(&mut c, base_type(&mut c, want)) == 20) && (closure_record(&mut c, want) == want)
+                && (closure_record(&mut c, inner) != inner) && direct(&mut c, inner) {
+                word := fresh(&mut c);
+                get(&mut c, v.t, view("%rax"));
+                o(&mut c, view("movq %rax,"));
+                stack_slot(&mut c, word);
+                o(&mut c, view("\nleaq "));
+                stack_slot(&mut c, word);
+                o(&mut c, view(",%rax\nmovq %rax,"));
+                // The reference slot itself now holds the spilled word's address: it keeps its
+                // checked source and its loans.
+                stack_slot(&mut c, v.t);
+                c.out.push(10);
+                return val(v.t, expected);
+            }
             if reference_as_fnmut(&mut c, v.t, v.ty, expected) != 0 {
                 return val(v.t, expected);
             }
@@ -44730,24 +44803,11 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
             if ty_kind(&mut c, pty) == 7 {
                 pty = ty_arg(&mut c, pty);
             }
+            pty = spec_closure_alias(&mut c, pty);
             bound := param_callable(&mut c, pty);
             if bound != NO_TYPE {
                 slot := local_id(&mut c, local - 1);
-                // In a specialisation the call keeps the closure's own environment (so it is
-                // direct) and takes the bound's signature with the specialisation's bindings
-                // (`T`, `U` as the body sees them), so arguments and result line up with the body.
-                mut calltype = bound;
-                if ty_kind(&mut c, pty) == 10 {
-                    sig := spec_callable_signature(&mut c, pty);
-                    if (sig != NO_TYPE) && (ty_kind(&mut c, bound) == 20) {
-                        calltype = intern_env(&mut c, 20, ty_arg(&mut c, sig), ty_mode(&mut c, bound), type_regions(&mut c, bound), type_args(&mut c, sig), ty_env(&mut c, bound));
-                    }
-                    // A named function given for F: called through its pointer with the bound's
-                    // signature, as the body sees it.
-                    if (sig != NO_TYPE) && (ty_kind(&mut c, bound) == 12) {
-                        calltype = intern_args(&mut c, 12, ty_arg(&mut c, sig), 0, u64[], type_args(&mut c, sig));
-                    }
-                }
+                calltype := callable_calltype(&mut c, pty, bound);
                 if ty_kind(&mut c, outer) == 7 {
                     viaref := intern_full(&mut c, 7, calltype, ty_mode(&mut c, outer), type_regions(&mut c, outer));
                     return indirect_call(&mut c, val(slot, viaref), 0);
@@ -44757,6 +44817,17 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
         }
         if local == 0 {
             captured := capture_field(&mut c, view(first), 0, 0);
+            // A captured callable-bound value (`|x| f(x)` inside a generic body): called like the
+            // parameter it was captured from.
+            if captured.ty != NO_TYPE {
+                // An environment field holds the plain closure type; the specialisation's binding
+                // that names it (closure types are unique per literal) is what the body sees.
+                cty := spec_closure_alias(&mut c, captured.ty);
+                cbound := param_callable(&mut c, cty);
+                if cbound != NO_TYPE {
+                    return indirect_call(&mut c, val(captured.t, callable_calltype(&mut c, cty, cbound)), 0);
+                }
+            }
             if captured.ty != NO_TYPE {
                 ck := ty_kind(&mut c, captured.ty);
                 if (ck == 12) || (ck == 20) || (ck == 25) {
