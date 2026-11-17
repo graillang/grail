@@ -1,6 +1,6 @@
 # SIMD types: the decision record
 
-Status: S1 and S2 built (branches `gaps16-simd`, `gaps17-simd2`). S3-S6 approved and staged below. This supersedes the
+Status: S1, S2 and S3a (x86-64 SSE2) built. S3b (AArch64 NEON) and S4-S6 approved and staged below. This supersedes the
 SIMD parts of `simd-layout-parallel-loops.md` where they differ (marked), and the
 pre-design note of the same name from commit ac15c72.
 
@@ -170,6 +170,43 @@ and a count clang cannot see. Every build computes the same result.
 - Corpus: `simd-s2-surface`, `simd-oracle-s2`, `simd-load-aligned-checks-the-address`, and three
   rejections.
 
+## As built (S3a: native SSE2 on x86-64)
+
+`machine.grl` `simd_x86_packed` lowers each `simd.` line to packed SSE2 when SSE2 gives exactly the
+result the scalar lanes give, and otherwise falls back to the lanes.
+- **Packed:** lane arithmetic (`addps`/`subps`/`mulps`/`divps`, the `pd` forms, `paddb`/`paddd`/
+  `paddq` and the subtracts), `andps`/`orps`/`xorps` for bitwise ops and masks, compares
+  (`cmpps`/`cmppd`, signed `pcmpgtd`/`pcmpgtb`, `pcmpeq`), select and mask `not`, `splat`
+  (`shufps`/`pshufd`/`movlhps`), the float `sum` as the same halving tree
+  (`movhlps` + `add`, then `shufps $85` + `addss`), copies, `any`/`all` through `movmskps`/
+  `pmovmskb`, and `to_f32` (`cvtdq2ps`).
+- **min/max** on floats keep the scalar rule: `cmpps $1` selects the smaller, then two `cmpps $3`
+  (unordered) masks give a NaN operand's partner. `minps` would return the second operand for a NaN
+  and for ±0 ties, so it is not used. Unsigned bytes use `pminub`/`pmaxub`; i32 uses
+  `pcmpgtd` + blend.
+- **4x32 shuffles** are one `shufps` when each half of the result comes from one operand, and two
+  through a gathered register otherwise. That covers broadcasts, `unpck`-style interleaves and
+  `movlhps`/`movhlps`.
+- **Still scalar lanes** (SSE2 has no exact instruction): i32/i64 multiplies, unsigned and 64-bit
+  integer compares, `to_i32` (saturating), lane reads, 8-lane or 64-bit shuffles.
+
+Every load is a `movups` into a register: a legacy SSE memory operand must be 16-byte aligned, and
+a vector's storage is aligned to its element. The internal assembler encodes the new forms. The 42
+forms in the test file, including high registers and immediates, are byte-identical to clang
+(`tools/asm-oracle.mjs`). The corpus's SIMD cases pass with `GRAIL_ASM_ORACLE=1`.
+
+**Measured** (native, x86-64, fastest of 7 runs against the C twins, at load ~60):
+
+| benchmark | S1/S2 scalar lanes | S3a SSE2 |
+|---|---|---|
+| dot | ~20x C | 8-10x C |
+| mat4 | 37x C | 7.5x C |
+| aos2soa | 25x C | 10-17x C |
+
+The remaining gap is that every native vector op goes through memory: two `movups` loads and one
+store per operation, and the stream's vectors live in frame slots. Keeping vectors in xmm registers
+across ops is S5. The LLVM backend is unchanged.
+
 ## Stages
 
 Each stage lands through the landing service.
@@ -178,8 +215,8 @@ Each stage lands through the landing service.
 - **S2 (built):** `u8x16` `u8x32` `u32x4` `i64x2` `m8x*`; shuffles; conversions and `bits()`;
   `load_aligned`/`store_aligned`; the mat4 and AoS-to-SoA benchmarks. Swizzle sugar (`.xyzw`) is
   left for when a program wants it; `shuffle` covers it.
-- **S3:** native packed SSE2 and NEON for `simd.` lines (the internal assemblers learn their
-  encodings); RV64 stays scalar lanes.
+- **S3:** native packed SSE2 (S3a, built) and NEON (S3b) for `simd.` lines (the internal assemblers
+  learn their encodings); RV64 stays scalar lanes.
 - **S4:** `extern "C"` vector ABI; `--cpu` levels and `target.features`; `mul_add`.
 - **S5:** native vector registers and register passing.
 - **S6:** `@target` with `cpu::has` dispatch.

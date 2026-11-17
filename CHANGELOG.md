@@ -1,5 +1,9 @@
 ## Unreleased
 
+- The native backend computes SIMD operations with packed SSE2 on x86-64 (lane arithmetic, compares,
+  select, splat, sums, 4-lane shuffles, `any`/`all`, `to_f32`), with exactly the same results as
+  before. A dot product, a 4x4 matrix product and an AoS-to-SoA transpose run 2-5x faster natively.
+  The internal assembler encodes the new instructions identically to clang.
 - The optimiser parses each distinct instruction line once per compile and replays the record for
   its repeats (a label operand is numbered again, the frame-slot bookkeeping redone): byte-identical
   output, 2.6% fewer instructions for a 4000-function file. The plan for taking the remaining text
