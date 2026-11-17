@@ -527,3 +527,21 @@ for COFF; no Mac is needed to compare objects):
 
 Targets after 3, 4 and 5a: self-compile at or under 10 s. That one is a target until stage 3's design
 note exists.
+
+## Cold-check profile, main 77810c06 (frontend_speed, for resumption)
+
+syn1000 `grail check` (dev compiler, GRAIL_JOBS=1, empty store): 9.19 G over four processes; the main
+module's `--check` run is 6.46 G, the runtime+os run 1.89 G, the driver 0.79 G. Inclusive costs
+in the main module run, largest first:
+
+| cost | inclusive | note |
+|---|---|---|
+| allocation: rt_alloc + rt_free + rt_drop_seq | ~2.2 G (34%) | rt_free 0.62 G and rt_alloc_unlocked 0.61 G self; the largest single target |
+| drop-emission walk: release / cleanup / drop_call_out / drop_ref_name / drop_in_place_ref | 0.62 G | still runs in a check, where no drop code is written; skipping it needs the drop *facts* kept and the naming (drop_ref_name, symbol hashing) dropped |
+| interface: iface_emit_all + module_bytes + w_type + items | 0.36 G (+0.25 G items) | iface_w_type 0.34 G re-encodes the same types: a per-type memo was tried and broke --iface-roundtrip (hash.iface); find why before retrying |
+| digests: iface_digest/sha256 0.28 G, fncache_hash/xxhash 0.31 G | 0.59 G | the trailer could take the store's fast hash (driver_speed has the go-ahead); xxhash read64 is still 0.14 G self |
+| ty_kind self 0.25 G, core::as_i64 0.38 G + 0.26 G | ~0.9 G | ty_kind is a per-call lookup; as_i64 is a conversion helper called on hot paths - inline or cache |
+| framable / framed | 0.27 G / 0.25 G | asked per value; memo by type |
+
+Growth: syn4000/syn1000 is 4.1 (compile-perf ratio), so nothing super-linear is left; the work is
+per-line cost.
