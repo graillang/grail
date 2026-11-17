@@ -1,5 +1,10 @@
 ## Unreleased
 
+- **Small runtime functions are inlined into every module.** A small runtime body (the scheduler's
+  `rt_current`, `rt_list_set`, `rt_list_head`, ...) is now inlined where another module calls it,
+  in every build shape: a per-module build carries the bodies in `runtime.facts`. A failure inside
+  such a copy reports the calling statement. Measured with callgrind on one worker, against main:
+  a join 3102 -> 3059 instructions, a spawn 1845 -> 1810.
 - **The optimiser inlines small functions in ordinary builds again.** A small leaf (at most 24
   instructions, no call but a failure exit) was only inlined when it carried no statement-position
   marker, and every statement of a build with error locations carries one, so outside
