@@ -1,5 +1,9 @@
 ## Unreleased
 
+- **Fix: default interface methods work across modules.** An interface's default method bodies were
+  not carried in its `.iface`, so an implementation in another module failed with
+  "missing interface method (it has no default body)" under separate compilation (a single run was
+  fine). The default's text now travels with the method record, as a generic template's does.
 - **Typed iterator adapters: `iter::over(v).map(..).filter(..).fold(..)`.** `iter::VecIter<T>`,
   `iter::Map<I, U, F>` and `iter::Filter<I, F>` implement `Iterator` with each callback held by its
   own closure type, so a chain is one nested type, specialised and called directly, with no

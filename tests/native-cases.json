@@ -17459,5 +17459,17 @@
     "note": "a user Drop that fails inside a task: the failure is contained like any task failure; the task's frame is discarded, not unwound, so the fields its drop had not reached leak and the end-of-main leak check reports that instead of aborting (docs/design/task-failure-containment.md)",
     "source": "struct Bad {\n    n: u64\n}\nimpl Drop for Bad {\n    fn drop(self: &mut Bad) {\n        v := u64[1];\n        println(v[self.n]);\n    }\n}\nstruct Pair {\n    bad: Bad,\n    text: string\n}\nfn work(n: u64, unused: u64) -> u64 {\n    p := Pair { bad: Bad { n: n }, text: \"left\".text() };\n    return p.text.len();\n}\nfn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {\n    t := spawn(sc, 5, work);\n    match try_join(t) {\n        n: u64 => {\n            return n;\n        },\n        f: TaskFailure => {\n            println(\"contained\");\n            return 0;\n        },\n    }\n}\nfn main() {\n    println(task_scope(0, body));\n}\n",
     "stdout": "contained\n0\n"
+  },
+  {
+    "name": "interface-default-methods-across-modules",
+    "files": [
+      "tests/defaults/shapes_user.grl"
+    ],
+    "modules": [
+      "tests/defaults/shapes.grl"
+    ],
+    "interfaces": true,
+    "stdout": "18\n9\n27\n7\n17\n",
+    "note": "default interface method bodies travel in the interface (as their text, like a generic template's), so an implementation in another module gets them: a default used, a default overridden, a default calling a required method and a default calling another default, also through a generic function of the interface's module (was: `missing interface method (it has no default body)`)"
   }
 ]

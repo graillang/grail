@@ -20251,9 +20251,13 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
         exchange(&mut c.output_region, 0);
         // `fn name(...) -> T { body }` is a default: an implementation may leave it out.
         mut default = 0;
+        mut default_text = u8[];
         if is(&mut c, view("{")) {
             default = header + 1;
             skip_braces(&mut c);
+            // The default's own text travels in the interface (as a generic template's does), so an
+            // implementation in another module can be given it.
+            default_text = (c.src[c.toks[header].start: c.toks[c.pos - 1].end]).copy();
         } else {
             expect(&mut c, view(";"));
         }
@@ -20295,7 +20299,7 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
                     owner: 0,
                     ext: 0,
                     symbol: u8[],
-                    body: u8[],
+                    body: default_text,
                     ppreds: Pred[],
                     rpred: no_pred(),
                     pnames: u8[][],
@@ -52609,7 +52613,7 @@ fn iface_rec_fn<a>(c: (&a mut C), p: (&a mut IR), home: &a [u8], module: &a [u8]
         file := virtual_source(&mut c, view(label), view(body));
         exchange(&mut c.funcs[index].file, file);
         exchange(&mut c.funcs[index].pos, 0);
-        exchange(&mut c.funcs[index].body, body);
+        exchange(&mut c.funcs[index].body, body.copy());
     }
     if section == 3 {
         // An implementation's method list is what dispatch walks.
@@ -52619,8 +52623,31 @@ fn iface_rec_fn<a>(c: (&a mut C), p: (&a mut IR), home: &a [u8], module: &a [u8]
     if section == 2 {
         // The interface's own method list is what `check_interfaces` compares an implementation
         // against, so it has to be as complete as the implementations are.
+        // A default body travels as its text: it becomes a source of its own, compiled for every
+        // implementation that leaves the method out, as it is in the interface's own module.
+        mut dfile = 0;
+        if body.len() != 0 {
+            mut label = u8[];
+            push_bytes(&mut label, view(p.path));
+            label.push(58);
+            push_bytes(&mut label, view(module));
+            push_bytes(&mut label, view("::"));
+            push_bytes(&mut label, view(name));
+            push_bytes(&mut label, view("#default"));
+            dfile = virtual_source(&mut c, view(label), view(body));
+        }
         mut item = &mut c.interfaces[contract - 1];
+        while item.defaults.len() < item.methods.len() {
+            item.defaults.push(0);
+            item.default_files.push(0);
+        }
         item.methods.push(index);
+        if dfile != 0 {
+            item.defaults.push(1);
+        } else {
+            item.defaults.push(0);
+        }
+        item.default_files.push(dfile);
     }
     return ();
 }
