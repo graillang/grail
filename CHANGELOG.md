@@ -5,6 +5,12 @@
   candidate slot on every line of every round; each line's effect is now worked out once per pass
   and read through a slot-to-candidate table. The output is byte-identical; compiling the compiler
   takes 20% fewer instructions, and a cold `grail build` of a 1000-function file 5.7% fewer.
+- **Release builds compile a module's LLVM code in parallel.** `grail llvm-compile` cuts a lifted
+  module into parts - shared declarations, each function in one part, internal functions renamed
+  per unit - and runs `clang -O2` on all of them at once under the jobserver, then joins them. A
+  release unit, and the release compiler itself (`tools/native.mjs release`), is no longer bound by
+  one serial `clang -O2` over a gigabyte of IR.
+
 - **`grail cache warm [--target T]`** checks and builds every standard module into the build store,
   as rustup ships libstd: a project's first check then compiles only its own modules. The installers
   run it (not under DESTDIR), and compile-perf's template store is now a warmed one. Dev compiler,

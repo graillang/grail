@@ -6,6 +6,7 @@ use explain;
 use bindgen;
 use pkg;
 use jobs;
+use llvm;
 use xxhash;
 use asm_x86;
 
@@ -958,14 +959,11 @@ fn release_optimise<a, b>(assemble: (&a u8[][]), asm: &b [u8], object: &b [u8], 
     lifted := cat(view(asm), view(".ll"));
     optimised := cat(view(object), view(".ll.o"));
     native_part := release_part(view(object));
-    mut clang = u8[][];
+    // `grail llvm-compile` runs `clang -O2` over the module cut in parts, in parallel.
+    mut clang = u8[][host::exe_path(), copy(view("llvm-compile")), lifted.copy(), optimised.copy(), copy(view(emulation))];
     for i in assemble.len() {
         clang.push(item(&assemble, i));
     }
-    clang.push(copy(view("-O2")));
-    clang.push(lifted.copy());
-    clang.push(copy(view("-o")));
-    clang.push(optimised.copy());
     merge := u8[][
         tool(view("GRAIL_LINKER"), view("ld.lld")),
         copy(view("-m")),
@@ -2093,6 +2091,96 @@ fn unit_reads<a, b>(groups: (&a ModuleGroup[]), base: (&b u8[][]), g: u64) -> u8
 // `grail unit-build N <N compiler words> <assembler words>`: one module's compiler run and then its
 // assembly, as one process, so a build can start several modules at once and wait for each as a
 // whole. Not a command a person runs.
+// `grail llvm-compile IN.ll OUT.o EMULATION CLANG...`: `CLANG -O2 -c` over the lifted module IN.ll,
+// cut into parts (llvm::split_module) compiled at once - as many as the build's jobserver grants,
+// about one per 4 MB of IR - and linked into one relocatable OUT.o. A release unit's optimisation is
+// then bounded by its largest part rather than by the whole module.
+fn llvm_compile_command<a>(args: (&a u8[][])) -> u64 {
+    if args.len() < 4 {
+        say(view("usage: grail llvm-compile IN.ll OUT.o EMULATION CLANG [ARGS...]"));
+        return 1;
+    }
+    input := item(&args, 0);
+    output := item(&args, 1);
+    emulation := item(&args, 2);
+    mut clang = u8[][];
+    mut i = 3;
+    while i < args.len() {
+        clang.push(item(&args, i));
+        i += 1;
+    }
+    text := host::read_file(view(input));
+    mut wanted = text.len() / 4194304 + 1;
+    mut cap = host::cpus();
+    asked := host::env(view("GRAIL_JOBS"));
+    if asked.len() != 0 {
+        cap = number_of(view(asked));
+    }
+    if 32 < cap {
+        cap = 32;
+    }
+    if cap < wanted {
+        wanted = cap;
+    }
+    mut js = jobs::open();
+    if 1 < wanted {
+        granted := jobs::workers(&mut js, wanted);
+        wanted = granted;
+    }
+    if wanted < 2 {
+        jobs::give_all(&mut js);
+        mut run = u8[][];
+        for c in clang.len() {
+            run.push(item(&clang, c));
+        }
+        run.push(copy(view("-O2")));
+        run.push(copy(view(input)));
+        run.push(copy(view("-o")));
+        run.push(copy(view(output)));
+        return host::command(run);
+    }
+    plan := llvm::split_plan(view(text), wanted);
+    // Unique to this unit's module: internal functions keep their own names in every part of it.
+    suffix := cat(view("u"), view(decimal(xxhash::hash64(view(input), 0))));
+    mut pids = u64[];
+    mut objects = u8[][];
+    for k in plan.count {
+        mut name = copy(view(input));
+        push_bytes(&mut name, view("."));
+        push_bytes(&mut name, view(decimal(k)));
+        part := cat(view(name), view(".ll"));
+        object := cat(view(name), view(".o"));
+        host::write_file(view(part), view(llvm::split_part(view(text), &plan, k, view(suffix))));
+        mut run = u8[][];
+        for c in clang.len() {
+            run.push(item(&clang, c));
+        }
+        run.push(copy(view("-O2")));
+        run.push(part.copy());
+        run.push(copy(view("-o")));
+        run.push(object.copy());
+        pids.push(host::spawn(run, host::environment(), 2, 2));
+        objects.push(object);
+    }
+    mut bad = 0;
+    for k in pids.len() {
+        if (9223372036854775807 < pids[k]) || (host::wait(pids[k]) != 0) {
+            bad = 1;
+        }
+    }
+    jobs::give_all(&mut js);
+    if bad != 0 {
+        say(view("grail: clang -O2 failed on a part of the LLVM module"));
+        return 1;
+    }
+    mut link = u8[][tool(view("GRAIL_LINKER"), view("ld.lld")), copy(view("-m")), copy(view(emulation)), copy(view("-r"))];
+    for k in objects.len() {
+        link.push(item(&objects, k));
+    }
+    link.push(copy(view("-o")));
+    link.push(copy(view(output)));
+    return host::command(link);
+}
 fn unit_build_command<a>(args: (&a u8[][])) -> u64 {
     if args.len() == 0 {
         return 1;
@@ -6699,6 +6787,7 @@ pub fn is_command<a>(name: &a [u8]) -> bool {
         || eq(view(name), view("profile"))
         || eq(view(name), view("cache"))
         || eq(view(name), view("unit-build"))
+        || eq(view(name), view("llvm-compile"))
         || eq(view(name), view("explain"))
         || eq(view(name), view("asm"))
         || eq(view(name), view("doc"))
@@ -6756,6 +6845,9 @@ pub fn run() -> u64 {
     }
     if eq(view(name), view("unit-build")) {
         return unit_build_command(&args);
+    }
+    if eq(view(name), view("llvm-compile")) {
+        return llvm_compile_command(&args);
     }
     if eq(view(name), view("explain")) {
         // `grail explain E0004`: what an error code means and how it is usually fixed.
