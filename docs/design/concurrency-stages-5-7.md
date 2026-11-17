@@ -789,3 +789,16 @@ option, the `Some` and the inner closure are back: allocations 3-5), and the com
 returns only `first`'s word. The fix is a two-word return from the runtime - `rt_parallel_with`
 returning both registers, or the builtin calling the combining function itself through the normal
 call path. That needs the unboxed owner's two-register contract, so it is coordinated with them.
+
+### What a join's ~3,500 instructions are, on main (ea22e51)
+
+`tools/sched-ic.sh` MODE 0 (a join of two trivial branches on a worker, one worker), split by
+function (callgrind self cost per join):
+
+| component | instructions | removed by |
+|---|---:|---|
+| three closure environments (`rt_rec`, the per-thread allocator, their frees) | 1,273 | call_abi S6 (frame environments for non-escaping closures) |
+| small runtime accessors, each a call and frame around 2-6 instructions of work (`rt_current` x4, `rt_job_block` x4, `rt_list_set` x4, `rt_job_stack` x3, `rt_job_deque` x2, `rt_list_head` x2, `rt_job_claim_word`, `rt_jobs_sched`, `rt_full_fence`) | 584 | cross-module inlining (/root/xinline); the LLVM build already does it |
+| fork, claim, run, publish, release (deque push/pop, the claim CAS, record recycling, the wake check) | 1,059 | the scheduler's own; with inlining it should fall to a few hundred |
+| the program: `pool::join`'s body, the two closure bodies, the slot, the loop | 633 | code generation (S4/S5, inlining) |
+| **total** | **3,549** | rayon 153, oneTBB 713 |

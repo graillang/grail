@@ -1003,6 +1003,134 @@ fn peephole<a, b>(o: (&a mut ir::Body), s: &b [u8], first: u64, last: u64) {
         i += 1;
     }
 }
+// Which of the frame slots `cands` (slot numbers, `-8n(%rbp)`) may be read before they are written
+// on some path from the prologue: 1 for those, per candidate. A slot whose address is taken, or
+// that an instruction this pass does not read uses, counts as read (`slot_plain`). The prologue's
+// zeroing (the cleared frame's 0, or `movq $0` into a promoted register) is only needed for these:
+// for any other slot every read sees a value the body wrote first.
+fn slots_live_in<a, b>(o: (&a ir::Body), s: &b [u8], cands: (&u64[]), prologue: u64) -> u64[] {
+    mut out = u64[];
+    for c in cands.len() {
+        out.push(0);
+    }
+    mut at = 0;
+    while at < cands.len() {
+        mut n = cands.len() - at;
+        if 60 < n {
+            n = 60;
+        }
+        mut chunk = u64[];
+        for c in n {
+            chunk.push(cands[at + c]);
+        }
+        mask := chunk_live_in(&o, view(s), &chunk, prologue);
+        for c in n {
+            if ((mask >> c) & 1) != 0 {
+                ir::put(&mut out, at + c, 1);
+            } else if !slot_plain(&o, chunk[c]) {
+                ir::put(&mut out, at + c, 1);
+            }
+        }
+        at += n;
+    }
+    return out;
+}
+// Every use of slot `n` is an operand of an instruction the liveness below reads (not an address
+// taken by `leaq`, not an instruction the parser left opaque).
+fn slot_plain<a>(o: (&a ir::Body), n: u64) -> bool {
+    at := n * 8;
+    for i in o.op.len() {
+        if o.del[i] != 0 {
+            continue;
+        }
+        uses := ((o.k0[i] == 2) && (o.v0[i] == at)) || ((o.k1[i] == 2) && (o.v1[i] == at));
+        if uses && ((o.op[i] == 3) || (o.op[i] == 0)) {
+            return false;
+        }
+    }
+    return true;
+}
+// Backward liveness of up to 60 slots (bit c for `cands[c]`) over the label graph, to a fixpoint;
+// the bits live just after the prologue. A read is a slot first operand, or a slot destination of
+// an instruction that is not a plain move (`addq $1,-8(%rbp)` reads it too); a plain move into the
+// slot writes it.
+fn chunk_live_in<a, b>(o: (&a ir::Body), s: &b [u8], cands: (&u64[]), prologue: u64) -> u64 {
+    last := o.op.len();
+    all := (1 << cands.len()) - 1;
+    mut lin = u64[];
+    for i in last {
+        lin.push(0);
+    }
+    mut result = 0;
+    mut changed = 1;
+    mut rounds = 0;
+    while (changed != 0) && (rounds < 64) {
+        changed = 0;
+        rounds += 1;
+        mut live = 0;
+        mut i = last;
+        while 0 < i {
+            i -= 1;
+            if i == prologue {
+                result = live;
+            }
+            // Fused lines (`tr`) are read like any other: a missed read would clear too little.
+            if o.del[i] != 0 {
+                continue;
+            }
+            op := o.op[i];
+            if op == 101 {
+                continue;
+            }
+            if op == 100 {
+                if lin[i] != live {
+                    ir::put(&mut lin, i, live);
+                    changed = 1;
+                }
+                continue;
+            }
+            if ir::is_jump(op) && (op != 15) {
+                t := jump_target(&o, i);
+                mut there = all;
+                if t < last {
+                    there = lin[t];
+                }
+                if op == 16 {
+                    live = there;
+                } else {
+                    live = live | there;
+                }
+                continue;
+            }
+            if (op == 29) || (op == 30) {
+                live = 0;
+                continue;
+            }
+            if (op == 15) && never_returns(&o, view(s), i) {
+                live = 0;
+                continue;
+            }
+            for c in cands.len() {
+                at := cands[c] * 8;
+                if (o.k1[i] == 2) && (o.v1[i] == at) {
+                    if ir::movelike(op) {
+                        live = live & (all - (1 << c));
+                    } else {
+                        live = live | (1 << c);
+                    }
+                }
+                if (o.k0[i] == 2) && (o.v0[i] == at) {
+                    live = live | (1 << c);
+                }
+            }
+        }
+    }
+    if changed != 0 {
+        // No fixpoint in the bound: every candidate is taken as read.
+        return all;
+    }
+    return result;
+}
 // Slot use permitted after promotion: the instruction stays valid with a register operand.
 fn promotable_use<a>(o: (&a ir::Body), i: u64) -> bool {
     op := o.op[i];
@@ -1572,7 +1700,10 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
             }
         }
         if ((o.m0[i] >> 5) & 1) != 0 {
-            if (op == 3) & (o.k0[i] == 4) & ir::at(view(s), o.s0[i], view("-.F")) {} else {
+            // A load of an argument from the caller's stack (`movq 16(%rbp),%rax`) reads a word
+            // no slot aliases and nothing in the body writes. It keeps its rbp mention, so a body
+            // with one is never inlined into another frame (inline_candidate).
+            if (op == 3) & (o.k0[i] == 4) & ir::at(view(s), o.s0[i], view("-.F")) {} else if (op == 1) & (o.k0[i] == 4) & (o.k1[i] == 1) & ir::incoming_arg(view(s), o.s0[i], o.e0[i]) {} else {
                 exchange(&mut o.weird, 1);
             }
         }
@@ -1703,6 +1834,8 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
     // frame.
     mut chosen = u64[];
     mut slots = u64[];
+    // Per chosen register, 1 when it must be cleared after the saves (slots_live_in).
+    mut zchosen = u64[];
     mut xchosen = u64[];
     mut xslots = u64[];
     mut xinit = u64[];
@@ -1918,6 +2051,24 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
                 ir::put(&mut dinit, dwline[k], k + 1);
             }
         }
+        // Rule 2 (call ABI S4): a promoted register is cleared after the saves only when its slot
+        // may be read before it is written; a slice's registers are loaded where they are stored.
+        mut real = u64[];
+        for c in slots.len() {
+            if slots[c] != 0 {
+                real.push(slots[c]);
+            }
+        }
+        rlive := slots_live_in(&o, view(s), &real, prologue);
+        mut q = 0;
+        for c in slots.len() {
+            if slots[c] != 0 {
+                zchosen.push(rlive[q]);
+                q += 1;
+            } else {
+                zchosen.push(0);
+            }
+        }
         // Which promoted slot each rewritten line reads (lsrc) and writes (ldst), +1: the f32
         // narrowing needs the slot behind a register that several slots share.
         mut lsrc = u64[];
@@ -1974,6 +2125,18 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
     peephole(&mut o, view(s), first, last);
     dead_defs(&mut o, view(s), first, last);
     newframe := compact(&mut o, view(s), prologue, ns);
+    // Rule 3 (call ABI S4): of the cleared range, only the slots that may be read before written.
+    mut zkeep = u64[];
+    if o.zline != 0 {
+        mut zc = u64[];
+        mut k = o.zfrom;
+        while k < o.zto + 1 {
+            zc.push(k);
+            k += 1;
+        }
+        zkeep = slots_live_in(&o, view(s), &zc, prologue);
+    }
+    fstart := o.out.len();
     for i in last {
         if (newframe != 0) & (i + 1 == last) {
             app(&mut o.out, view(".set "));
@@ -2019,7 +2182,16 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
                 }
             }
         }
-        if o.del[i] == 0 {
+        if (chosen.len() != 0) & (i == prologue) & (o.del[i] == 0) {
+            // Rule 1 (call ABI S4): the saves' area is part of the one frame adjustment.
+            app(&mut o.out, view("subq "));
+            for x in o.e0[i] - o.s0[i] {
+                o.out.push(s[o.s0[i] + x]);
+            }
+            app(&mut o.out, view("+"));
+            out_number(&mut o, 16 * ((chosen.len() + 1) / 2));
+            app(&mut o.out, view(",%rsp\n"));
+        } else if o.del[i] == 0 {
             emit_line(&mut o, view(s), i);
         }
         if saved != 0 {
@@ -2057,9 +2229,11 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
         if (o.zline != 0) & (i + 1 == o.zline) {
             mut k = o.zfrom;
             while k < o.zto + 1 {
-                app(&mut o.out, view("movq $0,-"));
-                out_number(&mut o, k * 8);
-                app(&mut o.out, view("(%rbp)\n"));
+                if zkeep[k - o.zfrom] != 0 {
+                    app(&mut o.out, view("movq $0,-"));
+                    out_number(&mut o, k * 8);
+                    app(&mut o.out, view("(%rbp)\n"));
+                }
                 k += 1;
             }
         }
@@ -2073,9 +2247,6 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
             }
         }
         if (chosen.len() != 0) & (i == prologue) {
-            app(&mut o.out, view("subq $"));
-            out_number(&mut o, 16 * ((chosen.len() + 1) / 2));
-            app(&mut o.out, view(",%rsp\n"));
             for c in chosen.len() {
                 app(&mut o.out, view("movq %"));
                 reg_name(&mut o, chosen[c]);
@@ -2084,15 +2255,327 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
                 o.out.push(10);
             }
             for c in chosen.len() {
-                app(&mut o.out, view("movq $0,%"));
-                reg_name(&mut o, chosen[c]);
-                o.out.push(10);
+                if zchosen[c] != 0 {
+                    app(&mut o.out, view("movq $0,%"));
+                    reg_name(&mut o, chosen[c]);
+                    o.out.push(10);
+                }
             }
         }
+    }
+    if prologue != 0 {
+        shrink_wrap(&mut o, fstart);
     }
     if (prologue != 0) & (chosen.len() == 0) & (xchosen.len() == 0) & (o.zline != 0) {
         inline_candidate(&mut o, view(s), prologue);
     }
+}
+// ---- shrink-wrapping (call ABI S5) ----
+// A body whose first statement is a guard that returns without a call - fib's
+// `if n < 2 { return n; }` - pays its whole prologue and epilogue on the path that needs neither.
+// When the emitted text is exactly
+//     pushq %rbp; movq %rsp,%rbp; subq $F,%rsp
+//     (saves of callee-saved registers, copies and stores of argument registers, zero stores)*
+//     cmpq A,B; jCC L
+//     (moves into %rax, restores of callee-saved registers)* leave; ret
+// the compare and the return are emitted first, on the argument registers the copies came from,
+// and the prologue and its setup move behind them, ending in `jmp L`:
+//     cmpq A',B'; jCC .Lsw_NAME; (moves into %rax)'; ret
+//     .Lsw_NAME: pushq %rbp; movq %rsp,%rbp; subq $F,%rsp; setup; jmp L
+// The original guard is no longer reached. Site labels (`.Lgs`) move with what they mark. Anything
+// else in that region - a call, a store, a write of another register, a read of a register the
+// setup did not copy from an argument - leaves the text as it was.
+fn shrink_wrap<a>(o: (&a mut ir::Body), start: u64) {
+    mut lines = u8[][];
+    mut cur = u8[];
+    mut k = start;
+    while k < o.out.len() {
+        b := o.out[k];
+        if b == 10 {
+            lines.push(cur);
+            cur = u8[];
+        } else {
+            cur.push(b);
+        }
+        k += 1;
+    }
+    if cur.len() != 0 {
+        return ();
+    }
+    mut p = 0;
+    while (p < lines.len()) && !ir::same_range(view(lines[p]), 0, lines[p].len(), view("pushq %rbp")) {
+        p += 1;
+    }
+    if (p + 3 >= lines.len()) || (o.name.len() == 0) {
+        return ();
+    }
+    // Only the function's own entry: nothing but its label may come before the prologue.
+    for i in p {
+        l := view(lines[i]);
+        label := (l.len() != 0) && (l[l.len() - 1] == 58);
+        directive := (l.len() != 0) && (l[0] == 46) && !label;
+        if !(directive || (label && !ir::at(view(l), 0, view(".L")))) {
+            return ();
+        }
+    }
+    if !sw_is(view(lines[p + 1]), view("movq %rsp,%rbp")) || !sw_starts(view(lines[p + 2]), view("subq $")) || !sw_ends(view(lines[p + 2]), view(",%rsp")) {
+        return ();
+    }
+    // Setup: what each callee-saved register and parameter slot holds, as the argument register it
+    // was copied from.
+    mut from = u8[][];
+    mut to = u8[][];
+    mut early = u8[][];
+    mut q = p + 3;
+    while q < lines.len() {
+        l := view(lines[q]);
+        if sw_site(l) {
+            early.push(copy_line(l));
+            q += 1;
+            continue;
+        }
+        if !sw_starts(l, view("movq ")) {
+            break;
+        }
+        ops := sw_ops(l, 5);
+        if ops.len() != 2 {
+            return ();
+        }
+        src := view(ops[0]);
+        dst := view(ops[1]);
+        if sw_callee_saved(src) && sw_rbp_mem(dst) {
+            q += 1;
+            continue;
+        }
+        if sw_arg(src) && (sw_callee_saved(dst) || sw_rbp_mem(dst)) {
+            from.push(copy_line(src));
+            to.push(copy_line(dst));
+            q += 1;
+            continue;
+        }
+        if sw_is(src, view("$0")) && (sw_callee_saved(dst) || sw_rbp_mem(dst)) {
+            q += 1;
+            continue;
+        }
+        break;
+    }
+    if q + 2 >= lines.len() {
+        return ();
+    }
+    cmp := view(lines[q]);
+    jcc := view(lines[q + 1]);
+    if !sw_starts(cmp, view("cmpq ")) || (jcc.len() < 4) || (jcc[0] != 106) || sw_starts(jcc, view("jmp")) {
+        return ();
+    }
+    mut sp = 0;
+    while (sp < jcc.len()) && (jcc[sp] != 32) {
+        sp += 1;
+    }
+    if sp >= jcc.len() {
+        return ();
+    }
+    cc := sub_line(jcc, 0, sp);
+    target := sub_line(jcc, sp + 1, jcc.len());
+    cops := sw_ops(cmp, 5);
+    if cops.len() != 2 {
+        return ();
+    }
+    a0 := sw_subst(view(cops[0]), &from, &to);
+    a1 := sw_subst(view(cops[1]), &from, &to);
+    if (a0.len() == 0) || (a1.len() == 0) {
+        return ();
+    }
+    // The guard: moves into %rax, restores, `leave`, `ret`.
+    mut guard = u8[][];
+    mut r = q + 2;
+    mut done = 0;
+    while (r < lines.len()) & (done == 0) {
+        l := view(lines[r]);
+        r += 1;
+        if sw_site(l) {
+            guard.push(copy_line(l));
+            continue;
+        }
+        if sw_is(l, view("leave")) {
+            continue;
+        }
+        if sw_is(l, view("ret")) {
+            done = 1;
+            continue;
+        }
+        if sw_is(l, view("xorl %eax,%eax")) {
+            guard.push(copy_line(l));
+            continue;
+        }
+        if sw_starts(l, view("movq ")) || sw_starts(l, view("movabsq ")) {
+            mut skip = 5;
+            if sw_starts(l, view("movabsq ")) {
+                skip = 8;
+            }
+            ops := sw_ops(l, skip);
+            if ops.len() != 2 {
+                return ();
+            }
+            if sw_callee_saved(view(ops[1])) && sw_rbp_mem(view(ops[0])) {
+                continue;
+            }
+            if !sw_is(view(ops[1]), view("%rax")) {
+                return ();
+            }
+            v := sw_subst(view(ops[0]), &from, &to);
+            if v.len() == 0 {
+                return ();
+            }
+            mut m = sub_line(l, 0, skip);
+            put_line(&mut m, view(v));
+            put_line(&mut m, view(",%rax"));
+            guard.push(m);
+            continue;
+        }
+        return ();
+    }
+    if done == 0 {
+        return ();
+    }
+    // Rebuild the text from `start`.
+    mut label = copy_line(view(".Lsw_"));
+    put_line(&mut label, view(o.name));
+    mut out = u8[];
+    for i in p {
+        put_line(&mut out, view(lines[i]));
+        out.push(10);
+    }
+    for i in early.len() {
+        put_line(&mut out, view(early[i]));
+        out.push(10);
+    }
+    put_line(&mut out, view("cmpq "));
+    put_line(&mut out, view(a0));
+    out.push(44);
+    put_line(&mut out, view(a1));
+    out.push(10);
+    put_line(&mut out, view(cc));
+    out.push(32);
+    put_line(&mut out, view(label));
+    out.push(10);
+    for i in guard.len() {
+        put_line(&mut out, view(guard[i]));
+        out.push(10);
+    }
+    put_line(&mut out, view("ret\n"));
+    put_line(&mut out, view(label));
+    put_line(&mut out, view(":\n"));
+    for i in q - p {
+        l := view(lines[p + i]);
+        if !sw_site(l) {
+            put_line(&mut out, l);
+            out.push(10);
+        }
+    }
+    // The remainder usually opens with the original guard's own dead `jmp L` (or with `L:`):
+    // falling into it is the jump.
+    mut jl = copy_line(view("jmp "));
+    put_line(&mut jl, view(target));
+    mut ll = copy_line(view(target));
+    ll.push(58);
+    mut first = r;
+    while (first < lines.len()) && sw_site(view(lines[first])) {
+        first += 1;
+    }
+    falls := (first < lines.len()) && (sw_is(view(lines[first]), view(jl)) || sw_is(view(lines[first]), view(ll)));
+    if !falls {
+        put_line(&mut out, view(jl));
+        out.push(10);
+    }
+    while r < lines.len() {
+        put_line(&mut out, view(lines[r]));
+        out.push(10);
+        r += 1;
+    }
+    while o.out.len() > start {
+        o.out.pop()!;
+    }
+    o.out.append(view(out));
+}
+fn copy_line<a>(l: &a [u8]) -> u8[] {
+    mut out = u8[];
+    out.append(l);
+    return out;
+}
+fn sub_line<a>(l: &a [u8], a0: u64, e: u64) -> u8[] {
+    mut out = u8[];
+    for i in e - a0 {
+        out.push(l[a0 + i]);
+    }
+    return out;
+}
+fn put_line<a, b>(out: (&a mut u8[]), l: &b [u8]) {
+    out.append(l);
+}
+fn sw_is<a, b>(l: &a [u8], t: &b [u8]) -> bool {
+    return ir::same_range(view(l), 0, l.len(), t);
+}
+fn sw_starts<a, b>(l: &a [u8], t: &b [u8]) -> bool {
+    return (t.len() <= l.len()) && ir::at(view(l), 0, t);
+}
+fn sw_ends<a, b>(l: &a [u8], t: &b [u8]) -> bool {
+    return (t.len() <= l.len()) && ir::at(view(l), l.len() - t.len(), t);
+}
+// A statement marker the site table reads (`.gpos`, `.gposa`, `.gbase`, `.gkind`; or the
+// `.Lgs<n>:` label it makes of one): no jump targets it, and it moves with what it marks.
+fn sw_site<a>(l: &a [u8]) -> bool {
+    return sw_starts(l, view(".gpos")) || sw_starts(l, view(".gbase ")) || sw_starts(l, view(".gkind "))
+        || (sw_starts(l, view(".Lgs")) && sw_ends(l, view(":")));
+}
+// The two operands after a mnemonic of `skip` bytes (with its space), split at the top-level comma.
+fn sw_ops<a>(l: &a [u8], skip: u64) -> u8[][] {
+    mut out = u8[][];
+    mut depth = 0;
+    mut cur = u8[];
+    mut i = skip;
+    while i < l.len() {
+        c := l[i];
+        if c == 40 {
+            depth += 1;
+        }
+        if c == 41 {
+            depth -= 1;
+        }
+        if (c == 44) && (depth == 0) {
+            out.push(cur);
+            cur = u8[];
+        } else {
+            cur.push(c);
+        }
+        i += 1;
+    }
+    out.push(cur);
+    return out;
+}
+fn sw_callee_saved<a>(r: &a [u8]) -> bool {
+    return sw_is(r, view("%rbx")) || sw_is(r, view("%r12")) || sw_is(r, view("%r13")) || sw_is(r, view("%r14")) || sw_is(r, view("%r15"));
+}
+fn sw_arg<a>(r: &a [u8]) -> bool {
+    return sw_is(r, view("%rdi")) || sw_is(r, view("%rsi")) || sw_is(r, view("%rdx")) || sw_is(r, view("%rcx")) || sw_is(r, view("%r8")) || sw_is(r, view("%r9"));
+}
+// A frame word `...(%rbp)`: a parameter slot or a callee-saved save.
+fn sw_rbp_mem<a>(op: &a [u8]) -> bool {
+    return sw_ends(op, view("(%rbp)")) && !sw_starts(op, view("("));
+}
+// The guard's operand with the setup undone: an immediate stays, an argument register stays, a
+// callee-saved register or parameter slot becomes the argument register it was copied from. Empty
+// when the operand is anything else (it would read what the prologue has not built).
+fn sw_subst<a>(op: &a [u8], from: (&u8[][]), to: (&u8[][])) -> u8[] {
+    if sw_starts(op, view("$")) || sw_arg(op) {
+        return copy_line(op);
+    }
+    mut found = u8[];
+    for i in to.len() {
+        if sw_is(op, view(to[i])) {
+            found = copy_line(view(from[i]));
+        }
+    }
+    return found;
 }
 // Whether an operand's text is an SSE register: `%xmm<n>`.
 fn is_xmm_text<b>(s: &b [u8], a: u64, e: u64) -> bool {
@@ -3358,9 +3841,10 @@ fn inline_calls<a, b>(o: (&a mut ir::Body), split: u64, marks: (&a mut u64[]), l
     mut next = 0;
     mut unit = u8[];
     mut uprefix = u8[];
-    mut seen_units = u8[][];
-    mut seen_sites = u64[];
-    mut site_unit = u8[];
+    // The inline-site counter of each unit prefix met so far, and which one is current.
+    mut seen = u8[][];
+    mut counts = u64[];
+    mut cur = 0;
     // Only the lines that can matter are visited: the calls and the unit markers, whose offsets
     // were noted when the text was made (lines_of_interest). Everything between is copied.
     for at in lines.len() {
@@ -3426,13 +3910,26 @@ fn inline_calls<a, b>(o: (&a mut ir::Body), split: u64, marks: (&a mut u64[]), l
                         fresh_prefix.push(text[at]);
                         at += 1;
                     }
+                    // Each unit numbers its own inline sites, so its text does not depend on how
+                    // many sites other units expanded; a unit whose text comes in more than one
+                    // part (a single-run build emits a module's specialisations in a later part)
+                    // goes on from where its last part stopped, or two copies would share a label.
+                    mut slot = seen.len();
+                    for x in seen.len() {
+                        if ir::same_range(view(seen[x]), 0, seen[x].len(), view(fresh_prefix)) {
+                            slot = x;
+                        }
+                    }
+                    if cur < seen.len() {
+                        ir::put(&mut counts, cur, site);
+                    }
+                    if slot == seen.len() {
+                        seen.push(fresh_prefix.copy());
+                        counts.push(0);
+                    }
+                    cur = slot;
+                    site = counts[slot];
                     exchange(&mut uprefix, fresh_prefix);
-                    // A unit has its own inline-site numbers, so one unit's text does not depend on
-                    // how many sites the units before it expanded. A unit can stand in the stream
-                    // more than once (a module's part, then its specialisations); its numbers carry
-                    // on where its previous part left them, or two copies would mint one label.
-                    site = unit_sites(&mut seen_units, &mut seen_sites, view(unit), site_unit.copy(), site);
-                    exchange(&mut site_unit, unit.copy());
                     o.out.append(text[pend..a]);
                     pend = a;
                     if split != 0 {
@@ -3472,33 +3969,6 @@ fn caller_position<a>(text: &a [u8], call: u64) -> u64 {
         e = b;
     }
     return call;
-}
-// The inline-site count `unit` starts from: what its previous part reached, or 0. `left`/`count` is
-// the unit being left and the sites it reached, which is filed first.
-fn unit_sites<a, b>(units: (&a mut u8[][]), counts: (&a mut u64[]), unit: &b [u8], left: u8[], count: u64) -> u64 {
-    if left.len() != 0 {
-        at := unit_index(&units, view(left));
-        if at == units.len() {
-            units.push(left);
-            counts.push(count);
-        } else {
-            exchange(&mut counts[at], count);
-        }
-    }
-    at := unit_index(&units, unit);
-    if at == units.len() {
-        return 0;
-    }
-    return counts[at];
-}
-fn unit_index<a, b>(units: (&a u8[][]), unit: &b [u8]) -> u64 {
-    for i in units.len() {
-        u := &units[i];
-        if u.len() == unit.len() && ir::same_range(view(u), 0, unit.len(), unit) {
-            return i;
-        }
-    }
-    return units.len();
 }
 // `_i<unit prefix>_<site>` on every `.L` in the body: the site number disambiguates two copies of
 // one body, and the unit prefix keeps a body label without a prefix of its own (`.Lret`) apart from

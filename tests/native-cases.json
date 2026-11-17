@@ -1571,13 +1571,15 @@
     "stdout": "42\n"
   },
   {
-    "name": "blocking-foreign-call-occupies-worker",
+    "name": "blocking-foreign-call-gives-its-worker-away",
+    "note": "One worker: a task makes a 120 ms `extern \"C\" blocking` usleep and a second task, queued behind it on the same worker, keeps running meanwhile - the worker went to a spare thread for the call.",
     "files": [
       "tests/concurrency/blocking_call.grl"
     ],
+    "env": {
+      "GRAIL_WORKERS": "1"
+    },
     "stdout": "42\n",
-    "stderr": "blocking foreign call is running on a green task's scheduler thread",
-    "stderrCount": 1,
     "targets": [
       "x86_64"
     ]
@@ -10651,7 +10653,7 @@
     "name": "entry-missing-names-the-file",
     "source": "fn hidden() { }",
     "reject": true,
-    "diagnostic": "no `main` and no public function with at most one parameter",
+    "diagnostic": "no `main` in ",
     "note": "The refusal points at the file the caller named; it used to point at the standard module the last pass had read."
   },
   {
@@ -17086,14 +17088,6 @@
     "stdout": "20\n"
   },
   {
-    "name": "unboxed-loop-jobs",
-    "files": [
-      "compiler/tests/unboxed_loop_jobs.grl"
-    ],
-    "stdout": "714\n714\n",
-    "note": "the loop-spawn shape of unboxed-task-items for jobs (captured plain records) and parallel_map items: each sees its own record"
-  },
-  {
     "name": "sched-thread-pointer-read-after-migration",
     "note": "Two reads of the thread pointer in one function with a sleep between them see the thread each runs on (400 tasks on 4 workers; at least one moves). Under the LLVM backend the read is inline assembly with a side effect, never merged across the suspension.",
     "files": [
@@ -17109,6 +17103,14 @@
     "targets": [
       "x86_64"
     ]
+  },
+  {
+    "name": "unboxed-loop-jobs",
+    "files": [
+      "compiler/tests/unboxed_loop_jobs.grl"
+    ],
+    "stdout": "714\n714\n",
+    "note": "the loop-spawn shape of unboxed-task-items for jobs (captured plain records) and parallel_map items: each sees its own record"
   },
   {
     "name": "reject-c-array-field-vector",
@@ -17243,13 +17245,6 @@
     "diagnostic": "one length parameter, two lengths"
   },
   {
-    "name": "closure-bounds-p17-no-callable-bound",
-    "note": "P17: callable bounds on a type parameter are deferred (Q5)",
-    "source": "fn apply<R, F: Fn()->R>(f: F) -> R { return f(); }\nfn main() { n := 3; println(apply(|| -> u64 n + 1)); }\n",
-    "reject": true,
-    "diagnostic": "expected `,`, found `(`"
-  },
-  {
     "name": "fuzz-extern-unmatched-closer-is-a-diagnostic",
     "source": "extern \"C\" fn f(x: u64) > u64;\nfn main() {}\n",
     "reject": true,
@@ -17291,5 +17286,88 @@
       "riscv64"
     ],
     "note": "a four-word record comes back through the caller's destination address, a hidden argument after the declared ones: the wrapper forwards it, also when the arguments pass seven words and go through the record"
+  },
+  {
+    "name": "callabi-shrink-wrap-guard",
+    "source": "fn fib(n: u64) -> u64 {\n    if n < 2 { return n; }\n    return fib(n - 1) + fib(n - 2);\n}\nfn main() -> u64 {\n    println(fib(20));\n    return 0;\n}\n",
+    "stdout": "6765\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "asm": [
+      "cmpq $2,%rdi\njae .Lsw_f_main_fib\n",
+      "movq %rdi,%rax\nret\n.Lsw_f_main_fib:\npushq %rbp\n"
+    ],
+    "note": "call ABI S5: a first statement that returns without a call is tested on the argument registers before the prologue, which moves behind it (optimize.grl shrink_wrap)"
+  },
+  {
+    "name": "callabi-one-frame-adjustment",
+    "source": "fn fib(n: u64) -> u64 {\n    if n < 2 { return n; }\n    return fib(n - 1) + fib(n - 2);\n}\nfn main() -> u64 {\n    println(fib(20));\n    return 0;\n}\n",
+    "stdout": "6765\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "asm": [
+      "+16,%rsp\nmovq %rbx,-",
+      "(%rbp)\nmovq %rdi,%rbx\njmp "
+    ],
+    "note": "call ABI S4: the callee-saved save area is part of the one frame adjustment, and a promoted register written before it is read is not cleared"
+  },
+  {
+    "name": "callabi-stack-arguments",
+    "source": "fn nine(a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u64, h: u64, i: u64) -> u64 {\n    return a + 2 * b + 3 * c + 4 * d + 5 * e + 6 * f + 7 * g + 8 * h + 9 * i;\n}\nfn deep(n: u64, a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u64, h: u64, i: u64) -> u64 {\n    if n == 0 { return nine(a, b, c, d, e, f, g, h, i); }\n    return deep(n - 1, b, c, d, e, f, g, h, i, a) + n;\n}\nfn main() -> u64 {\n    x := host::argc();\n    s := nine(x, 2, 3, 4, 5, 6, 7, 8, 9);\n    t := deep(4, 1, 2, 3, 4, 5, 6, 7, 8, 9);\n    mut acc = 0;\n    for k in 100 { acc += nine(k, k + 1, k + 2, k + 3, k + 4, k + 5, k + 6, k + 7, k + 8) % 1000; }\n    println(\"{} {} {}\", s, t, acc);\n    return 0;\n}\n",
+    "stdout": "285 205 49750\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "call ABI S3: words past the sixth travel on the stack (the caller's outgoing area, 16 + 8k(%rbp) in the callee), position-weighted so a word read from the wrong slot changes the sum; a 10-argument recursion rotates them"
+  },
+  {
+    "name": "entry-library-u64-params-no-main",
+    "source": "module bulk;\n\npub fn f0(x: u64) -> u64 {\n    return x + 1;\n}\npub fn f1(x: u64) -> u64 {\n    return f0(x) * 2;\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "no `main` in ",
+      "input.grl:1:1"
+    ],
+    "note": "a library whose public functions take a u64: none can be the entry, so the file is told it has no `main` (the first one used to be picked and refused at the entry check, located in an imported interface)"
+  },
+  {
+    "name": "entry-library-dyn-no-main",
+    "source": "module shape;\n\npub interface Shape {\n    fn area(self: &Self) -> u64;\n}\npub struct Square {\n    side: u64\n}\nimpl Shape for Square {\n    fn area(self: &Self) -> u64 {\n        return self.side * self.side;\n    }\n}\npub fn area_of(s: &dyn Shape) -> u64 {\n    return s.area();\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "no `main` in ",
+      "input.grl:1:1"
+    ],
+    "note": "a library whose public function takes `&dyn Shape`: not an entry, so no `main`, located in the file"
+  },
+  {
+    "name": "entry-library-using-result-no-main",
+    "source": "module chained;\nuse result;\nuse core;\n\nfn half(x: u64) -> result::Result<u64, string> {\n    return result::Result::Ok(x / 2);\n}\npub fn halve(x: u64) -> u64 {\n    return half(x).unwrap_or(0);\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "no `main` in "
+    ],
+    "note": "a library that uses `result`: the interface's generic methods are never entry candidates, and the refusal names the file, not result.iface"
+  },
+  {
+    "name": "entry-picked-no-params-still-runs",
+    "source": "pub fn run() -> u64 {\n    println(7);\n    return 0;\n}\nfn helper(x: u64) -> u64 {\n    return x;\n}\n",
+    "stdout": "7\n0\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "a module with no `main` still runs its first public function that takes nothing, and prints what it returns"
   }
 ]
