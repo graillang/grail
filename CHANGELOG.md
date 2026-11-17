@@ -1,5 +1,12 @@
 ## Unreleased
 
+- Fixed (release builds): a function calling a blocking `extern "C"` function was left unoptimised
+  since the foreign-call marker landed - the marker's locked counter, thread-pointer read and
+  register save around `rt_foreign_lost` were text the LLVM lifter refused. It now lifts them
+  (`lock incq`/`decq` as `atomicrmw` with the flags of the new value, the save area as words),
+  and calls to Grail's own functions no longer trip the vector-register guard meant for C calls.
+  tools/test-facts.mjs checks that a blocking-extern caller is lifted.
+
 - The optimiser parses each distinct instruction line once per compile and replays the record for
   its repeats (a label operand is numbered again, the frame-slot bookkeeping redone): byte-identical
   output, 2.6% fewer instructions for a 4000-function file. The plan for taking the remaining text

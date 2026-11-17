@@ -264,7 +264,9 @@ ok('signature: without --verify-facts a forged fact is dropped (six words again)
 const ffi = build('ffi-floats', 'ffi_float_calls.grl', { backend: 'llvm', verifyFacts: true });
 const ffiIr = readFileSync(ffi.ll, 'utf8');
 ok('ffi: the C functions are declared with their float types', /^declare double @"scale"\(i64, double, float\)$/m.test(ffiIr) && /^declare float @"half"\(float\)$/m.test(ffiIr));
-ok('ffi: the caller is lifted and calls them typed', /call double @"scale"\(i64 %t\d+, double %t\d+, float %t\d+\)/.test(ffiIr) && /^define [^\n]*@"f_main_main"/m.test(ffiIr));
+// The externs are blocking (the default): the foreign-call marker around each call (native.grl
+// ffi_marker_enter/leave) must not keep the caller out of the LLVM module.
+ok('ffi: the caller of a blocking extern is lifted and calls it typed', /call double @"scale"\(i64 %t\d+, double %t\d+, float %t\d+\)/.test(ffiIr) && /^define [^\n]*@"f_main_main"/m.test(ffiIr));
 ok('ffi: the values are the native build\'s', run([ffi.exe]).stdout === '500\n1.5\n', JSON.stringify(run([ffi.exe]).stdout));
 
 // ---- the indirect-call fact: a closure call passes only its words; a short fact is refused ----
