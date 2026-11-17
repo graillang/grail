@@ -5,12 +5,14 @@
 // sets. A difference prints the first differing section and, for code, objdump's view of where.
 //
 //   bun tools/asm-oracle.mjs [--target aarch64] FILE.s...   compare the two objects of each file
+//   bun tools/asm-oracle.mjs [--target aarch64] --corpus [--filter RE]   compile the corpus's
+//     single-source run cases for the target (no emulator: compile and assemble only) and compare
 //   GRAIL_ASM selects the assembler command (default: the tree's compiler, `grail asm`)
 // Over the corpus, the same comparison runs inside every x86-64 assembly when GRAIL_ASM_ORACLE=1
 // (tools/native.mjs `assemble`): `GRAIL_ASM_ORACLE=1 bun tools/test-native.mjs x86_64` checks each
 // program's object and then runs the program, which is the gate's `asm-oracle` leg.
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 
 export function readElf(bytes) {
@@ -121,6 +123,27 @@ if (import.meta.main) {
   const assembler = process.env.GRAIL_ASM ? process.env.GRAIL_ASM.split(' ') : [(await import('./native.mjs')).buildCompiler(), 'asm'];
   const work = join(import.meta.dir, '..', '.work/asm-oracle');
   mkdirSync(work, { recursive: true });
+  if (args[0] === '--corpus') {
+    const at = args.indexOf('--filter');
+    const filter = at >= 0 ? new RegExp(args[at + 1]) : null;
+    const root = join(import.meta.dir, '..');
+    const cases = JSON.parse(readFileSync(join(root, 'tests/native-cases.json'), 'utf8'))
+      .filter(c => c.source && !c.reject && !c.files && !c.modules && !(c.flags ?? []).length && (!c.targets || c.targets.includes(target)) && (!filter || filter.test(c.name)));
+    const corpus = join(work, `corpus-${target}`);
+    mkdirSync(corpus, { recursive: true });
+    const compiler = assembler[0];
+    args = [];
+    let skipped = 0;
+    for (const c of cases) {
+      const src = join(corpus, `${c.name}.grl`);
+      writeFileSync(src, c.source);
+      const out = join(corpus, `${c.name}.s`);
+      const r = run([compiler, '--target', target, '--module-root', join(root, 'lib'), out, src, join(root, 'compiler/runtime.grl'), join(root, 'compiler/os-linux.grl')]);
+      if (r.status !== 0) { skipped++; continue; }
+      args.push(out);
+    }
+    console.log(`asm-oracle: ${args.length} corpus programs compiled for ${target} (${skipped} did not compile alone)`);
+  }
   let failed = 0;
   for (const file of args) {
     const result = checkFile(file, work, assembler, target);
