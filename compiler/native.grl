@@ -28120,7 +28120,16 @@ fn container_record<a>(c: (&a mut C), ty: u64) -> bool {
     if (d.is_enum != 0) || (d.c_layout != 0) || (d.opaque != 0) {
         return false;
     }
-    return true;
+    // A closure's environment holds each capture in a word of its own (the closure body and the
+    // capture code address them so), so it is never a container of inline records - though it is
+    // itself framed (layout_bits).
+    return !same(view(d.module), view(".closure"));
+}
+fn closure_env_record<a>(c: (&a mut C), ty: u64) -> bool {
+    if ty_kind(&mut c, ty) != 8 {
+        return false;
+    }
+    return same(view(c.decls[ty_arg(&mut c, ty)].module), view(".closure"));
 }
 fn layout_bits<a>(c: (&a mut C), alias: u64) -> u64 {
     alias := closure_record(&mut c, alias);
@@ -28145,6 +28154,25 @@ fn layout_bits<a>(c: (&a mut C), alias: u64) -> u64 {
     if small_enum(&mut c, ty) {
         // Plain, and held as its words (5a): a small enum is frame words wherever it is held.
         bits = 5;
+    }
+    if closure_env_record(&mut c, ty) && (CLOSURES_FRAMED != 0) {
+        // S6(A): framed - its words in the frame - with every field a word; plain when no capture
+        // owns anything.
+        d := ty_arg(&mut c, ty);
+        mut all = c.decls[d].drop == 0;
+        for i in c.decls[d].count {
+            ft := base_type(&mut c, field_type(&mut c, ty, i));
+            k := ty_kind(&mut c, ft);
+            if (k == 8) || (k == 32) || (k == 20) {
+                all = false;
+            } else if !((k == 0) || (k == 1) || (k == 2) || (k == 7) || (k == 12) || (k == 18) || (k == 19) || (k == 21) || (k == 22) || (k == 25) || (k == 26)) {
+                all = false;
+            }
+        }
+        bits = 4;
+        if all {
+            bits = 5;
+        }
     }
     if container_record(&mut c, ty) {
         d := ty_arg(&mut c, ty);
@@ -38083,6 +38111,19 @@ fn reference_as_fnmut<a>(c: (&a mut C), slot: u64, ty: u64, expected: u64) -> u6
 }
 // `move_value`, re-owning the moved value under a wider call contract (`Fn` used as `FnMut`).
 fn move_as<a>(c: (&a mut C), v: Val, ty: u64) -> Val {
+    // A framed closure moved into an erased closure type is boxed (S6(A)): the erased type is a
+    // word, the boxed object.
+    if (ty_kind(&mut c, base_type(&mut c, v.ty)) == 20) && (ty_kind(&mut c, base_type(&mut c, ty)) == 20)
+        && (closure_record(&mut c, v.ty) != v.ty) && (closure_record(&mut c, ty) == ty) && framed(&mut c, v.ty) {
+        source := place_of(&mut c, v.t);
+        boxed := frame_box(&mut c, v.t, v.ty);
+        move_out(&mut c, val(v.t, v.ty));
+        own(&mut c, boxed, ty);
+        if source != 0 {
+            transfer_bonds(&mut c, source, place_of(&mut c, boxed));
+        }
+        return val(boxed, ty);
+    }
     get(&mut c, v.t, view("%rax"));
     slot := save(&mut c);
     old := place_of(&mut c, v.t);
