@@ -15677,7 +15677,7 @@
   {
     "name": "iter-hidden-borrow-not-sent-to-job",
     "note": "Q8 (a)/(b): an Iter mapped over `iter::refs(&v)` holds v's loan by flow and its `step` field is a bare `FnMut`, so it is not Send and cannot ride into a job (stands in for `thread::spawn`, which takes the same `FnMut<Send, Owned>`)",
-    "source": "use pool;\nuse iter;\nfn main() {\n    v := u64[1, 2, 3];\n    it := iter::map(iter::refs(&v), |x: &u64| -> u64 *x * 2);\n    j := pool::spawn(|| -> u64 { mut s = 0; for x in it { s += x; } return s; });\n    println(pool::wait(j));\n}\n",
+    "source": "use pool;\nuse iter;\nfn main() {\n    v := u64[1, 2, 3];\n    it := iter::refs(&v).map(|x: &u64| -> u64 *x * 2);\n    j := pool::spawn(|| -> u64 { mut s = 0; for x in it { s += x; } return s; });\n    println(pool::wait(j));\n}\n",
     "reject": true,
     "diagnostic": "cannot transfer closure capture `it`",
     "modules": [
@@ -15688,41 +15688,41 @@
   {
     "name": "iter-hidden-borrow-not-a-task-item",
     "note": "...nor be handed to a task",
-    "source": "use iter;\nfn total(it: iter::Iter<u64>, unused: u64) -> u64 { mut s = 0; for x in it { s += x; } return s; }\nfn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {\n    v := u64[1, 2, 3];\n    it := iter::map(iter::refs(&v), |x: &u64| -> u64 *x + base);\n    t := spawn(sc, it, total);\n    return join(t);\n}\nfn main() { println(task_scope(10, body)); }\n",
+    "source": "use iter;\nfn total(it: iter::Iter<u64>, unused: u64) -> u64 { mut s = 0; for x in it { s += x; } return s; }\nfn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {\n    v := u64[1, 2, 3];\n    it := iter::refs(&v).map(|x: &u64| -> u64 *x + base);\n    t := spawn(sc, it, total);\n    return join(t);\n}\nfn main() { println(task_scope(10, body)); }\n",
     "reject": true,
     "diagnostic": "cannot transfer spawned item: step is a closure whose type does not say what it captured"
   },
   {
     "name": "iter-hidden-borrow-not-returned",
     "note": "...nor be returned past the vector it borrows: call_bonds bonded the mapped Iter to `refs(&v)`'s loans",
-    "source": "use iter;\nfn doubled() -> iter::Iter<u64> {\n    v := u64[1, 2, 3];\n    return iter::map(iter::refs(&v), |x: &u64| -> u64 *x * 2);\n}\nfn main() { for x in doubled() { println(x); } }\n",
+    "source": "use iter;\nfn doubled() -> iter::Iter<u64> {\n    v := u64[1, 2, 3];\n    return iter::refs(&v).map(|x: &u64| -> u64 *x * 2);\n}\nfn main() { for x in doubled() { println(x); } }\n",
     "reject": true,
     "diagnostic": "returned borrow escapes its declared input lifetime"
   },
   {
     "name": "iter-hidden-borrow-blocks-push",
     "note": "...nor be kept across a mutation of the vector",
-    "source": "use iter;\nfn main() {\n    mut v = u64[1, 2, 3];\n    it := iter::map(iter::refs(&v), |x: &u64| -> u64 *x * 2);\n    v.push(4);\n    for x in it { println(x); }\n}\n",
+    "source": "use iter;\nfn main() {\n    mut v = u64[1, 2, 3];\n    it := iter::refs(&v).map(|x: &u64| -> u64 *x * 2);\n    v.push(4);\n    for x in it { println(x); }\n}\n",
     "reject": true,
     "diagnostic": "mutation conflicts with live borrow"
   },
   {
     "name": "iter-hidden-borrow-local-use",
     "note": "...and consumed locally it is fine, and the vector is free again afterwards",
-    "source": "use iter;\nfn main() {\n    mut v = u64[1, 2, 3];\n    {\n        it := iter::map(iter::refs(&v), |x: &u64| -> u64 *x * 2);\n        mut s = 0;\n        for x in it { s += x; }\n        println(s);\n    }\n    v.push(4);\n    println(v.len());\n}\n",
+    "source": "use iter;\nfn main() {\n    mut v = u64[1, 2, 3];\n    {\n        it := iter::refs(&v).map(|x: &u64| -> u64 *x * 2);\n        mut s = 0;\n        for x in it { s += x; }\n        println(s);\n    }\n    v.push(4);\n    println(v.len());\n}\n",
     "stdout": "12\n4\n"
   },
   {
     "name": "iter-hidden-borrow-not-owned",
     "note": "a record with a bare closure field is not `Owned`: `Owned` is the only way across a lifetime boundary",
-    "source": "use iter;\nfn keep<T: Owned>(t: T) -> u64 { return 1; }\nfn main() { v := u64[1, 2]; it := iter::map(iter::refs(&v), |x: &u64| -> u64 *x); println(keep(it)); }\n",
+    "source": "use iter;\nfn keep<T: Owned>(t: T) -> u64 { return 1; }\nfn main() { v := u64[1, 2]; it := iter::refs(&v).map(|x: &u64| -> u64 *x); println(keep(it)); }\n",
     "reject": true,
     "diagnostic": "type does not satisfy Owned: iter::Iter<u64> holds a closure whose type does not say it is `Owned`"
   },
   {
     "name": "iter-hidden-borrow-not-send",
     "note": "...nor Send",
-    "source": "use iter;\nfn keep<T: Send>(t: T) -> u64 { return 1; }\nfn main() { v := u64[1, 2]; it := iter::map(iter::refs(&v), |x: &u64| -> u64 *x); println(keep(it)); }\n",
+    "source": "use iter;\nfn keep<T: Send>(t: T) -> u64 { return 1; }\nfn main() { v := u64[1, 2]; it := iter::refs(&v).map(|x: &u64| -> u64 *x); println(keep(it)); }\n",
     "reject": true,
     "diagnostic": "type does not satisfy Send: iter::Iter<u64>"
   },
@@ -16027,5 +16027,64 @@
     ],
     "stdout": "1 2 3\n2 4 6\n9\n231\n25\n26\n19\n4 2\n",
     "note": "plain records kept by an enum payload, a closure capture, a Mutex payload, a dyn cell and a vector after the frame that built them has returned; the end-of-main leak check balances every box (unboxed-values.md stage 3a; tools/frame-records-test.mjs runs it with --frame-records too)"
+  },
+  {
+    "name": "closure-ref-param-matches-type-argument",
+    "note": "a closure's `(&a K)` parameter matches a parameter typed by a type argument bound to a reference (`C` of `Fn((&T), C)` given `key: &a u64`): the binding carries no lifetime and a closure parameter is a fresh input lifetime (RwLock::read_with's context, gaps12-sync)",
+    "source": "struct Lock<T> { v: T }\nimpl<T> Lock<T> {\n    pub fn read_with<C, R: Owned>(self: (&Lock<T>), ctx: C, f: Fn((&T), C) -> R) -> R { return f(&self.v, ctx); }\n}\nfn has<a>(l: (&Lock<u64[]>), key: (&a u64)) -> bool {\n    return l.read_with(key, |v: (&u64[]), k: (&a u64)| -> bool v.len() > *k);\n}\nfn main() { l := Lock { v: u64[1, 2, 3] }; k := 2; println(has(&l, &k)); }\n",
+    "stdout": "true\n"
+  },
+  {
+    "name": "closure-ref-param-matches-type-argument-elided",
+    "note": "...also with the lifetime elided in the closure",
+    "source": "struct Lock<T> { v: T }\nimpl<T> Lock<T> {\n    pub fn read_with<C, R: Owned>(self: (&Lock<T>), ctx: C, f: Fn((&T), C) -> R) -> R { return f(&self.v, ctx); }\n}\nfn has<a>(l: (&Lock<u64[]>), key: (&a u64)) -> bool {\n    return l.read_with(key, |v: (&u64[]), k: (&u64)| -> bool v.len() > *k);\n}\nfn main() { l := Lock { v: u64[1, 2, 3] }; k := 2; println(has(&l, &k)); }\n",
+    "stdout": "true\n"
+  },
+  {
+    "name": "closure-ref-param-not-inferred-from-type-argument",
+    "note": "...but it is not inferred: the message asks for the annotation",
+    "source": "struct Lock<T> { v: T }\nimpl<T> Lock<T> {\n    pub fn read_with<C, R: Owned>(self: (&Lock<T>), ctx: C, f: Fn((&T), C) -> R) -> R { return f(&self.v, ctx); }\n}\nfn has<a>(l: (&Lock<u64[]>), key: (&a u64)) -> bool {\n    return l.read_with(key, |v, k| -> bool v.len() > *k);\n}\nfn main() { l := Lock { v: u64[1, 2, 3] }; k := 2; println(has(&l, &k)); }\n",
+    "reject": true,
+    "diagnostic": "closure parameter `k` needs a type here"
+  },
+  {
+    "name": "closure-ref-param-value-mismatch-refused",
+    "note": "a closure parameter that is not a reference where the context is one stays a mismatch",
+    "source": "struct Lock<T> { v: T }\nimpl<T> Lock<T> {\n    pub fn read_with<C, R: Owned>(self: (&Lock<T>), ctx: C, f: Fn((&T), C) -> R) -> R { return f(&self.v, ctx); }\n}\nfn has<a>(l: (&Lock<u64[]>), key: (&a u64)) -> bool { return l.read_with(key, |v: (&u64[]), k: u64| -> bool v.len() > k); }\nfn main() { l := Lock { v: u64[1] }; k := 2; println(has(&l, &k)); }\n",
+    "reject": true,
+    "diagnostic": "type mismatch"
+  },
+  {
+    "name": "closure-ref-param-mode-mismatch-refused",
+    "note": "...and so does `&mut` where the context is a shared reference",
+    "source": "struct Lock<T> { v: T }\nimpl<T> Lock<T> {\n    pub fn read_with<C, R: Owned>(self: (&Lock<T>), ctx: C, f: Fn((&T), C) -> R) -> R { return f(&self.v, ctx); }\n}\nfn has<a>(l: (&Lock<u64[]>), key: (&a u64)) -> bool { return l.read_with(key, |v: (&u64[]), k: (&a mut u64)| -> bool v.len() > *k); }\nfn main() { l := Lock { v: u64[1] }; k := 2; println(has(&l, &k)); }\n",
+    "reject": true,
+    "diagnostic": "type mismatch"
+  },
+  {
+    "name": "closure-ref-param-not-returned-past-owned",
+    "note": "...and the reference cannot come back out through an `R: Owned` result",
+    "source": "struct Lock<T> { v: T }\nimpl<T> Lock<T> {\n    pub fn read_with<C, R: Owned>(self: (&Lock<T>), ctx: C, f: Fn((&T), C) -> R) -> R { return f(&self.v, ctx); }\n}\nfn get<a>(l: (&Lock<u64[]>), key: (&a u64)) -> (&a u64) { return l.read_with(key, |v: (&u64[]), k: (&a u64)| -> (&a u64) k); }\nfn main() { l := Lock { v: u64[1] }; k := 2; println(*get(&l, &k)); }\n",
+    "reject": true,
+    "diagnostic": "type does not satisfy Owned: &u64 holds a borrow"
+  },
+  {
+    "name": "closure-captured-ref-passed-to-generic",
+    "note": "a call-scoped closure passes a captured `&K` on to a generic function and returns `u64?` built from it: a captured shared reference read as a value is re-borrowed, not moved out of the environment (concurrent_map's shape on RwLock, gaps12-sync)",
+    "source": "struct Lock<T> { v: T }\nimpl<T> Lock<T> {\n    pub fn read_with<C, R: Owned>(self: (&Lock<T>), ctx: C, f: Fn((&T), C) -> R) -> R { return f(&self.v, ctx); }\n}\nfn find<a, b, K>(v: (&b K[]), key: (&a K)) -> bool { return v.len() != 0; }\nfn has<a, K: Send + Share>(l: (&Lock<K[]>), key: (&a K)) -> bool {\n    return l.read_with(0, |v: (&K[]), unused: u64| -> bool find(v, key));\n}\nfn get<a, K: Send + Share>(l: (&Lock<K[]>), key: (&a K)) -> u64? {\n    return l.read_with(0, |v: (&K[]), unused: u64| -> u64? { if find(v, key) { return Some(v.len()); } return None; });\n}\nfn main() { l := Lock { v: u64[1, 2, 3] }; k := 2; println(has(&l, &k)); println(get(&l, &k)!); }\n",
+    "stdout": "true\n3\n"
+  },
+  {
+    "name": "closure-captured-ref-rebound-keeps-loan",
+    "note": "...the re-borrow keeps the loan: the closure still holds `x` borrowed",
+    "source": "struct Lock<T> { v: T }\nimpl<T> Lock<T> {\n    pub fn read_with<C, R: Owned>(self: (&Lock<T>), ctx: C, f: Fn((&T), C) -> R) -> R { return f(&self.v, ctx); }\n}\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() { x := u64[1]; rx := &x; g := || -> u64 { r := rx; return r[0]; }; println(eat(x)); println(g()); }\n",
+    "reject": true,
+    "diagnostic": "move of unavailable or borrowed value"
+  },
+  {
+    "name": "closure-captured-ref-rebound-local",
+    "note": "...and once the closure is gone, `x` may move",
+    "source": "struct Lock<T> { v: T }\nimpl<T> Lock<T> {\n    pub fn read_with<C, R: Owned>(self: (&Lock<T>), ctx: C, f: Fn((&T), C) -> R) -> R { return f(&self.v, ctx); }\n}\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() { x := u64[1, 2]; mut n = 0; { rx := &x; g := || -> u64 { r := rx; return r[1]; }; n = g(); } println(n + eat(x)); }\n",
+    "stdout": "4\n"
   }
 ]

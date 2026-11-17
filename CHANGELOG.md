@@ -1,5 +1,3 @@
-# Changelog
-
 ## Unreleased
 
 - **`thread::scope`: threads that borrow.** `thread::scope(|t| { a := t.spawn(|| ..); ..; a.join() })`
@@ -7,7 +5,14 @@
   scope waits for every one of them before it returns. The compiler refuses two threads taking one
   `&mut`, the body touching what a thread borrowed, and a handle leaving the scope. A failure in
   one thread lets its siblings finish and is re-raised when the scope ends.
-- Fixed: a small leaf that takes the address of its own local (runtime.grl's `rt_frame`) was
+- **A closure may take a reference where a type argument stands for one, and pass a captured
+  reference on.** `lock.read_with(key, |v: (&u64[]), k: (&a u64)| -> bool ..)` was a type mismatch
+  when the context parameter `C` was bound to a reference (a type argument carries no lifetime; a
+  closure parameter has a fresh one); it is accepted, and a parameter type left to inference there
+  asks for the annotation. A captured shared reference read as a value (`find(v, key)` inside a
+  closure) is re-borrowed instead of moved out of the closure, which was "move of unavailable or
+  borrowed value"; the borrow is kept as before.
+ Unreleased- Fixed: a small leaf that takes the address of its own local (runtime.grl's `rt_frame`) was
   inlined with that local turned into a scratch register, so split and cached builds of programs
   that reach it emitted `leaq %r8,%rax` and did not assemble. Such a leaf is no longer an inline
   candidate.
