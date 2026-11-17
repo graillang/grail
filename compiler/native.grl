@@ -777,6 +777,10 @@ struct C {
     statics: Static[],
     ct_calls: CtCall[],
     ct_done: CtDone[],
+    // R4 (comptime-speed.md): in a probe compile, the functions the probe reaches by name, as
+    // (file, position) pairs; a body outside them is not compiled. 0 in r4_on: compile everything.
+    r4_on: u64,
+    r4_keep: u64[],
     // The module-binding guards a probe compile has defined (static_probe_init).
     ct_guards: u8[][],
     // Where the batch probe writes the bodies each value reached (ct_write_deps), or empty.
@@ -842,6 +846,11 @@ struct C {
     // 1 while an assignment's target path is read: its last field is written directly (and its
     // predicate owed there), not lent out, so `field_path` records it instead of refusing the loan.
     ref_assign_target: u64,
+    // `--report-checks`: the checks left in the program's own functions, as the site table met
+    // them, printed after the build (report_checks_print).
+    report_checks: u64,
+    checks_report: u8[],
+    checks_count: u64,
     // 1 when the index the next accessor checks was proved, but --verify-facts keeps the check: the
     // accessor's edge is marked (kind 16), so the check is not a failure the function answers
     // for - as a proved addition's kept check is not (binary).
@@ -2861,6 +2870,65 @@ fn site_in<a, b>(text: &a [u8], a: u64, e: u64, part: &b [u8]) -> bool {
     }
     return false;
 }
+// The name of a failure kind (rt_fail's codes) for the checks report.
+fn check_kind_name(kind: u64) -> string {
+    if (kind == 1) || (kind == 7) || (kind == 11) || (kind == 64) {
+        return "index";
+    }
+    if kind == 2 {
+        return "overflow";
+    }
+    if kind == 5 {
+        return "divide";
+    }
+    if (kind == 3) || (kind == 9) || (kind == 14) || (kind == 15) {
+        return "conversion";
+    }
+    if kind == 6 {
+        return "unwrap";
+    }
+    if kind == 12 {
+        return "assertion";
+    }
+    return "other";
+}
+// One residual check: `function  file:line:col  kind`.
+fn report_check<a, b>(c: (&a mut C), func: &b [u8], file: u64, line: u64, col: u64, kind: &b [u8]) -> unit {
+    if c.report_checks == 0 {
+        return ();
+    }
+    mut row = copy_bytes(view("  "));
+    push_bytes(&mut row, view(func));
+    row.push(9);
+    if file != 0 {
+        push_bytes(&mut row, view(file_path(&mut c, file)));
+        row.push(58);
+        decimal(&mut row, line);
+        row.push(58);
+        decimal(&mut row, col);
+    } else {
+        push_bytes(&mut row, view("(no location)"));
+    }
+    row.push(9);
+    push_bytes(&mut row, view(kind));
+    row.push(10);
+    push_bytes(&mut c.checks_report, view(row));
+    exchange(&mut c.checks_count, c.checks_count + 1);
+    return ();
+}
+// The number in `movq $K,%REG` on the code line `a..e`, or 0.
+fn site_imm<a, b>(text: &a [u8], a: u64, e: u64, reg: &b [u8]) -> u64 {
+    if !site_at(text, a, e, view("movq $")) || !site_in(text, a, e, view(reg)) {
+        return 0;
+    }
+    mut v = 0;
+    mut i = a + 6;
+    while (i < e) && (47 < text[i]) && (text[i] < 58) {
+        v = v * 10 + u64(text[i]) - 48;
+        i += 1;
+    }
+    return v;
+}
 fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
     mut out = u8[];
     mut entries = u8[];
@@ -2892,6 +2960,7 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
     mut func_count = 0;
     mut pending_func = 0;
     mut pending_name = u8[];
+    mut report_fn = u8[];
     // Lines are read in place, and what passes through unchanged is copied in runs: `pend` is the
     // first byte not yet copied to `out`. A line that is dropped or replaced, or that gets a label in
     // front of it, flushes the run before it.
@@ -3009,6 +3078,7 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
                 site_func_label(&mut out, func_count);
                 pending_func = func_count;
                 pending_name = span_copy(text[a..e], 0, e - a - 1);
+                report_fn = pending_name.copy();
             }
         }
         if pending_site && !directive {
@@ -3048,12 +3118,32 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
             if site_at(text, p1a, p1e, view("jb ")) && site_in(text, p2a, p2e, view("cmpq 8(%rdi),%rsi")) {
                 kind = 1;
             }
+            report_check(&mut c, view(report_fn), cur_file, cur_line, cur_col, view(check_kind_name(kind)));
             out.append(text[pend..a]);
             pend = next;
             push_bytes(&mut out, view("movq $"));
             decimal(&mut out, kind);
             push_bytes(&mut out, view(",%rdx\ncall rt_trap\n"));
             pending = 0;
+        }
+        // The other shapes a check takes in program code: a trap the optimiser already placed, a
+        // checked accessor call, an array's `rt_fail`, a refinement's entry check.
+        if (c.report_checks != 0) && seen_own && !own_internal && !directive && (a < e) {
+            if site_at(text, a, e, view("call rt_trap")) {
+                report_check(&mut c, view(report_fn), cur_file, cur_line, cur_col, view(check_kind_name(site_imm(text, p1a, p1e, view("%rdx")))));
+            }
+            if site_at(text, a, e, view("call rt_fail")) {
+                report_check(&mut c, view(report_fn), cur_file, cur_line, cur_col, view(check_kind_name(site_imm(text, p1a, p1e, view("%rdi")))));
+            }
+            if site_at(text, a, e, view("call rt_refine")) {
+                report_check(&mut c, view(report_fn), cur_file, cur_line, cur_col, view("refinement"));
+            }
+            if site_at(text, a, e, view("call rt_")) {
+                callee := span_copy(text[a..e], 5, e - a);
+                if fx_index_accessor(view(callee)) {
+                    report_check(&mut c, view(report_fn), cur_file, cur_line, cur_col, view("index"));
+                }
+            }
         }
         if (a < e) && !directive {
             p2a = p1a;
@@ -19895,6 +19985,12 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         skip_braces(&mut c);
         return ();
     }
+    if (pass == 3) && (typecount == 0) && (c.r4_on != 0) && !r4_kept(&c, c.file, position) {
+        // R4: a probe compiles only what its values reach; this body is not one of them.
+        body_brace(&mut c, position);
+        skip_braces(&mut c);
+        return ();
+    }
     if (pass == 3) || (pass == 4) {
         // A body an earlier run reported an error in is not checked again: its signature still
         // stands for its callers, so the rest of the program is checked against it. Pass 4 replays
@@ -23209,6 +23305,24 @@ fn ct_probe_exec<a, b, d, e>(c: (&a mut C), probe: &b [u8], text: &d [u8], key: 
         value_tmp := path_cat(view(path_cat(view(dir), view(tag))), view(".value"));
         host::write_file(view(probe_src), view(probe));
         self := host::exe_path();
+        // The runtime, the platform module and the standard library are the same in every probe:
+        // they are compiled once into a base object with their interfaces (ct_probe_base), and a
+        // probe compiles only itself and the program's own sources against them.
+        mut user_files = u8[][];
+        mut base_files = u8[][];
+        for i in files.len() {
+            if ct_std_path(view(files[i])) {
+                base_files.push(files[i].copy());
+            } else {
+                user_files.push(files[i].copy());
+            }
+        }
+        mut base_mods = u8[][];
+        base_dir := ct_probe_base(&mut c, view(self), &base_files, &mut base_mods, soft);
+        if base_dir.len() == 0 {
+            exchange(status_out, 1);
+            return u8[];
+        }
         mut cmd = ct_shell_quote(view(self));
         mut opt = 1;
         while opt < offset + 1 {
@@ -23227,10 +23341,14 @@ fn ct_probe_exec<a, b, d, e>(c: (&a mut C), probe: &b [u8], text: &d [u8], key: 
             }
             opt += 1;
         }
-        // Probes share a function cache of their own: the runtime and the standard library are most
-        // of a probe's compile and are the same in every probe (comptime-speed.md); a probe never
-        // replays a normal compile's bodies, whose static reads are compiled differently.
-        push_bytes(&mut cmd, view(" --fn-cache .work/comptime/fn --fn-cache-quiet"));
+        push_bytes(&mut cmd, view(" --use "));
+        push_bytes(&mut cmd, view(ct_shell_quote(view(path_cat(view(base_dir), view("/if"))))));
+        push_bytes(&mut cmd, view(" --use-named"));
+        for m in base_mods.len() {
+            push_bytes(&mut cmd, view(" --use-module "));
+            push_bytes(&mut cmd, view(base_mods[m]));
+        }
+        push_bytes(&mut cmd, view(" --separate"));
         // Assembled in process (`--object`), as a build is: a probe needs no C toolchain, only the
         // linker a build uses.
         push_bytes(&mut cmd, view(" --target x86_64 --object "));
@@ -23239,9 +23357,9 @@ fn ct_probe_exec<a, b, d, e>(c: (&a mut C), probe: &b [u8], text: &d [u8], key: 
         push_bytes(&mut cmd, view(ct_shell_quote(view(probe_s))));
         cmd.push(32);
         push_bytes(&mut cmd, view(ct_shell_quote(view(probe_src))));
-        for i in files.len() {
+        for i in user_files.len() {
             cmd.push(32);
-            push_bytes(&mut cmd, view(ct_shell_quote(view(files[i]))));
+            push_bytes(&mut cmd, view(ct_shell_quote(view(user_files[i]))));
         }
         mut pending = host::env(view("GRAIL_COMPTIME_PENDING"));
         if key.len() != 0 {
@@ -23276,7 +23394,7 @@ fn ct_probe_exec<a, b, d, e>(c: (&a mut C), probe: &b [u8], text: &d [u8], key: 
             // A diagnostic is printed on stdout; the value's own probe reports it if it matters.
             push_bytes(&mut compile, view(" > /dev/null 2>&1"));
         }
-        mut sh = u8[][copy_bytes(view("sh")), copy_bytes(view("-c")), compile];
+        mut sh = u8[][copy_bytes(view("sh")), copy_bytes(view("-c")), compile.copy()];
         if host::command(sh) != 0 {
             if soft != 0 {
                 exchange(status_out, 1);
@@ -23301,8 +23419,23 @@ fn ct_probe_exec<a, b, d, e>(c: (&a mut C), probe: &b [u8], text: &d [u8], key: 
         if ld.len() == 0 {
             ld = copy_bytes(view("ld.lld"));
         }
-        mut link = u8[][ld, copy_bytes(view("-m")), copy_bytes(view("elf_x86_64")), copy_bytes(view("-static")), probe_o.copy(), copy_bytes(view("-o")), probe_exe.copy()];
-        if host::command(link) != 0 {
+        mut link = u8[][ld, copy_bytes(view("-m")), copy_bytes(view("elf_x86_64")), copy_bytes(view("-static")), probe_o.copy(), path_cat(view(base_dir), view("/base.o")), copy_bytes(view("-o")), probe_exe.copy()];
+        mut link2 = u8[][];
+        for li in link.len() {
+            link2.push(link[li].copy());
+        }
+        mut linked = host::command(link) == 0;
+        if !linked {
+            // R4 left out a function the probe uses after all (reached in a way a name walk does not
+            // see): compile the whole program and link again.
+            mut whole = copy_bytes(view("GRAIL_PROBE_WHOLE=1 "));
+            push_bytes(&mut whole, view(compile));
+            mut sh3 = u8[][copy_bytes(view("sh")), copy_bytes(view("-c")), whole];
+            if host::command(sh3) == 0 {
+                linked = host::command(link2) == 0;
+            }
+        }
+        if !linked {
             if soft != 0 {
                 exchange(status_out, 1);
                 return u8[];
@@ -23925,6 +24058,236 @@ fn ct_batch<a>(c: (&a mut C)) -> unit {
     for r in results.len() {
         c.ct_done.push(CtDone { key: results[r].key.copy(), res: CTRes { ty: results[r].res.ty, value: results[r].res.value, text: results[r].res.text.copy() } });
     }
+    return ();
+}
+// Whether a path is the runtime's, a platform module's or the standard library's.
+fn ct_std_path<a>(path: &a [u8]) -> bool {
+    if in_std_dir(path) != 0 {
+        return true;
+    }
+    mut cut = 0;
+    for i in path.len() {
+        if (path[i] == 47) || (path[i] == 92) {
+            cut = i + 1;
+        }
+    }
+    base := slice_bytes(path, cut, path.len());
+    return same(view(base), view("runtime.grl")) || same(view(base), view("os-linux.grl")) || same(view(base), view("os-windows.grl")) || same(view(base), view("darwin.grl"));
+}
+// The probes' base: the runtime, the platform module and the standard library modules `files`
+// names, compiled once (separately, no entry) into `<build store>/probe-base/<key>/base.o` with their
+// interfaces in `if/`. The key is the compiler, the options and every file's contents, so a base is
+// reused until one of them changes. Answers the directory, or empty (with the failure reported,
+// unless `soft`); `mods` gets the modules that have an interface, for `--use-module`.
+fn ct_probe_base<a, b>(c: (&a mut C), self: &b [u8], files: (&a u8[][]), mods: (&a mut u8[][]), soft: u64) -> u8[] {
+    mut keyed = copy_bytes(view("grail-probe-base 1\n"));
+    push_bytes(&mut keyed, self);
+    keyed.push(10);
+    // The compiler as the function cache names a hand-run one: its path, size and time.
+    parts := host::stat(self, 1);
+    if 5 < parts.len() {
+        decimal(&mut keyed, parts[2]);
+        keyed.push(32);
+        decimal(&mut keyed, parts[4]);
+        keyed.push(46);
+        decimal(&mut keyed, parts[5]);
+    }
+    keyed.push(10);
+    mut flags = u8[];
+    offset := c.arg_offset;
+    mut opt = 1;
+    while opt < offset + 1 {
+        a := host::arg(opt);
+        if starts_with(view(a), view("--overflow=")) {
+            flags.push(32);
+            push_bytes(&mut flags, view(a));
+        } else if same(view(a), view("--module-root")) {
+            flags.push(32);
+            push_bytes(&mut flags, view("--module-root"));
+            flags.push(32);
+            push_bytes(&mut flags, view(ct_shell_quote(view(host::arg(opt + 1)))));
+            opt += 1;
+        }
+        opt += 1;
+    }
+    push_bytes(&mut keyed, view(flags));
+    for i in files.len() {
+        push_bytes(&mut keyed, view(files[i]));
+        keyed.push(10);
+        push_bytes(&mut keyed, view(fncache::hash(view(host::read_file(view(files[i]))))));
+        keyed.push(10);
+    }
+    digest := iface_digest(&keyed);
+    root := cli::probe_base_root();
+    mut dir = root.copy();
+    dir.push(47);
+    for i in 24 {
+        dir.push(digest[i]);
+    }
+    ifdir := path_cat(view(dir), view("/if"));
+    object := path_cat(view(dir), view("/base.o"));
+    if host::exists(view(object)) == 0 {
+        // Built in a directory of its own and renamed into place, so two compiles that build the same
+        // base at once never see half of one.
+        mut tmp = dir.copy();
+        push_bytes(&mut tmp, view(".tmp"));
+        decimal(&mut tmp, host::now_ms());
+        host::command(u8[][copy_bytes(view("rm")), copy_bytes(view("-rf")), tmp.copy()]);
+        host::command(u8[][copy_bytes(view("mkdir")), copy_bytes(view("-p")), path_cat(view(tmp), view("/if"))]);
+        mut cmd = ct_shell_quote(self);
+        push_bytes(&mut cmd, view(flags));
+        push_bytes(&mut cmd, view(" --target x86_64 --emit-interface "));
+        push_bytes(&mut cmd, view(ct_shell_quote(view(path_cat(view(tmp), view("/if"))))));
+        push_bytes(&mut cmd, view(" --separate --no-entry --object "));
+        push_bytes(&mut cmd, view(ct_shell_quote(view(path_cat(view(tmp), view("/base.o"))))));
+        cmd.push(32);
+        push_bytes(&mut cmd, view(ct_shell_quote(view(path_cat(view(tmp), view("/base.s"))))));
+        for i in files.len() {
+            cmd.push(32);
+            push_bytes(&mut cmd, view(ct_shell_quote(view(files[i]))));
+        }
+        if soft != 0 {
+            push_bytes(&mut cmd, view(" > /dev/null 2>&1"));
+        }
+        mut sh = u8[][copy_bytes(view("sh")), copy_bytes(view("-c")), cmd];
+        if host::command(sh) != 0 {
+            if soft == 0 {
+                fail(&mut c, view("compile-time values: compiling the runtime and the standard library for the probes failed (the errors above)"));
+            }
+            return u8[];
+        }
+        host::command(u8[][copy_bytes(view("mkdir")), copy_bytes(view("-p")), root.copy()]);
+        mut mv = u8[][copy_bytes(view("mv")), copy_bytes(view("-T")), tmp.copy(), dir.copy()];
+        if host::command(mv) != 0 {
+            // Another compile put the same base in place first: use it, drop ours.
+            host::command(u8[][copy_bytes(view("rm")), copy_bytes(view("-rf")), tmp.copy()]);
+        }
+    }
+    // The standard library modules: one interface each, named by the file (the runtime has none).
+    for i in files.len() {
+        f := files[i].copy();
+        mut cut = 0;
+        for j in f.len() {
+            if f[j] == 47 {
+                cut = j + 1;
+            }
+        }
+        n := slice_bytes(view(f), cut, f.len());
+        if (in_std_dir(view(f)) != 0) && (n.len() > 4) {
+            m := slice_bytes(view(n), 0, n.len() - 4);
+            if host::exists(view(path_cat(view(ifdir), view(path_cat(view("/"), view(path_cat(view(m), view(".iface")))))))) != 0 {
+                mods.push(m);
+            }
+        }
+    }
+    return dir;
+}
+// ---- R4: a probe compiles only what its values reach (docs/design/comptime-speed.md) -----------------
+fn r4_kept<a>(c: (&a C), file: u64, pos: u64) -> bool {
+    for i in c.r4_keep.len() / 2 {
+        if (c.r4_keep[2 * i] == file) && (c.r4_keep[2 * i + 1] == pos) {
+            return true;
+        }
+    }
+    return false;
+}
+// Before the bodies of a probe compile: the functions reachable by name from the probe's own,
+// token by token - a call, a method call and a generic's instantiation all name the function, so a
+// name reaches every function that has it - plus every `drop`, which runs without being named. A
+// reached body that names `dyn` or makes a closure reaches what a name walk cannot see: then the
+// probe compiles everything. GRAIL_PROBE_WHOLE=1 turns it off (the fallback when a link finds a
+// skipped function after all).
+fn r4_compute<a>(c: (&a mut C)) -> unit {
+    if (c.probe_mode == 0) || (host::env(view("GRAIL_PROBE_WHOLE")).len() != 0) {
+        return ();
+    }
+    n := c.funcs.len();
+    mut seen = u64[];
+    for i in n {
+        seen.push(0);
+    }
+    mut work = u64[];
+    for i in n {
+        m := c.funcs[i].module.copy();
+        nm := c.funcs[i].name.copy();
+        if same(view(m), view("grail_probe")) || same(view(nm), view("drop")) {
+            seen[i] = 1;
+            work.push(i);
+        }
+    }
+    saved_file := c.file;
+    saved_pos := c.pos;
+    mut whole = false;
+    while (work.len() != 0) && !whole {
+        f := work.pop()!;
+        file := c.funcs[f].file;
+        if file == 0 {
+            continue;
+        }
+        if file != c.file {
+            load_file(&mut c, file);
+            exchange(&mut c.file, file);
+        }
+        mut i = c.funcs[f].pos;
+        // To the body's opening brace, then through its matching close.
+        while (i < c.toks.len()) && (kind_at(&mut c, i) != 123) && (kind_at(&mut c, i) != 0) && (kind_at(&mut c, i) != 59) {
+            i += 1;
+        }
+        if kind_at(&mut c, i) != 123 {
+            continue;
+        }
+        mut depth = 0;
+        mut prev = u8[];
+        while i < c.toks.len() {
+            k := kind_at(&mut c, i);
+            if k == 0 {
+                break;
+            }
+            t := tok_text(&mut c, i);
+            if k == 123 {
+                depth += 1;
+            }
+            if k == 125 {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            if same(view(t), view("dyn")) {
+                whole = true;
+                break;
+            }
+            if (same(view(t), view("|")) || same(view(t), view("||"))) && (same(view(prev), view("(")) || same(view(prev), view(",")) || same(view(prev), view("=")) || same(view(prev), view(":=")) || same(view(prev), view("return"))) {
+                whole = true;
+                break;
+            }
+            if k == 1 {
+                for g in n {
+                    if (seen[g] == 0) && same(view(c.funcs[g].name), view(t)) {
+                        seen[g] = 1;
+                        work.push(g);
+                    }
+                }
+            }
+            prev = t;
+            i += 1;
+        }
+    }
+    if c.file != saved_file {
+        load_file(&mut c, saved_file);
+        exchange(&mut c.file, saved_file);
+    }
+    exchange(&mut c.pos, saved_pos);
+    if whole {
+        return ();
+    }
+    for f in n {
+        if seen[f] != 0 {
+            c.r4_keep.push(c.funcs[f].file);
+            c.r4_keep.push(c.funcs[f].pos);
+        }
+    }
+    exchange(&mut c.r4_on, 1);
     return ();
 }
 fn run_tier<a, b, d, e>(c: (&a mut C), module: &b [u8], text: &d [u8], key: &e [u8]) -> CTRes {
@@ -41265,6 +41628,20 @@ fn simd_named<a, b>(c: (&a mut C), n: &b [u8]) -> u64 {
     return intern_full(&mut c, 36, int_type(&mut c, b, 1), l + 1024, u64[]);
 }
 fn is_simd_name<a>(n: &a [u8]) -> bool {
+    // Asked of every name a primary starts with, so the common answer comes first: every SIMD type
+    // name is a lane letter (f, i, u, m), a width and `x` at index 2 or 3, four to six bytes. Only a
+    // name of that shape is looked up in the list below, which stays the one table of SIMD names
+    // (building it for every identifier was a twelfth of a check).
+    if (n.len() < 4) || (6 < n.len()) {
+        return false;
+    }
+    k := n[0];
+    if (k != 102) && (k != 105) && (k != 117) && (k != 109) {
+        return false;
+    }
+    if (n[2] != 120) && (n[3] != 120) {
+        return false;
+    }
     names := u8[][copy_bytes(view("f32x4")), copy_bytes(view("f32x8")), copy_bytes(view("f64x2")), copy_bytes(view("f64x4")), copy_bytes(view("i32x4")), copy_bytes(view("i32x8")), copy_bytes(view("i64x2")), copy_bytes(view("i64x4")), copy_bytes(view("u8x16")), copy_bytes(view("u8x32")), copy_bytes(view("u32x4")), copy_bytes(view("u32x8")), copy_bytes(view("m8x16")), copy_bytes(view("m8x32")), copy_bytes(view("m32x4")), copy_bytes(view("m32x8")), copy_bytes(view("m64x2")), copy_bytes(view("m64x4"))];
     for i in names.len() {
         if same(view(n), view(names[i])) {
@@ -46372,7 +46749,7 @@ fn pv_loop_mark<a>(c: (&a C)) -> u64[] {
 }
 // After a loop's body: one fact per sequence the body indexed and nothing in it killed - no write, no
 // mutable loan, no call that could reach it - so its header's data and length are what they were at
-// the loop head on every iteration (kind 7, docs/design/native-range-facts.md). The optimiser's
+// the loop head on every iteration (kind 8, docs/design/native-range-facts.md). The optimiser's
 // descriptor hoisting reads it; the unchecked accessor carries the per-access proof itself.
 fn pv_loop_facts<a>(c: (&a mut C), at: (&a u64[]), head: u64) -> unit {
     if !pv_ir_live(&c) || (c.facts_fn.len() == 0) {
@@ -57510,6 +57887,8 @@ pub fn main() -> u64 {
         statics: Static[],
         ct_calls: CtCall[],
         ct_done: CtDone[],
+        r4_on: 0,
+        r4_keep: u64[],
         ct_guards: u8[][],
         ct_deps_path: u8[],
         static_scratch: 0,
@@ -57547,6 +57926,9 @@ pub fn main() -> u64 {
         pv_arith_ok: 0,
         addr_arg: 0,
         ref_assign_target: 0,
+        report_checks: 0,
+        checks_report: u8[],
+        checks_count: 0,
         fx_verified_index: 0,
         dyn_result_seen: 0,
         proved_label: 0,
@@ -58133,7 +58515,10 @@ pub fn main() -> u64 {
                                     exchange(&mut c.backend, 1);
                                     offset += 1;
                                 } else {
-                                    if same(view(option), view("--forge-index-facts")) {
+                                    if same(view(option), view("--report-checks")) {
+                                        exchange(&mut c.report_checks, 1);
+                                        offset += 1;
+                                    } else if same(view(option), view("--forge-index-facts")) {
                                         exchange(&mut c.forge_index, 1);
                                         offset += 1;
                                     } else if starts_with(view(option), view("--forge-indirect=")) {
@@ -58318,6 +58703,7 @@ pub fn main() -> u64 {
         }
         if pass == 2 {
             jobs::phase(view("declarations"));
+            r4_compute(&mut c);
             par_start(&mut c, n);
             // From the bodies on, a check writes no text (`quiet`): its units are check units, with
             // the registrations and no text (fn_unit_of), as cargo's metadata is to its rlib.
@@ -58748,6 +59134,13 @@ pub fn main() -> u64 {
     if site_table_on(&c) {
         jobs::phase(view("optimised"));
         tabled := site_table(&mut c, view(out));
+        if c.report_checks != 0 {
+            mut head = copy_bytes(view("checks left in the program's own functions: "));
+            decimal(&mut head, c.checks_count);
+            head.push(10);
+            host::print(view(head));
+            host::print(view(c.checks_report));
+        }
         jobs::phase(view("location-table"));
         out = tabled;
     }

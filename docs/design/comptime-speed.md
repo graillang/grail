@@ -169,3 +169,42 @@ pins the probe counts: cold 1, unchanged 0, an edit elsewhere 0, an edit to a re
 Not done: `@f()` inside an expression still runs its own probe (it is not collected into the batch:
 a body may sit in an untaken `@if`); R4 (a probe that compiles only what it reaches) is measured
 against the remaining +0.9 s when it is taken up.
+
+## The fixed cost (2026-11-17)
+
+Measured on a one-value program (CPU s, value cache bypassed by editing the initialiser):
+
+| | before | after |
+|---|---|---|
+| no value | 1.22 | 1.20 |
+| one recomputed value | 2.47 (+1.25) | 1.27-1.31 (+0.07-0.11) |
+| after an unrelated function was added | 2.54 | 1.31 |
+| first build on a machine (base object built) | - | 2.63 |
+| 1600-function program, one recomputed value | 5.0 (+2.6) | 3.55 (+1.2) |
+
+Where the 1.1 s went: the probe's own compile+assembly was 0.23 s warm but 1.18 s cold, and it was
+cold after *any* change to the program's declarations, because the per-function cache key covers the
+whole run's declaration surface - so the runtime and core were recompiled. Link was 0.015 s, the run
+0.0002 s. Now the runtime, the platform module and the standard-library modules the program uses are
+compiled once (`ct_probe_base`, `--separate --no-entry --emit-interface`) and the probe is compiled
+with `--use` against their interfaces (0.02 s) and linked with the base object (0.02 s). What
+remains in a large program is the program's own functions, which R4 removes.
+
+## R4 as built (2026-11-17)
+
+`r4_compute` runs in a probe compile before the bodies: from the probe's own functions (and every
+`drop`), it walks each reached body's tokens and marks every function with a name it meets - which
+covers calls, method calls and generic templates (whose bodies are walked like any other). A reached
+body that names `dyn` or makes a closure (`|` after `(`, `,`, `=`, `:=`, `return`) turns R4 off for
+that probe. In pass 3 a non-generic body that is not marked is skipped; if the probe's link then finds
+it missing (reached some other way), the probe is recompiled with `GRAIL_PROBE_WHOLE=1` and linked
+again. Cases: comptime-r4-reached-through-generic, comptime-r4-closure-falls-back.
+
+Measured (CPU s, 1600-function program, one value recomputed): no value 2.46; with R4 2.41-2.68;
+R4 off 3.55. With the probe base, the cost of a recomputed value no longer grows with the program.
+
+The probe bases moved into the build store (`cli::probe_base_root`, `<store>/probe-base/<key>`):
+`grail cache clear` removes them and `prune` drops them (rebuilt on demand, about 1.4 s). `grail cache
+warm` does not build one yet: a base's key covers the standard-library modules the program uses, so
+there is no single base to warm; keying it on the whole library instead is the change that would
+allow it.
