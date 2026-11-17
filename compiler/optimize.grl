@@ -1443,11 +1443,36 @@ pub fn probe_frames<a>(s: &a [u8], after: u64) -> u8[] {
             e += 1;
         }
         mut name = u8[];
+        // The frame line is `subq $.F<n>,%rsp`, or `subq $.F<n>+K,%rsp` when the frame also saves
+        // callee-saved registers below the slots: the probe then covers the K bytes too.
+        mut extra: u64 = 0;
         if (e - a > 12) && ir::at(view(s), a, view("subq $.F")) && ir::at(view(s), e - 5, view(",%rsp")) {
-            name = s[a + 6: e - 5].copy();
+            mut stop = a + 6;
+            while (stop < e - 5) && (s[stop] != 43) {
+                stop += 1;
+            }
+            name = s[a + 6: stop].copy();
+            if stop < e - 5 {
+                for x in stop + 1..e - 5 {
+                    if (48 <= s[x]) & (s[x] <= 57) {
+                        extra = extra * 10 + u64(s[x] - 48);
+                    }
+                }
+            }
         }
         if (after != 0) && (e - a > 11) && ir::at(view(s), a, view("framesub .F")) {
-            name = s[a + 9: e].copy();
+            mut stop = a + 9;
+            while (stop < e) && (s[stop] != 43) {
+                stop += 1;
+            }
+            name = s[a + 9: stop].copy();
+            if stop < e {
+                for x in stop + 1..e {
+                    if (48 <= s[x]) & (s[x] <= 57) {
+                        extra = extra * 10 + u64(s[x] - 48);
+                    }
+                }
+            }
         }
         if after != 0 {
             for x in e - a {
@@ -1465,7 +1490,7 @@ pub fn probe_frames<a>(s: &a [u8], after: u64) -> u8[] {
                         }
                     }
                     if same {
-                        pages := (sizes[i] + 4095) / 4096;
+                        pages := (sizes[i] + extra + 4095) / 4096;
                         if after != 0 {
                             out.append(view("movq %rbp,%rax\nmovq $"));
                             put_num(&mut out, pages);
