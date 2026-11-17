@@ -31,6 +31,11 @@
   with one correctly rounded operation (Clinger), with the same text as before; longer ones still
   go through Burger & Dybvig. Decimal-shaped values print about twice as fast (LLVM 729M -> 384M
   instructions for 6,000 of them).
+- Parallel loops over several columns: `parallel_for_zip(grain, f, s1, .., s4)` and
+  `pool::zip2/zip3/zip4` with generic callable bounds (simd-layout-parallel-loops.md 4.2). One split,
+  the same index range of every slice per piece, equal lengths checked once, a piece per worker;
+  same-vector-twice, captured arguments and `FnMut` callbacks are the ordinary refusals.
+
 - Fixed: `grail fmt` could break a long expression inside `<<` or `>>` (each is two `<`/`>` tokens),
   or start a continuation line with `<`, and the output then read as a generic argument list and no
   longer parsed. A wrapped line now never starts with `<` or `>`.

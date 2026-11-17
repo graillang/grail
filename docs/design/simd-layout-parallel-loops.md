@@ -389,6 +389,19 @@ pool::zip2(&mut pos[0: n], &vel[0: n], 4096,
 - Runtime: `rt_parallel_for_chunks` (`runtime.grl:2992`) already takes a width; it becomes an array
   of `{data, width}` pairs. A grain is rounded up to whole cache lines where the element size divides 64 (3.1).
 
+*As built (2026-11-17, /root/fixed_arrays).* `parallel_zip_builtin` (native.grl, builtin id 67)
+takes the grain, the callback and one to four slices, checks each slice's mode and element
+(`require_capability_named`: transferable for `&mut`, shareable for `&`), the callback's arity and
+that each parameter is the argument's slice (kind, mode, element; lifetimes not compared - a callable
+bound is higher-ranked in them), and looks through a generic callable (`param_callable`). The frame
+holds the `{view, width}` pairs; `rt_parallel_zip` checks the lengths (failure kind 19 names the
+argument) and splits as `rt_parallel_split` does, from (n, grain) alone (`rt_job_split` kind 2,
+`rt_job_zip_leaf`). The runtime cannot call with more than three arguments (it is compiled by the
+seed too), so the leaf calls a compiler-emitted adapter `grail_zip_adapter_<closure>_<n>` with one
+block {callback, environment, views}, which loads the views into argument registers. The
+`v.len == p.len` entry fact waits on /root/prover_wrap. Cases: `parallel-for-zip-*`, `pool-zip-*`,
+`reject-parallel-for-zip-*`.
+
 Two smaller additions with the same construction:
 
 ```grl
