@@ -42,6 +42,27 @@ bounds check rather than a write into a neighbour. `pool::split_mut(data, grain,
 
 {{example:pool-split-mut}}
 
+`left, right := split_at_mut(s, mid)` cuts one exclusive slice into its two halves, `s[0: mid]` and
+`s[mid: len]`, and checks `mid <= s.len()` as it runs. Both halves can be used, written and passed on
+at once - each is a disjoint piece of the same loan, which is how divide-and-conquer code (a parallel
+sort, a tree build, a hand-written chunker) gets two exclusive pieces without the compiler reasoning
+about indices. `s` and the vector behind it are out of reach until both halves end, and two
+overlapping borrows inside one half still conflict.
+
+```grl
+fn bump(s: &mut [u64], depth: u64) {
+    if (s.len() < 2) || (depth == 0) {
+        for i in s.len() {
+            s[i] += 1;
+        }
+        return;
+    }
+    left, right := split_at_mut(s, s.len() / 2);
+    bump(left, depth - 1);
+    bump(right, depth - 1);
+}
+```
+
 `parallel_spawn(f)` returns a `Job<R>` you can wait on later with `parallel_join(job)`, or
 `pool::spawn`/`pool::wait`. A handle may outlive the statement that made it, and even the frame: its
 captures were moved into the job and its result comes back owned, so nothing it holds is frame
