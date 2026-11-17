@@ -104,8 +104,12 @@ What remains:
 - **`json` and `dyncall`: a box per value.** Each parsed node and each `dyn` object is still a heap
   allocation; enums whose payloads are stored inline and `dyn` values held in cells are the next
   steps (`docs/design/unboxed-values.md`).
-- **`hashmap`**: hashing costs what Rust's SipHash-1-3 costs per key; the rest is probing and the
-  growth path.
+- **`hashmap`: insertion order costs one memory touch.** One-word keys hash with a seeded
+  multiply mix (about eight instructions, as Go's and Zig's tables do) rather than SipHash-1-3,
+  which puts the map within about 1.1x of C in time. What remains is the layout: Grail's map keeps
+  its entries in insertion order in a dense vector beside the probe table, like Python's `dict`
+  and Zig's `ArrayHashMap`, so a lookup reads the slot and then the key. C's open-addressed table
+  keeps keys in the slots.
 - **`bintrees`** is where Grail does best against `malloc` and `Box`; Zig, with its release
   allocator, executes the fewest instructions.
 
