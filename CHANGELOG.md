@@ -218,6 +218,11 @@
   `sched_tbb.cpp`): join, spawn, a burst of spawns, fib(32) by nested join and the frame loop's
   tail. The table and the reason for each miss are in `docs/design/runtime-parity.md`.
 
+- Fixed: the native optimiser took an `f32` constant whose 64-bit immediate it cannot read (2.0 is
+  `$4611686018427387904`, more than 18 digits) for zero, held the variable as binary32 and read 2.0
+  back as 0.0. It changed Abundance's abgeo mesh digests (meshopt's `quadric_error_attr`);
+  `f32-constant-wide-immediate-not-narrowed` pins it.
+
 - Fixed: `bun tools/native.mjs build` rebuilt the compiler on every call. It assembled the bootstrap
   seed each time and keyed the compiler by the bootstrap's mtime, so the key never matched. The
   assembled seed is now kept under its digest and the key names the bootstrap's content; a second
@@ -277,6 +282,7 @@
   writes numbers only (kind, operands, the statement's site) into a record that is not heap
   memory. The joiner builds the message and the site text, on a healthy stack. A wake on that path
   no longer reaches scheduler creation.
+
 - Fixed: `bun tools/native.mjs build` rebuilt the compiler on every call. It assembled the bootstrap
   seed each time and keyed the compiler by the bootstrap's mtime, so the key never matched. The
   assembled seed is now kept under its digest and the key names the bootstrap's content; a second
@@ -286,8 +292,10 @@
   (`bench/rivals/`), release and debug builds of each, CPU time from `getrusage`, one table with
   Grail's two builds as ratios to the best competitor of their bar. The numbers and the named
   reason for every miss are in `docs/design/runtime-parity.md`, "Against other languages".
-
-
+  Every column targets baseline x86-64 (Zig gets `-mcpu=baseline`); a second table builds the
+  rivals for the host CPU, and a third counts instructions. `bench/sieve`, `matmul` and `xform`
+  (all twins) now make every round depend on the one before, so no compiler can drop a round:
+  their printed results changed.
 
 - **A foreign call costs what it costs in C (x86-64).** In a program that loaded libc, every
   `extern "C"` call switched the thread pointer to libc's TCB and back, and on x86-64 a write to the
@@ -322,6 +330,7 @@
   per piece of `0..n`, and `pool::reduce(n, grain, zero, leaf, merge)` folds the pieces' results
   in index order. A floating-point reduction therefore prints the same bits with 1, 4 or 24
   workers (`pool-reduce-bit-identical-workers-*`).
+
   Every column targets baseline x86-64 (Zig gets `-mcpu=baseline`); a second table builds the
   rivals for the host CPU, and a third counts instructions. `bench/sieve`, `matmul` and `xform`
   (all twins) now make every round depend on the one before, so no compiler can drop a round:
