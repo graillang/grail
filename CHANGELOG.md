@@ -15,6 +15,9 @@
   division fix included), Grail-native 107G -> 21.4G.
 - `pool::chunks_mut_at` (exclusive pieces with their first index) and `pool::reduce_chunks` (a
   read-only reduction folded in index order, the same bits on any number of workers).
+- A Grail callback called from C settles on its thread record once at entry and pins and unpins
+  through it, instead of choosing between `rt_tls_record` and the thread pointer at each end
+  (x86-64). A C loop calling a Grail callback 10 M times: LLVM 52 -> 47 instructions per call.
 
 - The native backend computes SIMD operations with packed SSE2 on x86-64 (lane arithmetic, compares,
   select, splat, sums, 4-lane shuffles, `any`/`all`, `to_f32`), with exactly the same results as
