@@ -2832,6 +2832,12 @@ fn cache_base() -> u8[] {
     }
     return copy(view(".work/cache"));
 }
+// Where compile-time probes keep their base objects (the runtime and the standard library compiled
+// once, docs/design/comptime-speed.md): inside the build store, so `grail cache clear` and `prune`
+// cover them.
+pub fn probe_base_root() -> u8[] {
+    return path_join(view(cache_base()), view("probe-base"));
+}
 fn cache_root<a>(target: &a [u8]) -> u8[] {
     return path_join(view(cache_base()), view(target));
 }
@@ -3479,6 +3485,13 @@ fn cache_command<a>(args: (&a u8[][])) -> u64 {
     if host::exists(view(base)) == 0 {
         host::print(view("cache: empty\n"));
         return 0;
+    }
+    // Probe bases are rebuilt on demand (one compile of the runtime and the standard library), so
+    // a prune drops them all rather than tracking their use.
+    probes := probe_base_root();
+    if host::exists(view(probes)) != 0 {
+        mut drop_probes = u8[][copy(view("rm")), copy(view("-rf")), probes.copy()];
+        host::command(drop_probes);
     }
     targets := host::list_dir(view(base));
     for t in targets.len() {

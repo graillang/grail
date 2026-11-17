@@ -777,6 +777,10 @@ struct C {
     statics: Static[],
     ct_calls: CtCall[],
     ct_done: CtDone[],
+    // R4 (comptime-speed.md): in a probe compile, the functions the probe reaches by name, as
+    // (file, position) pairs; a body outside them is not compiled. 0 in r4_on: compile everything.
+    r4_on: u64,
+    r4_keep: u64[],
     // The module-binding guards a probe compile has defined (static_probe_init).
     ct_guards: u8[][],
     // Where the batch probe writes the bodies each value reached (ct_write_deps), or empty.
@@ -19977,6 +19981,12 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         skip_braces(&mut c);
         return ();
     }
+    if (pass == 3) && (typecount == 0) && (c.r4_on != 0) && !r4_kept(&c, c.file, position) {
+        // R4: a probe compiles only what its values reach; this body is not one of them.
+        body_brace(&mut c, position);
+        skip_braces(&mut c);
+        return ();
+    }
     if (pass == 3) || (pass == 4) {
         // A body an earlier run reported an error in is not checked again: its signature still
         // stands for its callers, so the rest of the program is checked against it. Pass 4 replays
@@ -23380,7 +23390,7 @@ fn ct_probe_exec<a, b, d, e>(c: (&a mut C), probe: &b [u8], text: &d [u8], key: 
             // A diagnostic is printed on stdout; the value's own probe reports it if it matters.
             push_bytes(&mut compile, view(" > /dev/null 2>&1"));
         }
-        mut sh = u8[][copy_bytes(view("sh")), copy_bytes(view("-c")), compile];
+        mut sh = u8[][copy_bytes(view("sh")), copy_bytes(view("-c")), compile.copy()];
         if host::command(sh) != 0 {
             if soft != 0 {
                 exchange(status_out, 1);
@@ -23406,7 +23416,22 @@ fn ct_probe_exec<a, b, d, e>(c: (&a mut C), probe: &b [u8], text: &d [u8], key: 
             ld = copy_bytes(view("ld.lld"));
         }
         mut link = u8[][ld, copy_bytes(view("-m")), copy_bytes(view("elf_x86_64")), copy_bytes(view("-static")), probe_o.copy(), path_cat(view(base_dir), view("/base.o")), copy_bytes(view("-o")), probe_exe.copy()];
-        if host::command(link) != 0 {
+        mut link2 = u8[][];
+        for li in link.len() {
+            link2.push(link[li].copy());
+        }
+        mut linked = host::command(link) == 0;
+        if !linked {
+            // R4 left out a function the probe uses after all (reached in a way a name walk does not
+            // see): compile the whole program and link again.
+            mut whole = copy_bytes(view("GRAIL_PROBE_WHOLE=1 "));
+            push_bytes(&mut whole, view(compile));
+            mut sh3 = u8[][copy_bytes(view("sh")), copy_bytes(view("-c")), whole];
+            if host::command(sh3) == 0 {
+                linked = host::command(link2) == 0;
+            }
+        }
+        if !linked {
             if soft != 0 {
                 exchange(status_out, 1);
                 return u8[];
@@ -24046,7 +24071,7 @@ fn ct_std_path<a>(path: &a [u8]) -> bool {
     return same(view(base), view("runtime.grl")) || same(view(base), view("os-linux.grl")) || same(view(base), view("os-windows.grl")) || same(view(base), view("darwin.grl"));
 }
 // The probes' base: the runtime, the platform module and the standard library modules `files`
-// names, compiled once (separately, no entry) into `.work/comptime/base/<key>/base.o` with their
+// names, compiled once (separately, no entry) into `<build store>/probe-base/<key>/base.o` with their
 // interfaces in `if/`. The key is the compiler, the options and every file's contents, so a base is
 // reused until one of them changes. Answers the directory, or empty (with the failure reported,
 // unless `soft`); `mods` gets the modules that have an interface, for `--use-module`.
@@ -24089,7 +24114,9 @@ fn ct_probe_base<a, b>(c: (&a mut C), self: &b [u8], files: (&a u8[][]), mods: (
         keyed.push(10);
     }
     digest := iface_digest(&keyed);
-    mut dir = copy_bytes(view(".work/comptime/base/"));
+    root := cli::probe_base_root();
+    mut dir = root.copy();
+    dir.push(47);
     for i in 24 {
         dir.push(digest[i]);
     }
@@ -24125,7 +24152,7 @@ fn ct_probe_base<a, b>(c: (&a mut C), self: &b [u8], files: (&a u8[][]), mods: (
             }
             return u8[];
         }
-        host::command(u8[][copy_bytes(view("mkdir")), copy_bytes(view("-p")), copy_bytes(view(".work/comptime/base"))]);
+        host::command(u8[][copy_bytes(view("mkdir")), copy_bytes(view("-p")), root.copy()]);
         mut mv = u8[][copy_bytes(view("mv")), copy_bytes(view("-T")), tmp.copy(), dir.copy()];
         if host::command(mv) != 0 {
             // Another compile put the same base in place first: use it, drop ours.
@@ -24150,6 +24177,114 @@ fn ct_probe_base<a, b>(c: (&a mut C), self: &b [u8], files: (&a u8[][]), mods: (
         }
     }
     return dir;
+}
+// ---- R4: a probe compiles only what its values reach (docs/design/comptime-speed.md) -----------------
+fn r4_kept<a>(c: (&a C), file: u64, pos: u64) -> bool {
+    for i in c.r4_keep.len() / 2 {
+        if (c.r4_keep[2 * i] == file) && (c.r4_keep[2 * i + 1] == pos) {
+            return true;
+        }
+    }
+    return false;
+}
+// Before the bodies of a probe compile: the functions reachable by name from the probe's own,
+// token by token - a call, a method call and a generic's instantiation all name the function, so a
+// name reaches every function that has it - plus every `drop`, which runs without being named. A
+// reached body that names `dyn` or makes a closure reaches what a name walk cannot see: then the
+// probe compiles everything. GRAIL_PROBE_WHOLE=1 turns it off (the fallback when a link finds a
+// skipped function after all).
+fn r4_compute<a>(c: (&a mut C)) -> unit {
+    if (c.probe_mode == 0) || (host::env(view("GRAIL_PROBE_WHOLE")).len() != 0) {
+        return ();
+    }
+    n := c.funcs.len();
+    mut seen = u64[];
+    for i in n {
+        seen.push(0);
+    }
+    mut work = u64[];
+    for i in n {
+        m := c.funcs[i].module.copy();
+        nm := c.funcs[i].name.copy();
+        if same(view(m), view("grail_probe")) || same(view(nm), view("drop")) {
+            seen[i] = 1;
+            work.push(i);
+        }
+    }
+    saved_file := c.file;
+    saved_pos := c.pos;
+    mut whole = false;
+    while (work.len() != 0) && !whole {
+        f := work.pop()!;
+        file := c.funcs[f].file;
+        if file == 0 {
+            continue;
+        }
+        if file != c.file {
+            load_file(&mut c, file);
+            exchange(&mut c.file, file);
+        }
+        mut i = c.funcs[f].pos;
+        // To the body's opening brace, then through its matching close.
+        while (i < c.toks.len()) && (kind_at(&mut c, i) != 123) && (kind_at(&mut c, i) != 0) && (kind_at(&mut c, i) != 59) {
+            i += 1;
+        }
+        if kind_at(&mut c, i) != 123 {
+            continue;
+        }
+        mut depth = 0;
+        mut prev = u8[];
+        while i < c.toks.len() {
+            k := kind_at(&mut c, i);
+            if k == 0 {
+                break;
+            }
+            t := tok_text(&mut c, i);
+            if k == 123 {
+                depth += 1;
+            }
+            if k == 125 {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            if same(view(t), view("dyn")) {
+                whole = true;
+                break;
+            }
+            if (same(view(t), view("|")) || same(view(t), view("||"))) && (same(view(prev), view("(")) || same(view(prev), view(",")) || same(view(prev), view("=")) || same(view(prev), view(":=")) || same(view(prev), view("return"))) {
+                whole = true;
+                break;
+            }
+            if k == 1 {
+                for g in n {
+                    if (seen[g] == 0) && same(view(c.funcs[g].name), view(t)) {
+                        seen[g] = 1;
+                        work.push(g);
+                    }
+                }
+            }
+            prev = t;
+            i += 1;
+        }
+    }
+    if c.file != saved_file {
+        load_file(&mut c, saved_file);
+        exchange(&mut c.file, saved_file);
+    }
+    exchange(&mut c.pos, saved_pos);
+    if whole {
+        return ();
+    }
+    for f in n {
+        if seen[f] != 0 {
+            c.r4_keep.push(c.funcs[f].file);
+            c.r4_keep.push(c.funcs[f].pos);
+        }
+    }
+    exchange(&mut c.r4_on, 1);
+    return ();
 }
 fn run_tier<a, b, d, e>(c: (&a mut C), module: &b [u8], text: &d [u8], key: &e [u8]) -> CTRes {
     if key.len() != 0 {
@@ -57748,6 +57883,8 @@ pub fn main() -> u64 {
         statics: Static[],
         ct_calls: CtCall[],
         ct_done: CtDone[],
+        r4_on: 0,
+        r4_keep: u64[],
         ct_guards: u8[][],
         ct_deps_path: u8[],
         static_scratch: 0,
@@ -58562,6 +58699,7 @@ pub fn main() -> u64 {
         }
         if pass == 2 {
             jobs::phase(view("declarations"));
+            r4_compute(&mut c);
             par_start(&mut c, n);
             // From the bodies on, a check writes no text (`quiet`): its units are check units, with
             // the registrations and no text (fn_unit_of), as cargo's metadata is to its rlib.

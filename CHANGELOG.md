@@ -4,6 +4,13 @@
   7, so a stable vector whose slot number matched an indirect call's ordinal (with a loop head
   label of 6 or less) could make the lifter pass that call too few arguments. The stability fact
   is now kind 8.
+- **R4: a compile-time probe compiles only what its values reach.** Before the bodies, a probe walks
+  the bodies its value functions reach, name by name (a call, a method, a generic's template), and
+  compiles only those; one that makes a closure or names `dyn` compiles the whole program, and a link
+  that finds a function left out recompiles with everything. A recomputed value in a 1600-function
+  program now costs +0.0-0.2 s instead of +1.1 s. The probes' base objects live in the build store
+  (`<store>/probe-base`), which `grail cache clear` and `prune` cover.
+
 - Fixed (release builds): a function calling a blocking `extern "C"` function was left unoptimised
   since the foreign-call marker landed - the marker's locked counter, thread-pointer read and
   register save around `rt_foreign_lost` were text the LLVM lifter refused. It now lifts them
