@@ -248,7 +248,14 @@ struct Closure {
     weak: u64,
     // The part (module) its body is emitted into.
     unit: u8[],
-    mode: u64
+    mode: u64,
+    // The function body the closure was written in (`c.body_file`/`c.body_pos` when it was
+    // recorded). Its body is emitted after every function, so an error in it is reported against
+    // that body: the re-run that looks for the next error skips the enclosing function, which drops
+    // the closure with it (next_error). Without it the re-run skipped whichever body happened to be
+    // checked last, met the same error again and chained to the 20-run cap.
+    body_file: u64,
+    body_pos: u64
 }
 struct ImplParams {
     decl: u64,
@@ -22805,10 +22812,42 @@ fn mod_from_iface<a>(c: (&a C), name: &a [u8]) -> bool {
     path := iface_join(view(c.iface_use), view(name), view(".iface"));
     return host::exists(view(path)) != 0;
 }
-// A `use` line no root answers for. The message names the module, the file that asked, and every
-// root that was searched; the behaviour it replaces was an unknown type inside a module the reader
-// did not write.
-fn unresolved_module<a>(c: (&a mut C), name: &a [u8], from: &a [u8]) -> unit {
+// Where `use NAME` is written in `text`: the offset of NAME on a line that starts with `use` (after
+// indentation), or the length of `text` when no such line is there.
+fn use_offset<a, b>(text: &a [u8], name: &b [u8]) -> u64 {
+    mut at = 0;
+    while at < text.len() {
+        mut i = at;
+        while (i < text.len()) && ((text[i] == 32) || (text[i] == 9)) {
+            i += 1;
+        }
+        if (i + 4 + name.len() <= text.len()) && same(view(text[i: i + 4]), view("use ")) {
+            mut j = i + 4;
+            while (j < text.len()) && (text[j] == 32) {
+                j += 1;
+            }
+            if (j + name.len() <= text.len()) && same(view(text[j: j + name.len()]), view(name)) {
+                after := j + name.len();
+                if (after == text.len()) || !use_name_byte(text[after]) {
+                    return j;
+                }
+            }
+        }
+        while (at < text.len()) && (text[at] != 10) {
+            at += 1;
+        }
+        at += 1;
+    }
+    return text.len();
+}
+fn use_name_byte(b: u8) -> bool {
+    return ((97 <= b) && (b <= 122)) || ((65 <= b) && (b <= 90)) || ((48 <= b) && (b <= 57)) || (b == 95);
+}
+// A `use` line no root answers for. The message names the module and every root that was searched,
+// and points at the `use` line in the file that asked, so it reads as the error it is - a module name
+// the program got wrong - rather than as the driver failing. The behaviour it replaces was an unknown
+// type inside a module the reader did not write.
+fn unresolved_module<a>(c: (&a mut C), name: &a [u8], from: &a [u8], text: &a [u8]) -> unit {
     mut msg = u8[];
     push_bytes(&mut msg, view("cannot resolve module `"));
     push_bytes(&mut msg, view(name));
@@ -22829,7 +22868,33 @@ fn unresolved_module<a>(c: (&a mut C), name: &a [u8], from: &a [u8]) -> unit {
             push_bytes(&mut msg, view(c.mod_roots[i]));
         }
     }
-    fail_option(&mut c, view(msg));
+    at := use_offset(view(text), view(name));
+    if at == text.len() {
+        fail_option(&mut c, view(msg));
+        return ();
+    }
+    source := text.copy();
+    here := diag_pos(&source, at);
+    width := diag_digits(here.line);
+    exchange(&mut c.src, source);
+    o(&mut c, view("error: "));
+    o(&mut c, view(msg));
+    c.out.push(10);
+    for i in width {
+        c.out.push(32);
+    }
+    o(&mut c, view("--> "));
+    o(&mut c, view(from));
+    c.out.push(58);
+    on(&mut c, here.line);
+    c.out.push(58);
+    on(&mut c, here.column);
+    c.out.push(10);
+    diag_gutter(&mut c, width);
+    c.out.push(10);
+    diag_excerpt(&mut c, width, &here, name.len(), 94, view("no module root holds this module"));
+    host::print(view(c.out));
+    host::exit(1);
     return ();
 }
 // The module set of a program: the command line's own files, then every module their `use` lines
@@ -22919,7 +22984,7 @@ fn resolve_modules<a>(c: (&a mut C), offset: u64) -> unit {
             }
             found := mod_find(&c, view(name));
             if found.len() == 0 {
-                unresolved_module(&mut c, view(name), view(file));
+                unresolved_module(&mut c, view(name), view(file), view(text));
                 return ();
             }
             // In the set before its own `use` lines are read: that is what ends a cycle.
@@ -35333,6 +35398,8 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
                     weak: weak,
                     unit: owner_unit,
                     mode: mode,
+                    body_file: c.body_file,
+                    body_pos: c.body_pos,
                 }
             );
     }
@@ -35558,6 +35625,10 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
         symbol := cl.symbol.copy();
         names := copy_names(&cl.names);
         params := copy_numbers(&cl.params);
+        body_file := cl.body_file;
+        body_pos := cl.body_pos;
+        exchange(&mut c.body_file, body_file);
+        exchange(&mut c.body_pos, body_pos);
         load_file(&mut c, file);
         exchange(&mut c.file, file);
         exchange(&mut c.raw, 0);

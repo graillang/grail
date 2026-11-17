@@ -551,6 +551,33 @@ function lint() {
       summary || (noToolchain ? `skipped, no compiler toolchain: ${output.trim().split('\n').slice(-1)[0]}` : output.trim().split('\n').slice(0, 3).join(' ')),
     );
   }
+  // An error inside a closure ends its re-run chain as one in a function does: the re-run that
+  // looks for the next error skips the body the closure was written in (native.grl `next_error`,
+  // `Closure.body_pos`). When it skipped whichever body was checked last instead, every run met the
+  // same error again and the chain ran to its cap of 20 compiles: 14 s instead of 2 for an
+  // eight-line program, and the fuzzer's two "hangs". Measured against a clean compile of the same
+  // program so a loaded host moves both sides.
+  {
+    const built = spawnSync(process.execPath, [join(root, 'tools/native.mjs'), 'build'], { cwd: root, encoding: 'utf8' });
+    const compiler = (built.stdout ?? '').trim().split('\n').pop();
+    if (built.status === 0 && compiler && existsSync(compiler)) {
+      const dir = join(root, '.work/ci-closure-error');
+      mkdirSync(dir, { recursive: true });
+      const body = tail => `fn main() {\n    mut count = 0;\n    mut next = || -> u64 {\n        count += 1;\n        ${tail}\n    };\n    println(next());\n}\n`;
+      writeFileSync(join(dir, 'ok.grl'), body('return count;'));
+      writeFileSync(join(dir, 'bad.grl'), body('retur;'));
+      const time = file => { const t = Date.now(); const r = spawnSync(compiler, ['check', file], { cwd: dir, encoding: 'utf8', timeout: 600_000 }); return { ms: Date.now() - t, r }; };
+      const ok = time('ok.grl');
+      const bad = time('bad.grl');
+      check(
+        'an error in a closure ends its re-run chain',
+        bad.r.status === 1 && `${bad.r.stdout}${bad.r.stderr}`.includes('undefined name `retur`') && bad.ms < 5 * ok.ms + 2000,
+        `${bad.ms} ms with the error, ${ok.ms} ms without`,
+      );
+    } else {
+      check('an error in a closure ends its re-run chain', true, 'skipped, no compiler toolchain');
+    }
+  }
   check('LSP/debugger/profiler plan exists', existsSync(join(root, 'docs/tooling/lsp-debugger-profiler.md')));
   check('FFI test runner exists', existsSync(join(root, 'tools/test-ffi.mjs')));
   check('the gate runs the jobserver test', readFileSync(join(root, 'tools/gate.sh'), 'utf8').includes('jobs-test') && existsSync(join(root, 'tools/jobs-test.mjs')));

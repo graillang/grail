@@ -8,6 +8,14 @@
   takes stale, and they are read again. `vector-grown-through-its-address-is-reread` covers the
   direct call, a loop, a method on a record holding the vector and a record passed by `&mut`.
 
+- Fixed: an error inside a closure made the compiler re-run itself up to 20 times. To report the
+  next error it re-runs with the failing body skipped, and for a closure it skipped the wrong body,
+  met the same error again and chained to the cap: an eight-line program took 14 s to reject
+  (30 s with a second error), now under 2 s with the same diagnostics. Found as two "hangs" of the
+  front-end fuzzer.
+- A `use` naming a module no root holds is an ordinary diagnostic: `error: cannot resolve module
+  ...` with the `use` line's location and the name underlined, instead of a bare `grail:` line.
+- `tools/fuzz-frontend.mjs` names its five slowest cases in the summary and in `report.json`.
 - **The atomics family.** `Atomic<T>` now holds `u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`,
   `i64` or `bool`. Each width wraps at its own size, and `fetch_min`/`fetch_max` are signed for
   `i*` types.
