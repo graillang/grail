@@ -2377,29 +2377,8 @@ fn array_element<a, b>(l: (&a mut L), target: &b [u8]) -> unit {
     return ();
 }
 fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> unit {
-    if target.len() == 0 {
+    if (target.len() == 0) || (target[0] == 42) {
         bad(&mut l);
-        return ();
-    }
-    if target[0] == 42 {
-        // `call *OPERAND`: a closure or a function value. Every Grail function has the one calling
-        // convention the stream uses (six word arguments, a {rax, rdx} answer), lifted or not, so
-        // the call is the direct call's with the address as the callee. Without this, every
-        // function that calls a closure parameter - lock_with's callbacks, a pool job's body, a
-        // sort's comparator - was left out of LLVM entirely.
-        operand := sub(target, 1, target.len());
-        addr := value(&mut l, view(operand), 64);
-        fp := def(&mut l, view("inttoptr i64 {} to ptr"), &u8[][addr]);
-        args := call_args(&mut l);
-        pair := def(&mut l, view("call {i64, i64} {}({})"), &u8[][fp, args]);
-        r0 := def(&mut l, view("extractvalue {i64, i64} {}, 0"), &u8[][copy(view(pair))]);
-        r1 := def(&mut l, view("extractvalue {i64, i64} {}, 1"), &u8[][pair]);
-        set_reg(&mut l, view("rax"), view(r0));
-        set_reg(&mut l, view("rdx"), view(r1));
-        set_chain(&mut l, reg_index(view("rax")) + 1, 0, 0, 0);
-        set_chain(&mut l, reg_index(view("rdx")) + 1, 0, 0, 0);
-        clear_args(&mut l);
-        refresh(&mut l);
         return ();
     }
     if eq(target, view("rt_abort")) {
