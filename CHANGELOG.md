@@ -4,6 +4,12 @@
   7, so a stable vector whose slot number matched an indirect call's ordinal (with a loop head
   label of 6 or less) could make the lifter pass that call too few arguments. The stability fact
   is now kind 8.
+- Fixed (release builds): a function calling a blocking `extern "C"` function was left unoptimised
+  since the foreign-call marker landed - the marker's locked counter, thread-pointer read and
+  register save around `rt_foreign_lost` were text the LLVM lifter refused. It now lifts them
+  (`lock incq`/`decq` as `atomicrmw` with the flags of the new value, the save area as words),
+  and calls to Grail's own functions no longer trip the vector-register guard meant for C calls.
+  tools/test-facts.mjs checks that a blocking-extern caller is lifted.
 
 - The optimiser parses each distinct instruction line once per compile and replays the record for
   its repeats (a label operand is numbered again, the frame-slot bookkeeping redone): byte-identical
@@ -29,6 +35,11 @@
   program's own sources against them, then links with the base. The fixed cost of recomputing a
   value fell from +1.1 s to +0.07-0.11 s of CPU (the probe's function cache was invalidated by any
   change to the program's declarations, so the runtime was recompiled after every edit).
+- `grail build --report checks` prints every runtime check left in the program's own functions,
+  one line each: the function, `file:line:col`, and the kind (index, overflow, divide, conversion,
+  refinement, ...). A check the prover removed is not listed, so what stays in a hot loop is
+  visible. The report run is uncached, so a module from the build store cannot hide its checks.
+  The compiler's own flag is `--report-checks`.
 
 - **`grail cache warm [--target T]`** checks and builds every standard module into the build store,
   as rustup ships libstd: a project's first check then compiles only its own modules. The installers
