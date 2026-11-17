@@ -4362,6 +4362,22 @@ fn authority_of<a>(c: (&a mut C), slot: u64) -> u64 {
     mut r = &c.resources[n - 1];
     return r.authority;
 }
+// The place a slice's live loan borrows, or 0 (a slice with no tracked loan).
+fn slice_source<a>(c: (&a mut C), slot: u64) -> u64 {
+    holder := place_of(&mut c, slot);
+    if holder == 0 {
+        return 0;
+    }
+    for i in c.bonds.len() {
+        h := c.bonds[i].holder;
+        loan := c.bonds[i].loan;
+        guard := c.bonds[i].guard;
+        if (h == holder) & (guard == 0) && (loan_live(&mut c, loan) != 0) {
+            return c.check.loans[loan - 1].source;
+        }
+    }
+    return 0;
+}
 fn authority_loan<a>(c: (&a mut C), slot: u64, target: u64) -> u64 {
     holder := place_of(&mut c, slot - 1);
     for i in c.bonds.len() {
@@ -5378,6 +5394,14 @@ fn bind_loan<a>(c: (&a mut C), value: u64, source: u64, target: u64, mode: u64) 
         ty := r.ty;
         if ty_kind(&mut c, ty) == 7 {
             authority = source + 1;
+        }
+        // A slice holds its loan the way a reference does: a borrow inside what it borrows is a
+        // re-borrow through it.
+        if ty_kind(&mut c, ty) == 27 {
+            borrowed := slice_source(&mut c, source);
+            if (borrowed != 0) && ownership::ancestor(&c.check, borrowed, target) {
+                authority = source + 1;
+            }
         }
     }
     mut loan = 0;
@@ -37303,7 +37327,16 @@ fn index_view<a>(c: (&a mut C), value: Val, access: u64) -> Val {
             c.caddr.push(slot);
             c.caddr.push(elem);
         }
-        root := place_of(&mut c, xt);
+        mut root = place_of(&mut c, xt);
+        // A typed slice is a borrowed view: its element lives in what the slice borrows, so the
+        // element reference is a re-borrow through the slice's own loan (`&v[i]` of a slice
+        // parameter `(&a [K])` has region `a`, and the slice is suspended while it lives).
+        if (vk == 27) && (c.raw == 0) {
+            borrowed := slice_source(&mut c, xt);
+            if borrowed != 0 {
+                root = borrowed;
+            }
+        }
         target := member_place(&mut c, root, 0, elem);
         own(&mut c, slot, ty);
         bind_loan(&mut c, slot, xt, root, access == 2);
