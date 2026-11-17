@@ -6,6 +6,11 @@
   records each C function's argument and result types, and the lifter emits the call as C types it
   (`call double @scale(i64, double, float)`), on x86-64 for calls whose arguments are all in
   registers. Variadic calls, records and stack arguments keep the native body.
+- **Records that own data are no longer boxed** (unboxed-values.md, stage 4). Every struct and
+  tuple - strings, vectors and `impl Drop` included - is held as its words in the frame, inline in
+  the record that contains it and flat in vectors; each type gets an in-place drop, and the boxes
+  that remain (enum payloads, closures, `Mutex`, `dyn`, task results) drop in place and free.
+  `check syn1000`: record boxes 404 k -> 71 k, peak memory 53 -> 41 MB.
 
 - AArch64 and RV64 native code drops moves that move nothing (call ABI S7): the word machine's
   result register is x9 (t0) and its first argument x0 (a0), and moves go through the scratch x10

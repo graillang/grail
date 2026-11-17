@@ -10127,6 +10127,18 @@ fn rt_vec_reverse(s: u64) -> u64 {
     }
     return 0;
 }
+// `truncate`/`clear` of a vector of inline elements `w` bytes wide that own something
+// (unboxed-values.md, stage 4): each removed element is dropped in place, at its address, by
+// `dropper` (its in-place drop), from the last one back, and the length is set.
+fn rt_vec_truncatew(s: u64, keep: u64, w: u64, dropper: u64) -> u64 {
+    mut n = raw_load(s + 8);
+    while keep < n {
+        n -= 1;
+        raw_store(s + 8, n);
+        raw_call2(dropper, wrapping_add(raw_load(s), wrapping_mul(n, w)), 0);
+    }
+    return 0;
+}
 fn rt_vec_truncate(s: u64, keep: u64, dropper: u64) -> u64 {
     if dropper == 0 {
         // Plain words: clear the tail and set the length, instead of a pop per element.
