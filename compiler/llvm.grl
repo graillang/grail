@@ -579,19 +579,21 @@ fn parse_int<a>(s: &a [u8]) -> Int {
 }
 // `name:` (or `name: directive`) -> name, else empty.
 fn label_of<a>(line: &a [u8]) -> u8[] {
+    // Found first, copied once: this is asked of every line of every function.
     mut out = u8[];
     for i in line.len() {
         ch := line[i];
         if ch == 58 {
+            if i != 0 {
+                out.append(line[0: i]);
+            }
             return out;
         }
-        ok := ident_char(ch);
-        if !ok {
-            return u8[];
+        if !ident_char(ch) {
+            return out;
         }
-        out.push(ch);
     }
-    return u8[];
+    return out;
 }
 fn is_local_label<a>(name: &a [u8]) -> bool {
     return starts(name, view(".L"));
@@ -6453,6 +6455,13 @@ fn lower_target<a, b, c>(stream: &a [u8], triple: &b [u8], target: u64, facts: (
     }
     // Lifted functions native code does not name are internal (inlinable and removable).
     mut thunks = u8[];
+    // rename_line renames only exported local labels: when there are none, no line can change.
+    mut exported_local = false;
+    for i in exported.keys.len() {
+        if (exported.used[i] != 0) && is_local_label(view(exported.keys[i])) {
+            exported_local = true;
+        }
+    }
     // The function text line by line, trimmed as split_lines trims, without copying a line unless
     // it has to change: almost every line goes straight to the module.
     mut at: u64 = 0;
@@ -6471,7 +6480,7 @@ fn lower_target<a, b, c>(stream: &a [u8], triple: &b [u8], target: u64, facts: (
             b0 -= 1;
         }
         raw := functions[a0: b0];
-        if (target == 0) && !starts(raw, view("define ")) && ((exported.count == 0) || !has(raw, view(".L"))) {
+        if (target == 0) && !starts(raw, view("define ")) && (!exported_local || !has(raw, view(".L"))) {
             put(&mut ir, raw);
             ir.push(10);
             continue;
