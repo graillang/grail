@@ -129,7 +129,10 @@ pieces of at least 16,384), Go one goroutine per core, and Zig one `std.Thread` 
 others fuse the six columns into one loop, the usual way to write it in each; Grail's library has a
 zip of at most four columns, hence one call per axis. Each entity's arithmetic is independent and
 the final sum is serial, so every program prints the serial checksum at any worker count, and the
-tool checks that it does.
+tool checks that it does: a build that prints another answer is not charted. Grail's release build
+of this program is absent for that reason on the commit charted. With the three updates written as
+closure literals at the call, it prints a wrong checksum (the y axis's positions are lost), a
+miscompile in the LLVM backend that is being fixed; the development build prints the right one.
 
 A parallel loop is about time, so this chart is wall time, best of several runs, with every runtime
 told the same number of threads. It needs a machine doing nothing else, and the figures charted

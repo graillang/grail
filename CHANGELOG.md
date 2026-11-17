@@ -1,5 +1,9 @@
 ## Unreleased
 
+- **`bench-rivals` no longer charts a build that printed the wrong answer.** It already failed the
+  run when a build's output differed from C's, but still wrote that build's figures into the
+  results, so a miscompiled program could chart as the fastest. Such a figure is now left out and
+  shown as not measured.
 - **`grail build --release` no longer hangs on large programs.** The LLVM lifter's name table was
   sized once from a guess and never grew; a program with more names than the guess (the Abundance
   port's `abgeo` and `cache`) filled it, and the next lookup of a missing name probed for ever. The
