@@ -2741,6 +2741,48 @@ fn address_accessor(name: (&[u8])) -> bool {
 // body has them, the element address as a `getelementptr` on `data` - recorded as an element
 // address in %rax - or, for the value accessors, the element loaded with the `element` tag.
 fn generic_element(l: (&mut L), target: (&[u8])) -> bool {
+    // `v.pop()!` of a word vector, emitted in place with the same tags: the length (a header word)
+    // loaded and written back as `!tbaa !1`, the element read as `!tbaa !3`. A pop loop's length then
+    // lives in a register, since no element load can alias it (B2,
+    // docs/design/dyn-and-callable-bounds.md).
+    // `v.len()`: the header's length word, tagged as a header load.
+    if eq(target, view("rt_len")) && (l.verify == 0) && (l.proof.len() == 0) {
+        s := get_reg(&mut l, view("rdi"));
+        h := def(&mut l, view("inttoptr i64 {} to ptr"), &u8[][s]);
+        lp := def(&mut l, view("getelementptr i8, ptr {}, i64 8"), &u8[][h]);
+        n := def(&mut l, view("load i64, ptr {}, align 8, !tbaa !1"), &u8[][lp]);
+        set_reg(&mut l, view("rax"), view(n));
+        set_chain(&mut l, reg_index(view("rax")) + 1, 0, 0, 0);
+        set_chain(&mut l, reg_index(view("rdx")) + 1, 0, 0, 0);
+        clear_args(&mut l);
+        return true;
+    }
+    if eq(target, view("rt_pop")) && (l.verify == 0) && (l.proof.len() == 0) {
+        s := get_reg(&mut l, view("rdi"));
+        h := def(&mut l, view("inttoptr i64 {} to ptr"), &u8[][s]);
+        lp := def(&mut l, view("getelementptr i8, ptr {}, i64 8"), &u8[][copy(view(h))]);
+        n := def(&mut l, view("load i64, ptr {}, align 8, !tbaa !1"), &u8[][copy(view(lp))]);
+        empty := def(&mut l, view("icmp eq i64 {}, 0"), &u8[][copy(view(n))]);
+        good := fresh_block(&mut l);
+        wrong := fresh_block(&mut l);
+        emit(&mut l, view("br i1 {}, label %{}, label %{}"), &u8[][empty, copy(view(wrong)), copy(view(good))]);
+        begin_block(&mut l, view(wrong));
+        l.calls.push(copy(view("rt_fail")));
+        emit(&mut l, view("call {i64, i64} @\"rt_fail\"(i64 8, i64 0, i64 0, i64 0, i64 0, i64 0)"), &u8[][]);
+        emit(&mut l, view("unreachable"), &u8[][]);
+        begin_block(&mut l, view(good));
+        last := def(&mut l, view("sub i64 {}, 1"), &u8[][copy(view(n))]);
+        d := def(&mut l, view("load ptr, ptr {}, align 8, !tbaa !1"), &u8[][h]);
+        off := def(&mut l, view("mul i64 {}, 8"), &u8[][copy(view(last))]);
+        ep := def(&mut l, view("getelementptr i8, ptr {}, i64 {}"), &u8[][d, off]);
+        v := def(&mut l, view("load i64, ptr {}, align 8, !tbaa !3"), &u8[][ep]);
+        emit(&mut l, view("store i64 {}, ptr {}, align 8, !tbaa !1"), &u8[][last, lp]);
+        set_reg(&mut l, view("rax"), view(v));
+        set_chain(&mut l, reg_index(view("rax")) + 1, 0, 0, 0);
+        set_chain(&mut l, reg_index(view("rdx")) + 1, 0, 0, 0);
+        clear_args(&mut l);
+        return true;
+    }
     mut width: u64 = 0;
     mut checked = false;
     mut value: u64 = 0;
