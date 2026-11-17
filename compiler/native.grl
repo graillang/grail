@@ -14567,11 +14567,23 @@ fn dyn_box<a>(c: (&a mut C), v: Val, expected: u64) -> Val {
     register_vtable(&mut c, id, concrete);
     observe(&mut c, v.t);
     mut value = v.t;
+    mut cell = 0;
     if framed(&mut c, concrete) {
-        value = frame_box(&mut c, v.t, concrete);
+        // The record's words live in the cell itself, after {value, vtable}: one allocation, and a
+        // method call reaches the record at cell+16 with no load (the cell table's adapters). The
+        // value word still addresses them, as docs/design/fat-dyn.md's layout says.
+        words := (value_bytes(&mut c, concrete) + 7) / 8;
+        sz := imm(&mut c, 2 + words);
+        cell = invoke(&mut c, view("rt_rec"), one(sz));
+        get(&mut c, cell, view("%rax"));
+        o(&mut c, view("leaq 16(%rax),%rax\n"));
+        value = save(&mut c);
+        bytes := imm(&mut c, value_bytes(&mut c, concrete));
+        invoke(&mut c, view("rt_copy_bytes"), three(value, v.t, bytes));
+    } else {
+        sz := imm(&mut c, 2);
+        cell = invoke(&mut c, view("rt_rec"), one(sz));
     }
-    sz := imm(&mut c, 2);
-    cell := invoke(&mut c, view("rt_rec"), one(sz));
     rec_store(&mut c, cell, 0, value);
     o(&mut c, view("leaq "));
     vt := cell_vtable_symbol(&mut c, id, concrete);
@@ -14831,8 +14843,12 @@ fn emit_vtables<a>(c: (&a mut C)) -> unit {
         if needs_drop(&mut c, concrete) {
             drop_name(&mut c, concrete);
             if framed(&mut c, concrete) && !frame_drops(&mut c, concrete) {
-                // The cell's value is the box dyn_box made: freeing it is the whole drop.
-                push_bytes(&mut entries, view("rt_free"));
+                // The record's words are inside the cell (dyn_box), which the cell's drop frees.
+                entries.push(48);
+            } else if framed(&mut c, concrete) {
+                // Owners inside the cell are dropped in place; the cell itself is freed after.
+                dropper := drop_in_place_ref(&mut c, concrete);
+                push_bytes(&mut entries, view(dropper));
             } else {
                 dropper := drop_ref_name(&mut c, concrete);
                 push_bytes(&mut entries, view(dropper));
@@ -14877,12 +14893,19 @@ fn emit_vtables<a>(c: (&a mut C)) -> unit {
                 // dispatch site itself, so the adapter is a load and a jump (no frame of its own).
                 // On the LLVM backend the method may be in the other object, which a direct `jmp`
                 // cannot reach (`grail asm` relocates calls and RIP-relative operands, not jumps).
+                // A record held in the cell (dyn_box) is at cell+16: no load at all.
+                mut receiver = ":\nmovq (%rdi),%rdi\n";
+                if framed(&mut c, concrete) {
+                    receiver = ":\nleaq 16(%rdi),%rdi\n";
+                }
                 if (c.backend != 0) && (c.target == 0) {
-                    push_bytes(&mut thunks, view(":\nmovq (%rdi),%rdi\nleaq "));
+                    push_bytes(&mut thunks, view(receiver));
+                    push_bytes(&mut thunks, view("leaq "));
                     push_bytes(&mut thunks, view(target));
                     push_bytes(&mut thunks, view("(%rip),%r11\njmp *%r11\n"));
                 } else {
-                    push_bytes(&mut thunks, view(":\nmovq (%rdi),%rdi\njmp "));
+                    push_bytes(&mut thunks, view(receiver));
+                    push_bytes(&mut thunks, view("jmp "));
                     push_bytes(&mut thunks, view(target));
                     thunks.push(10);
                 }

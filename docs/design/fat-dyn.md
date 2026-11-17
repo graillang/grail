@@ -17,6 +17,7 @@ VTable        size 8*(1+methods)      { drop: fn(*mut u8) @0, method_0 @8, ... }
 &dyn I        8 bytes, align 8        one pointer to a DynPair
 &mut dyn I    8 bytes, align 8        the same word; mutability is in the type, not the value
 dyn I         (owned) 8 bytes         one pointer to a heap cell { value @0, vtable @8 }
+                                      (a record held as its words: its bytes follow @16, and value = cell+16)
 ```
 
 A borrowed object is therefore a *thin* pointer, exactly like `&T`: same size, same alignment,
