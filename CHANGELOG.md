@@ -1,5 +1,10 @@
 ## Unreleased
 
+- A push onto a vector or a text that has room is a store and a length again, in a release build too:
+  growing moved out of `rt_push` into a cold `rt_push_slow`, so the call a release program makes
+  into the runtime no longer saves five registers on every push. Abundance's slowest program
+  (abgeo) runs 6% fewer instructions; `rt_push` went from 17% to 6-8% of its time.
+
 - **`host::chmod(path, mode)`**: sets a file's permission bits, 0 or a positive errno (fchmodat on
   Linux, chmod on macOS, and 0 on Windows, which has no bits to set). The build store will use it to
   give a restored executable image its mode without a shell, once the bootstrap seed knows it.
