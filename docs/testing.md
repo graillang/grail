@@ -329,10 +329,15 @@ shows the queue and the last landings.
 The build host's half is `tools/land-remote.sh`, run there from its checkout of main
 (`/srv/grail/w`) after each landing. It runs `tools/qemu/build.sh` first, so the emulated legs use
 the patched qemu-aarch64 (see "The aarch64 emulator"; the first build takes several minutes, later
-ones are a no-op), then starts the six aarch64/riscv64 legs detached. Logs are in
-`/srv/grail/logs/STAMP/`, where STAMP also names the landing's local log directory.
+ones are a no-op), then starts the six aarch64/riscv64 legs detached, and beside them the front-end
+fuzzer at 2000 cases (ten times the lint's seed) against the compiler that landed, seeded from the
+landing's stamp so each landing tries new inputs and a front-end hang is found within hours. Logs
+are in `/srv/grail/logs/STAMP/`, where STAMP also names the landing's local log directory; the
+fuzzer's `report.json` and the shrunk input of every bug it finds are kept in `STAMP/fuzz/`, and
+`bun tools/fuzz-frontend.mjs --seed SEED --cases 2000` reproduces a run.
 `tools/land.sh --remote-status` (`just land-status-remote`) prints the newest landing's emulator
-version and each leg's verdict - running, ok with its pass count, or FAIL with the failing cases -
-and exits 0 when all passed, 1 when one failed, 3 while any is running. The host needs the build
+version, each leg's verdict - running, ok with its pass count, or FAIL with the failing cases - and
+the fuzzer's seed and summary, and exits 0 when all passed, 1 when one failed, 3 while any is
+running. The host needs the build
 dependencies `build.sh` names when one is missing (on Ubuntu: `build-essential ninja-build
 pkg-config libglib2.0-dev libpcre2-dev flex bison python3-venv`).
