@@ -1,6 +1,6 @@
 # SIMD types: the decision record
 
-Status: S1 built (branch `gaps16-simd`). S2-S6 approved and staged below. This supersedes the
+Status: S1, S2 and S3a (x86-64 SSE2) built. S3b (AArch64 NEON) and S4-S6 approved and staged below. This supersedes the
 SIMD parts of `simd-layout-parallel-loops.md` where they differ (marked), and the
 pre-design note of the same name from commit ac15c72.
 
@@ -116,16 +116,107 @@ loop.
 Found on the way: `same_type` did not compare an `Atomic<T>`'s element, so an `Atomic<u8>` passed
 for an `Atomic<u64>` (`atomic-element-is-part-of-the-type`).
 
+## As built (S2)
+
+**Types added.** `u8x16` `u8x32` `u32x4` `u32x8` `i64x2` `i64x4`, and the masks `m8x16` `m8x32`.
+- Unsigned lanes compare and order as unsigned: `lt`/`le`/`gt`/`ge`, `min`/`max`.
+- A lane is read zero-extended, as a `u8` or `u32` word is held.
+- `u8` lanes wrap at 8 bits, `sum` included.
+
+**Operations added.**
+- **Shuffles.** `v.shuffle(i0, .., iN-1)` makes lane j v's lane i_j. `v.shuffle2(w, ..)` indexes v
+  followed by w, so indices are below 2N. Indices are literals checked at compile time. In LLVM IR
+  they are one `shufflevector`, which clang turns into `shufps`, `unpcklps` and `movlhps` as the
+  pattern allows. Natively they are lane copies.
+- **Conversions.**
+  - `to_f32()` on i32 lanes gives the nearest f32.
+  - `to_i32()` on f32 lanes truncates toward zero and saturates to the i32 range; a NaN lane is 0.
+    That is LLVM's `fptosi.sat` semantics, written as `fptosi` and three `select`s. The selects are
+    defined for out-of-range lanes because the poison lane is never the chosen operand.
+  - `bits()` reinterprets f32 lanes as u32 and f64 lanes as i64. `T::from_bits` goes back.
+- **`load_aligned`/`store_aligned`** (decision 1 above). One `and`/`cmp`/`je` on the address, and a
+  misaligned address fails with `address A is not N-byte aligned` (`rt_fail` kind 20). Only then is
+  the access an aligned one to LLVM (`copya`, `copyd`: the source, respectively the destination,
+  aligned to the vector's size; the frame side keeps the element's alignment).
+- **Arrays.** Agreed with /root/fixed_arrays: an array keeps its element's alignment. An
+  alignment request on an array field waits for a benchmark that needs one (AVX loads splitting
+  cache lines, S4); until then aligned access stays the user's checked contract.
+
+**Measured** (x86-64; `bun tools/bench-simd.mjs` for time, callgrind for instructions; the machine
+was at load 50-77, where instruction counts are the steadier figure). The twins are
+`bench/simd_{dot,mat4,aos}.c`: SSE2 intrinsics, the same operations in the same order, heap arrays
+and a count clang cannot see. Every build computes the same result.
+
+| benchmark | Grail LLVM / C, instructions | time, fastest of 21 | time, median |
+|---|---|---|---|
+| mat4: 1024 column-major 4x4 products | 74.0 / 71.0 per matrix = 1.04 | 0.71x | 1.10x |
+| aos2soa: 4096 xyzw records to 4 arrays | 7.0 / 6.0 per record = 1.17 | 1.12x | 0.98x |
+| dot (S1): 4096 elements | 2.09 / 1.19 per element = 1.75 (clang unrolls 4x around the same dependency chain) | pinned in S1: 1.046x | 1.054x |
+
+- mat4's inner loop is clang's for the intrinsics: `movups` ×5, `shufps` ×4, `mulps` ×4, `addps` ×3
+  per column.
+- aos2soa's loop is C's instruction for instruction: four loads, `unpcklps`/`unpckhps`/`movlhps`/
+  `movhlps`, four stores. It adds one bound compare and the overflow branch of `j += 16`, three
+  instructions per four records. Both bounds are stated in the loop condition, each in the form its
+  accesses index by (`j + 16 <= src.len()`, `i + 4 <= n`). A bound written through `src.len() / 4`
+  leaves four checks in the loop, because LLVM cannot carry it through the division.
+- The native backend's scalar lanes are 20-37x C, as expected until S3.
+
+**Tested.**
+- `tests/simd/oracle2.grl`: u8x16, u32x4 and i64x2 against the scalar operations on edge values;
+  shuffles against their index tables; `to_i32` against the truncate/saturate/NaN rule and `to_f32`
+  against the scalar conversion; `bits`/`from_bits` round trips. 0 lanes differ on all three targets
+  and both backends, and a broken reference reports 284.
+- Corpus: `simd-s2-surface`, `simd-oracle-s2`, `simd-load-aligned-checks-the-address`, and three
+  rejections.
+
+## As built (S3a: native SSE2 on x86-64)
+
+`machine.grl` `simd_x86_packed` lowers each `simd.` line to packed SSE2 when SSE2 gives exactly the
+result the scalar lanes give, and otherwise falls back to the lanes.
+- **Packed:** lane arithmetic (`addps`/`subps`/`mulps`/`divps`, the `pd` forms, `paddb`/`paddd`/
+  `paddq` and the subtracts), `andps`/`orps`/`xorps` for bitwise ops and masks, compares
+  (`cmpps`/`cmppd`, signed `pcmpgtd`/`pcmpgtb`, `pcmpeq`), select and mask `not`, `splat`
+  (`shufps`/`pshufd`/`movlhps`), the float `sum` as the same halving tree
+  (`movhlps` + `add`, then `shufps $85` + `addss`), copies, `any`/`all` through `movmskps`/
+  `pmovmskb`, and `to_f32` (`cvtdq2ps`).
+- **min/max** on floats keep the scalar rule: `cmpps $1` selects the smaller, then two `cmpps $3`
+  (unordered) masks give a NaN operand's partner. `minps` would return the second operand for a NaN
+  and for ±0 ties, so it is not used. Unsigned bytes use `pminub`/`pmaxub`; i32 uses
+  `pcmpgtd` + blend.
+- **4x32 shuffles** are one `shufps` when each half of the result comes from one operand, and two
+  through a gathered register otherwise. That covers broadcasts, `unpck`-style interleaves and
+  `movlhps`/`movhlps`.
+- **Still scalar lanes** (SSE2 has no exact instruction): i32/i64 multiplies, unsigned and 64-bit
+  integer compares, `to_i32` (saturating), lane reads, 8-lane or 64-bit shuffles.
+
+Every load is a `movups` into a register: a legacy SSE memory operand must be 16-byte aligned, and
+a vector's storage is aligned to its element. The internal assembler encodes the new forms. The 42
+forms in the test file, including high registers and immediates, are byte-identical to clang
+(`tools/asm-oracle.mjs`). The corpus's SIMD cases pass with `GRAIL_ASM_ORACLE=1`.
+
+**Measured** (native, x86-64, fastest of 7 runs against the C twins, at load ~60):
+
+| benchmark | S1/S2 scalar lanes | S3a SSE2 |
+|---|---|---|
+| dot | ~20x C | 8-10x C |
+| mat4 | 37x C | 7.5x C |
+| aos2soa | 25x C | 10-17x C |
+
+The remaining gap is that every native vector op goes through memory: two `movups` loads and one
+store per operation, and the stream's vectors live in frame slots. Keeping vectors in xmm registers
+across ops is S5. The LLVM backend is unchanged.
+
 ## Stages
 
 Each stage lands through the landing service.
 - **S1 (this):** the types above; arithmetic, compare, select, min/max, splat/new, load/store, sum,
   lane, mask any/all/not; LLVM vectors; native scalar lanes; the oracle; the dot benchmark.
-- **S2:** `u8x16` `u8x32` `u32x4` `i64x2` `m8x*`; shuffles and swizzles; conversions and `bits()`;
-  `load_aligned`/`store_aligned`; the mat4 and AoS-to-SoA benchmarks; LLVM parity within 5% on all
-  three.
-- **S3:** native packed SSE2 and NEON for `simd.` lines (the internal assemblers learn their
-  encodings); RV64 stays scalar lanes.
+- **S2 (built):** `u8x16` `u8x32` `u32x4` `i64x2` `m8x*`; shuffles; conversions and `bits()`;
+  `load_aligned`/`store_aligned`; the mat4 and AoS-to-SoA benchmarks. Swizzle sugar (`.xyzw`) is
+  left for when a program wants it; `shuffle` covers it.
+- **S3:** native packed SSE2 (S3a, built) and NEON (S3b) for `simd.` lines (the internal assemblers
+  learn their encodings); RV64 stays scalar lanes.
 - **S4:** `extern "C"` vector ABI; `--cpu` levels and `target.features`; `mul_add`.
 - **S5:** native vector registers and register passing.
 - **S6:** `@target` with `cpu::has` dispatch.

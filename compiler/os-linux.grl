@@ -3,6 +3,23 @@ unsafe module runtime;
 // Linux syscall boundary. The portable runtime calls these operation IDs; `os-windows.grl` is the
 // PE counterpart with the same signatures. Operation IDs are stable runtime identifiers, not the
 // target's syscall ABI.
+// The syscalls the runtime's own machinery needs - writing a report, exiting, parking and waking a
+// thread, yielding, the clock, unmapping - through a dispatcher that offers nothing else. On Linux it is
+// rt_syscall itself. On a platform whose rt_syscall emulates every call (os-windows.grl), the failure
+// path calling the full dispatcher "reached" every arm, sockets included, and every effect claim that
+// can fail went with it (docs/design/effects.md).
+// Create (or truncate) a regular file to write, and close what it returned: the two calls the
+// failure path's profile dump makes. They are not the general dispatcher so that the failure path
+// reaches no directory or socket code through them (see rt_syscall_low).
+fn rt_create_file(path: u64, flags: u64, mode: u64) -> u64 {
+    return rt_syscall(2, path, flags, mode);
+}
+fn rt_close_file(fd: u64) -> u64 {
+    return rt_syscall(3, fd, 0, 0);
+}
+fn rt_syscall_low(n: u64, a: u64, b: u64, c: u64) -> u64 {
+    return rt_syscall(n, a, b, c);
+}
 fn rt_syscall(n: u64, a: u64, b: u64, c: u64) -> u64 {
     if raw_target() == 0 {
         if rt_comptime_on() {
@@ -166,6 +183,9 @@ fn rt_syscall4(n: u64, a: u64, b: u64, c: u64, d: u64) -> u64 {
     }
     if n == 266 {
         return raw_syscall4(36, a, b, c, d); // symlinkat
+    }
+    if n == 268 {
+        return raw_syscall4(53, a, b, c, d); // fchmodat
     }
     if n == 271 {
         return raw_syscall4(73, a, b, c, d); // ppoll
@@ -1032,6 +1052,16 @@ fn rt_rename(from: u64, to: u64) -> u64 {
 // symlinkat(2): `target` is the text the link holds. 0 or a positive errno.
 fn rt_symlink(target: u64, link: u64) -> u64 {
     r := rt_syscall4(266, target, wrapping_sub(0, 100), link, 0);
+    if rt_error(r) {
+        return wrapping_sub(0, r);
+    }
+    return 0;
+}
+
+// fchmodat(2) relative to the working directory: the permission bits of `path`. 0 or a positive
+// errno.
+fn rt_chmod(path: u64, mode: u64) -> u64 {
+    r := rt_syscall4(268, wrapping_sub(0, 100), path, mode, 0);
     if rt_error(r) {
         return wrapping_sub(0, r);
     }
