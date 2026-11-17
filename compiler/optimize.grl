@@ -3804,6 +3804,10 @@ fn inline_calls<a, b>(o: (&a mut ir::Body), split: u64, marks: (&a mut u64[]), l
     mut next = 0;
     mut unit = u8[];
     mut uprefix = u8[];
+    // The inline-site counter of each unit prefix met so far, and which one is current.
+    mut seen = u8[][];
+    mut counts = u64[];
+    mut cur = 0;
     // Only the lines that can matter are visited: the calls and the unit markers, whose offsets
     // were noted when the text was made (lines_of_interest). Everything between is copied.
     for at in lines.len() {
@@ -3860,10 +3864,26 @@ fn inline_calls<a, b>(o: (&a mut ir::Body), split: u64, marks: (&a mut u64[]), l
                         fresh_prefix.push(text[at]);
                         at += 1;
                     }
+                    // Each unit numbers its own inline sites, so its text does not depend on how
+                    // many sites other units expanded; a unit whose text comes in more than one
+                    // part (a single-run build emits a module's specialisations in a later part)
+                    // goes on from where its last part stopped, or two copies would share a label.
+                    mut slot = seen.len();
+                    for x in seen.len() {
+                        if ir::same_range(view(seen[x]), 0, seen[x].len(), view(fresh_prefix)) {
+                            slot = x;
+                        }
+                    }
+                    if cur < seen.len() {
+                        ir::put(&mut counts, cur, site);
+                    }
+                    if slot == seen.len() {
+                        seen.push(fresh_prefix.copy());
+                        counts.push(0);
+                    }
+                    cur = slot;
+                    site = counts[slot];
                     exchange(&mut uprefix, fresh_prefix);
-                    // A unit starts its own inline-site numbers, so one unit's text does not depend
-                    // on how many sites the units before it expanded.
-                    site = 0;
                     o.out.append(text[pend..a]);
                     pend = a;
                     if split != 0 {
