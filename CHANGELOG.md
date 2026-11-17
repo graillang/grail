@@ -1,5 +1,11 @@
 ## Unreleased
 
+- `bench/ecs_par.c` and `bench/rivals/ecs_par.*`: the parallel ECS benchmark's C/OpenMP, Rust/rayon, Go
+  and Zig twins; `bun tools/bench-rivals.mjs --workers 1,4,8 --metric wall` runs a program at each
+  worker count with every runtime told its threads. `bash tools/quiet-window.sh` takes the wall-time
+  measurements (sched-rivals, the parallel benchmark, the kernels) in one command, pinned with
+  taskset, when the machine has been quietened.
+
 - An effect refusal over a callee the run cannot see (compiling a program to assembly without the
   runtime's sources) names it - "the target is `rt_len`, whose body and effect summary this run does
   not have" - instead of calling it an indirect call.
