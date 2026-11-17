@@ -113,6 +113,14 @@ const fixtures = [
       'c_bv_roundtrip40'],
   },
   {
+    // Argument-register exhaustion and an indirect result beside eight integer arguments (AAPCS64
+    // NSRN/NGRN = 8 once a record spills; SysV keeps filling registers; Win64 positional slots):
+    // tests/ffi/edges_shim.c.
+    name: 'abi_edges',
+    stdout: '140349\n204056\n90807055\n90807140\n4321\n8765\n8\n',
+    symbols: ['c_fp_spill', 'c_fp_spill8', 'c_int_spill5', 'c_int_spill7', 'c_ret24_8'],
+  },
+  {
     // Homogeneous float aggregates of doubles by value both ways (AAPCS64 d0-d3 even at 32 bytes;
     // SysV memory; Win64 and RV64 by reference): tests/ffi/hfa_shim.c.
     name: 'hfa_records',

@@ -362,8 +362,12 @@ length := unsafe { c_length(vec) };
   target ABI: SysV x86-64 per-eightbyte INTEGER/SSE classes with a mixed eightbyte counting as
   INTEGER, MEMORY over 16 bytes or when a register class is exhausted; AAPCS64 homogeneous float
   aggregates in `v0`-`v7`, other composites up to 16 bytes in consecutive `x` registers, larger
-  records by reference to a caller copy; RV64 by reference over 2*XLEN and otherwise one register per
-  field for one or two fields with a float, else one integer register per eightbyte. The argument
+  records by reference to a caller copy, and a composite with too few registers left on the stack,
+  closing its register file to every later argument (NSRN or NGRN set to 8 - unlike SysV, where a
+  later scalar still takes a register the record could not use); RV64 by reference over 2*XLEN and
+  otherwise one register per field for one or two fields with a float when enough of each kind are
+  left, else one integer register per eightbyte, a two-word record with only `a7` left split between
+  `a7` and the stack. The argument
   counters of the call are advanced by the plan, so a `byval` record keeps its place among the
   arguments around it, and a call through a `cfn` that declares the marker uses the same lowering.
 - The record is borrowed, not moved: it is still usable after the call, like a C-layout record passed
@@ -391,6 +395,11 @@ length := unsafe { c_length(vec) };
   registers, and Win64 and RV64 pass it by reference. The 40-byte shape exhausts both integer
   register files before the callee sees it, so SysV uses MEMORY and AAPCS64, RV64 and Win64 pass a
   pointer to a caller copy.
+- `tests/ffi/abi_edges.grl` (`tests/ffi/edges_shim.c`) covers where the ABIs part ways once
+  registers run out: a two-double HFA after seven doubles followed by a double, a float pair after
+  eight doubles, a 16-byte integer record after five and after seven integers followed by an integer,
+  and a 24-byte result beside eight integer arguments (`x8` on AAPCS64, the first argument register on
+  SysV and Win64). It runs on all three ELF targets and under Wine.
 - The same fixture covers the other direction and the copy semantics: records of 4, 12, 16, 24 and
   40 bytes **returned by value** (Win64 returns only a 1/2/4/8-byte record in `rax` and any other
   size through a hidden result pointer in `rcx`; SysV uses `rax:rdx` up to 16 bytes and MEMORY above
