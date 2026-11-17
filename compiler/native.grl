@@ -28806,15 +28806,6 @@ fn text_count<a, b>(c: (&a C), from: u64, pat: &b [u8]) -> u64 {
     }
     return n;
 }
-// Whether the body being emitted is the runtime's rt_sites_fill, whose one raw call reaches the
-// compiler-emitted rt_sites helper.
-fn raw_call_is_sites_helper<a>(c: (&a mut C)) -> bool {
-    if (c.raw == 0) || (c.fx_cur == 0) || (c.fx_cur > c.fx_syms.len()) {
-        return false;
-    }
-    sym := c.fx_syms[c.fx_cur - 1].copy();
-    return same(view(sym), view("rt_sites_fill")) || same(view(sym), view("_rt_sites_fill"));
-}
 // A call through the import table to a named operating-system function. In the runtime (trusted code)
 // it is what a `syscall` instruction is on Linux: the OS does the work, so it neither allocates on the
 // Grail heap (whose roots are `rt_alloc` and `rt_grow`) nor reaches a Grail failure entry, and it
@@ -37588,9 +37579,8 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
     if id == 143 {
         // raw_sites(out, capacity): the site-table helper this compiler emits beside the tables
         // (site_table), called by name - a leaf, so the effect walk follows a named edge. A build
-        // with no table has no helper and answers 0 words. The runtime moves to it from its
-        // raw_call2 through state word 3400 at the next reseed (a new intrinsic lands one reseed
-        // before its first use in the runtime: docs/testing.md).
+        // with no table has no helper and answers 0 words (rt_sites_fill asks only when the entry
+        // stub published a table).
         if site_table_on(&c) {
             get(&mut c, args[0], view("%rdi"));
             get(&mut c, args[1], view("%rsi"));
@@ -37603,18 +37593,7 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
         get(&mut c, args[1], view("%rdi"));
         get(&mut c, args[2], view("%rsi"));
         get(&mut c, args[0], view("%rax"));
-        if raw_call_is_sites_helper(&mut c) {
-            // The runtime's call to the site-table helper: the target is the address the entry stub
-            // published in state word 3400, and only the entry stub writes that word, always with
-            // `rt_sites` - a leaf this compiler emits beside the tables (site_table). So the call is
-            // named, not unknown. The runtime cannot spell it as a direct call: it is compiled by the
-            // bootstrap seed too, which knows no such form.
-            fx_edge(&mut c, view("rt_sites"), 0);
-            fx_called(&mut c);
-            o(&mut c, view("call *%rax\n"));
-        } else {
-            call_slot_out(&mut c, view("call *%rax\n"), view("a call through a value the compiler did not name"));
-        }
+        call_slot_out(&mut c, view("call *%rax\n"), view("a call through a value the compiler did not name"));
     }
     if id == 112 {
         get(&mut c, args[0], view("%rdi"));
@@ -44044,9 +44023,17 @@ fn simd_method<a, b>(c: (&a mut C), value: Val, name: &b [u8]) -> Val {
         if simd_bits(&mut c, ty) == 64 {
             rty = simd_with_elem(&mut c, ty, int_type(&mut c, 64, 1));
         }
-        dst := frame_alloc(&mut c, simd_words(&mut c, ty));
-        simd_copy_op(&mut c, view("copy"), dst, value.t, ty);
-        return val(dst, rty);
+        // A NaN lane reads as the one quiet NaN (0x7FC00000, 0x7FF8000000000000), as scalar
+        // bits() does: hardware differs in the NaN an operation makes. A lane equals itself unless
+        // it is a NaN, so the lanes that fail the compare take a splat of the canonical NaN.
+        mty := simd_mask_of(&mut c, ty);
+        same_lane := simd_emit(&mut c, view("eq"), ty, mty, value.t, value.t, SIMD_NONE, SIMD_NONE, 0, false);
+        nan_word := imm(&mut c, 9221120237041090560);
+        get(&mut c, nan_word, view("%rax"));
+        nan_scalar := save(&mut c);
+        nans := simd_emit(&mut c, view("splat"), ty, ty, SIMD_NONE, SIMD_NONE, SIMD_NONE, nan_scalar, 0, false);
+        canonical := simd_emit(&mut c, view("select"), ty, ty, same_lane, value.t, nans, SIMD_NONE, 0, false);
+        return val(canonical, rty);
     }
     if same(view(name), view("mul_add")) && float {
         // `a.mul_add(b, c)`: a * b + c in each lane with one rounding (docs/design/simd.md, S4).
@@ -47784,6 +47771,10 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
                 }
                 ty := int_type_named(&mut c, named);
                 if raw_bits != 0 {
+                    if is_float(&mut c, source) {
+                        // Every NaN reads as the one canonical pattern, whatever the target made.
+                        return val(invoke(&mut c, view("rt_float_bits"), one(value.t)), 0);
+                    }
                     return val(value.t, 0);
                 }
                 // A constant the target cannot hold is refused here rather than at run time: the
