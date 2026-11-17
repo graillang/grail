@@ -23,6 +23,14 @@
   2048x2048 image: Grail-LLVM 25.8G -> 6.9G instructions, Grail-native 128G -> 38.6G. A case pins
   division, remainder and multiplication at the edges of every width (checked and wrapping), and
   `MIN / -1`, `MIN * -1`, division and remainder by zero and products one past the maximum abort.
+- **The linux-x86_64 release package ships the release-built compiler.** `tools/ci.mjs` builds the
+  compiler with the native backend as before (the bootstrap and fixed point) and then the release
+  compiler from it (`tools/native.mjs release`: LLVM backend and clang -O2, accepted on identical
+  text, objects and a corpus slice), and packages the release one - several times faster at
+  compiling (`check` of a 104 000-line program: 11.2 G against 25.8 G instructions).
+  `GRAIL_SHIP_NATIVE=1` ships the native build. `tools/compile-perf.mjs` measures
+  `GRAIL_RELEASE_COMPILER` beside the dev compiler when it is set.
+
 - Fixed: the per-loop stability fact and the LLVM backend's indirect-call fact both used fact kind
   7, so a stable vector whose slot number matched an indirect call's ordinal (with a loop head
   label of 6 or less) could make the lifter pass that call too few arguments. The stability fact
