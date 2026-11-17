@@ -1,5 +1,6 @@
 ## Unreleased
 
+- Landing on main goes through a service (`tools/landsvc/landd.py`, client `tools/land.sh`): it merges each queued branch onto current main itself, gates up to four together, retries a red train one branch at a time, and cannot be stopped by killing the process that queued a branch.
 - `tools/pkg-test.mjs` passes again and runs in the gate and the landing queue. Its offline-build
   check called `grail run --offline`, a flag only `add`, `update` and `fetch` have (a build never
   networks); the stricter option parser refuses it, and nothing ran the suite to notice. Running
