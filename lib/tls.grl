@@ -1,0 +1,964 @@
+module tls;
+use host;
+use net;
+
+// TLS over the operating system's own implementation: OpenSSL (LibreSSL included) on Linux. A macOS
+// or Windows build is refused with a message until those layers are run (SecureTransport, SChannel).
+// Design: docs/design/tls.md.
+//
+// ```grl
+// mut cfg = tls::config();
+// cfg.add_alpn("h2,http/1.1");
+// client := tls::client(&cfg)!;
+// mut s := client.connect("93.184.216.34", 443, "example.com")!;
+// s.write_all(view("GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n"))!;
+// body := s.read_all()?;
+// s.close();
+// ```
+//
+// The binding is the first half of this module and every `unsafe` block is in it: a caller sees
+// `TlsConfig`, `TlsClient`, `TlsStream` and `Error`, and no foreign value leaves the module. The
+// second half is the pump that turns `WANT_READ`/`WANT_WRITE` into the runtime's readiness wait, so a
+// TLS stream suspends its task exactly like `net::TcpStream` and never holds a scheduler thread
+// inside a foreign call.
+//
+// Peer verification is not optional: a client refuses to exist while its trust store is empty
+// (`Error::NoTrustStore`) rather than verifying nothing, and the name or address a caller passes is
+// always checked against the certificate.
+//
+// The three bindings sit behind `@if target.os` static branches: a module is compiled for every
+// target its program is built for, and only a static branch can name one platform's library. The
+// untaken branch is parsed but never type-checked nor emitted, so it asks the linker for nothing.
+// (That is also why the binding is here and not in `compiler/os-linux.grl`: that file is compiled
+// into every Linux program, and an `extern` declaration requests its link input when it is
+// declared, so a binding there would put `-lssl -lcrypto` on every Grail build.)
+
+// The minimum protocol version a client accepts. `VERSION_DEFAULT` leaves the choice to the library.
+pub const VERSION_DEFAULT: u64 = 0;
+pub const VERSION_TLS12: u64 = 1;
+pub const VERSION_TLS13: u64 = 2;
+
+// Why a TLS operation did not complete. The classes are distinct because callers act on them
+// differently: `Verify` is a security result and is never retried, `Io` is the transport,
+// `Closed` is the end of the conversation, and `NoTrustStore` is a refusal to start one.
+pub enum Error {
+    // The peer's chain or name did not verify; the payload is the library's result code.
+    Verify(u64),
+    // The peer is not TLS we can continue with; the payload is the library's code (0 when only the
+    // transport was at fault).
+    Protocol(u64),
+    // The transport failed; the payload is the library's error-queue code (0 when unknown).
+    Io(u64),
+    // No trust anchors are configured and the system store is empty: connecting would verify
+    // nothing, so it is refused here.
+    NoTrustStore,
+    // The stream was already closed, or the peer's connection ended without a close_notify.
+    Closed
+}
+
+impl Error {
+    pub fn show<a>(self: (&a Error)) -> string {
+        match self {
+            Verify(code) => { return format("tls: verification failed ({})", code); },
+            Protocol(code) => { return format("tls: protocol error ({})", code); },
+            Io(code) => { return format("tls: io error ({})", code); },
+            NoTrustStore => { return "tls: no trust store: no CA configured and the system store is empty".text(); },
+            Closed => { return "tls: connection closed".text(); }
+        }
+    }
+    // A verification failure is the one class a caller must not retry or ignore.
+    pub fn is_verify<a>(self: (&a Error)) -> bool {
+        match self {
+            Verify(code) => { return true; },
+            _ => { return false; }
+        }
+    }
+    // The context refused to exist because it had no trust anchors to verify with.
+    pub fn is_no_trust_store<a>(self: (&a Error)) -> bool {
+        match self {
+            NoTrustStore => { return true; },
+            _ => { return false; }
+        }
+    }
+    pub fn is_closed<a>(self: (&a Error)) -> bool {
+        match self {
+            Closed => { return true; },
+            _ => { return false; }
+        }
+    }
+}
+
+// One client policy: trust anchors, the ALPN list, the version floor and an optional client
+// certificate. `TlsClient` copies what it needs out of it.
+pub struct TlsConfig {
+    ca_file: string,
+    ca_dir: string,
+    alpn: u8[][],
+    min_version: u64,
+    client_cert: string,
+    client_key: string
+}
+
+// The default policy: the system trust store, no ALPN, the library's default versions, no client
+// certificate. Verification is always on; there is no switch for it.
+pub fn config() -> TlsConfig {
+    return TlsConfig {
+        ca_file: "".text(),
+        ca_dir: "".text(),
+        alpn: u8[][],
+        min_version: VERSION_DEFAULT,
+        client_cert: "".text(),
+        client_key: "".text()
+    };
+}
+
+impl TlsConfig {
+    // Trust this PEM bundle instead of the system store. This is how a private CA is trusted, and
+    // what the local-server acceptance test uses to accept a server it rejected a moment earlier.
+    pub fn set_ca_file(self: (&mut TlsConfig), path: string) {
+        self.ca_file = path;
+        return ();
+    }
+    // Trust every certificate in this directory (a `c_rehash` store) instead of the system store.
+    pub fn set_ca_dir(self: (&mut TlsConfig), path: string) {
+        self.ca_dir = path;
+        return ();
+    }
+    // Advertise `protocols` in ALPN, as a comma-separated list ("h2,http/1.1").
+    pub fn add_alpn(self: (&mut TlsConfig), protocols: string) {
+        for protocol in split_commas(view(protocols)) {
+            self.alpn.push(protocol);
+        }
+        return ();
+    }
+    // Refuse anything below `version` (`VERSION_TLS12`, `VERSION_TLS13`).
+    pub fn set_min_version(self: (&mut TlsConfig), version: u64) {
+        self.min_version = version;
+        return ();
+    }
+    // Present a client certificate: a PEM chain and its unencrypted PEM private key.
+    pub fn set_client_cert(self: (&mut TlsConfig), cert_file: string, key_file: string) {
+        self.client_cert = cert_file;
+        self.client_key = key_file;
+        return ();
+    }
+    pub fn alpn_count<a>(self: (&a TlsConfig)) -> u64 {
+        return self.alpn.len();
+    }
+}
+
+// The maximum size of one `read` buffer, so a caller cannot ask the record layer for more than it
+// can copy through the runtime's read path.
+pub const MAX_RECORD_CHUNK: u64 = 16384;
+
+// ---------------------------------------------------------------------------------------------
+// Shared helpers.
+
+// A NUL-terminated copy of `text`, for the C calls that take a `const char *`.
+fn cstring<a>(text: (&a [u8])) -> u8[] {
+    mut out = u8[];
+    for b in text {
+        out.push(b);
+    }
+    out.push(0);
+    return out;
+}
+
+// Exactly four dot-separated decimal parts, each 0-255 (the addresses the runtime connects to).
+fn is_ipv4<a>(text: (&a [u8])) -> bool {
+    mut parts = 0;
+    mut digits = 0;
+    mut value = 0;
+    for b in text {
+        if b == 46 {
+            if digits == 0 || parts == 3 {
+                return false;
+            }
+            parts += 1;
+            digits = 0;
+            value = 0;
+        } else {
+            if b < 48 {
+                return false;
+            }
+            if b > 57 || digits == 3 {
+                return false;
+            }
+            value = value * 10 + u64(b) - 48;
+            if value > 255 {
+                return false;
+            }
+            digits += 1;
+        }
+    }
+    return parts == 3 && digits > 0;
+}
+
+// "a,b,,c" as the list ["a", "b", "c"]: empty entries are dropped, surrounding spaces are not
+// part of a protocol name and are removed.
+fn split_commas<a>(text: (&a [u8])) -> u8[][] {
+    mut out = u8[][];
+    mut current = u8[];
+    for b in text {
+        if b == 44 {
+            if current.len() != 0 {
+                out.push(current.copy());
+            }
+            current = u8[];
+        } else {
+            if b != 32 {
+                current.push(b);
+            }
+        }
+    }
+    if current.len() != 0 {
+        out.push(current.copy());
+    }
+    return out;
+}
+
+// Four words of per-connection state whose meaning belongs to the target's binding: OpenSSL keeps
+// its `SSL` and the two memory BIOs there, SecureTransport its context, SChannel its credential and
+// its security context. Nothing outside the platform branches reads them.
+struct PlatformState {
+    p0: u64,
+    p1: u64,
+    p2: u64,
+    p3: u64
+}
+
+@if target.os == .linux {
+    // -----------------------------------------------------------------------------------------
+    // OpenSSL / LibreSSL.
+    //
+    // One word per pointer, because a `handle` cannot be compared with the null a failed
+    // allocation returns, and a client that cannot tell whether `SSL_CTX_new` failed cannot tell a
+    // refusal from a crash. The words never leave this branch.
+    //
+    // `ssl.h` spells four of these as macros, so the function behind the macro is declared:
+    // `SSL_set_tlsext_host_name` and `SSL_set_min_proto_version` are ctrls,
+    // `SSL_CTX_set_max_proto_version` is not used, and `SSL_get_peer_certificate` is
+    // `SSL_get1_peer_certificate` in 1.1 and later.
+
+    extern "C" lib "ssl" fn TLS_client_method() -> u64;
+    extern "C" lib "ssl" fn SSL_CTX_new(method: u64) -> u64;
+    extern "C" lib "ssl" fn SSL_CTX_free(ctx: u64) -> unit;
+    extern "C" lib "ssl" fn SSL_CTX_ctrl(ctx: u64, command: i32, larg: i64, parg: CPtr) -> i64;
+    extern "C" lib "ssl" fn SSL_CTX_set_verify(ctx: u64, mode: i32, callback: u64) -> unit;
+    extern "C" lib "ssl" fn SSL_CTX_set_default_verify_paths(ctx: u64) -> i32;
+    extern "C" lib "ssl" as "SSL_CTX_load_verify_locations" fn load_verify_file(ctx: u64, file: CStr, dir: CPtr) -> i32;
+    extern "C" lib "ssl" as "SSL_CTX_load_verify_locations" fn load_verify_dir(ctx: u64, file: CPtr, dir: CStr) -> i32;
+    extern "C" lib "ssl" fn SSL_CTX_get_cert_store(ctx: u64) -> u64;
+    extern "C" lib "crypto" fn X509_STORE_get0_objects(store: u64) -> u64;
+    extern "C" lib "crypto" fn OPENSSL_sk_num(stack: u64) -> i32;
+    extern "C" lib "ssl" fn SSL_CTX_set_alpn_protos(ctx: u64, protocols: &[u8]) -> i32;
+    extern "C" lib "ssl" fn SSL_CTX_use_certificate_chain_file(ctx: u64, file: CStr) -> i32;
+    extern "C" lib "ssl" fn SSL_CTX_use_PrivateKey_file(ctx: u64, file: CStr, kind: i32) -> i32;
+    extern "C" lib "ssl" fn SSL_CTX_check_private_key(ctx: u64) -> i32;
+    extern "C" lib "ssl" fn SSL_new(ctx: u64) -> u64;
+    extern "C" lib "ssl" fn SSL_free(ssl: u64) -> unit;
+    extern "C" lib "ssl" fn SSL_set_bio(ssl: u64, rbio: u64, wbio: u64) -> unit;
+    extern "C" lib "ssl" fn SSL_get_rbio(ssl: u64) -> u64;
+    extern "C" lib "ssl" fn SSL_get_wbio(ssl: u64) -> u64;
+    extern "C" lib "ssl" fn SSL_connect(ssl: u64) -> i32;
+    extern "C" lib "ssl" fn SSL_read(ssl: u64, buffer: &mut [u8]) -> i32;
+    extern "C" lib "ssl" fn SSL_write(ssl: u64, data: &[u8]) -> i32;
+    extern "C" lib "ssl" fn SSL_get_error(ssl: u64, ret: i32) -> i32;
+    extern "C" lib "ssl" fn SSL_shutdown(ssl: u64) -> i32;
+    extern "C" lib "ssl" fn SSL_ctrl(ssl: u64, command: i32, larg: i64, parg: CPtr) -> i64;
+    extern "C" lib "ssl" fn SSL_set1_host(ssl: u64, name: CStr) -> i32;
+    extern "C" lib "ssl" fn SSL_get0_param(ssl: u64) -> u64;
+    extern "C" lib "crypto" fn X509_VERIFY_PARAM_set1_ip_asc(param: u64, ip: CStr) -> i32;
+    extern "C" lib "ssl" fn SSL_get_verify_result(ssl: u64) -> i64;
+    extern "C" lib "ssl" fn SSL_get_version(ssl: u64) -> CStr;
+    extern "C" lib "ssl" fn SSL_get0_alpn_selected(ssl: u64, data: &mut CPtr, length: &mut Length32) -> unit;
+    extern "C" lib "crypto" fn BIO_s_mem() -> u64;
+    extern "C" lib "crypto" fn BIO_new(kind: u64) -> u64;
+    extern "C" lib "crypto" fn BIO_free(bio: u64) -> i32;
+    extern "C" lib "crypto" fn BIO_read(bio: u64, data: &mut [u8]) -> i32;
+    extern "C" lib "crypto" fn BIO_write(bio: u64, data: &[u8]) -> i32;
+    extern "C" lib "crypto" fn BIO_ctrl(bio: u64, command: i32, larg: i64, parg: CPtr) -> i64;
+    extern "C" lib "crypto" fn ERR_get_error() -> u64;
+    extern "C" lib "ssl" fn SSL_get1_peer_certificate(ssl: u64) -> u64;
+    extern "C" lib "crypto" fn X509_free(cert: u64) -> unit;
+    extern "C" lib "crypto" fn X509_get_subject_name(cert: u64) -> u64;
+    extern "C" lib "crypto" fn X509_NAME_oneline(name: u64, buffer: &mut [u8], size: i32) -> u64;
+    extern "C" lib "crypto" as "OPENSSL_sk_num" fn stack_length(stack: u64) -> i32;
+
+    // The C `unsigned int *` out-parameter of `SSL_get0_alpn_selected`.
+    extern "C" record Length32 { value: u32 }
+
+    // `ssl.h` values, spelled here because the C spellings are macro expansions.
+    const SSL_VERIFY_PEER: i32 = 1;
+    const SSL_ERROR_SSL: i32 = 1;
+    const SSL_ERROR_WANT_READ: i32 = 2;
+    const SSL_ERROR_WANT_WRITE: i32 = 3;
+    const SSL_ERROR_SYSCALL: i32 = 5;
+    const SSL_ERROR_ZERO_RETURN: i32 = 6;
+    const SSL_CTRL_SET_MIN_PROTO_VERSION: i32 = 123;
+    const SSL_CTRL_SET_TLSEXT_HOSTNAME: i32 = 55;
+    const TLSEXT_NAMETYPE_HOST_NAME: i64 = 0;
+    const BIO_CTRL_PENDING: i32 = 10;
+    const SSL_FILETYPE_PEM: i32 = 1;
+    const TLS1_2_VERSION: i64 = 771;
+    const TLS1_3_VERSION: i64 = 772;
+
+    // -----------------------------------------------------------------------------------------
+    // Context: the trust store, the ALPN list, the version floor, an optional client certificate.
+
+    fn context_new(cfg: (&TlsConfig)) -> u64 |? Error {
+        mut ctx: u64 = 0;
+        unsafe {
+            ctx = SSL_CTX_new(TLS_client_method());
+        }
+        if ctx == 0 {
+            return Error::Protocol(0);
+        }
+        unsafe {
+            SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, 0);
+        }
+        mut minimum: i64 = 0;
+        if cfg.min_version == VERSION_TLS12 {
+            minimum = TLS1_2_VERSION;
+        }
+        if cfg.min_version == VERSION_TLS13 {
+            minimum = TLS1_3_VERSION;
+        }
+        if minimum != 0 {
+            unsafe {
+                SSL_CTX_ctrl(ctx, SSL_CTRL_SET_MIN_PROTO_VERSION, minimum, cnull());
+            }
+        }
+        // ALPN's wire form is one length-prefixed byte string per protocol.
+        if cfg.alpn.len() != 0 {
+            mut wire = u8[];
+            for protocol in &cfg.alpn {
+                if protocol.len() > 255 {
+                    context_free(ctx);
+                    return Error::Protocol(0);
+                }
+                wire.push(u8(protocol.len()));
+                for b in view(protocol) {
+                    wire.push(b);
+                }
+            }
+            mut ok: i32 = 0;
+            unsafe {
+                ok = SSL_CTX_set_alpn_protos(ctx, view(wire));
+            }
+            if ok != 0 {
+                context_free(ctx);
+                return Error::Protocol(0);
+            }
+        }
+        // A client certificate and key, when the policy names one.
+        if cfg.client_cert.len() != 0 {
+            cert := cstring(view(cfg.client_cert));
+            key := cstring(view(cfg.client_key));
+            mut loaded: i32 = 0;
+            mut checked: i32 = 0;
+            unsafe {
+                loaded = SSL_CTX_use_certificate_chain_file(ctx, cstr(view(cert)));
+            }
+            if loaded == 1 {
+                unsafe {
+                    loaded = SSL_CTX_use_PrivateKey_file(ctx, cstr(view(key)), SSL_FILETYPE_PEM);
+                }
+            }
+            if loaded == 1 {
+                unsafe {
+                    checked = SSL_CTX_check_private_key(ctx);
+                }
+            }
+            if loaded != 1 {
+                context_free(ctx);
+                return Error::Protocol(0);
+            }
+            if checked != 1 {
+                context_free(ctx);
+                return Error::Protocol(0);
+            }
+        }
+        // Trust anchors: an explicit CA, or the system store. An empty store is a refusal.
+        mut loaded_ok: i32 = 0;
+        if cfg.ca_file.len() != 0 {
+            file := cstring(view(cfg.ca_file));
+            unsafe {
+                loaded_ok = load_verify_file(ctx, cstr(view(file)), cnull());
+            }
+        } else {
+            if cfg.ca_dir.len() != 0 {
+                dir := cstring(view(cfg.ca_dir));
+                unsafe {
+                    loaded_ok = load_verify_dir(ctx, cnull(), cstr(view(dir)));
+                }
+            } else {
+                unsafe {
+                    loaded_ok = SSL_CTX_set_default_verify_paths(ctx);
+                }
+            }
+        }
+        if loaded_ok != 1 {
+            context_free(ctx);
+            return Error::NoTrustStore;
+        }
+        if context_store_count(ctx) == 0 {
+            context_free(ctx);
+            return Error::NoTrustStore;
+        }
+        return ctx;
+    }
+
+    fn context_free(ctx: u64) -> unit {
+        unsafe {
+            SSL_CTX_free(ctx);
+        }
+        return ();
+    }
+
+    // How many certificates the context's store holds: the emptiness test behind `NoTrustStore`.
+    fn context_store_count(ctx: u64) -> i64 {
+        mut store: u64 = 0;
+        unsafe {
+            store = SSL_CTX_get_cert_store(ctx);
+        }
+        if store == 0 {
+            return 0;
+        }
+        mut objects: u64 = 0;
+        unsafe {
+            objects = X509_STORE_get0_objects(store);
+        }
+        if objects == 0 {
+            return 0;
+        }
+        mut count: i32 = 0;
+        unsafe {
+            count = stack_length(objects);
+        }
+        return i64(count);
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Session: one connection's TLS state, with memory BIOs so the C library never touches the
+    // socket.
+
+    // Frees a half-built session: the SSL owns both BIOs once SSL_set_bio has run.
+    fn session_abandon(ssl: u64) -> unit {
+        unsafe {
+            SSL_free(ssl);
+        }
+        return ();
+    }
+
+    fn session_new(ctx: u64, server_name: (&[u8]), fd: u64) -> PlatformState |? Error {
+        mut ssl: u64 = 0;
+        unsafe {
+            ssl = SSL_new(ctx);
+        }
+        if ssl == 0 {
+            return Error::Protocol(0);
+        }
+        mut rbio: u64 = 0;
+        unsafe {
+            rbio = BIO_new(BIO_s_mem());
+        }
+        if rbio == 0 {
+            session_abandon(ssl);
+            return Error::Protocol(0);
+        }
+        mut wbio: u64 = 0;
+        unsafe {
+            wbio = BIO_new(BIO_s_mem());
+        }
+        if wbio == 0 {
+            unsafe {
+                BIO_free(rbio);
+            }
+            session_abandon(ssl);
+            return Error::Protocol(0);
+        }
+        // `SSL_set_bio` takes ownership of both BIOs, so `SSL_free` releases them.
+        unsafe {
+            SSL_set_bio(ssl, rbio, wbio);
+        }
+        // Identity: a DNS name is compared against the certificate's names and sent as SNI; an
+        // address is compared against its IP entries (and never sent as SNI, which RFC 6066
+        // forbids for literals).
+        if is_ipv4(server_name) {
+            ip := cstring(server_name);
+            mut ok: i32 = 0;
+            unsafe {
+                ok = X509_VERIFY_PARAM_set1_ip_asc(SSL_get0_param(ssl), cstr(view(ip)));
+            }
+            if ok != 1 {
+                session_abandon(ssl);
+                return Error::Verify(0);
+            }
+        } else {
+            name := cstring(server_name);
+            mut host_ok: i32 = 0;
+            unsafe {
+                host_ok = SSL_set1_host(ssl, cstr(view(name)));
+            }
+            if host_ok != 1 {
+                session_abandon(ssl);
+                return Error::Verify(0);
+            }
+            mut sni_ok: i64 = 0;
+            unsafe {
+                sni_ok = SSL_ctrl(ssl, SSL_CTRL_SET_TLSEXT_HOSTNAME, TLSEXT_NAMETYPE_HOST_NAME, cptr(view(name)));
+            }
+            if sni_ok == 0 {
+                session_abandon(ssl);
+                return Error::Protocol(0);
+            }
+        }
+        return PlatformState { p0: ssl, p1: rbio, p2: wbio, p3: 0 };
+    }
+
+    fn session_free<a>(state: (&a PlatformState)) -> unit {
+        unsafe {
+            SSL_free(state.p0);
+        }
+        return ();
+    }
+
+    fn handshake<a>(state: (&a PlatformState), fd: u64) -> unit |? Error {
+        ssl := state.p0;
+        rbio := state.p1;
+        wbio := state.p2;
+        loop {
+            mut ret: i32 = 0;
+            unsafe {
+                ret = SSL_connect(ssl);
+            }
+            outcome := step(state, fd, ret)?;
+            if outcome == 1 {
+                return ();
+            }
+        }
+    }
+
+    // One step of the state machine: flush what the library produced, and when it wants more
+    // input, wait for the socket (the runtime suspends the task there). Returns 0 when the caller
+    // should go again and 1 when the operation completed.
+    fn step<a>(state: (&a PlatformState), fd: u64, ret: i32) -> u64 |? Error {
+        ssl := state.p0;
+        rbio := state.p1;
+        wbio := state.p2;
+        flush(wbio, fd)?;
+        if ret > 0 {
+            return 1;
+        }
+        mut code: i32 = 0;
+        unsafe {
+            code = SSL_get_error(ssl, ret);
+        }
+        if code == SSL_ERROR_WANT_READ {
+            fill(rbio, fd)?;
+            return 0;
+        }
+        if code == SSL_ERROR_WANT_WRITE {
+            fill(rbio, fd)?;
+            return 0;
+        }
+        return fail(ssl, code);
+    }
+
+    // A failed TLS call, classified. The verification result decides: it is X509_V_OK for a
+    // protocol failure and non-zero for a rejected chain or name.
+    fn fail(ssl: u64, code: i32) -> Error {
+        if code == SSL_ERROR_ZERO_RETURN {
+            return Error::Closed;
+        }
+        mut verify: i64 = 0;
+        unsafe {
+            verify = SSL_get_verify_result(ssl);
+        }
+        if verify != 0 {
+            return Error::Verify(u64(verify));
+        }
+        mut queued: u64 = 0;
+        unsafe {
+            queued = ERR_get_error();
+        }
+        if queued != 0 {
+            return Error::Protocol(queued);
+        }
+        if code == SSL_ERROR_SYSCALL {
+            return Error::Closed;
+        }
+        return Error::Protocol(u64(code));
+    }
+
+    fn read_some<a>(state: (&a PlatformState), fd: u64, buffer: (&mut u8[])) -> u64 |? Error {
+        ssl := state.p0;
+        loop {
+            mut ret: i32 = 0;
+            unsafe {
+                ret = SSL_read(ssl, buffer);
+            }
+            outcome := step(state, fd, ret)?;
+            if outcome == 1 {
+                return u64(ret);
+            }
+        }
+    }
+
+    fn write_some<a>(state: (&a PlatformState), fd: u64, data: (&[u8])) -> u64 |? Error {
+        ssl := state.p0;
+        loop {
+            mut ret: i32 = 0;
+            unsafe {
+                ret = SSL_write(ssl, data);
+            }
+            outcome := step(state, fd, ret)?;
+            if outcome == 1 {
+                return u64(ret);
+            }
+        }
+    }
+
+    fn close_notify<a>(state: (&a PlatformState), fd: u64) -> unit |? Error {
+        ssl := state.p0;
+        wbio := state.p2;
+        mut ret: i32 = 0;
+        unsafe {
+            ret = SSL_shutdown(ssl);
+        }
+        flush(wbio, fd)?;
+        if ret < 0 {
+            mut code: i32 = 0;
+            unsafe {
+                code = SSL_get_error(ssl, ret);
+            }
+            if code == SSL_ERROR_WANT_READ {
+                return ();
+            }
+            if code == SSL_ERROR_WANT_WRITE {
+                return ();
+            }
+            return fail(ssl, code);
+        }
+        return ();
+    }
+
+    // Push everything the output BIO holds onto the socket.
+    fn flush(wbio: u64, fd: u64) -> unit |? Error {
+        loop {
+            mut pending: i64 = 0;
+            unsafe {
+                pending = BIO_ctrl(wbio, BIO_CTRL_PENDING, 0, cnull());
+            }
+            if pending <= 0 {
+                return ();
+            }
+            mut buf = u8[0; 4096];
+            mut got: i32 = 0;
+            unsafe {
+                got = BIO_read(wbio, &mut buf);
+            }
+            if got <= 0 {
+                return ();
+            }
+            chunk := head(&buf, u64(got));
+            written := host::write_fd(fd, view(chunk));
+            if written != chunk.len() {
+                return Error::Closed;
+            }
+        }
+    }
+
+    // Read from the socket into the input BIO, waiting (suspending this task) while the peer is not
+    // ready.
+    fn fill(rbio: u64, fd: u64) -> unit |? Error {
+        chunk := host::read_fd(fd, 16384);
+        if chunk.len() == 0 {
+            return Error::Closed;
+        }
+        mut wrote: i32 = 0;
+        unsafe {
+            wrote = BIO_write(rbio, view(chunk));
+        }
+        if wrote <= 0 {
+            return Error::Protocol(0);
+        }
+        return ();
+    }
+
+    fn version_text<a>(state: (&a PlatformState)) -> u8[] {
+        ssl := state.p0;
+        mut text = u8[];
+        unsafe {
+            text = cstr_bytes(SSL_get_version(ssl));
+        }
+        return text;
+    }
+
+    fn alpn_text<a>(state: (&a PlatformState)) -> u8[] {
+        ssl := state.p0;
+        mut pointer: CPtr = cnull();
+        mut length_value = Length32 { value: 0 };
+        unsafe {
+            SSL_get0_alpn_selected(ssl, &mut pointer, &mut length_value);
+        }
+        length := u64(length_value.value);
+        if length == 0 {
+            return u8[];
+        }
+        mut out = u8[];
+        unsafe {
+            out = cslice(u8, pointer, length);
+        }
+        return out;
+    }
+
+    fn peer_subject_text<a>(state: (&a PlatformState)) -> u8[] {
+        ssl := state.p0;
+        mut cert: u64 = 0;
+        unsafe {
+            cert = SSL_get1_peer_certificate(ssl);
+        }
+        if cert == 0 {
+            return u8[];
+        }
+        mut name: u64 = 0;
+        unsafe {
+            name = X509_get_subject_name(cert);
+        }
+        mut line = u8[0; 512];
+        if name != 0 {
+            unsafe {
+                X509_NAME_oneline(name, &mut line, 512);
+            }
+        }
+        mut out = u8[];
+        for b in line {
+            if b == 0 {
+                break;
+            }
+            out.push(b);
+        }
+        unsafe {
+            X509_free(cert);
+        }
+        return out;
+    }
+}
+
+// The first `count` bytes of `buffer`.
+fn head<a>(buffer: (&a [u8]), count: u64) -> u8[] {
+    mut out = u8[];
+    mut i: u64 = 0;
+    while i < count {
+        out.push(buffer[i]);
+        i += 1;
+    }
+    return out;
+}
+
+@if target.os == .macos {
+    // A SecureTransport layer was written and cross-compiled but never run, and a TLS layer nobody
+    // has executed is the skipped-check failure this module exists to avoid. It is refused until
+    // a macOS runner exercises it; docs/design/tls.md keeps the plan.
+    @assert(
+        false,
+        "tls: the macOS SecureTransport layer is not landed. It needs a macOS runner to execute it, -framework Security at link time, and CoreFoundation for ALPN and the peer subject. docs/design/tls.md has the plan"
+    );
+}
+
+@if target.os == .windows {
+    // The SChannel layer is not in this increment, and a module that half-speaks TLS is worse than
+    // one that does not: a refused build says so here, with the plan in docs/design/tls.md, instead
+    // of a connection that skips a check nobody can run yet.
+    @assert(
+        false,
+        "tls: the Windows SChannel layer is not implemented. Landing it needs a Windows runner and three pieces: a SCHANNEL_CRED credential, the InitializeSecurityContext token loop, and a record pump over EncryptMessage/DecryptMessage plus a CryptoAPI CERT_CHAIN_POLICY_SSL check for the host name, which SChannel does not do itself. docs/design/tls.md has the plan"
+    );
+}
+
+// One trusted client context: the C library's session cache together with the policy it was built
+// from. Create one per process (per policy) and connect through it - resumption lives in this
+// object, so a client per connection resumes nothing. Several connections may use one client.
+pub struct TlsClient {
+    ctx: u64
+}
+
+// Builds the context: loads the trust store (refusing when it is empty), the ALPN list, the version
+// floor and a client certificate if the policy names one.
+pub fn client(config: (&TlsConfig)) -> TlsClient |? Error {
+    ctx := context_new(config)?;
+    return TlsClient { ctx: ctx };
+}
+
+// One TLS connection. It owns the socket it was handed: `close` releases both, and a stream that is
+// simply dropped leaks its descriptor and its session until the process exits (Grail has no
+// destructor).
+pub struct TlsStream {
+    state: PlatformState,
+    fd: u64,
+    sent_close: u64,
+    closed: u64
+}
+
+impl TlsClient {
+    // Connects to `address` (an IPv4 dotted quad; the runtime has no name lookup), starting TLS for
+    // `server_name`, which is what the certificate must name and what SNI carries. A DNS
+    // `server_name` is compared against the certificate's names; a dotted quad against its IP
+    // entries.
+    pub fn connect(self: (&TlsClient), address: string, port: u64, server_name: string) -> TlsStream |? Error {
+        match net::connect(address, port) {
+            stream: net::TcpStream => { return self.connect_over(stream, server_name); },
+            error: io::Error => { return transport_error(error); }
+        }
+    }
+
+    // The same handshake over a socket the caller already has. The stream takes ownership of it:
+    // the `TcpStream` value is consumed here, so it cannot be closed twice.
+    pub fn connect_over(self: (&TlsClient), stream: net::TcpStream, server_name: string) -> TlsStream |? Error {
+        fd := stream.fd();
+        mut state = session_new(self.ctx, view(server_name), fd)?;
+        match handshake(&state, fd) {
+            ok: unit => {
+                return TlsStream { state: state, fd: fd, sent_close: 0, closed: 0 };
+            },
+            error: Error => {
+                session_free(&state);
+                host::close(fd);
+                return error;
+            }
+        }
+    }
+}
+
+// The transport's failure as a TLS error: the system errno where the runtime kept one.
+fn transport_error(error: io::Error) -> Error {
+    match error {
+        Other(code) => { return Error::Io(code); },
+        _ => { return Error::Io(0); }
+    }
+}
+
+impl TlsStream {
+    // The underlying descriptor, for a `host::` call this module does not wrap.
+    pub fn fd(self: (&TlsStream)) -> u64 {
+        return self.fd;
+    }
+
+    // The negotiated protocol version, as the library names it ("TLSv1.3").
+    pub fn version(self: (&TlsStream)) -> string {
+        return version_text(&self.state).text();
+    }
+
+    // The ALPN protocol the peer selected, or "" when none was negotiated.
+    pub fn alpn(self: (&TlsStream)) -> string {
+        return alpn_text(&self.state).text();
+    }
+
+    // The subject of the peer's certificate, as `X509_NAME_oneline` renders it
+    // ("/CN=example.com"), or "" when the peer presented none.
+    pub fn peer_subject(self: (&TlsStream)) -> string {
+        return peer_subject_text(&self.state).text();
+    }
+
+    // Up to `buffer.len()` bytes of application data, waiting for the peer when there is none yet.
+    // 0 means the peer sent a close_notify; a connection that ends without one is `Error::Closed`.
+    pub fn read(self: (&mut TlsStream), buffer: (&mut u8[])) -> u64 |? Error {
+        if self.closed != 0 {
+            return Error::Closed;
+        }
+        if buffer.len() == 0 {
+            return 0;
+        }
+        fd := self.fd;
+        return read_some(&self.state, fd, buffer);
+    }
+
+    // Every byte until the peer's close_notify; `Error::Closed` for a connection that ended without
+    // one.
+    pub fn read_all(self: (&mut TlsStream)) -> u8[] |? Error {
+        if self.closed != 0 {
+            return Error::Closed;
+        }
+        fd := self.fd;
+        mut out = u8[];
+        loop {
+            mut chunk = u8[0; 4096];
+            count := read_some(&self.state, fd, &mut chunk)?;
+            if count == 0 {
+                break;
+            }
+            for i in count {
+                out.push(chunk[i]);
+            }
+        }
+        return out;
+    }
+
+    // One write to the record layer: the count may be short, as a socket write may be.
+    pub fn write(self: (&mut TlsStream), data: (&[u8])) -> u64 |? Error {
+        if self.closed != 0 {
+            return Error::Closed;
+        }
+        if data.len() == 0 {
+            return 0;
+        }
+        fd := self.fd;
+        return write_some(&self.state, fd, data);
+    }
+
+    // Every byte, looping while the record layer takes a prefix; returns the count.
+    pub fn write_all(self: (&mut TlsStream), data: (&[u8])) -> u64 |? Error {
+        if self.closed != 0 {
+            return Error::Closed;
+        }
+        fd := self.fd;
+        mut offset: u64 = 0;
+        while offset < data.len() {
+            part := write_some(&self.state, fd, data[offset:])?;
+            if part == 0 {
+                return Error::Closed;
+            }
+            offset += part;
+        }
+        return offset;
+    }
+
+    // Sends a close_notify and flushes it: the connection is half-closed for writing and the peer's
+    // data may still be read. The socket stays open; `close` releases it.
+    pub fn shutdown(self: (&mut TlsStream)) -> unit |? Error {
+        if self.closed != 0 {
+            return Error::Closed;
+        }
+        if self.sent_close != 0 {
+            return ();
+        }
+        fd := self.fd;
+        close_notify(&self.state, fd)?;
+        self.sent_close = 1;
+        return ();
+    }
+
+    // Sends a close_notify (when nothing failed and it was not already sent), releases the session
+    // and closes the socket. Call it exactly once; the stream cannot be used afterwards.
+    pub fn close(self: TlsStream) {
+        if self.closed == 0 {
+            if self.sent_close == 0 {
+                send_close_quietly(&self.state, self.fd);
+            }
+            session_free(&self.state);
+        }
+        host::close(self.fd);
+        return ();
+    }
+}
+
+// `close` is the last thing a caller does with a stream and must not fail on a peer that has
+// already gone: the close_notify is attempted and the outcome does not change what is released.
+fn send_close_quietly<a>(state: (&a PlatformState), fd: u64) -> unit {
+    match close_notify(state, fd) {
+        ok: unit => { return (); },
+        error: Error => { return (); }
+    }
+}

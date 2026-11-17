@@ -123,11 +123,13 @@ test('performance charts render from a results file: SVG, direction captions, ra
   expect(rowRatio(fixture.tables[1], fixture.tables[1].rows[1])).toBeCloseTo(2.4); // higher is better: 3600 / 1500
   expect(html).toContain('A table without a chart'); // a numbers-only table still renders as a table
   expect(html).toContain('0123456789ab (fixture)');
+  expect(html).toContain('<text x="0" y="41" class="perf-axis perf-source">Grail 0123456789ab (fixture); measured 2026-11-16, load average 1.00 on 4 CPUs.</text>'); // provenance inside each chart
   expect(html).toContain('bun tools/bench-rivals.mjs --runs 3');
   expect(html).not.toMatch(/<script|https?:\/\/(?!www\.w3\.org\/2000\/svg)/);
   expect(html).not.toContain('\n'); // one line: a raw HTML block markdown leaves alone
   expect(perfBlock('perf-results#release', join(root, 'tools/fixtures'))).toContain('<svg ');
   expect(() => perfBlock('perf-results#no-such-table', join(root, 'tools/fixtures'))).toThrow('no table');
+  expect(perfBlock('perf-results#no-such-table|numbers-only', join(root, 'tools/fixtures'))).toContain('A table without a chart'); // the first table present
   expect(() => renderResults({ schema: 2 })).toThrow('not a rivals result file');
 });
 test('the Performance chapter renders every committed result file', () => {
