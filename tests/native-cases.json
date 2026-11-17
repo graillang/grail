@@ -571,12 +571,6 @@
     "signal": "SIGABRT"
   },
   {
-    "name": "runtime-checks-survive-wrap-option",
-    "source": "unsafe module runtime;pub fn audit()->u64{return 0-1;}",
-    "overflow": "wrap",
-    "signal": "SIGABRT"
-  },
-  {
     "name": "abort-in-c-callback-arithmetic",
     "files": [
       "tests/abort/callback_abort.grl"
@@ -14873,28 +14867,11 @@
     "note": "a closure's write of a captured record's field is checked like any field write"
   },
   {
-    "name": "refinement-field-cross-field-refused",
-    "source": "struct P {\n    lo: u64,\n    hi: u64 where lo <= hi\n}\nfn main() {\n    p := P { lo: 1, hi: 3 };\n    println(p.hi);\n}\n",
-    "reject": true,
-    "diagnostic": [
-      "a field predicate may name only its own field: `lo` is not `hi`"
-    ],
-    "targets": [
-      "x86_64",
-      "aarch64",
-      "riscv64"
-    ],
-    "backends": [
-      "native"
-    ],
-    "note": "a predicate naming another field was read in the constructor's scope; it is refused until cross-field predicates are designed"
-  },
-  {
     "name": "refinement-field-outer-name-refused",
     "source": "fn main() {\n    println(1);\n}\nstruct P {\n    n: u64 where n < LIMIT\n}\n",
     "reject": true,
     "diagnostic": [
-      "a field predicate may name only its own field: `LIMIT` is not `n`"
+      "a field predicate may name only fields of its record: `LIMIT` is not a field of `P`"
     ],
     "targets": [
       "x86_64",
@@ -17450,5 +17427,188 @@
       }
     ],
     "note": "small enums in a framed record and through btree iteration stay frame words (no rt_enum: a layout-bit change re-boxed them once), struct literals are bound in place, pop and remove land in the caller's frame (no rt_popw box)"
+  },
+  {
+    "name": "raw-overflow-follows-build-mode-wrap",
+    "source": "unsafe module runtime;\nfn main() {\n    mut a: u64 = 18446744073709551615;\n    a = a + 2;\n    println(a);\n}\n",
+    "overflow": "wrap",
+    "stdout": "1\n",
+    "note": "Raw (`unsafe module`) code follows the build's overflow mode like all other code: under wrap (and so under --release) an overflowing add wraps. Code that must check uses explicit checked operations."
+  },
+  {
+    "name": "raw-overflow-follows-build-mode-checked",
+    "source": "unsafe module runtime;\nfn main() {\n    mut a: u64 = 18446744073709551615;\n    a = a + 2;\n    println(a);\n}\n",
+    "signal": "SIGABRT",
+    "note": "The same raw add traps in a checked (development) build."
+  },
+  {
+    "name": "iter-typed-chain-fold",
+    "note": "typed adapters (docs/design/dyn-and-callable-bounds.md 2c): `iter::over(v).map(..).filter(..).fold(..)` is one nested type, each callback its own closure type, every call direct",
+    "source": "use iter;\nfn main() { v := u64[1, 2, 3, 4]; t := iter::over(v.copy()).map(|x: u64| -> u64 x * 2).filter(|x: &u64| -> bool *x % 3 == 0).fold(0, |s: u64, x: u64| -> u64 s + x); println(t); }\n",
+    "stdout": "6\n",
+    "modules": [
+      "lib/iter.grl",
+      "lib/core.grl"
+    ]
+  },
+  {
+    "name": "iter-typed-for-loop",
+    "note": "a `for` loop over a typed adapter (inherent `next`)",
+    "source": "use iter;\nfn main() { mut t = 0; for x in iter::over(u64[1, 2, 3]).map(|x: u64| -> u64 x + 1) { t += x; } println(t); }\n",
+    "stdout": "9\n",
+    "modules": [
+      "lib/iter.grl",
+      "lib/core.grl"
+    ]
+  },
+  {
+    "name": "callable-bound-impl-parameter",
+    "note": "a callable bound on an impl's parameter (`impl<U, F: FnMut(u64) -> U> W<U, F>`): the impl's own type and its field `f: F` carry the bound, so `self.f` is callable",
+    "source": "pub struct W<U, F> { f: F, u: U }\nimpl<U, F: FnMut(u64) -> U> W<U, F> {\n    pub fn run(self: &mut Self, x: u64) -> U { g := &mut self.f; return g(x); }\n}\nfn main() { mut w = W { f: |x: u64| -> u64 x + 1, u: 0 }; println(w.run(4)); }\n",
+    "stdout": "5\n"
+  },
+  {
+    "name": "callable-bound-impl-parameter-interface",
+    "files": [
+      "tests/callable/holder_user.grl"
+    ],
+    "modules": [
+      "tests/callable/holder.grl"
+    ],
+    "interfaces": true,
+    "stdout": "5\n",
+    "note": "...and through an interface file: the impl's callable bound travels with its parameter record"
+  },
+  {
+    "name": "refinement-field-cross-literal-checked",
+    "source": "struct P {\n    lo: u64,\n    hi: u64 where lo <= hi\n}\nfn seven() -> u64 {\n    return 7;\n}\nfn main() {\n    p := P { lo: 1, hi: 3 };\n    println(p.hi - p.lo);\n    x := seven();\n    q := P { lo: x, hi: 3 };\n    println(q.hi);\n}\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a predicate across fields is checked once the literal has every field: `lo <= hi` with `lo` the stored 7",
+    "signal": "SIGABRT",
+    "stdout": "2\n",
+    "stderr": [
+      "error: refinement violated: lo <= hi\n --> ",
+      "input.grl:12:",
+      "required by P.hi"
+    ]
+  },
+  {
+    "name": "refinement-field-cross-no-capture",
+    "source": "struct P {\n    lo: u64,\n    hi: u64 where lo <= hi\n}\nfn seven() -> u64 {\n    return 7;\n}\nfn main() {\n    lo := 0;\n    x := seven();\n    q := P { hi: 3, lo: x };\n    println(q.hi + lo);\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "",
+    "stderr": [
+      "error: refinement violated: lo <= hi\n --> ",
+      "input.grl:11:"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "a local named `lo` is not the field: the predicate reads the record's own `lo` (7), whichever order the literal gives the fields in"
+  },
+  {
+    "name": "refinement-field-cross-strict-proved",
+    "source": "@strict;\nstruct P {\n    lo: u64,\n    hi: u64 where lo <= hi\n}\nfn mk(a: u64, b: u64 where a <= b) -> P {\n    return P { lo: a, hi: b };\n}\nfn need_le(x: u64, y: u64 where x <= y) -> u64 {\n    return y - x;\n}\nfn span(p: &P) -> u64 {\n    return need_le(p.lo, p.hi);\n}\nfn main() {\n    p := mk(2, 5);\n    println(span(&p));\n}\n",
+    "stdout": "3\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "strict mode proves the literal from `a <= b`, and a reader through `&P` gets `p.lo <= p.hi` as a fact that proves the call"
+  },
+  {
+    "name": "refinement-field-cross-strict-unproved",
+    "source": "@strict;\nstruct P {\n    lo: u64,\n    hi: u64 where lo <= hi\n}\nfn mk(a: u64, b: u64) -> P {\n    return P { lo: a, hi: b };\n}\nfn main() {\n    println(mk(2, 5).hi);\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "cannot prove the refinement `lo <= hi`"
+    ],
+    "note": "nothing relates `a` and `b`, so strict mode refuses the literal"
+  },
+  {
+    "name": "refinement-field-cross-write-checked",
+    "source": "struct P {\n    lo: u64,\n    hi: u64 where lo <= hi\n}\nfn seven() -> u64 {\n    return 7;\n}\nfn main() {\n    mut p = P { lo: 1, hi: 3 };\n    p.hi = 5;\n    println(p.hi);\n    p.lo = seven();\n    println(p.lo);\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "5\n",
+    "stderr": [
+      "error: refinement violated: lo <= hi\n --> ",
+      "input.grl:12:"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "writing either field owes the predicate over the new value and the other field as the record holds it, also when the predicate belongs to the other field"
+  },
+  {
+    "name": "refinement-field-cross-write-strict-refused",
+    "source": "@strict;\nstruct P {\n    lo: u64,\n    hi: u64 where lo <= hi\n}\nfn main() {\n    mut p = P { lo: 1, hi: 3 };\n    p.hi = 5;\n    println(p.hi);\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "cannot prove the refinement `lo <= hi`",
+      "rebuild the record with a literal"
+    ],
+    "note": "a single-field write leaves the other field without a term (the root is `mut`), so strict mode asks for a literal instead"
+  },
+  {
+    "name": "refinement-field-cross-loan-refused",
+    "source": "struct P {\n    lo: u64,\n    hi: u64 where lo <= hi\n}\nfn zap(x: &mut u64) {\n    *x = 9;\n}\nfn main() {\n    mut p = P { lo: 1, hi: 3 };\n    zap(&mut p.lo);\n    println(p.lo);\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "cannot borrow the refined field `P.lo` mutably"
+    ],
+    "note": "`lo` has no predicate of its own, but `hi`'s reads it: a loan of it is refused like a loan of a refined field"
+  },
+  {
+    "name": "refinement-field-cross-compound",
+    "source": "struct P {\n    lo: u64,\n    hi: u64 where lo <= hi\n}\nfn main() {\n    mut p = P { lo: 1, hi: 3 };\n    p.hi -= 3;\n    println(p.hi);\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "",
+    "stderr": [
+      "error: refinement violated: lo <= hi\n --> ",
+      "input.grl:7:"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "a compound assignment owes the predicate across fields too"
+  },
+  {
+    "name": "refinement-field-cross-vector-length",
+    "source": "struct B {\n    n: u64,\n    items: u64[] where items.len() <= n\n}\nfn main() {\n    b := B { n: 4, items: u64[1, 2] };\n    println(b.items.len());\n    c := B { n: 1, items: u64[1, 2] };\n    println(c.n);\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "2\n",
+    "stderr": [
+      "error: refinement violated: items.len() <= n\n --> ",
+      "input.grl:8:"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "a vector's length against another field"
+  },
+  {
+    "name": "refinement-field-cross-type-refused",
+    "source": "struct Q {\n    n: u64\n}\nstruct P {\n    q: Q,\n    hi: u64 where q < hi\n}\nfn main() {\n    println(1);\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "a field predicate may read only integer, float and vector fields: `q` is not one"
+    ],
+    "note": "a field of another type cannot be read by a predicate"
   }
 ]
