@@ -1,5 +1,9 @@
 ## Unreleased
 
+- **SIMD `.bits()` gives the same NaN bits on every target too.** A NaN lane of an `f32x*` or
+  `f64x*` vector now reads as `0x7FC00000` or `0x7FF8000000000000`, as scalar `bits(x)` does;
+  before, x86-64 gave negative NaNs (and a release build could mix the two), ARM and RISC-V
+  positive ones. Three vector instructions (compare with itself, select), no per-lane work.
 - **`bits(x)` of a NaN is the same on every target.** Hardware disagrees on the NaN an operation
   makes (x86 sets the sign bit; ARM and RISC-V do not), so `bits(0.0 / 0.0)` used to be
   `0xFFF8000000000000` on x86-64 and `0x7FF8000000000000` elsewhere. Every NaN now reads as the one
