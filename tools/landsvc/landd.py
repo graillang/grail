@@ -113,8 +113,10 @@ def gate_fast(out):
         return False, ['FAIL: self-host: ' + (tail[0] if tail else '')], C
     return True, ['self-host fixed point holds'], C
 
-def gate(out, stamp):
-    """Build and run the fast gate on the worktree's tree. Returns (ok, notes, compiler)."""
+def gate(out, stamp, post=False):
+    """Build and run the fast gate on the worktree's tree. Returns (ok, notes, compiler).
+    `post`: the post-landing run on main, whose suites may do what a landing cannot wait for
+    (GRAIL_LAND_MODE=post: compile-perf measures the release compiler too)."""
     notes = []
     base = os.path.join(Q, '.work/land-base/grail')
     C = None
@@ -125,6 +127,7 @@ def gate(out, stamp):
         if c and os.path.exists(c): C = c; break
     if not C: return False, ['the compiler does not build (build.log)'], None
     env = dict(os.environ, GRAIL_COMPILER=C, GRAIL_FFI_COMPILER=C)
+    if post: env['GRAIL_LAND_MODE'] = 'post'
     def start(name, cmd):
         d = tempfile.mkdtemp(prefix='landcache-')
         e = dict(env, GRAIL_CACHE_DIR=d)
@@ -271,7 +274,7 @@ def post_loop():
                 stamp = time.strftime('%Y%m%d-%H%M%S', time.gmtime())
                 out = os.path.join(LOGS, f'post-{stamp}-{head}'); os.makedirs(out, exist_ok=True)
                 t0 = time.time()
-                ok, notes, C = gate(out, stamp)
+                ok, notes, C = gate(out, stamp, post=True)
                 if C:
                     rl = remote_legs(C, stamp)
                     notes.append(rl)

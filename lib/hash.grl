@@ -44,12 +44,14 @@ fn compress2<a>(state:(&a mut Hasher),word:u64){
 }
 // `tail` holds the `used` (< 8) bytes not yet compressed, little-endian.
 @no_alloc
+@no_block
 pub fn write_byte<a>(state:(&a mut Hasher),value:u64 where value<256){
     state.tail=state.tail^(value<<(state.used*8));state.used+=1;state.total=wrapping_add(state.total,1);
     if state.used==8{word:=state.tail;compress(&mut state,word);state.tail=0;state.used=0;}
 }
 // Eight bytes, little-endian: the same as eight write_byte calls, one compression.
 @no_alloc
+@no_block
 pub fn write_num<a>(state:(&a mut Hasher),value:u64){
     if state.used==0{state.total=wrapping_add(state.total,8);compress(&mut state,value);}
     else{write_unaligned(&mut state,value);}
@@ -60,6 +62,7 @@ fn write_unaligned<a>(state:(&a mut Hasher),value:u64){
 }
 // Bytes, eight at a time where they line up with the state.
 @no_alloc
+@no_block
 pub fn write_bytes<a,b>(state:(&a mut Hasher),data:&b [u8]){
     n:=data.len();mut i:u64=0;
     while (i<n)&&(state.used!=0){write_byte(&mut state,data[i]);i+=1;}
@@ -73,6 +76,7 @@ pub fn write_bytes<a,b>(state:(&a mut Hasher),data:&b [u8]){
     while i<n{write_byte(&mut state,u64(data[i]));i+=1;}
 }
 @no_alloc
+@no_block
 pub fn finish(state:Hasher)->u64{mut current=state;return finish_at(&mut current);}
 fn finish_at<a>(state:(&a mut Hasher))->u64{
     word:=state.tail^((state.total&255)<<56);

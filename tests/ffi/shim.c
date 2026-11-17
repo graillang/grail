@@ -106,6 +106,7 @@ long long c_apply_preserving(grail_callback callback, long long value) {
 
 #include "abi_shim.c"
 #include "byval_shim.c"
+#include "hfa_shim.c"
 #include "narrow_shim.c"
 #include "out_shim.c"
 #include "words_shim.c"

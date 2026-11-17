@@ -736,6 +736,13 @@ try {
   process.exit(2);
 }
 const cases = JSON.parse(readFileSync(join(root, 'tests/native-cases.json'), 'utf8'));
+// Two cases with one name would run one and silently shadow the other: a clean git merge can add the
+// same case on both sides at different places, which merge-cases never sees.
+{
+  const seen = new Set(), twice = [];
+  for (const c of cases) { if (seen.has(c.name)) twice.push(c.name); seen.add(c.name); }
+  if (twice.length) throw new Error(`tests/native-cases.json names a case more than once: ${twice.join(', ')}`);
+}
 // --update writes this copy: staging rewrites a case's paths to snapshot files, and those must never
 // reach the corpus file.
 const pristine = JSON.parse(JSON.stringify(cases));

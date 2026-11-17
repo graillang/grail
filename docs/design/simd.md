@@ -1,6 +1,6 @@
 # SIMD types: the decision record
 
-Status: S1, S2 and S3 (x86-64 SSE2, AArch64 NEON) built. S4-S6 approved and staged below. This supersedes the
+Status: S1-S3 and S4a (`mul_add`) built. S4b (`--cpu` levels), S4c (the `extern "C"` vector ABI), S5 and S6 approved and staged below. This supersedes the
 SIMD parts of `simd-layout-parallel-loops.md` where they differ (marked), and the
 pre-design note of the same name from commit ac15c72.
 
@@ -234,6 +234,51 @@ is not in the RV64GC baseline).
 
 There are no native timings for AArch64: under qemu-user they measure the emulator, not the code.
 The x86-64 numbers above show what packed code buys over the lanes.
+
+## As built (S4a: `mul_add`)
+
+`a.mul_add(b, c)` on f32 and f64 vectors computes `a * b + c` in each lane with one rounding, and
+gives the same bits on every target and backend:
+- **AArch64:** NEON `fmla`.
+- **RV64:** `fmadd.s`/`fmadd.d` per lane. RV64GC has them in F and D.
+- **LLVM on those two:** `@llvm.fma.v4f32` and friends, which lower to the same instructions.
+- **Baseline x86-64:** it has no fused instruction, so each lane calls the runtime's software fused
+  multiply-add, `rt_fma32`/`rt_fma64`. That is what C's `fma()` does there through libm. Calling
+  per lane also keeps LLVM from turning `llvm.fma` into a call to a libm the program does not link.
+
+The software routine uses integers only:
+- the exact product of the significands is 128 bits, built from 32-bit halves;
+- `c` is aligned to it with a sticky bit;
+- the sum is rounded once to nearest-even, with subnormals and overflow;
+- infinities, NaN and zero products are decided on the bits, and exact cancellation gives +0.
+
+It is slow, tens of instructions per lane, and documented as such. `--cpu` levels with FMA use
+`vfmadd` (S4b).
+
+**Tested.** `tests/simd/fma.grl` runs 200,000 f32 and 100,000 f64 lanes against
+`tests/simd/fma_reference.c` (C's `fmaf`/`fma` on the host): random bit patterns, edge values
+(zeros, infinities, NaN, subnormals, the largest finite values) and `c = -(a * b)`. With that `c`
+the result is exactly the product's rounding error, so an unfused multiply-add gives 0 and fails.
+The checksum is identical on x86_64, aarch64 and riscv64 with both backends. `fmla` and the RV64 R4
+`fmadd` encodings are in `tests/asm/simd-aarch64.s` and `simd-riscv64.s` (byte-identical to clang),
+together with S3b's NEON forms.
+
+## As built (S4b: `--cpu` levels)
+
+`grail build --cpu=x86-64|x86-64-v2|x86-64-v3|x86-64-v4|native`. `native` reads the machine's flags
+from /proc/cpuinfo.
+- The driver packs the level into the build flags. The compiler receives `--cpu=x86-64-vN`, which is
+  in the cache key. A release build's clang gets `-march=x86-64-vN`.
+- Every lifted function says `"target-cpu"="x86-64-vN"`, because a ThinLTO link's code generation
+  does not see `-march`; without it `llvm.fma` became calls to libm's `fma`/`fmaf`.
+- `@if target.features.NAME` answers by target and level: x86-64-v2/v3/v4 per the psABI, `neon` and
+  `fma` on AArch64, `d` and `fma` on RV64. An unknown name is an error that lists the known ones.
+- At v3 and above, `mul_add` is `vfmadd231ps`/`pd` natively (VEX-encoded by the internal assembler,
+  in `tests/asm/simd-x86_64.s`) and `llvm.fma` under LLVM. `tests/simd/fma.grl` still matches C on
+  both.
+- Other targets refuse `--cpu`.
+
+Not done: the `extern "C"` vector ABI (S4c), stopped here by the wrap-up order.
 
 ## Stages
 
