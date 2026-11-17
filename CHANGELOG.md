@@ -1,5 +1,13 @@
 ## Unreleased
 
+- **Release builds keep vector headers in registers across element stores (TBAA).** The LLVM lifter
+  writes the word and 4-byte element accessors (`rt_slot`, `rt_slot4`, `rt_at4` and their unchecked
+  forms) in place: the header's `data`/`len` loads carry a `header` type tag, and every load or store
+  through the element address - followed through registers and frame slots within a block - carries
+  an `element` tag. Safe Grail cannot point one into the other, so LLVM hoists the header loads out of
+  loops and vectorises them: bench/ecs goes from 3.45 G to 0.94 G instructions, sort from 7.53 G to
+  7.24 G.
+
 - **A standard generic is checked once per surface, not once per run.** The check
   `emit_specializations` owes every template a run instantiates (a replay of its body with its own
   parameters opaque, its text thrown away) is now a unit of the per-function store: what it asked of
