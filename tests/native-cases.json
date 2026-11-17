@@ -17526,7 +17526,7 @@
     "note": "...a closure that names the outer lifetime for that parameter and captures storage labelled with it is refused the same way",
     "source": "struct Box1<T> { v: T }\nfn with_lock<a, T, C, R: Owned, F: FnMut((&mut T), C) -> R>(m: (&a mut Box1<T>), ctx: C, f: F) -> R { mut g = f; return g(&mut m.v, ctx); }\nstruct Out<a> { slot: (&a mut u64[])[] }\nfn stash<a, b>(m: (&a mut Box1<u64[]>), out: (&b mut Out<a>)) -> u64 {\n    return with_lock(&mut m, 0, |v: (&a mut u64[]), k: u64| -> u64 { out.slot.push(v); return 0; });\n}\nfn main() { mut m = Box1 { v: u64[1] }; mut out = Out { slot: [] }; println(stash(&mut m, &mut out)); }\n",
     "reject": true,
-    "diagnostic": "its parameter 1 is a reference the bound gives it fresh on every call"
+    "diagnostic": "mutation through readonly frame"
   },
   {
     "name": "callable-bound-fresh-ref-function-independent",
@@ -17545,14 +17545,14 @@
     "note": "the same hole through a vecs callback on main: `any`'s `FnMut((&T)) -> bool` given a closure that keeps each element reference in captured storage",
     "source": "use vecs;\nfn keep_refs<a, b>(v: (&a u64[]), out: (&b mut (&a u64)[])) -> bool { return v.any(|x: (&a u64)| -> bool { out.push(x); return false; }); }\nfn main() { v := u64[1, 2]; mut out = (&u64)[]; println(keep_refs(&v, &mut out)); }\n",
     "reject": true,
-    "diagnostic": "is a reference the bound gives it fresh on every call"
+    "diagnostic": "elided output reference needs one input lifetime"
   },
   {
     "name": "callable-bound-fresh-ref-filter-adapter-refused",
     "note": "...through the typed Filter adapter",
     "source": "use iter;\nfn keep_refs<a, b>(v: (&a u64[]), out: (&b mut (&a u64)[])) -> u64 {\n    return iter::over(v.copy()).filter(|x: (&a u64)| -> bool { out.push(x); return true; }).fold(0, |s: u64, x: u64| -> u64 s + x);\n}\nfn main() { v := u64[1, 2]; mut out = (&u64)[]; println(keep_refs(&v, &mut out)); }\n",
     "reject": true,
-    "diagnostic": "is a reference the bound gives it fresh on every call"
+    "diagnostic": "elided output reference needs one input lifetime"
   },
   {
     "name": "callable-bound-fresh-ref-returned-refused",
@@ -17979,5 +17979,17 @@
     "note": "plain use of a Keep<F>",
     "source": "struct Keep<F> { f: F }\nfn keep<F: Fn() -> u64>(f: F) -> Keep<F> { return Keep { f: f }; }\nfn main() { v := u64[1, 2]; k := keep(|| -> u64 v.len()); g := &k.f; println(g()); }\n",
     "stdout": "2\n"
+  },
+  {
+    "name": "callable-bound-fresh-ref-closure-capture-independent",
+    "note": "a closure with an elided `&mut` parameter that also captures a borrowed key is accepted: its parameters are typed in its own lifetime namespace, so nothing ties the fresh parameter to the capture (was a false refusal when the enclosing function named lifetimes; concurrent_map's remove on RwLock::write_with, /root/thread_alloc)",
+    "source": "struct Box1<T> { v: T }\nfn with_lock<a, T, C, R: Owned, F: FnMut((&mut T), C) -> R>(m: (&a mut Box1<T>), ctx: C, f: F) -> R { mut g = f; return g(&mut m.v, ctx); }\nfn rem<a, b>(v: (&a mut u64[]), k: (&b u64)) -> u64 { return v.len(); }\nfn go<a, b>(m: (&a mut Box1<u64[]>), key: (&b u64)) -> u64 { return with_lock(&mut m, 0, |v: (&mut u64[]), unused: u64| -> u64 rem(v, key)); }\nfn main() { mut m = Box1 { v: u64[1] }; k := 5; println(go(&mut m, &k)); }\n",
+    "stdout": "1\n"
+  },
+  {
+    "name": "callable-bound-fresh-ref-closure-capture-generic",
+    "note": "...the same in a generic function",
+    "source": "struct Box1<T> { v: T }\nfn with_lock<a, T, C, R: Owned, F: FnMut((&mut T), C) -> R>(m: (&a mut Box1<T>), ctx: C, f: F) -> R { mut g = f; return g(&mut m.v, ctx); }\nfn rem<a, b, K>(v: (&a mut K[]), k: (&b K)) -> u64 { return v.len(); }\nfn go<a, b, K>(m: (&a mut Box1<K[]>), key: (&b K)) -> u64 { return with_lock(&mut m, 0, |v: (&mut K[]), unused: u64| -> u64 rem(v, key)); }\nfn main() { mut m = Box1 { v: u64[1] }; k := 5; println(go(&mut m, &k)); }\n",
+    "stdout": "1\n"
   }
 ]
