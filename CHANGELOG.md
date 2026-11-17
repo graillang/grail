@@ -7,6 +7,12 @@
   splat, sums, `any`/`all`, `to_f32`, and integer min/max. Results are identical to the scalar lanes
   and to the LLVM backend. The internal AArch64 assembler encodes the NEON forms identically to
   clang.
+- **png and inflate decode faster.** Inflate's length and distance tables were vector literals
+  built on every match; they are static text indexed in place. png unfilters the common layout
+  (whole-byte samples, no channel added) straight into the image with one loop per filter type,
+  instead of five filter tests per byte, a fresh vector per row and a byte-by-byte copy. A 4096x4096
+  RGBA texture: Grail-LLVM 41.1G -> 8.1G instructions (3.65 -> 0.91 s; libpng 0.40 s, the runtime's
+  division fix included), Grail-native 107G -> 21.4G.
 - The native backend computes SIMD operations with packed SSE2 on x86-64 (lane arithmetic, compares,
   select, splat, sums, 4-lane shuffles, `any`/`all`, `to_f32`), with exactly the same results as
   before. A dot product, a 4x4 matrix product and an AoS-to-SoA transpose run 2-5x faster natively.
