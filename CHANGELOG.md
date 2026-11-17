@@ -33,6 +33,9 @@
   build and recorded if its stamp and bytes are unchanged, and the resolved module set waits for it.
   Dev compiler, the 104,000-line syn4000: a build right after an edited build 0.340G -> 0.005G
   instructions, a check after an edited check 0.343G -> 0.008G.
+- Compiling is a little cheaper: the optimiser's liveness tables are allocated at full size once per
+  body instead of grown a push at a time (cold build of a 104k-line program: 93.9G -> 92.1G
+  instructions, output unchanged).
 - **`bench-rivals` no longer charts a build that printed the wrong answer.** It already failed the
   run when a build's output differed from C's, but still wrote that build's figures into the
   results, so a miscompiled program could chart as the fastest. Such a figure is now left out and

@@ -622,21 +622,20 @@ struct LiveFx {
 }
 fn live_fx<a>(o: (&a ir::Body)) -> LiveFx {
     last := o.op.len();
-    mut fx = LiveFx { rd: u64[], wr: u64[], tgt: u64[] };
+    // Allocated at their full length once: grown a push at a time, the three vectors were a third
+    // of the optimiser's reallocation (cold syn4000 build).
+    mut fx = LiveFx { rd: u64[0; last], wr: u64[0; last], tgt: u64[0; last] };
     for i in last {
         op := o.op[i];
-        mut r = 0;
-        mut w = 0;
-        mut t = last;
         if (op == 16) || ((16 < op) && (op < 25)) {
-            t = jump_target(&o, i);
-        } else if (op != 100) && (op != 101) && (op != 0) && (op != 29) && (op != 30) {
-            r = ir::reads(&o, i);
-            w = ir::writes(&o, i);
+            fx.tgt[i] = jump_target(&o, i);
+        } else {
+            fx.tgt[i] = last;
+            if (op != 100) && (op != 101) && (op != 0) && (op != 29) && (op != 30) {
+                fx.rd[i] = ir::reads(&o, i);
+                fx.wr[i] = ir::writes(&o, i);
+            }
         }
-        fx.rd.push(r);
-        fx.wr.push(w);
-        fx.tgt.push(t);
     }
     return fx;
 }
