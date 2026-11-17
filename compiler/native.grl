@@ -53,15 +53,6 @@ fn is_type_id(ty: u64) -> bool {
     return ty < CT_PENDING;
 }
 
-struct Tok {
-    kind: u64,
-    start: u64,
-    end: u64,
-    // Where the token starts, 1-based, worked out once when the file is read: every position a
-    // diagnostic, a debug row or a runtime-error site needs is a lookup, not a scan of the source.
-    line: u64,
-    col: u64
-}
 struct Ty {
     kind: u64,
     arg: u64,
@@ -464,7 +455,9 @@ struct Atom {
 }
 struct C {
     src: u8[],
-    toks: Tok[],
+    // The loaded file's tokens. Each knows where it starts (line, col), worked out once by the
+    // lexer: every position a diagnostic, a debug row or a runtime-error site needs is a lookup.
+    toks: lexer::Token[],
     pos: u64,
     out: u8[],
     // 1 (--split): mark module boundaries in `out` and write one assembly file per module.
@@ -574,6 +567,9 @@ struct C {
     interior: u64[],
     // 1 + the frame slot holding the hidden result address (needs_dest), or 0.
     result_dest: u64,
+    // Slots holding the address of a field's word in a Grail record: a plain, untagged word address,
+    // so a sub-word value there (an f32, a u8) is read and written as the word it is stored as.
+    word_refs: u64[],
     // The result adapters this object needs (box_result_thunk): closure * 4 + words.
     box_thunks: u64[],
     // Per type id: 0 not yet known, else 1 + (1 if the type is a plain record) + (2 if it is a
@@ -598,7 +594,15 @@ struct C {
     file_loaded: u64,
     file_cache_index: u64[],
     file_cache_src: u8[][],
-    file_cache_toks: Tok[][],
+    file_cache_toks: lexer::Token[][],
+    // The functions by module, for the interface writer (iface_func_ids): an open-addressed table
+    // of groups (`fmod_slots` holds group + 1), each group's module, its key and its functions in
+    // table order; `fmod_n` functions are filed. Functions are only ever appended.
+    fmod_slots: u64[],
+    fmod_keys: u64[],
+    fmod_names: u8[][],
+    fmod_ids: u64[][],
+    fmod_n: u64,
     funcs: Func[],
     // The (module, name) index of `funcs` and of `decls` (see name_key).
     func_slots: u64[],
@@ -792,6 +796,9 @@ struct C {
     // 1 while an assignment's target path is read: its last field is written directly (and its
     // predicate owed there), not lent out, so `field_path` records it instead of refusing the loan.
     ref_assign_target: u64,
+    // 1 once the body being emitted returned a two-word result (dyn_result): its wrapper returns the
+    // same rax:rdx pair and says so too.
+    dyn_result_seen: u64,
     // 1 while a refined function's body labels and declares itself: its symbol is `<name>.proved`,
     // and `<name>` is the checking wrapper emitted after it (ref_wrapper).
     proved_label: u64,
@@ -3504,7 +3511,12 @@ fn save_result<a>(c: (&a mut C), ret: u64) -> u64 {
             return frame_from_registers(&mut c, words);
         }
         // A larger result was written to the destination the call passed (call_dest): rax is it.
-        return save(&mut c);
+        slot := save(&mut c);
+        if is_array(&mut c, ret) {
+            // Nothing else holds the destination: a binding takes it as its own (bind_value).
+            c.array_fresh.push(slot);
+        }
+        return slot;
     }
     if borrowed_object(&mut c, ret) == 0 {
         return save(&mut c);
@@ -4443,7 +4455,7 @@ fn arg_slot<a>(c: (&a C), declared: u64, i: u64) -> u64 {
 // after it (kept_slots).
 fn begin_result_dest<a>(c: (&a mut C), ret: u64, count: u64) -> unit {
     exchange(&mut c.result_dest, 0);
-    if (c.raw == 0) & needs_dest(&mut c, ret) {
+    if needs_dest(&mut c, ret) {
         d := fresh(&mut c);
         if d != count {
             fail(&mut c, view("internal: the result address is not the slot after the parameters"));
@@ -4462,7 +4474,9 @@ fn kept_slots<a>(c: (&a C), count: u64) -> u64 {
 // The caller's side of needs_dest: frame words of the call site the callee writes its result to,
 // passed after the declared arguments; 0 when the result needs none.
 fn call_dest<a>(c: (&a mut C), ret: u64) -> u64 {
-    if (c.raw != 0) || !needs_dest(&mut c, ret) {
+    // Layout is the type's, never the module's: an unsafe module calling a function that needs a
+    // destination passes one like anyone else.
+    if !needs_dest(&mut c, ret) {
         return 0;
     }
     return frame_alloc(&mut c, record_words(&mut c, base_type(&mut c, ret)));
@@ -4594,6 +4608,15 @@ fn invoke<a, b>(c: (&a mut C), name: &b [u8], args: u64[]) -> u64 {
 // Owned values have independent stack flags. Aliased field loads are not owners until moved.
 fn needs_drop<a>(c: (&a mut C), ty: u64) -> bool {
     k := ty_kind(&mut c, ty);
+    // An array owns what its elements own; its storage is never a box of its own.
+    if (k == 32) & (c.raw == 0) {
+        // A plain or extern record element is its bytes inline, owning nothing.
+        elem := ty_arg(&mut c, ty);
+        if array_record_elem(&mut c, elem) {
+            return false;
+        }
+        return needs_drop(&mut c, elem);
+    }
     // A record or enum always owns its fields' storage, and an `impl Drop` adds its call at the head
     // of that helper. The declaration's bit answers the question in one read: emit_drops asks it for
     // every type, and every drop site asks it for every value.
@@ -6844,7 +6867,8 @@ fn drop_ref_name<a>(c: (&a mut C), ty: u64) -> u8[] {
 // A call to a type's drop helper: the `Drop` reached through the compiler's glue is a real edge.
 fn drop_call_out<a>(c: (&a mut C), ty: u64) -> unit {
     // A framed record's words belong to a frame or to the place that holds them: nothing to free.
-    if framed(&mut c, ty) {
+    // An array that owns its elements still drops them, in place (its helper frees no storage).
+    if framed(&mut c, ty) && !array_owned(&mut c, ty) {
         return ();
     }
     name := drop_ref_name(&mut c, ty);
@@ -7096,7 +7120,13 @@ fn tok_text<a>(c: (&a mut C), i: u64) -> u8[] {
     t := &c.toks[i];
     st := t.start;
     en := t.end;
-    return (c.src[st: en]).copy();
+    // Filled in place: a slice of the source and a copy of it was a view record more per token.
+    n := en - st;
+    mut out = u8[0; n];
+    for k in n {
+        out[k] = c.src[st + k];
+    }
+    return out;
 }
 // Whether the current token is spelled `s`, read from the source in place. `is` is asked for every
 // keyword at every statement, and copying the token out to compare it was four allocations a
@@ -8222,6 +8252,14 @@ fn ref_wrapper<a, b, d>(c: (&a mut C), m: &b [u8], name: &b [u8], body_symbol: &
     }
     o(&mut c, view(":\n"));
     fx_begin(&mut c, view(sym), view(name), c.file, position, claimed_alloc, claimed_panic);
+    // The wrapper's own facts key, and the body's two-word result passing through it in rax:rdx.
+    body_facts := c.facts_fn.copy();
+    if body_facts.len() != 0 {
+        exchange(&mut c.facts_fn, sym.copy());
+    }
+    if c.dyn_result_seen != 0 {
+        dyn_result(&mut c);
+    }
     o(&mut c, view("pushq %rbp\nmovq %rsp,%rbp\n"));
     frame := label(&mut c);
     if c.target == 4 {
@@ -8233,19 +8271,34 @@ fn ref_wrapper<a, b, d>(c: (&a mut C), m: &b [u8], name: &b [u8], body_symbol: &
         fname(&mut c, frame);
         o(&mut c, view(",%rsp\n"));
     }
-    mut regs = count;
-    if 6 < count {
+    // A result of more than two words comes with the caller's destination address after the
+    // declared arguments (begin_result_dest): the wrapper keeps it in a slot of its own and hands it
+    // on, so the body writes the caller's words.
+    mut total = count;
+    if c.result_dest != 0 {
+        total = count + 1;
+    }
+    mut dslot = 0;
+    if total != count {
+        dslot = fresh(&mut c);
+    }
+    mut regs = total;
+    if 6 < total {
         regs = 5;
     }
     for i in regs {
         o(&mut c, view("movq "));
         o(&mut c, view(argreg(i)));
         c.out.push(44);
-        stack_slot(&mut c, i);
+        if i < count {
+            stack_slot(&mut c, i);
+        } else {
+            stack_slot(&mut c, dslot);
+        }
         c.out.push(10);
     }
     mut spill = 0;
-    if 6 < count {
+    if 6 < total {
         spill = fresh(&mut c);
         o(&mut c, view("movq %r9,"));
         stack_slot(&mut c, spill);
@@ -8261,7 +8314,11 @@ fn ref_wrapper<a, b, d>(c: (&a mut C), m: &b [u8], name: &b [u8], body_symbol: &
     ref_params(&mut c);
     for i in regs {
         o(&mut c, view("movq "));
-        stack_slot(&mut c, i);
+        if i < count {
+            stack_slot(&mut c, i);
+        } else {
+            stack_slot(&mut c, dslot);
+        }
         c.out.push(44);
         o(&mut c, view(argreg(i)));
         c.out.push(10);
@@ -8279,6 +8336,9 @@ fn ref_wrapper<a, b, d>(c: (&a mut C), m: &b [u8], name: &b [u8], body_symbol: &
     c.out.push(10);
     fx_end(&mut c);
     exchange(&mut c.check, after);
+    if body_facts.len() != 0 {
+        exchange(&mut c.facts_fn, body_facts);
+    }
     return ();
 }
 // Whether field `k` of record `d` carries a predicate. Such a field is written only where the
@@ -8557,6 +8617,10 @@ fn pv_literal<a>(t: &a [u8]) -> bool {
 }
 // A word the prover must not mistake for a variable.
 fn pv_keyword<a>(t: &a [u8]) -> bool {
+    // Every word below is two to eight bytes long.
+    if (t.len() < 2) || (8 < t.len()) {
+        return false;
+    }
     return same(view(t), view("true"))
         || same(view(t), view("false"))
         || same(view(t), view("if"))
@@ -8600,8 +8664,7 @@ fn pv_term<a>(c: (&a mut C), at: u64, used: (&a mut u64)) -> u8[] {
     }
     // `NAME.len()` is the length of the thing NAME names.
     if (kind_at(&mut c, at + 1) == 46) & (kind_at(&mut c, at + 2) == 1) & (kind_at(&mut c, at + 3) == 40) & (kind_at(&mut c, at + 4) == 41) {
-        m := tok_text(&mut c, at + 2);
-        if same(view(m), view("len")) {
+        if is_at(&mut c, at + 2, view("len")) {
             // A static string's or table's length is a known number (module-values stage 5).
             known := pv_known_literal(&mut c, view(t), true);
             exchange(used, 5);
@@ -8623,8 +8686,7 @@ fn pv_term<a>(c: (&a mut C), at: u64, used: (&a mut u64)) -> u8[] {
             push_bytes(&mut out, view(f));
             exchange(used, 3);
             if (kind_at(&mut c, at + 3) == 46) & (kind_at(&mut c, at + 4) == 1) & (kind_at(&mut c, at + 5) == 40) & (kind_at(&mut c, at + 6) == 41) {
-                m := tok_text(&mut c, at + 4);
-                if same(view(m), view("len")) {
+                if is_at(&mut c, at + 4, view("len")) {
                     push_bytes(&mut out, view(".len"));
                     exchange(used, 7);
                 }
@@ -9211,6 +9273,18 @@ fn pv_mentions<a, b>(term: &a [u8], name: &b [u8]) -> bool {
 // Drop every fact that mentions a name, its length or a field of it: a binding of the name shadows
 // what the facts said, and a write through it makes them false.
 fn pv_kill<a>(facts: (&a mut Atom[]), name: &a [u8]) -> unit {
+    // Most writes kill nothing: then the list stays as it is instead of being copied whole.
+    mut any = false;
+    for i in facts.len() {
+        x := &facts[i];
+        if pv_mentions(view(x.a), view(name)) || pv_mentions(view(x.b), view(name)) {
+            any = true;
+            break;
+        }
+    }
+    if !any {
+        return ();
+    }
     mut keep = Atom[];
     for i in facts.len() {
         x := &facts[i];
@@ -9510,8 +9584,7 @@ fn pv_span_term<a>(c: (&a mut C), lo: u64, hi: u64) -> u8[] {
     if (i < hi) & (kind_at(&mut c, i) == 38) {
         i += 1;
         if (i < hi) & (kind_at(&mut c, i) == 1) {
-            m := tok_text(&mut c, i);
-            if same(view(m), view("mut")) {
+            if is_at(&mut c, i, view("mut")) {
                 i += 1;
             }
         }
@@ -9573,8 +9646,7 @@ fn pv_span_mutates<a>(c: (&a mut C), lo: u64, hi: u64) -> bool {
         k := kind_at(&mut c, i);
         if k == 38 {
             if kind_at(&mut c, i + 1) == 1 {
-                m := tok_text(&mut c, i + 1);
-                if same(view(m), view("mut")) {
+                if is_at(&mut c, i + 1, view("mut")) {
                     return true;
                 }
             }
@@ -9787,8 +9859,7 @@ fn pv_span_calls<a>(c: (&a mut C), lo: u64, hi: u64) -> bool {
         k := kind_at(&mut c, i);
         if k == 38 {
             if kind_at(&mut c, i + 1) == 1 {
-                m := tok_text(&mut c, i + 1);
-                if same(view(m), view("mut")) {
+                if is_at(&mut c, i + 1, view("mut")) {
                     return true;
                 }
             }
@@ -9933,6 +10004,9 @@ fn pv_ir_atoms<a>(c: (&a mut C), lo: u64, hi: u64) -> Atom[] {
 }
 // A statement keyword whose own conditions and statements report what they do as they are compiled.
 fn pv_compound<a, b>(t: &b [u8]) -> bool {
+    if (t.len() < 2) || (6 < t.len()) {
+        return false;
+    }
     return same(view(t), view("if"))
         || same(view(t), view("match"))
         || same(view(t), view("while"))
@@ -9964,7 +10038,8 @@ fn pv_ir_statement<a>(c: (&a mut C), lo: u64, hi: u64) -> unit {
         return ();
     }
     mut i = lo;
-    while i < hi {
+    // A name written kills the facts that mention it; with none held there is nothing to kill.
+    while (i < hi) & (c.pv_facts.len() != 0) {
         if kind_at(&mut c, i) == 1 {
             n := tok_text(&mut c, i);
             pv_ir_wrote(&mut c, view(n));
@@ -10723,9 +10798,9 @@ fn load_file<a>(c: (&a mut C), index: u64) -> unit {
         if slot == c.file_cache_index.len() {
             c.file_cache_index.push(parked);
             c.file_cache_src.push(u8[]);
-            c.file_cache_toks.push(Tok[]);
+            c.file_cache_toks.push(lexer::Token[]);
         }
-        old_toks := exchange(&mut c.toks, Tok[]);
+        old_toks := exchange(&mut c.toks, lexer::Token[]);
         old_src := exchange(&mut c.src, u8[]);
         exchange(&mut c.file_cache_toks[slot], old_toks);
         exchange(&mut c.file_cache_src[slot], old_src);
@@ -10734,7 +10809,7 @@ fn load_file<a>(c: (&a mut C), index: u64) -> unit {
     for i in c.file_cache_index.len() {
         if c.file_cache_index[i] == index {
             // The entry stays in the list, empty, until this file is parked again.
-            back_toks := exchange(&mut c.file_cache_toks[i], Tok[]);
+            back_toks := exchange(&mut c.file_cache_toks[i], lexer::Token[]);
             back_src := exchange(&mut c.file_cache_src[i], u8[]);
             exchange(&mut c.toks, back_toks);
             exchange(&mut c.src, back_src);
@@ -10777,25 +10852,7 @@ fn load_file<a>(c: (&a mut C), index: u64) -> unit {
             src = host::read_file(view(path));
         }
     }
-    mut toks = Tok[];
-    lexed := lexer::tokenize(view(src));
-    mut line = 1;
-    mut col = 1;
-    mut at = 0;
-    for i in lexed.len() {
-        t := &lexed[i];
-        while at < t.start {
-            if src[at] == 10 {
-                line += 1;
-                col = 1;
-            } else {
-                col += 1;
-            }
-            at += 1;
-        }
-        toks.push(Tok { kind: t.kind, start: t.start, end: t.end, line: line, col: col });
-    }
-    drop(lexed);
+    toks := lexer::tokenize(view(src));
     exchange(&mut c.toks, toks);
     exchange(&mut c.src, src);
     exchange(&mut c.pos, 0);
@@ -10866,8 +10923,16 @@ fn intern_env<a>(
 ) -> u64 {
     if (k == 8) & (c.raw == 0) {
         for i in args.len() {
-            if is_array(&mut c, args[i]) {
-                array_stage_fail(&mut c, view("a type argument (an option, a tuple, a generic record or enum)"));
+            if array_owned(&mut c, args[i]) {
+                array_stage_fail(&mut c, view("a type argument, when its elements own data,"));
+            }
+        }
+        // An enum's payload is one word until enums are inline (unboxed-values.md, stage 5).
+        if c.decls[arg].is_enum != 0 {
+            for i in args.len() {
+                if is_array(&mut c, args[i]) {
+                    array_stage_fail(&mut c, view("a type argument of an enum or an option"));
+                }
             }
         }
     }
@@ -12883,6 +12948,7 @@ fn dyn_pair_of_words<a, b, d>(c: (&a mut C), data: &b [u8], table: &d [u8]) -> u
 // in the returning frame. The fact keeps the second word live at the `ret`; the caller rebuilds the
 // pair in its own frame (save_result).
 fn dyn_result<a>(c: (&a mut C)) -> unit {
+    exchange(&mut c.dyn_result_seen, 1);
     if c.facts_fn.len() != 0 {
         llvm::fact_dyn_result(&mut c.facts, copy_bytes(view(c.facts_fn)));
     }
@@ -13259,8 +13325,24 @@ fn bind_types<a, b>(c: (&a mut C), ty: u64, map: (&b u64[])) -> u64 {
         return project(&mut c, base, mode);
     }
     if (k == 6) || (k == 27) || (k == 28) || (k == 7) || (k == 12) || (k == 13) || (k == 14) || (k == 16) || (k == 20) || (k == 29)
-        || (k == 34) || (k == 35) {
+        || (k == 32) || (k == 34) || (k == 35) {
         arg = bind_types(&mut c, arg, &map);
+    }
+    if k == 32 {
+        // An array whose length a value parameter gives: bound to a constant, it is the concrete
+        // array `[T; N]` - one type, however it was reached.
+        largs := type_args(&mut c, ty);
+        if largs.len() == 1 {
+            mut l = bind_types(&mut c, largs[0], &map);
+            while (l != NO_TYPE) && is_type_id(l) && (ty_kind(&mut c, l) == 10) {
+                l = ty_arg(&mut c, l);
+            }
+            if (l != NO_TYPE) && is_type_id(l) && (ty_kind(&mut c, l) == 31) {
+                return intern_args(&mut c, 32, arg, ty_arg(&mut c, l), u64[], u64[]);
+            }
+            return intern_args(&mut c, 32, arg, 0, u64[], u64[l]);
+        }
+        return intern_args(&mut c, 32, arg, mode, u64[], u64[]);
     }
     mut args = type_args(&mut c, ty);
     for i in args.len() {
@@ -13285,10 +13367,7 @@ fn bind_types<a, b>(c: (&a mut C), ty: u64, map: (&b u64[])) -> u64 {
 }
 fn field_type<a>(c: (&a mut C), ty: u64, index: u64) -> u64 {
     d := ty_arg(&mut c, ty);
-    // An inline C array field reads as a vector of its elements (bytes for u8) in Grail code;
-    // cfield_load and cfield_store copy between the two whole.
     mut t = field_ty(&mut c, d, index);
-    t = carray_surface(&mut c, t);
     mut rs = type_regions(&mut c, ty);
     mut args = type_args(&mut c, ty);
     field := bind_types(&mut c, t, &args);
@@ -13304,7 +13383,7 @@ fn concrete_type<a>(c: (&a mut C), ty: u64) -> bool {
     }
     arg := ty_arg(&mut c, ty);
     if (k == 6) || (k == 27) || (k == 7) || (k == 10) || (k == 12) || (k == 13) || (k == 14) || (k == 16) || (k == 20) || (k == 29)
-        || (k == 34) || (k == 35) {
+        || (k == 32) || (k == 34) || (k == 35) {
         if !concrete_type(&mut c, arg) {
             return false;
         }
@@ -13694,7 +13773,11 @@ fn source_type_name<a>(c: (&a mut C), ty: u64) -> u8[] {
         inner := source_type_name(&mut c, arg);
         push_bytes(&mut out, view(inner));
         push_bytes(&mut out, view("; "));
-        decimal(&mut out, ty_mode(&mut c, ty));
+        if type_args(&mut c, ty).len() != 0 {
+            out.push(78);
+        } else {
+            decimal(&mut out, ty_mode(&mut c, ty));
+        }
         out.push(93);
         return out;
     }
@@ -14512,23 +14595,40 @@ fn parse_type<a>(c: (&a mut C)) -> u64 {
         advance(&mut c);
         k := parse_type(&mut c);
         if eat(&mut c, view(";")) {
-            // `[T; N]`: N elements of T back to back, in C layout (docs/design/fixed-arrays.md). As a
-            // field of an extern record it still reads and writes as a vector T[] of exactly N
-            // elements, until arrays are fields everywhere.
+            // `[T; N]`: N elements of T back to back, in C layout (docs/design/fixed-arrays.md).
+            // `N` may be a value parameter (`fn f<@n: u64>(a: &[f32; n])`): bound, it is the constant;
+            // in a template it is the parameter itself, carried as the array's one type argument
+            // until a specialisation binds it (bind_types, infer_type).
+            if (kind(&mut c) == 1) && (value_param(&mut c, view(tok_text(&mut c, c.pos))) != 0) && (kind_at(&mut c, c.pos + 1) == 93) {
+                mut lenty = type_level_value(&mut c);
+                // A binding may arrive behind an indirection (kind 10), as value_param_value says.
+                while (lenty != NO_TYPE) && is_type_id(lenty) && (ty_kind(&mut c, lenty) == 10) {
+                    lenty = ty_arg(&mut c, lenty);
+                }
+                expect(&mut c, view("]"));
+                if ty_kind(&mut c, lenty) == 31 {
+                    if ty_arg(&mut c, lenty) == 0 {
+                        fail(&mut c, view("an array length is a positive integer constant"));
+                    }
+                    return type_suffixes(&mut c, intern_args(&mut c, 32, k, ty_arg(&mut c, lenty), u64[], u64[]));
+                }
+                return type_suffixes(&mut c, intern_args(&mut c, 32, k, 0, u64[], u64[lenty]));
+            }
             n := ct_expr(&mut c, 0);
             if (n.ty != 0) || (n.value == 0) {
                 fail(&mut c, view("an array length is a positive integer constant"));
             }
             expect(&mut c, view("]"));
-            return intern_args(&mut c, 32, k, n.value, u64[], u64[]);
+            t = intern_args(&mut c, 32, k, n.value, u64[], u64[]);
+        } else {
+            expect(&mut c, view(":"));
+            v := parse_type(&mut c);
+            expect(&mut c, view("]"));
+            mut ma = u64[];
+            ma.push(k);
+            ma.push(v);
+            t = named_type(&mut c, copy_bytes(view("hashmap")), copy_bytes(view("Map")), ma);
         }
-        expect(&mut c, view(":"));
-        v := parse_type(&mut c);
-        expect(&mut c, view("]"));
-        mut ma = u64[];
-        ma.push(k);
-        ma.push(v);
-        t = named_type(&mut c, copy_bytes(view("hashmap")), copy_bytes(view("Map")), ma);
     } else {
         t = parse_type_base(&mut c);
     }
@@ -14585,6 +14685,9 @@ fn type_suffixes<a>(c: (&a mut C), base: u64) -> u64 {
     while is(&mut c, view("[")) {
         advance(&mut c);
         expect(&mut c, view("]"));
+        if array_owned(&mut c, out) {
+            array_stage_fail(&mut c, view("a vector's element, when its elements own data,"));
+        }
         out = vec_of(&mut c, out);
     }
     return out;
@@ -15633,8 +15736,11 @@ fn decl<a>(c: (&a mut C), pass: u64) -> unit {
                 diag_label(&mut c, spots[spot - 1], view("the first one is here"));
                 duplicate_field_fail(&mut c, view(name), view(f), is_enum, at_field);
             }
-            if is_array(&mut c, ty) {
-                array_stage_fail(&mut c, view("a field of a struct or a variant's payload"));
+            if (is_enum != 0) && is_array(&mut c, ty) {
+                array_stage_fail(&mut c, view("a variant's payload"));
+            }
+            if array_owned(&mut c, ty) {
+                array_stage_fail(&mut c, view("a field, when its elements own data,"));
             }
             spots.push(at_field);
             pending.push(Field { name: f, ty: ty, pred: fp });
@@ -17129,6 +17235,11 @@ fn extern_has_body<a>(c: (&a mut C), start: u64) -> u64 {
             depth += 1;
         }
         if (k == 41) || (k == 62) || (k == 93) {
+            if depth == 0 {
+                // A closer with no opener: not a declaration this scan can read. The parser that
+                // follows reports it where it is.
+                return 0;
+            }
             depth -= 1;
         }
         if depth == 0 {
@@ -17355,10 +17466,6 @@ fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     mut ret = 1;
     if eat(&mut c, view("->")) {
         ret = parse_type(&mut c);
-        if is_array(&mut c, ret) {
-            diag_help(&mut c, view("take a `&mut [T; N]` parameter and fill it"));
-            array_stage_fail(&mut c, view("a function result"));
-        }
         ffi_direct_result(&mut c, ret, view("extern C results must be an integer, f32, f64, unit, CStr, handle or cfn"));
     }
     expect(&mut c, view(";"));
@@ -18818,9 +18925,9 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                 }
                 ty = parse_type(&mut c);
             }
-            if is_array(&mut c, ty) {
-                diag_help(&mut c, view("pass it by reference: `&[T; N]` to read it, `&mut [T; N]` to change it"));
-                array_stage_fail(&mut c, view("a parameter taken by value"));
+            if is_array(&mut c, ty) && (export != 0) {
+                diag_help(&mut c, view("C takes an array parameter as a pointer: declare it `&[T; N]` or `&mut [T; N]`"));
+                fail(&mut c, view("C cannot pass an array by value"));
             }
             // `p: T where P`: the parameter's refinement (docs/design/refinements.md).
             mut pp = no_pred();
@@ -18902,9 +19009,8 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     mut rpred = no_pred();
     if eat(&mut c, view("->")) {
         ret = parse_type(&mut c);
-        if is_array(&mut c, ret) {
-            diag_help(&mut c, view("take a `&mut [T; N]` parameter and fill it"));
-            array_stage_fail(&mut c, view("a function result"));
+        if is_array(&mut c, ret) && (export != 0) {
+            fail(&mut c, view("C cannot return an array by value: return a record that holds it, or fill a `&mut [T; N]`"));
         }
         // `-> T ensures P`: the result's refinement, with `result` naming the value.
         if is(&mut c, view("ensures")) {
@@ -19265,11 +19371,18 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     exchange(&mut c.caddr, u64[]);
     exchange(&mut c.interior, u64[]);
     exchange(&mut c.boxed, u64[]);
+    exchange(&mut c.word_refs, u64[]);
     // A function with refined parameters is two: the body, `<name>.proved`, which a proved call
     // enters and which checks nothing, and `<name>`, a wrapper emitted after it that checks the
     // parameters and calls the body (ref_wrapper). Both are ordinary functions to every later pass.
     wrapped := (export == 0) & (c.raw == 0) & (ref_pred_count(&mut c) != 0);
     exchange(&mut c.proved_label, u64(wrapped));
+    exchange(&mut c.dyn_result_seen, 0);
+    // The body's facts are keyed by the symbol it is labelled with: a fact about `<name>` would not
+    // reach `<name>.proved`, and the optimiser would read its two-word result as one word.
+    if wrapped & (c.facts_fn.len() != 0) {
+        push_bytes(&mut c.facts_fn, view(".proved"));
+    }
     func_directive(&mut c, view(m), view(name), view(body_symbol), export);
     if (c.debug != 0) & (c.validating == 0) {
         dstart = label(&mut c);
@@ -25416,25 +25529,7 @@ fn dr_parse_tail<a>(c: (&a mut C), pass: u64) -> unit {
     } else {
         push_bytes(&mut c.file_text[here], view(text));
     }
-    lexed := lexer::tokenize(view(c.src));
-    mut toks = Tok[];
-    mut line = 1;
-    mut col = 1;
-    mut at = 0;
-    for i in lexed.len() {
-        t := &lexed[i];
-        while at < t.start {
-            if c.src[at] == 10 {
-                line += 1;
-                col = 1;
-            } else {
-                col += 1;
-            }
-            at += 1;
-        }
-        toks.push(Tok { kind: t.kind, start: t.start, end: t.end, line: line, col: col });
-    }
-    drop(lexed);
+    toks := lexer::tokenize(view(c.src));
     exchange(&mut c.toks, toks);
     exchange(&mut c.pos, before);
     while kind(&mut c) != 0 {
@@ -27207,6 +27302,10 @@ fn plain<a>(c: (&a mut C), alias: u64) -> bool {
 // plain record's words, or an `extern "C"` record's C size - and 0 for a vector of words.
 fn flat_bytes<a>(c: (&a mut C), elem: u64) -> u64 {
     ty := base_type(&mut c, elem);
+    // `[f32; 3][]` is a C `float[n][3]`: elements of exactly the array's bytes.
+    if is_array(&mut c, ty) {
+        return array_bytes(&mut c, ty);
+    }
     if plain(&mut c, ty) {
         return record_words(&mut c, ty) * 8;
     }
@@ -27277,6 +27376,14 @@ fn container_record<a>(c: (&a mut C), ty: u64) -> bool {
 }
 fn layout_bits<a>(c: (&a mut C), alias: u64) -> u64 {
     ty := base_type(&mut c, alias);
+    // An array of plain data is plain: its bytes are stored inline wherever it is held. One that
+    // owns its elements is not (until records with drops are inline, unboxed-values.md stage 4).
+    if is_array(&mut c, ty) {
+        if needs_drop(&mut c, ty_arg(&mut c, ty)) {
+            return 0;
+        }
+        return 1;
+    }
     while c.layout_memo.len() <= ty {
         c.layout_memo.push(0);
     }
@@ -27296,7 +27403,7 @@ fn layout_bits<a>(c: (&a mut C), alias: u64) -> u64 {
         for i in c.decls[d].count {
             ft := base_type(&mut c, field_type(&mut c, ty, i));
             k := ty_kind(&mut c, ft);
-            if k == 8 {
+            if (k == 8) || (k == 32) {
                 if (layout_bits(&mut c, ft) & 1) != 0 {
                     holds = true;
                 } else {
@@ -27375,6 +27482,10 @@ fn enum_frame<a>(c: (&a mut C), tag: u64, payload: u64) -> u64 {
 // its value is the address of frame words, its drop frees nothing, and a holder that keeps it past
 // the statement boxes it.
 fn framed<a>(c: (&a mut C), ty: u64) -> bool {
+    // An array is always frame storage (docs/design/fixed-arrays.md).
+    if is_array(&mut c, ty) {
+        return true;
+    }
     return plain(&mut c, ty);
 }
 // N adjacent fresh frame slots holding one value, declared to every pass by an aggregate fact
@@ -27499,6 +27610,10 @@ fn holder_drop<a>(c: (&a mut C), ty: u64) -> unit {
 // A value that is about to be owned or moved and is still an interior address gets a box of its
 // own holding a copy of the words, and the slot holds the box from here on.
 fn materialise<a>(c: (&a mut C), slot: u64, ty: u64) -> unit {
+    // An interior array is copied into storage of its own when it is bound or moved (move_value).
+    if is_array(&mut c, ty) {
+        return ();
+    }
     if framed(&mut c, ty) {
         for i in c.boxed.len() {
             if c.boxed[i] == slot {
@@ -27543,6 +27658,11 @@ fn materialise<a>(c: (&a mut C), slot: u64, ty: u64) -> unit {
 }
 // Moves the boxed plain record `value` into the words at `dst`, and frees the box.
 fn copy_into<a>(c: (&a mut C), dst: u64, value: u64, ty: u64) -> unit {
+    if is_array(&mut c, ty) {
+        // An array's storage is the frame's, never a box to free.
+        array_copy(&mut c, dst, value, array_bytes(&mut c, ty));
+        return ();
+    }
     words := record_words(&mut c, base_type(&mut c, ty));
     bytes := imm(&mut c, words * 8);
     invoke(&mut c, view("rt_copy_bytes"), three(dst, value, bytes));
@@ -27565,6 +27685,9 @@ fn field_reference<a>(c: (&a mut C), base: u64, ty: u64, k: u64) -> u64 {
 }
 // The words a record's own storage takes: a word per field, or an `extern "C"` record's C size.
 fn record_words<a>(c: (&a mut C), ty: u64) -> u64 {
+    if is_array(&mut c, ty) {
+        return (array_bytes(&mut c, ty) + 7) / 8;
+    }
     if small_enum(&mut c, ty) {
         return 2;
     }
@@ -27618,10 +27741,6 @@ fn field_load<a>(c: (&a mut C), base: u64, ty: u64, k: u64, address: u64) -> u64
 // new instruction selection.
 // The runtime copy parameters of a C array field's element: (size, signed, kind, record words),
 // kind 0 an integer or word, 1 an f32, 2 an extern record.
-fn carray_elem<a>(c: (&a mut C), arr: u64) -> u64[] {
-    elem := ty_arg(&mut c, arr);
-    return carray_elem_of(&mut c, elem);
-}
 fn carray_elem_of<a>(c: (&a mut C), elem: u64) -> u64[] {
     size := ffi_field_size(&mut c, elem);
     mut signed = 0;
@@ -27653,25 +27772,25 @@ fn cfield_load<a>(c: (&a mut C), base: u64, d: u64, k: u64, address: u64) -> u64
     size := ffi_field_size(&mut c, ty);
     more := exchange(&mut c.cfield_more, 0);
     if ty_kind(&mut c, ty) == 32 {
-        // Read whole into a fresh vector, which a chained `.len()`, `[i]` or `.text()` then uses;
-        // there is no reference into the inline array (`&r.f`, `&mut r.f`), as that would let code
-        // reach past its N elements.
-        if address != 0 {
-            fail(&mut c, view("a C array field has no reference: read it whole as a vector, or assign it whole"));
-        }
-        e := carray_elem(&mut c, ty);
+        // An array field is its bytes in place, as an embedded record's are: a reference, an index,
+        // a method or an assignment uses that interior address; a whole read copies the elements
+        // into storage of the reader's own, since a C struct is plain data.
         get(&mut c, base, view("%rax"));
-        o(&mut c, view("addq $"));
+        o(&mut c, view("leaq "));
         on(&mut c, off);
-        o(&mut c, view(",%rax\n"));
+        o(&mut c, view("(%rax),%rax\n"));
         at := save(&mut c);
-        mut args = u64[at];
-        count := ty_mode(&mut c, ty);
-        args.push(imm(&mut c, count));
-        for j in 4 {
-            args.push(imm(&mut c, e[j]));
+        if address != 0 {
+            c.caddr.push(at);
+            c.caddr.push(ty);
+            return at;
         }
-        return invoke(&mut c, view("rt_carray_load"), args);
+        if (more != 0) || (kind(&mut c) == 91) || (kind(&mut c) == 46) {
+            return at;
+        }
+        copy := array_fresh_copy(&mut c, at, ty);
+        c.array_fresh.push(copy);
+        return copy;
     }
     if is_c_record(&mut c, ty) != 0 {
         // The embedded record's bytes start at base+off: a further projection (o.inner.x) and an
@@ -27830,23 +27949,13 @@ fn cfield_store<a>(c: (&a mut C), base: u64, d: u64, k: u64, value: u64) -> unit
     off := ffi_offset(&mut c, d, k);
     size := ffi_field_size(&mut c, ty);
     if ty_kind(&mut c, ty) == 32 {
-        // A whole vector into the inline array: its length must be the array's (checked at run time).
-        e := carray_elem(&mut c, ty);
+        // A whole array into the field: N elements, the count fixed by the type.
         get(&mut c, base, view("%rax"));
-        o(&mut c, view("addq $"));
+        o(&mut c, view("leaq "));
         on(&mut c, off);
-        o(&mut c, view(",%rax\n"));
+        o(&mut c, view("(%rax),%rax\n"));
         at := save(&mut c);
-        mut args = u64[at, value];
-        count := ty_mode(&mut c, ty);
-        args.push(imm(&mut c, count));
-        args.push(imm(&mut c, e[0]));
-        args.push(imm(&mut c, e[2]));
-        invoke(&mut c, view("rt_carray_store"), args);
-        // The vector was handed over (callers move it in) and its elements are now in the array.
-        vty := carray_surface(&mut c, ty);
-        get(&mut c, value, view("%rdi"));
-        drop_call(&mut c, vty);
+        array_copy(&mut c, at, value, array_bytes(&mut c, ty));
         return ();
     }
     if is_c_record(&mut c, ty) != 0 {
@@ -27932,6 +28041,9 @@ fn embedded_place<a>(c: (&a mut C), slot: u64) -> bool {
 // Loads a narrow C field through its address slot as a Grail word (sign- or zero-extended,
 // f32 widened to the binary64 word Grail holds).
 fn caddr_load<a>(c: (&a mut C), slot: u64, ty: u64) -> u64 {
+    if is_array(&mut c, ty) {
+        return slot;
+    }
     mut signed = 0;
     if ty_kind(&mut c, ty) == 18 {
         signed = ty_mode(&mut c, ty);
@@ -27941,6 +28053,10 @@ fn caddr_load<a>(c: (&a mut C), slot: u64, ty: u64) -> u64 {
 }
 // Stores a Grail word into a narrow C field through its address slot.
 fn caddr_store<a>(c: (&a mut C), slot: u64, ty: u64, value: u64) -> unit {
+    if is_array(&mut c, ty) {
+        array_copy(&mut c, slot, value, array_bytes(&mut c, ty));
+        return ();
+    }
     if is_c_record(&mut c, ty) != 0 {
         // The moved-in record's bytes replace the embedded ones; its own buffer is released.
         d := ty_arg(&mut c, ty);
@@ -28757,6 +28873,10 @@ fn field_path<a>(c: (&a mut C), id: u64, lty: u64, address: u64) -> Val {
             } else {
                 n = field_load(&mut c, b, base.ty, k, last);
             }
+            if last & subword(&mut c, fty) {
+                // Every field of a Grail record is at least a word: the address is untagged.
+                c.word_refs.push(n);
+            }
         }
         if last {
             // 2 is a `&mut` of the field, 3 the place an assignment writes (assign_field_path).
@@ -28819,9 +28939,9 @@ fn field_path<a>(c: (&a mut C), id: u64, lty: u64, address: u64) -> Val {
         next_dot := kind(&mut c) == 46;
         inner_c := is_c_record(&mut c, fty);
         raw_fty := field_ty(&mut c, d, k);
-        if (outer_c != 0) & (address == 0) & (ty_kind(&mut c, raw_fty) == 32) {
-            // A C array field read whole is a fresh vector (rt_carray_load copied the elements out):
-            // reading it reads the container, and the reader owns the copy.
+        if (outer_c != 0) & (address == 0) & (ty_kind(&mut c, raw_fty) == 32) & !next_dot & (kind(&mut c) != 91) {
+            // A C array field read whole is a copy (cfield_load): reading it reads the container, and
+            // the reader owns the copy.
             observe(&mut c, b);
             own(&mut c, n, fty);
             return val(n, fty);
@@ -29199,6 +29319,32 @@ fn infer_type<a, b>(c: (&a mut C), formal: u64, actual: u64, map: (&b mut u64[])
         infer_type(&mut c, arg, aa, &mut map);
         return ();
     }
+    if k == 32 {
+        // The element type, and a value parameter giving the length from the argument's length.
+        infer_type(&mut c, arg, ty_arg(&mut c, actual), &mut map);
+        largs := type_args(&mut c, formal);
+        if largs.len() == 1 {
+            length := intern(&mut c, 31, ty_mode(&mut c, actual));
+            l := largs[0];
+            if (ty_kind(&mut c, l) == 9) && (ty_arg(&mut c, l) < map.len()) && (map[ty_arg(&mut c, l)] != NO_TYPE) {
+                mut old = map[ty_arg(&mut c, l)];
+                while ty_kind(&mut c, old) == 10 {
+                    old = ty_arg(&mut c, old);
+                }
+                if (ty_kind(&mut c, old) == 31) && (ty_arg(&mut c, old) != ty_mode(&mut c, actual)) {
+                    mut msg = copy_bytes(view("one length parameter, two lengths: this argument is `"));
+                    push_bytes(&mut msg, view(source_type_name(&mut c, actual)));
+                    push_bytes(&mut msg, view("` where an earlier one fixed the length at "));
+                    decimal(&mut msg, ty_arg(&mut c, old));
+                    fail(&mut c, view(msg));
+                }
+            }
+            infer_type(&mut c, l, length, &mut map);
+        } else if ty_mode(&mut c, formal) != ty_mode(&mut c, actual) {
+            require_type(&mut c, actual, formal);
+        }
+        return ();
+    }
     if (k == 12) || (k == 20) {
         result := ty_arg(&mut c, actual);
         infer_type(&mut c, arg, result, &mut map);
@@ -29499,6 +29645,9 @@ fn structural_eq<a>(c: (&a mut C), x: u64, y: u64, ty: u64, depth: u64) -> u64 {
 // A reference to bytes/string passed where a view (&a [u8]) is expected becomes a view of the same
 // storage (like Rust's &String -> &str); the view keeps the reference's borrow alive.
 fn coerce_view<a>(c: (&a mut C), v: Val, formal: u64) -> Val {
+    if is_type_id(formal) && (ty_kind(&mut c, v.ty) == 7) && is_array(&mut c, ty_arg(&mut c, v.ty)) {
+        return array_to_slice(&mut c, v, formal);
+    }
     // `&v` / `&mut v` of a vector passed for a typed slice `&[T]` / `&mut [T]`: the slice over the
     // whole vector, borrowing it as `&v[:]` would (docs/design/typed-slices.md).
     if (ty_kind(&mut c, formal) == 27) && (ty_kind(&mut c, v.ty) == 7) {
@@ -29577,21 +29726,6 @@ fn reborrow_view<a>(c: (&a mut C), v: Val, formal: u64) -> Val {
     view_bonds(&mut c, slot, v.t, mode, false);
     return val(slot, vty);
 }
-// A field's type as Grail code sees it: an inline C array `[T; N]` is the vector `T[]` it is copied
-// to and from.
-fn surface_field_ty<a>(c: (&a mut C), d: u64, k: u64) -> u64 {
-    t := field_ty(&mut c, d, k);
-    return carray_surface(&mut c, t);
-}
-// `[T; N]` reads as `T[]` - `[u8; N]` as the byte sequence, as `u8[]` always is - so a char buffer
-// is ordinary bytes in Grail code.
-fn carray_surface<a>(c: (&a mut C), t: u64) -> u64 {
-    if ty_kind(&mut c, t) != 32 {
-        return t;
-    }
-    elem := ty_arg(&mut c, t);
-    return vec_of(&mut c, elem);
-}
 // ---- Fixed-size arrays (docs/design/fixed-arrays.md) ----
 // `[T; N]` is N elements of T back to back, in C layout. An array value is the address of its bytes,
 // so `&a` and `&mut a` are that same word (`direct`). Its bytes live in the frame: one aggregate of
@@ -29604,6 +29738,11 @@ fn is_array<a>(c: (&a mut C), ty: u64) -> bool {
         return false;
     }
     return ty_kind(&mut c, base_type(&mut c, ty)) == 32;
+}
+// An array whose length is a value parameter not bound yet (a generic template's): its length is
+// unknown, so nothing that depends on it is judged until the specialisation.
+fn array_parametric<a>(c: (&a mut C), ty: u64) -> bool {
+    return is_array(&mut c, ty) && (type_args(&mut c, base_type(&mut c, ty)).len() != 0);
 }
 fn array_len<a>(c: (&a mut C), ty: u64) -> u64 {
     return ty_mode(&mut c, base_type(&mut c, ty));
@@ -29637,7 +29776,51 @@ fn array_elem_bytes<a>(c: (&a mut C), alias: u64) -> u64 {
         }
         return 8;
     }
+    // A handle, a CStr or a CPtr: one word.
+    if (k == 23) || (k == 24) || (k == 26) {
+        return 8;
+    }
+    if is_c_record(&mut c, ty) != 0 {
+        return ffi_record_size(&mut c, ty_arg(&mut c, ty));
+    }
+    if plain(&mut c, ty) {
+        return record_words(&mut c, ty) * 8;
+    }
+    if (k == 19) || (k == 22) {
+        return 8;
+    }
+    // An owner - bytes, a string, a vector, a record that owns data, an enum or an option - is the
+    // one word that owns it.
+    if (k == 3) || (k == 4) || (k == 6) || (k == 8) {
+        return 8;
+    }
     return 0;
+}
+// Whether the array's elements own something: such an array moves, drops its elements, and holds
+// them as one word each.
+fn array_owned<a>(c: (&a mut C), ty: u64) -> bool {
+    return is_array(&mut c, ty) && needs_drop(&mut c, array_elem(&mut c, ty));
+}
+// An element `a[i]` reads as a value: a number, a bool, a char or a C word. Anything else -
+// an owner, a record, an array - is reached through its place.
+fn array_read_elem<a>(c: (&a mut C), elem: u64) -> bool {
+    if is_array(&mut c, elem) || array_record_elem(&mut c, elem) || needs_drop(&mut c, elem) {
+        return false;
+    }
+    return true;
+}
+// A record element (an extern record's C bytes or a plain record's words): stored and read as its
+// bytes, reached through its address.
+fn array_record_elem<a>(c: (&a mut C), elem: u64) -> bool {
+    ty := base_type(&mut c, elem);
+    return (ty != 0) && (ty_kind(&mut c, ty) == 8) && ((is_c_record(&mut c, ty) != 0) || plain(&mut c, ty));
+}
+// An element read as its value by `a[i]`: a number, a bool-free scalar, or a C word.
+fn array_scalar_elem<a>(c: (&a mut C), elem: u64) -> bool {
+    if is_array(&mut c, elem) || array_record_elem(&mut c, elem) {
+        return false;
+    }
+    return true;
 }
 fn array_bytes<a>(c: (&a mut C), ty: u64) -> u64 {
     return array_elem_bytes(&mut c, array_elem(&mut c, ty)) * array_len(&mut c, ty);
@@ -29648,7 +29831,7 @@ fn array_moves<a>(c: (&a mut C), ty: u64) -> bool {
     if !is_array(&mut c, ty) {
         return false;
     }
-    return 32 < array_bytes(&mut c, ty);
+    return (32 < array_bytes(&mut c, ty)) || needs_drop(&mut c, array_elem(&mut c, ty));
 }
 // A value that is moved rather than copied but owns nothing to drop: an exclusive reference, or an
 // array larger than the copy rule's four words.
@@ -29656,7 +29839,7 @@ fn affine_nodrop<a>(c: (&a mut C), ty: u64) -> bool {
     if c.raw != 0 {
         return false;
     }
-    return (ty_kind(&mut c, ty) == 7) || array_moves(&mut c, ty);
+    return (ty_kind(&mut c, ty) == 7) || (array_moves(&mut c, ty) && !needs_drop(&mut c, ty));
 }
 // The frame of the function just compiled: larger than a page, the output gets stack probes, so the
 // frame is touched a page at a time from the top and can never step over a stack's guard page; larger
@@ -29690,7 +29873,7 @@ fn array_check<a>(c: (&a mut C), ty: u64) -> unit {
     if array_elem_bytes(&mut c, array_elem(&mut c, ty)) == 0 {
         mut msg = copy_bytes(view("`"));
         push_bytes(&mut msg, view(source_type_name(&mut c, ty)));
-        push_bytes(&mut msg, view("`: an array element is a number or another array in this version"));
+        push_bytes(&mut msg, view("`: an array element is a number, a C handle or pointer, a plain or extern record, or another array"));
         fail(&mut c, view(msg));
     }
     return ();
@@ -29754,7 +29937,9 @@ fn array_fresh_copy<a>(c: (&a mut C), src: u64, ty: u64) -> u64 {
 // than copying it: the binding's scope ends before the site that made the storage can run again.
 // Anything else (a binding, an element, an assignment's target) gets a copy (move_value).
 fn bind_value<a>(c: (&a mut C), v: Val, ty: u64) -> Val {
-    if is_array(&mut c, ty) {
+    // An array that owns its elements is bound as any owner is: the binding gets an owner record of
+    // its own (move_value), so its scope's end drops the elements.
+    if is_array(&mut c, ty) && !needs_drop(&mut c, ty) {
         for i in c.array_fresh.len() {
             if c.array_fresh[i] == v.t {
                 c.array_fresh[i] = 0;
@@ -29806,9 +29991,23 @@ fn array_store_elem<a>(c: (&a mut C), addr: u64, elem: u64, value: Val) -> unit 
         }
         return ();
     }
+    if array_record_elem(&mut c, elem) {
+        // The record's bytes are copied in and the record it was is used up (its box freed).
+        move_out(&mut c, val(value.t, value.ty));
+        if is_c_record(&mut c, elem) != 0 {
+            caddr_store(&mut c, addr, base_type(&mut c, elem), value.t);
+        } else {
+            copy_into(&mut c, addr, value.t, elem);
+        }
+        return ();
+    }
     if subword(&mut c, elem) {
         caddr_store(&mut c, addr, base_type(&mut c, elem), value.t);
         return ();
+    }
+    if needs_drop(&mut c, elem) {
+        // The element's owner moves into the array.
+        move_out(&mut c, val(value.t, value.ty));
     }
     get(&mut c, value.t, view("%rax"));
     get(&mut c, addr, view("%rcx"));
@@ -29842,9 +30041,12 @@ fn array_literal<a>(c: (&a mut C), ty: u64) -> Val {
         v = adopt_value(&mut c, v, estart, c.pos, elem);
         require_type(&mut c, v.ty, elem);
         if (count == 0) & is(&mut c, view(";")) {
+            if needs_drop(&mut c, elem) {
+                fail(&mut c, view("a repeated element must be a plain value; give each owned element"));
+            }
             advance(&mut c);
             r := ct_expr(&mut c, 0);
-            if (r.ty != 0) || (r.value != n) {
+            if ((r.ty != 0) || (r.value != n)) && !array_parametric(&mut c, ty) && (c.ct_unbound == 0) {
                 mut msg = copy_bytes(view("this repeat makes "));
                 decimal(&mut msg, r.value);
                 push_bytes(&mut msg, view(" elements, and `"));
@@ -29877,7 +30079,7 @@ fn array_literal<a>(c: (&a mut C), ty: u64) -> Val {
         }
     }
     expect(&mut c, view("]"));
-    if count != n {
+    if (count != n) && !array_parametric(&mut c, ty) {
         mut msg = copy_bytes(view("this literal has "));
         decimal(&mut msg, count);
         push_bytes(&mut msg, view(" elements, and `"));
@@ -29928,7 +30130,7 @@ fn array_index<a>(c: (&a mut C), value: Val, x: Val, access: u64, base_name: u8[
     if (kind(&mut c) == 2) & (kind_at(&mut c, bstart + 1) == 93) {
         literal = 1;
         konst = literal_value(&mut c, view(tok_text(&mut c, bstart)));
-        if n <= konst {
+        if (n <= konst) && !array_parametric(&mut c, xty) {
             mut msg = copy_bytes(view("index "));
             decimal(&mut msg, konst);
             push_bytes(&mut msg, view(" is out of bounds for `"));
@@ -29957,13 +30159,17 @@ fn array_index<a>(c: (&a mut C), value: Val, x: Val, access: u64, base_name: u8[
         slot = array_element(&mut c, xt, bound.t, xty, proved);
     }
     array_mark(&mut c, slot, elem);
+    // A boxed record held as an owning word is reached by its own address, as in a vector.
+    if !array_record_elem(&mut c, elem) && !is_array(&mut c, elem) {
+        slot = word_reference(&mut c, slot, elem);
+    }
     ty := reference_type(&mut c, elem, access == 2);
     root := place_of(&mut c, xt);
     target := member_place(&mut c, root, 0, elem);
     own(&mut c, slot, ty);
     bind_loan(&mut c, slot, xt, root, access == 2);
     set_target(&mut c, slot, target, slot + 1);
-    if (access == 0) & !is_array(&mut c, elem) {
+    if (access == 0) & array_read_elem(&mut c, elem) {
         result := array_load_elem(&mut c, slot, elem);
         release_temporary(&mut c, slot);
         return val(result, elem);
@@ -29990,7 +30196,7 @@ fn array_eq<a>(c: (&a mut C), x: u64, y: u64, ty: u64, depth: u64) -> u64 {
     bx := invoke(&mut c, view("rt_aslotu"), three(y, i, imm(&mut c, w)));
     mut a = ax;
     mut b = bx;
-    if !is_array(&mut c, elem) {
+    if !is_array(&mut c, elem) && !array_record_elem(&mut c, elem) {
         a = array_load_elem(&mut c, ax, elem);
         b = array_load_elem(&mut c, bx, elem);
     }
@@ -30033,6 +30239,8 @@ fn array_text<a>(c: (&a mut C), acc: u64, x: u64, ty: u64, depth: u64) -> unit {
     at := invoke(&mut c, view("rt_aslotu"), three(x, i, imm(&mut c, w)));
     if is_array(&mut c, elem) {
         array_text(&mut c, acc, at, base_type(&mut c, elem), depth + 1);
+    } else if array_record_elem(&mut c, elem) {
+        record_text(&mut c, acc, at, base_type(&mut c, elem), depth + 1);
     } else {
         part := array_load_elem(&mut c, at, elem);
         if code != 0 {
@@ -30049,8 +30257,149 @@ fn array_text<a>(c: (&a mut C), acc: u64, x: u64, ty: u64, depth: u64) -> unit {
     format_raw(&mut c, acc, view("]"));
     return ();
 }
-// `.len()`, `.copy()` on an array.
-fn array_method<a, b>(c: (&a mut C), xt: u64, xty: u64, input: u64, name: &b [u8]) -> Val {
+// An element a vector runtime function handed back boxed, as an array: its bytes go into frame
+// storage of their own and the box is freed. Anything else is the box itself.
+fn array_unbox<a>(c: (&a mut C), boxed: u64, ty: u64) -> u64 {
+    if !is_array(&mut c, ty) {
+        return boxed;
+    }
+    copy := array_fresh_copy(&mut c, boxed, ty);
+    invoke(&mut c, view("rt_free"), one(boxed));
+    c.array_fresh.push(copy);
+    return copy;
+}
+// The slice of all N elements of the array at `xt`: `&[T]` (`&[u8]` for bytes), exclusive when
+// `mode` is 1, borrowing the array for as long as the slice lives. Until views are pairs in the frame
+// (unboxed-values.md, stage 2) the slice is a view record on the heap, made here: one allocation, so
+// a hot path takes `&[T; N]` instead.
+fn array_view<a>(c: (&a mut C), xt: u64, xty: u64, mode: u64) -> Val {
+    elem := array_elem(&mut c, xty);
+    mut args = two(xt, imm(&mut c, 0));
+    args.push(imm(&mut c, array_len(&mut c, xty)));
+    args.push(imm(&mut c, array_elem_bytes(&mut c, elem)));
+    args.push(imm(&mut c, array_len(&mut c, xty)));
+    slot := invoke(&mut c, view("rt_aslice"), args);
+    return array_view_value(&mut c, slot, xt, elem, mode);
+}
+fn array_view_value<a>(c: (&a mut C), slot: u64, xt: u64, elem: u64, mode: u64) -> Val {
+    mut vty = 0;
+    if elem == int_type(&mut c, 8, 0) {
+        vty = intern_full(&mut c, 5, 0, mode, u64[]);
+    } else {
+        vty = intern_full(&mut c, 27, elem, mode, u64[]);
+    }
+    own(&mut c, slot, vty);
+    view_bonds(&mut c, slot, xt, mode, false);
+    return val(slot, vty);
+}
+// Whether a slice of `elem` - a vector's element stored as the array stores it - has the array's
+// element width, so a copy between the two is a copy of bytes.
+fn array_same_width<a>(c: (&a mut C), elem: u64) -> bool {
+    w := array_elem_bytes(&mut c, elem);
+    if is_array(&mut c, elem) {
+        return true;
+    }
+    if elem == int_type(&mut c, 8, 0) {
+        return true;
+    }
+    if narrow_code(&mut c, elem) != 0 {
+        return w == 4;
+    }
+    return w == 8;
+}
+// `a[lo: hi]`, after the `[`: a slice of elements lo..hi, checked against the constant N.
+fn array_subslice<a>(c: (&a mut C), value: Val, x: Val, access: u64) -> Val {
+    lo := expr(&mut c, 0);
+    require_type(&mut c, lo.ty, 0);
+    expect(&mut c, view(":"));
+    hi := expr(&mut c, 0);
+    require_type(&mut c, hi.ty, 0);
+    expect(&mut c, view("]"));
+    mut mode = 0;
+    if ty_kind(&mut c, value.ty) == 7 {
+        mode = ty_mode(&mut c, value.ty);
+    }
+    if access == 2 {
+        mode = 1;
+    }
+    elem := array_elem(&mut c, x.ty);
+    mut args = two(x.t, lo.t);
+    args.push(hi.t);
+    args.push(imm(&mut c, array_elem_bytes(&mut c, elem)));
+    args.push(imm(&mut c, array_len(&mut c, x.ty)));
+    slot := invoke(&mut c, view("rt_aslice"), args);
+    return array_view_value(&mut c, slot, x.t, elem, mode);
+}
+// A `&T`/`&mut T` argument or initializer whose referent is an array, where `&[T]`/`&mut [T]` (or a
+// byte view) of its element type is expected: the slice of all of it.
+fn array_to_slice<a>(c: (&a mut C), v: Val, formal: u64) -> Val {
+    if (c.raw != 0) || (formal == 0) || (formal == NO_TYPE) || !is_type_id(formal) || (ty_kind(&mut c, v.ty) != 7) {
+        return v;
+    }
+    fk := ty_kind(&mut c, formal);
+    if (fk != 27) & (fk != 5) {
+        return v;
+    }
+    inner := ty_arg(&mut c, v.ty);
+    if !is_array(&mut c, inner) {
+        return v;
+    }
+    elem := array_elem(&mut c, inner);
+    if fk == 27 {
+        if same_type(&mut c, base_type(&mut c, ty_arg(&mut c, formal)), base_type(&mut c, elem)) == 0 {
+            return v;
+        }
+    } else if elem != int_type(&mut c, 8, 0) {
+        return v;
+    }
+    mode := ty_mode(&mut c, formal);
+    if (mode != 0) & (ty_mode(&mut c, v.ty) == 0) {
+        fail(&mut c, view("a mutable slice of an array needs `&mut`"));
+    }
+    x := deref(&mut c, v);
+    return array_view(&mut c, x.t, x.ty, mode);
+}
+// `.len()`, `.copy()`, `.copy_from(&s)` on an array.
+fn array_method<a, b>(c: (&a mut C), xt: u64, xty: u64, input: u64, inty: u64, name: &b [u8]) -> Val {
+    if same(view(name), view("copy_from")) {
+        // The elements of a vector or slice of exactly N, copied in; its length is checked here.
+        if ty_kind(&mut c, inty) == 7 {
+            if ty_mode(&mut c, inty) == 0 {
+                fail(&mut c, view("copy_from writes the array: it needs `&mut` or a `mut` binding"));
+            }
+        } else {
+            require_mutable_binding(&mut c, input, 0);
+        }
+        elem := array_elem(&mut c, xty);
+        sstart := c.pos;
+        mut s = expr(&mut c, 0);
+        expect(&mut c, view(")"));
+        sx := deref(&mut c, s);
+        sk := ty_kind(&mut c, sx.ty);
+        mut selem = 0;
+        if (sk == 6) || (sk == 27) {
+            selem = ty_arg(&mut c, sx.ty);
+        } else if (sk == 3) || (sk == 5) {
+            selem = int_type(&mut c, 8, 0);
+        } else {
+            exchange(&mut c.pos, sstart);
+            fail(&mut c, view("copy_from takes a vector or a slice of the array's element type"));
+        }
+        if same_type(&mut c, base_type(&mut c, selem), base_type(&mut c, elem)) == 0 {
+            exchange(&mut c.pos, sstart);
+            fail(&mut c, view("copy_from takes a vector or a slice of the array's element type"));
+        }
+        if !array_same_width(&mut c, elem) {
+            exchange(&mut c.pos, sstart);
+            fail(&mut c, view("copy_from of this element type is not supported yet: assign the elements"));
+        }
+        mut args = two(xt, sx.t);
+        args.push(imm(&mut c, array_len(&mut c, xty)));
+        args.push(imm(&mut c, array_elem_bytes(&mut c, elem)));
+        invoke(&mut c, view("rt_array_copy_from"), args);
+        release_temporary(&mut c, input);
+        return val(imm(&mut c, 0), 1);
+    }
     if same(view(name), view("len")) {
         expect(&mut c, view(")"));
         slot := imm(&mut c, array_len(&mut c, xty));
@@ -30059,15 +30408,15 @@ fn array_method<a, b>(c: (&a mut C), xt: u64, xty: u64, input: u64, name: &b [u8
     }
     if same(view(name), view("copy")) {
         expect(&mut c, view(")"));
+        if needs_drop(&mut c, array_elem(&mut c, xty)) {
+            fail(&mut c, view("copy requires an array of plain values; copying owners would duplicate ownership"));
+        }
         copy := array_fresh_copy(&mut c, xt, xty);
         release_temporary(&mut c, input);
         c.array_fresh.push(copy);
         return own(&mut c, copy, base_type(&mut c, xty));
     }
-    mut msg = copy_bytes(view("an array has no method `"));
-    push_bytes(&mut msg, view(name));
-    push_bytes(&mut msg, view("` (it has len and copy)"));
-    fail(&mut c, view(msg));
+    fail(&mut c, view("internal: not an array method"));
     return val(0, 0);
 }
 // Consumes the current token if it is of kind `k`.
@@ -30115,7 +30464,7 @@ fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
             }
             astart := c.pos;
             k := find_field(&mut c, d, view(f));
-            field := surface_field_ty(&mut c, d, k);
+            field := field_ty(&mut c, d, k);
             mut context = NO_TYPE;
             mut known = 1;
             for i in map.len() {
@@ -30151,7 +30500,7 @@ fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
                 }
             }
             seen.push(k);
-            ft := surface_field_ty(&mut c, d, k);
+            ft := field_ty(&mut c, d, k);
             if literal_target(&mut c, ft) & (c.lit_start == astart) & (c.lit_end == aend) {
                 if adopt_literal(&mut c, astart, aend, ft) {
                     v = val(v.t, ft);
@@ -31991,6 +32340,8 @@ fn emit_box_thunks<a>(c: (&a mut C)) -> unit {
         } else {
             o(&mut c, view("movq %rdi,-48(%rbp)\nmovq (%rdi),%rax\nmovq 8(%rdi),%rdi\n"));
         }
+        // A result the runtime can keep as it is (words 0) passes through in rax.
+        pass := words == 0;
         if big {
             o(&mut c, view("movq -40(%rbp),"));
             o(&mut c, view(argreg(args)));
@@ -32000,10 +32351,13 @@ fn emit_box_thunks<a>(c: (&a mut C)) -> unit {
         if !big {
             o(&mut c, view("movq %rax,-40(%rbp)\nmovq %rdx,-32(%rbp)\n"));
         }
-        if kind == 2 {
+        if kind == 3 {
+            o(&mut c, view("movq -48(%rbp),%rax\nmovq 8(%rax),%rdi\ncall rt_free\n"));
+        }
+        if kind >= 2 {
             o(&mut c, view("movq -48(%rbp),%rdi\ncall rt_free\n"));
         }
-        if big {
+        if big || pass {
             o(&mut c, view("movq -40(%rbp),%rax\n"));
         } else {
             o(&mut c, view("leaq -40(%rbp),%rdi\nmovq $"));
@@ -35397,18 +35751,20 @@ fn parallel_split_builtin<a>(c: (&a mut C), data: Val) -> Val {
     close_loans(&mut c);
     return own(&mut c, slot, 1);
 }
-// parallel_with(first, second) -> A: fork `first` as a job and run `second` here, on the calling
-// stack, while a worker may be running `first`; the call returns `first`'s result once both are
-// done. It is the two-branch join (`pool::join`), and it is structured: neither callback outlives
+// parallel_with(first, second, combine) -> R: fork `first` as a job and run `second` here, on the
+// calling stack, while a worker may be running `first`; once both are done the call is
+// combine(first's result, second's result). It is the two-branch join (`pool::join`), and it is structured: neither callback outlives
 // the call, so both may capture borrows.
 //
 //   - `first` may run on another worker, so it is checked exactly as a `parallel_map` callback is:
 //     an `Fn` whose captures are classified, with an owned, transferable result.
 //   - `second` never leaves the calling stack and is called once, so it may be an `FnMut` with any
-//     captures; it returns nothing (it writes its result through a capture).
+//     captures; its result is handed to `combine` as it is.
 fn parallel_with_builtin<a>(c: (&a mut C), callee: Val) -> Val {
     expect(&mut c, view(","));
     other := expr(&mut c, 0);
+    expect(&mut c, view(","));
+    joiner := expr(&mut c, 0);
     expect(&mut c, view(")"));
     input := callee.t;
     inty := callee.ty;
@@ -35444,9 +35800,25 @@ fn parallel_with_builtin<a>(c: (&a mut C), callee: Val) -> Val {
     if type_args(&mut c, hty).len() != 0 {
         fail(&mut c, view("a parallel_with callback takes no arguments: what it needs it captures"));
     }
-    if ty_kind(&mut c, ty_arg(&mut c, hty)) != 2 {
-        fail(&mut c, view("the second parallel_with callback returns unit: it writes its result through a capture"));
+    second := ty_arg(&mut c, hty);
+    // `combine` is a plain function (no environment) of the two results: the runtime calls it with
+    // both words once both branches are done, and it is the call's value. That is how both results
+    // come back without an option or a capture written by `second` - nothing here allocates.
+    cty := joiner.ty;
+    if ty_kind(&mut c, cty) != 12 {
+        fail(&mut c, view("parallel_with's third argument is a plain function of the two results"));
     }
+    cargs := type_args(&mut c, cty);
+    if cargs.len() != 2 {
+        fail(&mut c, view("parallel_with's third argument takes the two results"));
+    }
+    if (same_type(&mut c, cargs[0], result) == 0) | (same_type(&mut c, cargs[1], second) == 0) {
+        fail(&mut c, view("parallel_with's third argument takes the first result, then the second"));
+    }
+    combined := ty_arg(&mut c, cty);
+    observe(&mut c, joiner.t);
+    get(&mut c, joiner.t, view("%rax"));
+    combine := save(&mut c);
     observe(&mut c, function.t);
     mut env = imm(&mut c, 0);
     if closure {
@@ -35483,11 +35855,12 @@ fn parallel_with_builtin<a>(c: (&a mut C), callee: Val) -> Val {
     target2 := save(&mut c);
     mut pargs = three(target, env, target2);
     pargs.push(env2);
+    pargs.push(combine);
     slot := invoke(&mut c, view("rt_parallel_with"), pargs);
     release_temporary(&mut c, input);
     release_temporary(&mut c, input2);
     close_loans(&mut c);
-    return own(&mut c, slot, result);
+    return own(&mut c, slot, combined);
 }
 // parallel_class(class, f) -> A: run `f` with every job it forks in priority class `class` (0 Frame,
 // 1 Normal, 2 Background), and return its result. It is pool::with_class. `f` may run as a job of
@@ -35615,7 +35988,8 @@ fn parallel_spawn_builtin<a>(c: (&a mut C), callee: Val) -> Val {
     mut box = imm(&mut c, 0);
     mut target = function.t;
     if closure {
-        // The box is the slot the closure ABI reads: `code(box, ...)` loads the object from it.
+        // The callee reads the object through a one-word slot (`code(slot, ...)`), which the job's
+        // frame provides.
         get(&mut c, function.t, view("%rax"));
         o(&mut c, view("movq (%rax),%rax\n"));
         target = save(&mut c);
@@ -35626,7 +36000,9 @@ fn parallel_spawn_builtin<a>(c: (&a mut C), callee: Val) -> Val {
             // calls the object's own drop (the environment record's) once.
             move_out(&mut c, function);
         }
-        box = apply(&mut c, view("rt_job_box"), one(object));
+        // The job record keeps the object and its frame holds the word the ABI reads
+        // (rt_job_boxed): nothing is allocated for it.
+        box = object;
     }
     if (c.raw == 0) & framed(&mut c, result) {
         words := record_words(&mut c, base_type(&mut c, result));
@@ -35855,12 +36231,22 @@ fn spawn_builtin<a>(c: (&a mut C), scope: Val) -> Val {
     require_sendable_owned(&mut c, item.ty, view("spawned item"));
     require_sendable_owned(&mut c, result, view("spawned result"));
     mut value = item.t;
+    itemty := item.ty;
     if c.raw == 0 {
         move_out(&mut c, item);
     }
     mut entry = f.t;
-    if (c.raw == 0) & framed(&mut c, result) {
-        words := record_words(&mut c, base_type(&mut c, result));
+    boxed_item := (c.raw == 0) & framed(&mut c, itemty);
+    if boxed_item {
+        // The task runs after this statement, and its item's words are a frame site that may run
+        // again (a spawn in a loop): the item travels in a box of its own, freed by the adapter.
+        value = frame_box(&mut c, value, itemty);
+    }
+    if (c.raw == 0) & (framed(&mut c, result) || boxed_item) {
+        mut words = 0;
+        if framed(&mut c, result) {
+            words = record_words(&mut c, base_type(&mut c, result));
+        }
         // The runtime keeps one word of a task's result: the task runs an adapter, whose item is a
         // cell {function, item} it unpacks, and which returns the result boxed.
         sz := imm(&mut c, 2);
@@ -35868,8 +36254,12 @@ fn spawn_builtin<a>(c: (&a mut C), scope: Val) -> Val {
         rec_store(&mut c, cell, 0, f.t);
         rec_store(&mut c, cell, 1, value);
         value = cell;
+        mut kind = 2;
+        if boxed_item {
+            kind = 3;
+        }
         o(&mut c, view("leaq "));
-        push_bytes(&mut c.out, view(result_adapter(&mut c, 2, count, words)));
+        push_bytes(&mut c.out, view(result_adapter(&mut c, kind, count, words)));
         o(&mut c, view("(%rip),%rax\n"));
         entry = save(&mut c);
     }
@@ -37649,6 +38039,7 @@ fn isolated_body_type<a, b, d>(c: (&a mut C), start: u64, names: (&b u8[][]), pa
     // aside with them.
     saved_interior := exchange(&mut c.interior, u64[]);
     saved_boxed := exchange(&mut c.boxed, u64[]);
+    saved_word_refs := exchange(&mut c.word_refs, u64[]);
     saved_scope := exchange(&mut c.scope_end, end);
     saved_loop_start := exchange(&mut c.loop_start, 0);
     saved_loop_end := exchange(&mut c.loop_end, 0);
@@ -37710,6 +38101,7 @@ fn isolated_body_type<a, b, d>(c: (&a mut C), start: u64, names: (&b u8[][]), pa
     exchange(&mut c.next, saved_next);
     exchange(&mut c.interior, saved_interior);
     exchange(&mut c.boxed, saved_boxed);
+    exchange(&mut c.word_refs, saved_word_refs);
     exchange(&mut c.scope_end, saved_scope);
     exchange(&mut c.loop_start, saved_loop_start);
     exchange(&mut c.loop_end, saved_loop_end);
@@ -37865,10 +38257,6 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
     mut ret = 1;
     if eat(&mut c, view("->")) {
         ret = parse_type(&mut c);
-        if is_array(&mut c, ret) {
-            diag_help(&mut c, view("take a `&mut [T; N]` parameter and fill it"));
-            array_stage_fail(&mut c, view("a function result"));
-        }
     } else if hinted && (hint_ret != NO_TYPE) {
         ret = hint_ret;
     } else if !is(&mut c, view("{")) {
@@ -38516,6 +38904,7 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
         exchange(&mut c.next, 0);
         exchange(&mut c.interior, u64[]);
         exchange(&mut c.boxed, u64[]);
+        exchange(&mut c.word_refs, u64[]);
         // Facts made in the body (a frame record, a DynPair) are about the body's own frame, under
         // the symbol it is emitted as.
         exchange(&mut c.facts_fn, body_label(&c, view(".closure"), view(symbol), view(""), 0));
@@ -39725,7 +40114,7 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
     input := value.t;
     inty := value.ty;
     x := deref(&mut c, value);
-    xt := x.t;
+    mut xt = x.t;
     mut xty = x.ty;
     // A specialisation binds a bounded parameter to its concrete record (kind 10 wraps it): its
     // methods are the record's.
@@ -39735,7 +40124,7 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
             xty = concrete;
         }
     }
-    k := ty_kind(&mut c, xty);
+    mut k = ty_kind(&mut c, xty);
     // A receiver that is a `&dyn I` - a parameter, a binding, or the `&(&dyn I)` an index of a
     // vector of them hands back - dispatches through the pair's vtable. The loaded word is the
     // handle itself, so it is the receiver.
@@ -40231,7 +40620,21 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
         return scope_method(&mut c, xt, k, view(name));
     }
     if is_array(&mut c, xty) {
-        return array_method(&mut c, xt, xty, input, view(name));
+        if same(view(name), view("len")) || same(view(name), view("copy")) || same(view(name), view("copy_from")) {
+            return array_method(&mut c, xt, xty, input, inty, view(name));
+        }
+        // Every other method is a slice's: the array is viewed as one, exclusively when it is
+        // reached through `&mut` or bound with `mut`.
+        mut mode = 0;
+        if ty_kind(&mut c, inty) == 7 {
+            mode = ty_mode(&mut c, inty);
+        } else if binding_mode(&c, input) == 2 {
+            mode = 1;
+        }
+        s := array_view(&mut c, xt, xty, mode);
+        xt = s.t;
+        xty = s.ty;
+        k = ty_kind(&mut c, xty);
     }
     if c.raw == 0 {
         if (k != 3) & (k != 4) & (k != 5) & (k != 6) & (k != 27) {
@@ -40391,9 +40794,16 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
             return pop_option(&mut c, had, element, ty);
         }
         width := flat_bytes(&mut c, ty);
+        if is_array(&mut c, ty) & !insist {
+            array_stage_fail(&mut c, view("pop's option (`v.pop()!` takes the last element)"));
+        }
         if (insist) & (width != 0) {
-            slot := apply(&mut c, view("rt_popw"), two(xt, imm(&mut c, width)));
-            c.boxed.push(slot);
+            mut slot = apply(&mut c, view("rt_popw"), two(xt, imm(&mut c, width)));
+            if is_array(&mut c, ty) {
+                slot = array_unbox(&mut c, slot, ty);
+            } else {
+                c.boxed.push(slot);
+            }
             own(&mut c, slot, ty);
             result := place_of(&mut c, slot);
             return_bonds(&mut c, root, result, 1);
@@ -40527,7 +40937,11 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
             mut slot = 0;
             if width != 0 {
                 slot = apply(&mut c, view("rt_vec_removew"), three(xt, i.t, imm(&mut c, width)));
-                c.boxed.push(slot);
+                if is_array(&mut c, elem) {
+                    slot = array_unbox(&mut c, slot, elem);
+                } else {
+                    c.boxed.push(slot);
+                }
             } else {
                 slot = apply(&mut c, view("rt_vec_remove"), two(xt, i.t));
             }
@@ -40542,7 +40956,11 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
         require_type(&mut c, i.ty, 0);
         expect(&mut c, view(","));
         vstart := c.pos;
-        mut b = expr(&mut c, 0);
+        mut inserted = NO_TYPE;
+        if is_array(&mut c, elem) {
+            inserted = elem;
+        }
+        mut b = expr_expected(&mut c, 0, inserted);
         vend := c.pos;
         expect(&mut c, view(")"));
         b = adopt_value(&mut c, b, vstart, vend, elem);
@@ -40573,7 +40991,12 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
         return val(imm(&mut c, 0), 1);
     }
     pstart := c.pos;
-    mut b = expr(&mut c, 0);
+    // `v.push([0.0; 4])` onto a vector of arrays: the literal is the element type's.
+    mut pushed = NO_TYPE;
+    if (k == 6) && (c.raw == 0) && same(view(name), view("push")) && is_array(&mut c, ty_arg(&mut c, xty)) {
+        pushed = ty_arg(&mut c, xty);
+    }
+    mut b = expr_expected(&mut c, 0, pushed);
     pend := c.pos;
     expect(&mut c, view(")"));
     // push_char(c): append the UTF-8 encoding of a char to bytes or a string.
@@ -40886,7 +41309,8 @@ fn tag_narrow_borrow<a>(c: (&a mut C), slot: u64) -> unit {
     if (c.raw != 0) || (narrow == 0) {
         return ();
     }
-    if is_c_record(&mut c, narrow) != 0 {
+    // A record or an array is reached by its address: a reference to one is never tagged.
+    if (is_c_record(&mut c, narrow) != 0) || is_array(&mut c, narrow) {
         return ();
     }
     get(&mut c, slot, view("%rax"));
@@ -41004,9 +41428,22 @@ fn swap_records<a>(c: (&a mut C), x: u64, y: u64, ty: u64) -> unit {
     }
     return ();
 }
+fn is_word_ref<a>(c: (&a C), slot: u64) -> bool {
+    for i in c.word_refs.len() {
+        if c.word_refs[i] == slot {
+            return true;
+        }
+    }
+    return false;
+}
 fn ref_load<a>(c: (&a mut C), r: u64, ty: u64) -> u64 {
     if direct(&mut c, ty) {
         get(&mut c, r, view("%rax"));
+        return save(&mut c);
+    }
+    if is_word_ref(&c, r) {
+        get(&mut c, r, view("%rax"));
+        o(&mut c, view("movq (%rax),%rax\n"));
         return save(&mut c);
     }
     narrow := caddr_ty(&mut c, r);
@@ -41062,7 +41499,7 @@ fn ref_store<a>(c: (&a mut C), r: u64, ty: u64, value: u64) -> unit {
         caddr_store(&mut c, dst, ty, value);
         return ();
     }
-    if !subword(&mut c, ty) {
+    if !subword(&mut c, ty) || is_word_ref(&c, r) {
         get(&mut c, value, view("%rax"));
         get(&mut c, r, view("%rcx"));
         o(&mut c, view("movq %rax,(%rcx)\n"));
@@ -43302,6 +43739,9 @@ fn index_view<a>(c: (&a mut C), value: Val, access: u64) -> Val {
                 base_name = tok_text(&mut c, c.pos - 2);
             }
         }
+        if !element_index_ahead(&mut c) {
+            return array_subslice(&mut c, val(input, inty), x, access);
+        }
         return array_index(&mut c, val(input, inty), x, access, base_name);
     }
     if (vk == 6 || vk == 27) && !element_index_ahead(&mut c) && c.raw == 0 {
@@ -44790,14 +45230,60 @@ fn refuse_string_bytes<a>(c: (&a mut C)) -> unit {
     );
 }
 // Legacy vector/byte assignment evaluates RHS before parsing its mutable target.
+// The type `name[i][j] = ...` writes, read from the local's type before the right side is compiled,
+// when every step is an index into a vector or an array, and that type is an array (so a literal on
+// the right is one); NO_TYPE otherwise, which leaves the right side as it always was.
+fn index_target_array<a>(c: (&a mut C), start: u64, op: u64) -> u64 {
+    l := find_local(&mut c, view(tok_text(&mut c, start)));
+    if (l == 0) || (c.raw != 0) {
+        return NO_TYPE;
+    }
+    mut ty = local_ty(&mut c, l - 1);
+    mut p = start + 1;
+    while p < op {
+        while ty_kind(&mut c, ty) == 7 {
+            ty = ty_arg(&mut c, ty);
+        }
+        if kind_at(&mut c, p) != 91 {
+            return NO_TYPE;
+        }
+        if is_array(&mut c, ty) {
+            ty = array_elem(&mut c, ty);
+        } else if (ty_kind(&mut c, ty) == 6) || (ty_kind(&mut c, ty) == 27) {
+            ty = ty_arg(&mut c, ty);
+        } else {
+            return NO_TYPE;
+        }
+        mut depth = 0;
+        while p < op {
+            k := kind_at(&mut c, p);
+            if k == 91 {
+                depth += 1;
+            }
+            if k == 93 {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            p += 1;
+        }
+        p += 1;
+    }
+    if is_array(&mut c, ty) {
+        return ty;
+    }
+    return NO_TYPE;
+}
 fn index_assignment<a>(c: (&a mut C)) -> unit {
     start := c.pos;
     oppos := index_assignment_ahead(&mut c);
     operator := kind_at(&mut c, oppos);
+    target_array := index_target_array(&mut c, start, oppos);
     exchange(&mut c.pos, oppos + 1);
     vstart := c.pos;
     rhs_mark := c.resources.len();
-    mut v = expr(&mut c, 0);
+    mut v = expr_expected(&mut c, 0, target_array);
     vend := c.pos;
     if c.raw == 0 && !contains_borrow(&mut c, v.ty, 0) {
         // The place lies before the right side in the source, so locals must not expire here (their
@@ -44865,7 +45351,12 @@ fn index_assignment<a>(c: (&a mut C)) -> unit {
         }
         require_type(&mut c, v.ty, elem);
         require_write(&mut c, r.t);
-        array_store_elem(&mut c, r.t, elem, v);
+        if needs_drop(&mut c, elem) {
+            // The new owner goes in and the old one comes out, to be dropped with the statement.
+            exchange_into(&mut c, r, v);
+        } else {
+            array_store_elem(&mut c, r.t, elem, v);
+        }
         exchange(&mut c.pos, after);
         return ();
     }
@@ -46439,6 +46930,7 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
                 vend := c.pos;
                 expect(&mut c, view(";"));
                 v = adopt_value(&mut c, v, vstart, vend, ty);
+                v = array_to_slice(&mut c, v, ty);
                 if (borrowed_object(&mut c, ty) != 0) & (borrowed_object(&mut c, v.ty) == 0) {
                     v = borrow_dyn(&mut c, v, ty);
                 }
@@ -46669,8 +47161,8 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
                 if ty_kind(&mut c, v.ty) == 7 {
                     byref = 1;
                     refmode = ty_mode(&mut c, v.ty);
-                } else if is_array(&mut c, elemty) {
-                    fail(&mut c, view("for x in a over array elements needs &a (each element is borrowed)"));
+                } else if !array_read_elem(&mut c, elemty) {
+                    fail(&mut c, view("for x in a over arrays, records or owners needs &a (each element is borrowed)"));
                 }
             } else if (k == 3) || (k == 4) || (k == 5) {
                 iterable = 1;
@@ -46828,8 +47320,11 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
         if arrty != 0 {
             // The loop runs i over 0..N, so the element address needs no check.
             observe(&mut c, seq);
-            at := array_element(&mut c, seq, i, arrty, true);
+            mut at = array_element(&mut c, seq, i, arrty, true);
             array_mark(&mut c, at, elemty);
+            if (byref != 0) && !array_record_elem(&mut c, elemty) && !is_array(&mut c, elemty) {
+                at = word_reference(&mut c, at, elemty);
+            }
             if byref != 0 {
                 rty := reference_type(&mut c, elemty, refmode);
                 root := place_of(&mut c, seq);
@@ -47210,9 +47705,6 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
         mut target = id;
         mut through = 0;
         mut fieldty = 0;
-        if (kind(&mut c) == 46) & (carray_assign(&mut c, id, ty) != 0) {
-            return ();
-        }
         mut fname = u8[];
         mut assigned_d = 0;
         mut assigned_k = 0;
@@ -47272,48 +47764,6 @@ fn discard_value<a>(c: (&a mut C), v: Val) -> unit {
         }
     }
     return ();
-}
-// `r.f = v;` where `f` is an inline C array of the local extern record `r`: the vector's elements are
-// copied into the array (its length must be the array's). Returns 0 without consuming anything when
-// the statement is not that shape.
-fn carray_assign<a>(c: (&a mut C), id: u64, ty: u64) -> u64 {
-    mut rty = ty;
-    if ty_kind(&mut c, rty) == 7 {
-        rty = ty_arg(&mut c, rty);
-    }
-    if (ty_kind(&mut c, rty) != 8) || (is_c_record(&mut c, rty) == 0) {
-        return 0;
-    }
-    name_at := c.pos + 1;
-    if (kind_at(&mut c, name_at) != 1) || (kind_at(&mut c, c.pos + 2) != 61) {
-        return 0;
-    }
-    d := ty_arg(&mut c, rty);
-    fname := tok_text(&mut c, name_at);
-    k := find_field(&mut c, d, view(fname));
-    raw := field_ty(&mut c, d, k);
-    if ty_kind(&mut c, raw) != 32 {
-        return 0;
-    }
-    require_write(&mut c, id);
-    advance(&mut c);
-    advance(&mut c);
-    advance(&mut c);
-    v := expr(&mut c, 0);
-    expect(&mut c, view(";"));
-    want := surface_field_ty(&mut c, d, k);
-    require_type(&mut c, v.ty, want);
-    x := move_value(&mut c, v);
-    mut base = id;
-    if ty_kind(&mut c, ty) == 7 {
-        // Through `&mut R`: the reference's target is the record's storage.
-        target := deref(&mut c, val(id, ty));
-        base = target.t;
-    }
-    cfield_store(&mut c, base, d, k, x.t);
-    // cfield_store dropped the vector once its elements were copied: the temporary is spent.
-    move_out(&mut c, x);
-    return 1;
 }
 // The rest of an assignment once its target is known: `target` is the binding slot (through =
 // 0, `l` its local) or a field reference (through = 1, `fieldty` the field type).
@@ -47518,13 +47968,20 @@ fn assignment_tail<a, b>(c: (&a mut C), l: u64, id: u64, ty: u64, target: u64, t
         ref_store(&mut c, target, fieldty, v.t);
     } else if is_array(&mut c, ty) {
         // An array's bytes go into the storage the variable already has: the value's storage (a
-        // literal's, say) is made again by its own site, so the variable never shares it.
+        // literal's, say) is made again by its own site, so the variable never shares it. What it
+        // owned was dropped by the release above; its drop flag is set again for what it owns now.
         array_copy(&mut c, target, v.t, array_bytes(&mut c, ty));
         old := resource(&mut c, target);
         if old != 0 {
+            flag := c.resources[old - 1].flag;
             place := place_of(&mut c, target);
             if place != 0 {
                 ownership::initialize(&mut c.check, place);
+            }
+            if flag != 0 {
+                o(&mut c, view("movq $1,"));
+                stack_slot(&mut c, flag - 1);
+                c.out.push(10);
             }
         }
     } else {
@@ -48202,7 +48659,8 @@ fn host_fn<a, b>(c: (&a mut C), name: &b [u8], ret: u64) -> unit {
 }
 fn drop_call<a>(c: (&a mut C), ty: u64) -> unit {
     // A framed record's words belong to a frame or to the place that holds them: nothing to free.
-    if framed(&mut c, ty) {
+    // An array that owns its elements still drops them, in place (its helper frees no storage).
+    if framed(&mut c, ty) && !array_owned(&mut c, ty) {
         return ();
     }
     // A body emitted without its bindings (a template's validation replay) cannot name a helper: the
@@ -48352,6 +48810,32 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
                     mark(&mut c, skip);
                     o(&mut c, view("movq %r12,%rdi\n"));
                     call_out(&mut c, view("rt_free"));
+                }
+                if kind == 32 {
+                    // An array drops each element in place; its storage is a frame's (or a box its
+                    // holder frees), never its own to free.
+                    mode := ty_mode(&mut c, ty);
+                    w := array_elem_bytes(&mut c, arg);
+                    head := label(&mut c);
+                    end := label(&mut c);
+                    o(&mut c, view("xorq %r13,%r13\n"));
+                    mark(&mut c, head);
+                    o(&mut c, view("cmpq $"));
+                    on(&mut c, mode);
+                    o(&mut c, view(",%r13\n"));
+                    jump(&mut c, view("jae"), end);
+                    o(&mut c, view("movq %r13,%rax\nimulq $"));
+                    on(&mut c, w);
+                    o(&mut c, view(",%rax\naddq %r12,%rax\n"));
+                    if is_array(&mut c, arg) {
+                        o(&mut c, view("movq %rax,%rdi\n"));
+                    } else {
+                        o(&mut c, view("movq (%rax),%rdi\n"));
+                    }
+                    drop_call(&mut c, arg);
+                    o(&mut c, view("incq %r13\n"));
+                    jump(&mut c, view("jmp"), head);
+                    mark(&mut c, end);
                 }
                 if kind == 6 {
                     // Inline elements (plain or C records) own nothing: only the buffer is freed.
@@ -49087,10 +49571,17 @@ fn iface_w_type<a>(c: (&a mut C), out: (&a mut u8[]), deps: (&a mut u64[]), ty: 
         iface_wv(&mut body, arg);
     } else if k == 5 {
         // A view: mode and slots are the whole type.
+    } else if k == 32 {
+        // An array: its element, then its length's type argument when a value parameter gives the
+        // length (none when the length is the constant in the mode).
+        iface_w_type(&mut c, &mut body, &mut deps, arg);
+        iface_wv(&mut body, args.len());
+        for i in args.len() {
+            iface_w_type(&mut c, &mut body, &mut deps, args[i]);
+        }
     } else if (k == 6) || (k == 7) || (k == 10) || (k == 11) || (k == 13) || (k == 14) || (k == 16) || (k == 26)
-        || (k == 27) || (k == 29) || (k == 32) || (k == 34) || (k == 35) {
-        // One nested type in the payload (for an array `[T; N]`, `T`; the mode is `N`; an `Atomic<T>`
-        // carries its element since format 8).
+        || (k == 27) || (k == 29) || (k == 34) || (k == 35) {
+        // One nested type in the payload (an `Atomic<T>` carries its element since format 8).
         iface_w_type(&mut c, &mut body, &mut deps, arg);
     } else if k == 8 {
         owner := c.decls[arg].module.copy();
@@ -49380,8 +49871,29 @@ fn iface_r_type<a>(p: (&a mut IR), c: (&a mut C)) -> u64 {
         } else {
             id = iface_intern_args(&mut p, &mut c, tag, inner, mode, rs, u64[]);
         }
+    } else if tag == 32 {
+        if p.phase == 0 {
+            p.rtext.push(40);
+            push_bytes(&mut p.rtext, view(iface_plain_word(tag)));
+            iface_spell_flags(&mut p, mode, &rs);
+            p.rtext.push(32);
+        }
+        inner := iface_r_type(&mut p, &mut c);
+        n := iface_rv(&mut p);
+        mut largs = u64[];
+        for i in n {
+            if p.phase == 0 {
+                p.rtext.push(32);
+            }
+            largs.push(iface_r_type(&mut p, &mut c));
+        }
+        if p.phase == 0 {
+            p.rtext.push(41);
+        } else {
+            id = iface_intern_args(&mut p, &mut c, tag, inner, mode, rs, largs);
+        }
     } else if (tag == 6) || (tag == 7) || (tag == 11) || (tag == 13) || (tag == 14) || (tag == 16)
-        || (tag == 26) || (tag == 27) || (tag == 29) || (tag == 32) || (tag == 34) || (tag == 35) {
+        || (tag == 26) || (tag == 27) || (tag == 29) || (tag == 34) || (tag == 35) {
         if (p.phase == 0) & (tag != 35) {
             p.rtext.push(40);
             push_bytes(&mut p.rtext, view(iface_plain_word(tag)));
@@ -52545,26 +53057,50 @@ fn iface_before<a, b>(x: &a [u8], y: &b [u8]) -> bool {
 // Declarations are written in name order, so a review diff shows the declaration that changed
 // rather than a reshuffled file.
 fn iface_sorted<a>(names: (&a u8[][])) -> u64[] {
+    // A stable merge sort, bottom up: of two equal names the earlier comes first, which is the order
+    // the selection sort this replaces produced, at n log n comparisons instead of n squared.
+    n := names.len();
     mut order = u64[];
-    mut used = u64[];
-    for i in names.len() {
-        used.push(0);
+    for i in n {
+        order.push(i);
     }
-    while order.len() < names.len() {
-        mut best = names.len();
-        for i in names.len() {
-            if used[i] == 0 {
-                if best == names.len() {
-                    best = i;
-                } else {
-                    if iface_before(view(names[i]), view(names[best])) {
-                        best = i;
-                    }
-                }
+    mut merged = u64[0; n];
+    mut width = 1;
+    while width < n {
+        mut lo = 0;
+        while lo < n {
+            mut mid = lo + width;
+            if n < mid {
+                mid = n;
             }
+            mut hi = mid + width;
+            if n < hi {
+                hi = n;
+            }
+            mut i = lo;
+            mut j = mid;
+            mut k = lo;
+            while k < hi {
+                mut left = i < mid;
+                if left && (j < hi) {
+                    // The right one goes first only when it is strictly before the left one.
+                    left = !iface_before(view(names[order[j]]), view(names[order[i]]));
+                }
+                if left {
+                    merged[k] = order[i];
+                    i += 1;
+                } else {
+                    merged[k] = order[j];
+                    j += 1;
+                }
+                k += 1;
+            }
+            lo = hi;
         }
-        exchange(&mut used[best], 1);
-        order.push(best);
+        for k in n {
+            order[k] = merged[k];
+        }
+        width = width * 2;
     }
     return order;
 }
@@ -52970,13 +53506,71 @@ fn iface_decl_ids<a, b>(c: (&a mut C), m: &b [u8]) -> u64[] {
 }
 
 fn iface_func_ids<a, b>(c: (&a mut C), m: &b [u8]) -> u64[] {
-    mut ids = u64[];
-    for i in c.funcs.len() {
-        if same(view(c.funcs[i].module), view(m)) {
-            ids.push(i);
-        }
+    // Asked once per declaration (its `.inherent_` module) and per implementation: a scan of every
+    // function each time made the interface cost the product of the two (fmod_sync).
+    fmod_sync(&mut c);
+    g := fmod_group(&c, m);
+    if g == 0 {
+        return u64[];
     }
-    return ids;
+    return c.fmod_ids[g - 1].copy();
+}
+// The group of module `m` in the by-module table, + 1; 0 when no function is in it.
+fn fmod_group<a, b>(c: (&a C), m: &b [u8]) -> u64 {
+    if c.fmod_slots.len() == 0 {
+        return 0;
+    }
+    key := name_key(view(m), view(""));
+    mask := c.fmod_slots.len() - 1;
+    mut h = key & mask;
+    while c.fmod_slots[h] != 0 {
+        g := c.fmod_slots[h];
+        if (c.fmod_keys[g - 1] == key) && same(view(c.fmod_names[g - 1]), view(m)) {
+            return g;
+        }
+        h = (h + 1) & mask;
+    }
+    return 0;
+}
+// Files the functions added since the last call, each under its module, in table order.
+fn fmod_sync<a>(c: (&a mut C)) -> unit {
+    while c.fmod_n < c.funcs.len() {
+        i := c.fmod_n;
+        exchange(&mut c.fmod_n, i + 1);
+        m := c.funcs[i].module.copy();
+        mut g = fmod_group(&c, view(m));
+        if g == 0 {
+            // A new group; the table stays at most half full.
+            if c.fmod_slots.len() <= 2 * (c.fmod_names.len() + 1) {
+                mut size = 64;
+                while size <= 4 * (c.fmod_names.len() + 1) {
+                    size = size * 2;
+                }
+                mut slots = u64[0; size];
+                for k in c.fmod_names.len() {
+                    mut h = c.fmod_keys[k] & (size - 1);
+                    while slots[h] != 0 {
+                        h = (h + 1) & (size - 1);
+                    }
+                    slots[h] = k + 1;
+                }
+                exchange(&mut c.fmod_slots, slots);
+            }
+            key := name_key(view(m), view(""));
+            c.fmod_keys.push(key);
+            c.fmod_names.push(m.copy());
+            c.fmod_ids.push(u64[]);
+            g = c.fmod_names.len();
+            mask := c.fmod_slots.len() - 1;
+            mut h = key & mask;
+            while c.fmod_slots[h] != 0 {
+                h = (h + 1) & mask;
+            }
+            c.fmod_slots[h] = g;
+        }
+        c.fmod_ids[g - 1].push(i);
+    }
+    return ();
 }
 
 
@@ -53335,21 +53929,21 @@ fn iface_scan<a>(path: &a [u8]) -> u8[] {
         c := text[i];
         if (c == 32) || (c == 9) || (c == 10) || (c == 13) || (c == 12) {
             i += 1;
-        } else if (c == 47) & (i + 1 < text.len()) & (text[i + 1] == 47) {
-            while (i < text.len()) & (text[i] != 10) {
+        } else if (c == 47) && (i + 1 < text.len()) && (text[i + 1] == 47) {
+            while (i < text.len()) && (text[i] != 10) {
                 i += 1;
             }
         } else {
             mut word = u8[];
-            while (i < text.len()) & iface_ident_byte(text[i]) {
+            while (i < text.len()) && iface_ident_byte(text[i]) {
                 word.push(text[i]);
                 i += 1;
             }
             if same(view(word), view("module")) {
-                while (i < text.len()) & ((text[i] == 32) || (text[i] == 9)) {
+                while (i < text.len()) && ((text[i] == 32) || (text[i] == 9)) {
                     i += 1;
                 }
-                while (i < text.len()) & iface_ident_byte(text[i]) {
+                while (i < text.len()) && iface_ident_byte(text[i]) {
                     name.push(text[i]);
                     i += 1;
                 }
@@ -53601,7 +54195,7 @@ fn iface_emit_all<a>(c: (&a mut C)) -> unit {
 pub fn main() -> u64 {
     mut c = C {
         src: u8[],
-        toks: Tok[],
+        toks: lexer::Token[],
         pos: 0,
         out: u8[],
         split: 0,
@@ -53667,6 +54261,7 @@ pub fn main() -> u64 {
         caddr: u64[],
         interior: u64[],
         box_thunks: u64[],
+        word_refs: u64[],
         result_dest: 0,
         layout_memo: u64[],
         layout_offsets: u64[][],
@@ -53681,7 +54276,12 @@ pub fn main() -> u64 {
         file_loaded: 0,
         file_cache_index: u64[],
         file_cache_src: u8[][],
-        file_cache_toks: Tok[][],
+        file_cache_toks: lexer::Token[][],
+        fmod_slots: u64[],
+        fmod_keys: u64[],
+        fmod_names: u8[][],
+        fmod_ids: u64[][],
+        fmod_n: 0,
         funcs: Func[],
         func_slots: u64[],
         func_keys: u64[],
@@ -53798,6 +54398,7 @@ pub fn main() -> u64 {
         pv_pred_mode: 0,
         pv_arith_ok: 0,
         ref_assign_target: 0,
+        dyn_result_seen: 0,
         proved_label: 0,
         ref_assign_d: 0,
         ref_assign_k: 0,

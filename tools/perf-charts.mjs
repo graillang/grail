@@ -33,7 +33,8 @@ export function rowRatio(table, row, key = table.primary) {
   return (row.direction ?? table.direction) === 'higher' ? Math.max(...rivals) / mine : mine / Math.min(...rivals);
 }
 
-export function chart(table, data = undefined) {
+// `prefix` names the result file, so two files' tables of one id (release) are two elements.
+export function chart(table, data = undefined, prefix = data?.tool) {
   const cols = table.columns;
   const grailOrder = new Map(cols.filter(c => c.grail).map((c, i) => [c.key, i]));
   // Each bar: how far it is from the row's best, as a multiple: value / best where lower is better,
@@ -98,7 +99,7 @@ export function chart(table, data = undefined) {
     lx += 22 + c.label.length * 6.6;
   });
   const total = left + width + right;
-  return `<figure class="perf-chart" id="chart-${escape(table.id)}"><svg viewBox="0 0 ${total} ${height}" width="100%" role="img" aria-label="${escape(`${table.title}. ${caption}`)}" xmlns="http://www.w3.org/2000/svg">${parts.join('')}</svg><figcaption>${escape(table.title)}. ${escape(caption)}${source ? ` ${escape(source)}` : ''}</figcaption></figure>`;
+  return `<figure class="perf-chart" id="chart-${prefix ? `${escape(prefix)}-` : ''}${escape(table.id)}"><svg viewBox="0 0 ${total} ${height}" width="100%" role="img" aria-label="${escape(`${table.title}. ${caption}`)}" xmlns="http://www.w3.org/2000/svg">${parts.join('')}</svg><figcaption>${escape(table.title)}. ${escape(caption)}${source ? ` ${escape(source)}` : ''}</figcaption></figure>`;
 }
 
 export function numbers(table) {
@@ -125,8 +126,8 @@ export function provenance(data) {
 }
 
 // The whole result file: every charted table as a chart then its numbers, the rest as numbers.
-export function renderResults(data) {
+export function renderResults(data, prefix = data?.tool) {
   if (data?.schema !== 1 || !Array.isArray(data.tables)) throw new Error(`not a rivals result file (schema ${data?.schema})`);
-  const html = data.tables.map(t => `${t.chart ? chart(t, data) : ''}${numbers(t)}`).join('') + provenance(data);
+  const html = data.tables.map(t => `${t.chart ? chart(t, data, prefix) : ''}${numbers(t)}`).join('') + provenance(data);
   return `<section class="perf-results" data-tool="${escape(data.tool)}">${html}</section>`.replace(/\n/g, ' ');
 }

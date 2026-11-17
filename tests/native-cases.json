@@ -6429,15 +6429,16 @@
   },
   {
     "name": "c-array-fields",
-    "source": "extern \"C\" record Px { x: i32, w: f32 }\nextern \"C\" record Box { tag: u16, name: [u8; 8], ids: [u32; 4], ws: [f32; 2], ps: [Px; 2], small: [i16; 3] }\nfn main() -> u64 {\n    @assert(size_of(Box) == 60, \"Box has C's layout\");\n    mut b = Box { tag: 1, name: u8[0; 8], ids: u32[1, 2, 3, 4], ws: f32[0.5, 1.5], ps: Px[Px { x: -1, w: 0.25 }, Px { x: 2, w: 4.0 }], small: i16[-7, 0, 7] };\n    ids := b.ids;\n    println(\"{} {} {}\", ids.len(), ids[0], ids[3]);\n    ws := b.ws;\n    println(\"{} {}\", ws[0], ws[1]);\n    ps := b.ps;\n    println(\"{} {}\", ps[0].x, ps[1].w);\n    small := b.small;\n    println(\"{} {}\", small[0], small[2]);\n    mut name = b.name;\n    name[0] = 71;\n    name[1] = 114;\n    b.name = name;\n    println(b.name.text().len());\n    mut next = b.ids;\n    next[3] = 40;\n    b.ids = next;\n    again := b.ids;\n    println(\"{} {}\", again[0], again[3]);\n    b.ws = f32[2.0, 3.0];\n    println(b.ws[1]);\n    return 0;\n}\n",
-    "stdout": "4 1 4\n0.5 1.5\n-1 4\n-7 7\n8\n1 40\n3\n",
-    "note": "[T; N] fields in an extern record: laid out inline (size_of), read whole as vectors (bytes for u8, narrow f32/u32, records, i16), assigned whole"
+    "source": "extern \"C\" record Px { x: i32, w: f32 }\nextern \"C\" record Box { tag: u16, name: [u8; 8], ids: [u32; 4], ws: [f32; 2], ps: [Px; 2], small: [i16; 3] }\nfn len_of(b: &[u8]) -> u64 {\n    return b.len();\n}\nfn main() -> u64 {\n    @assert(size_of(Box) == 60, \"Box has C's layout\");\n    mut b = Box { tag: 1, name: [0; 8], ids: [1, 2, 3, 4], ws: [0.5, 1.5], ps: [Px { x: -1, w: 0.25 }, Px { x: 2, w: 4.0 }], small: [-7, 0, 7] };\n    ids := b.ids;\n    println(\"{} {} {}\", ids.len(), ids[0], ids[3]);\n    println(\"{} {}\", b.ws[0], b.ws[1]);\n    println(\"{} {}\", b.ps[0].x, b.ps[1].w);\n    println(\"{} {}\", b.small[0], b.small[2]);\n    b.name[0] = 71;\n    b.name[1] = 114;\n    println(\"{} {}\", len_of(&b.name), b.name[1]);\n    b.ids[3] = 40;\n    println(\"{} {}\", b.ids[0], b.ids[3]);\n    b.ws = [2.0, 3.0];\n    println(b.ws[1]);\n    mut copy = b.ids;\n    copy[0] = 9;\n    println(\"{} {} {}\", copy[0], b.ids[0], b.ids);\n    b.ids.copy_from(&u32[5, 6, 7, 8]);\n    println(b.ids);\n    return 0;\n}\n",
+    "stdout": "4 1 4\n0.5 1.5\n-1 4\n-7 7\n8 114\n1 40\n3\n9 1 [1, 2, 3, 40]\n[5, 6, 7, 8]\n",
+    "note": "[T; N] fields in an extern record are arrays (docs/design/fixed-arrays.md): laid out inline (size_of), elements read and written in place - bytes, narrow f32/u32/i16, records - borrowed as a slice, assigned whole from an array, copied by a whole read, filled by copy_from"
   },
   {
     "name": "c-array-length-mismatch",
-    "source": "extern \"C\" record Px { x: i32, w: f32 }\nextern \"C\" record Box { tag: u16, name: [u8; 8], ids: [u32; 4], ws: [f32; 2], ps: [Px; 2], small: [i16; 3] }\nfn main() -> u64 {\n    mut b = Box { tag: 1, name: u8[0; 8], ids: u32[1, 2, 3, 4], ws: f32[0.5, 1.5], ps: Px[Px { x: -1, w: 0.25 }, Px { x: 2, w: 4.0 }], small: i16[-7, 0, 7] };\n    b.ids = u32[1, 2, 3];\n    return 0;\n}\n",
+    "source": "extern \"C\" record Box { tag: u16, ids: [u32; 4] }\nfn main() -> u64 {\n    mut b = Box { tag: 1, ids: [1, 2, 3, 4] };\n    v := u32[1, 2, 3];\n    b.ids.copy_from(&v);\n    return 0;\n}\n",
     "signal": "SIGABRT",
-    "note": "assigning a vector whose length is not the C array's aborts: C reads all N elements"
+    "note": "copy_from a vector whose length is not the array's aborts: C reads all N elements",
+    "stderr": "error: array length mismatch: got 3 elements for an array of 4\n"
   },
   {
     "name": "cstr-bytes-needs-unsafe",
@@ -8424,6 +8425,7 @@
   },
   {
     "name": "task-sleep-timers-overlap",
+    "timing": true,
     "note": "Green tasks sleep on the platform timer and wake in parallel: eight 30 ms sleeps finish in far less than the serial 240 ms.",
     "source": "use host;\n// Eight sleeping tasks must overlap: a serial sleep would take 8 * 30 ms, and the assertion below\n// fails long before that.\nfn nap(n: u64, unused: u64) -> u64 {\n    host::sleep_ms(30);\n    return n;\n}\nfn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {\n    mut many = Task<u64>[];\n    for i in 8 {\n        many.push(spawn(sc, i, nap));\n    }\n    mut total = 0;\n    while many.len() != 0 {\n        total += join(many.pop()!);\n    }\n    return total;\n}\nfn main() {\n    start := host::now_ms();\n    println(task_scope(0, body));\n    elapsed := host::now_ms() - start;\n    assert(elapsed < 400);\n}\n",
     "stdout": "28\n"
@@ -11353,6 +11355,7 @@
   },
   {
     "name": "pool-split-mut-timing",
+    "timing": true,
     "note": "The measured case for stage 2: the same 3M-u64 CPU-bound workload through the owned chunk split and through the in-place split, best of three. Asserts the copy is gone (one owned chunk at least 1.33x slower than one in-place chunk, both single-job, so no core count can explain it) and that parallelism still pays (eight in-place chunks at least 1.5x faster than one, asserted only above four cores). stderr carries the times; stdout is a fixed token.",
     "files": [
       "tests/pool/split_mut_timing.grl"
@@ -11456,20 +11459,15 @@
   {
     "name": "reject-array-by-value-parameter",
     "reject": true,
-    "source": "fn f(a: [f32; 4]) -> f32 {\n    return a[0];\n}\nfn main() {\n}\n",
-    "diagnostic": "an array as a parameter taken by value is not supported yet"
+    "source": "extern \"C\" fn take(a: [f32; 4]) -> f32 {\n    return a[0];\n}\nfn main() {\n}\n",
+    "diagnostic": "C cannot pass an array by value",
+    "note": "C takes an array parameter as a pointer: `&[T; N]`"
   },
   {
     "name": "reject-array-result",
     "reject": true,
-    "source": "fn f() -> [f32; 4] {\n    return [0.0; 4];\n}\nfn main() {\n}\n",
-    "diagnostic": "an array as a function result is not supported yet"
-  },
-  {
-    "name": "reject-array-struct-field",
-    "reject": true,
-    "source": "struct S {\n    a: [f32; 4]\n}\nfn main() {\n}\n",
-    "diagnostic": "an array as a field of a struct or a variant's payload is not supported yet"
+    "source": "extern \"C\" fn make() -> [f32; 4] {\n    return [0.0; 4];\n}\nfn main() {\n}\n",
+    "diagnostic": "C cannot return an array by value"
   },
   {
     "name": "reject-array-capture",
@@ -11480,14 +11478,8 @@
   {
     "name": "reject-array-type-argument",
     "reject": true,
-    "source": "fn main() {\n    t: ([u8; 2], u64) = ([1, 2], 3);\n}\n",
-    "diagnostic": "an array as a type argument"
-  },
-  {
-    "name": "reject-array-owned-element",
-    "reject": true,
-    "source": "fn main() {\n    a: [string; 2] = [\"a\".text(), \"b\".text()];\n}\n",
-    "diagnostic": "an array element is a number or another array in this version"
+    "source": "fn main() {\n    o: [u8; 2]? = None;\n}\n",
+    "diagnostic": "an array as a type argument of an enum or an option is not supported yet"
   },
   {
     "name": "reject-array-write-through-shared",
@@ -11510,7 +11502,7 @@
     "backends": [
       "native"
     ],
-    "note": "a loop to N, `for x in a` and a refined index have no element check; an unknown index is one compare against the constant N - no length is loaded - and a loop over an array calls nothing",
+    "note": "a loop to N, `for x in a` and a refined index have no element check; an unknown index is one compare against the constant N - no length is loaded - and a loop over an array calls nothing; the compare is against the immediate N",
     "source": "fn total(a: &[u64; 8]) -> u64 {\n    mut t = 0;\n    for i in 8 {\n        t += a[i];\n    }\n    return t;\n}\nfn total_each(a: &[f64; 8]) -> f64 {\n    mut t = 0.0;\n    for x in a {\n        t = t + *x;\n    }\n    return t;\n}\nfn get(a: &[u64; 8], k: u64) -> u64 {\n    return a[k];\n}\nfn at(a: &[u64; 8], i: u64 where i < 8) -> u64 {\n    return a[i];\n}\nfn main() {\n    a: [u64; 8] = [1, 2, 3, 4, 5, 6, 7, 8];\n    f: [f64; 8] = [0.5; 8];\n    println(\"{} {} {} {}\", total(&a), total_each(&f), get(&a, 7), at(&a, 2));\n}\n",
     "stdout": "36 4 8 3\n",
     "asm": [
@@ -11539,10 +11531,6 @@
       {
         "in": "f_main_get",
         "text": "8(%rdi)"
-      },
-      {
-        "in": "f_main_get",
-        "text": "movabsq $8,%rdx"
       }
     ]
   },
@@ -11692,6 +11680,7 @@
   },
   {
     "name": "sched-task-forks-jobs-while-timers-tick",
+    "timing": true,
     "note": "One task per worker forks compute jobs in a loop while a ticker task sleeps 5 ms forty times; the sums prove no job was lost and the ticker's worst gap stays under a bound that only a stalled scheduler exceeds.",
     "files": [
       "tests/sched/task_jobs_timers.grl"
@@ -11707,6 +11696,7 @@
   },
   {
     "name": "sched-job-wait-does-not-hold-a-worker",
+    "timing": true,
     "note": "Every worker's task forks one job that sleeps 300 ms while a ticker task sleeps 10 ms at a time: the sleeping job parks its runner and the waiting task parks too, so the ticker keeps ticking. With jobs on a pool of their own each waiting task put a scheduler thread to sleep and the ticker stalled for the whole 300 ms.",
     "files": [
       "tests/sched/job_wait_in_task.grl"
@@ -11812,6 +11802,7 @@
   },
   {
     "name": "sched-help-stops-when-the-stack-is-low",
+    "timing": true,
     "note": "A task recurses through about 90% of its stack and joins there while a thief runs its forked branch, which forks eight children of about 290 KiB each. They are its own job's work, so leapfrogging may take them, but there is no room for one: the room check makes the waiter park instead of running one into the guard page.",
     "files": [
       "tests/sched/help_depth.grl"
@@ -11845,7 +11836,7 @@
   },
   {
     "name": "sched-job-failure-is-contained",
-    "note": "A task forks eight chunks over its own vector and one fails an index check while the others are still writing. The failing stack waits for its outstanding forks, then the failure is re-raised at the join and the task is contained: try_join returns the check's message with the original statement and the line naming the join, a sibling task's result is intact, and the process keeps running.",
+    "note": "A task forks eight chunks over its own vector and one fails an index check while the others are still writing. The failing stack waits for its outstanding forks, then the failure is re-raised at the join and the task is contained: try_join returns the check's message with the original statement and the line naming the join, a sibling task's result is intact, and the process keeps running. Native only: an LLVM build carries no statement table, so a site cannot be named there (an LLVM backend gap, recorded in concurrency-stages-5-7.md).",
     "files": [
       "tests/sched/job_failure.grl"
     ],
@@ -11854,11 +11845,11 @@
       "lib/core.grl"
     ],
     "stdout": "index 100 out of bounds for length 1\n --> job_failure.grl:12:9\n = in a job joined at job_failure.grl:20:5\n56\nstill running\n",
-    "backends": [
-      "native"
-    ],
     "targets": [
       "x86_64"
+    ],
+    "backends": [
+      "native"
     ]
   },
   {
@@ -11878,7 +11869,8 @@
   },
   {
     "name": "sched-join-failure-names-the-user-join",
-    "note": "A branch of a user's pool::join, run by another worker, fails. try_join reports the failing statement and, as the join, the user's own pool::join line rather than the fork inside lib/pool.grl (standard-library sites carry bit 62 in the site table and are skipped for that line). The exit note counts one failure, and the stacks it discarded separately.",
+    "timing": true,
+    "note": "A branch of a user's pool::join, run by another worker, fails. try_join reports the failing statement and, as the join, the user's own pool::join line rather than the fork inside lib/pool.grl (standard-library sites carry bit 62 in the site table and are skipped for that line). The exit note counts one failure, and the stacks it discarded separately. Native only: an LLVM build carries no statement table, so a site cannot be named there (an LLVM backend gap, recorded in concurrency-stages-5-7.md).",
     "files": [
       "tests/sched/join_failure_site.grl"
     ],
@@ -11893,6 +11885,9 @@
     "stderr": "after 1 contained task failure(s) (",
     "targets": [
       "x86_64"
+    ],
+    "backends": [
+      "native"
     ]
   },
   {
@@ -15185,6 +15180,7 @@
   },
   {
     "name": "thread-sleep-until",
+    "timing": true,
     "source": "use thread;\nuse time;\nfn main() {\n    start := time::now();\n    thread::sleep_until(start.after_ms(60));\n    waited := start.elapsed_ms();\n    println((waited >= 60) && (waited < 1000));\n    // A deadline already past returns at once.\n    thread::sleep_until(start);\n    println(time::now().millis() != 0);\n}\n",
     "modules": [
       "lib/thread.grl",
@@ -15230,6 +15226,7 @@
   },
   {
     "name": "mutex-waiters-park-burn-no-cpu",
+    "timing": true,
     "source": "use host;\nstruct Shared { m: Mutex<u64> }\n// Process user + system time in clock ticks (1/100 s), from /proc/self/stat fields 14 and 15.\nfn cpu_ticks() -> u64 {\n    text := host::read_file(\"/proc/self/stat\");\n    mut i = 0;\n    while text[i] != 41 {\n        i += 1;\n    }\n    mut field = 2;\n    mut total = 0;\n    mut n = 0;\n    while i < text.len() {\n        c := text[i];\n        if c == 32 {\n            if (field == 14) || (field == 15) {\n                total += n;\n            }\n            field += 1;\n            n = 0;\n        } else if (c >= 48) && (c <= 57) {\n            n = n * 10 + u64(c - 48);\n        }\n        i += 1;\n    }\n    return total;\n}\nfn hold<a>(v: (&a mut u64), ms: u64) -> u64 {\n    host::sleep_ms(ms);\n    *v += 1;\n    return *v;\n}\nfn bump<a>(v: (&a mut u64), by: u64) -> u64 {\n    *v += by;\n    return *v;\n}\nfn holder(n: u64, s: (&Shared)) -> u64 {\n    return s.m.lock_with(300, hold);\n}\nfn waiter(n: u64, s: (&Shared)) -> u64 {\n    host::sleep_ms(30);\n    return s.m.lock_with(1, bump);\n}\nfn body<sc>(scope: (&sc Scope<(&Shared)>), s: (&Shared)) -> u64 {\n    mut many = Task<u64>[];\n    many.push(spawn(scope, 0, holder));\n    for i in 8 {\n        many.push(spawn(scope, i, waiter));\n    }\n    mut last = 0;\n    while let Some(t) = many.pop() {\n        r := join(t);\n        if last < r { last = r; }\n    }\n    return last;\n}\nfn main() {\n    s := Shared { m: Mutex::new(0) };\n    before := cpu_ticks();\n    start := host::now_ms();\n    println(task_scope(&s, body));\n    wall := host::now_ms() - start;\n    used := (cpu_ticks() - before) * 10;\n    // Eight waiters through a 300 ms hold: parked, they burn (almost) nothing.\n    println((wall >= 300) && (used < 100));\n}\n",
     "modules": [
       "lib/core.grl"
@@ -15376,6 +15373,7 @@
   },
   {
     "name": "sync-wait-cancelled-by-scope-on-each-primitive",
+    "timing": true,
     "source": "use sync;\nuse time;\nuse host;\n// One waiter on each primitive, its scope cancelled while it waits: a plain wait ends the task as\n// Cancelled, a `_until` form answers Cancelled, and the cancelled scope re-raises nothing.\nstruct Shared { m: Mutex<u64>, c: sync::Condition, l: sync::Latch, b: sync::Barrier, s: sync::Semaphore, rw: sync::RwLock<u64>, out: Mutex<u64[]>, holding: Atomic<u64> }\nfn note<a>(v: (&a mut u64[]), n: u64) -> u64 { v.push(n); return v.len(); }\nfn total<a>(v: (&a mut u64[]), n: u64) -> u64 {\n    mut t = 0;\n    for i in v.len() {\n        t += v[i];\n    }\n    return t;\n}\nfn on_condition(n: u64, s: (&Shared)) -> u64 {\n    return s.c.wait_with(&s.m, 0, |v: (&u64), k: (&u64)| -> bool *v == 99, |v: (&mut u64), k: u64| -> u64 *v);\n}\nfn on_latch(n: u64, s: (&Shared)) -> u64 { s.l.wait(); return 1; }\nfn on_barrier(n: u64, s: (&Shared)) -> u64 { s.b.wait(); return 1; }\nfn on_semaphore(n: u64, s: (&Shared)) -> u64 { return s.s.acquire_with(1, 0, |k: u64| -> u64 k); }\nfn on_sleep(n: u64, s: (&Shared)) -> u64 { time::sleep_ms(5000); return 1; }\nfn on_try_sleep(n: u64, s: (&Shared)) -> u64 {\n    match time::try_sleep_ms(5000) {\n        time::WaitError(e) => { s.out.lock_with(10, note); },\n        unit(u) => {}\n    }\n    return 0;\n}\nfn on_latch_until(n: u64, s: (&Shared)) -> u64 {\n    match s.l.wait_until(time::now().after_ms(5000)) {\n        time::WaitError(e) => {\n            match e {\n                Cancelled => { s.out.lock_with(20, note); },\n                TimedOut => { s.out.lock_with(21, note); }\n            }\n        },\n        unit(u) => {}\n    }\n    return 0;\n}\nfn on_rw_until(n: u64, s: (&Shared)) -> u64 {\n    // Behind the holder for certain: the holder has the read lock before this asks to write.\n    while s.holding.load() == 0 {\n        host::sleep_ms(1);\n    }\n    match s.rw.write_until(time::now().after_ms(5000), 0, |v: (&mut u64), k: u64| -> u64 *v) {\n        time::WaitError(e) => { s.out.lock_with(30, note); },\n        u64(v) => {}\n    }\n    return 0;\n}\nfn holder(n: u64, s: (&Shared)) -> u64 {\n    // Holds the read lock through the cancellation without waiting on anything cancellable, so the\n    // writer below is certainly parked behind it when the scope is cancelled.\n    return s.rw.read_with(0, |v: (&u64), k: u64| -> u64 { s.holding.store(1); until := host::now_ms() + 400; while host::now_ms() < until {} return *v; });\n}\nfn body<sc>(scope: (&sc Scope<(&Shared)>), s: (&Shared)) -> u64 {\n    spawn(scope, 0, holder);\n    spawn(scope, 0, on_condition);\n    spawn(scope, 0, on_latch);\n    spawn(scope, 0, on_barrier);\n    spawn(scope, 0, on_semaphore);\n    spawn(scope, 0, on_sleep);\n    spawn(scope, 0, on_try_sleep);\n    spawn(scope, 0, on_latch_until);\n    spawn(scope, 0, on_rw_until);\n    while s.holding.load() == 0 {\n        host::sleep_ms(1);\n    }\n    host::sleep_ms(100);\n    scope.cancel();\n    return 0;\n}\nfn main() {\n    s := Shared { m: Mutex::new(0), c: sync::condition(), l: sync::latch(1), b: sync::barrier(2), s: sync::semaphore(0), rw: sync::rwlock<u64>(5), out: Mutex::new(u64[]), holding: Atomic::new(0) };\n    start := host::now_ms();\n    println(task_scope(&s, body));\n    println(host::now_ms() - start < 2000);\n    println(s.out.lock_with(0, total));\n}\n",
     "modules": [
       "lib/sync.grl",
@@ -15775,6 +15773,7 @@
   },
   {
     "name": "sched-frame-not-starved-by-background",
+    "timing": true,
     "note": "A background task keeps Background jobs of about 30 ms queued (32 at a time) while the main thread runs Frame passes of 64 short leaves: the worst Frame pass stays within a loose bound of its time alone, at most the cap (2 of 8 workers) plus the forking stack run Background work at once, and host::background_wait_us() reports that the oldest queued Background job has waited.",
     "files": [
       "tests/sched/classes.grl"
@@ -16230,6 +16229,7 @@
   },
   {
     "name": "sched-fork-reaches-a-thief",
+    "timing": true,
     "note": "200 rounds of a fork made while the other workers are parked; the branch that stays waits for a thief to start the forked one (500 ms at most). A worker that found work while searching used to stay counted as searching while it ran it, so its own forks woke nobody and stranded until the timeout; zero rounds may time out.",
     "files": [
       "tests/sched/fork_reaches_thief.grl"
@@ -17002,6 +17002,7 @@
   },
   {
     "name": "sleep-woken-early-rearms-its-timer",
+    "timing": true,
     "note": "A task's sleep that is woken before its deadline (a wake left pending by an earlier wait, or the timer's rounding) re-arms the timer for what is left instead of suspending on the one-shot registration that may already have fired: an I/O-style task sleeping 5 ms at a time beside parallel frames used to hang about one run in four (bench/frame.grl).",
     "files": [
       "tests/sched/task_jobs_timers.grl"
@@ -17014,6 +17015,14 @@
     "targets": [
       "x86_64"
     ]
+  },
+  {
+    "name": "unboxed-task-items",
+    "files": [
+      "compiler/tests/unboxed_task_items.grl"
+    ],
+    "stdout": "714\n",
+    "note": "plain-record task items spawned in a loop each reach their own task (boxed at spawn, freed by the task adapter); before, every task read the last iteration's words"
   },
   {
     "name": "closure-bounds-p17-callable-bound",
@@ -17072,5 +17081,212 @@
     "note": "a closure capturing a call-scoped parameter may be given to a callable-bound parameter and the result returned: the callee only borrows the closure for the call",
     "source": "use vecs;\nfn scale<T>(items: T[], f: Fn(T) -> T) -> T[] { return items.map(|x: T| -> T f(x)); }\nfn main() { r := scale(u64[1, 2], |x: u64| -> u64 x * 10); println(r[1]); }\n",
     "stdout": "20\n"
+  },
+  {
+    "name": "unboxed-loop-jobs",
+    "files": [
+      "compiler/tests/unboxed_loop_jobs.grl"
+    ],
+    "stdout": "714\n714\n",
+    "note": "the loop-spawn shape of unboxed-task-items for jobs (captured plain records) and parallel_map items: each sees its own record"
+  },
+  {
+    "name": "sched-thread-pointer-read-after-migration",
+    "note": "Two reads of the thread pointer in one function with a sleep between them see the thread each runs on (400 tasks on 4 workers; at least one moves). Under the LLVM backend the read is inline assembly with a side effect, never merged across the suspension.",
+    "files": [
+      "tests/sched/tp_read_after_migration.grl"
+    ],
+    "modules": [
+      "lib/core.grl"
+    ],
+    "env": {
+      "GRAIL_WORKERS": "4"
+    },
+    "stdout": "true\n",
+    "targets": [
+      "x86_64"
+    ]
+  },
+  {
+    "name": "reject-c-array-field-vector",
+    "reject": true,
+    "note": "an extern record's array field is an array: a vector is not one (copy_from copies a vector of the same length in)",
+    "source": "extern \"C\" record Box { tag: u16, ids: [u32; 4] }\nfn main() -> u64 {\n    mut b = Box { tag: 1, ids: [1, 2, 3, 4] };\n    b.ids = u32[1, 2, 3, 4];\n    return 0;\n}\n",
+    "diagnostic": "type mismatch"
+  },
+  {
+    "name": "reject-array-enum-payload",
+    "reject": true,
+    "source": "enum E {\n    A([f32; 4]),\n    B\n}\nfn main() {\n}\n",
+    "diagnostic": "an array as a variant's payload is not supported yet",
+    "note": "an enum's payload is one word until enums are inline (unboxed-values.md, stage 5)"
+  },
+  {
+    "name": "reject-array-reference-element",
+    "reject": true,
+    "source": "fn f<a>(x: &a u64) -> u64 {\n    v: [&a u64; 1] = [x];\n    return 0;\n}\nfn main() {\n}\n",
+    "diagnostic": "an array element is a number, a C handle or pointer, a plain or extern record, or another array"
+  },
+  {
+    "name": "array-record-fields-and-vectors",
+    "note": "arrays inline in structs and generic records, and a vector of arrays stored flat (a C `float[n][4]`): construction, in-place updates through `&mut`, element and nested assignment, push, insert, remove, pop()!, iteration",
+    "source": "struct Body {\n    pos: [f64; 3],\n    vel: [f64; 3],\n    mass: f64\n}\nstruct Mesh {\n    name: string,\n    tri: [u32; 3],\n    verts: [f32; 4][]\n}\nstruct Pair<T> {\n    a: T,\n    b: T\n}\nfn step(b: &mut Body, dt: f64) {\n    for k in 3 {\n        b.pos[k] = b.pos[k] + dt * b.vel[k];\n    }\n}\nfn main() {\n    mut b = Body { pos: [0.0, 1.0, 2.0], vel: [1.0, 1.0, 1.0], mass: 5.0 };\n    step(&mut b, 0.5);\n    println(\"{} {} {}\", b.pos, b.vel[2], b.mass);\n    p := b.pos;\n    b.pos = [9.0; 3];\n    println(\"{} {}\", p, b.pos);\n    println(b);\n    mut vs: [f32; 4][] = [[1.0, 2.0, 3.0, 4.0], [5.0; 4]];\n    vs.push([0.5; 4]);\n    vs[1] = [7.0, 7.0, 7.0, 7.0];\n    vs[2][3] = 9.0;\n    println(\"{} {} {}\", vs.len(), vs[1][0], vs[2]);\n    for v in &vs {\n        println(v[3]);\n    }\n    vs.insert(0, [6.0; 4]);\n    r := vs.remove(1);\n    println(\"{} {} {}\", r, vs[0], vs.len());\n    last := vs.pop()!;\n    println(\"{} {}\", last, vs.len());\n    m := Mesh { name: \"tri\".text(), tri: [0, 1, 2], verts: vs };\n    println(\"{} {} {}\", m.name, m.tri, m.verts.len());\n    q := Pair { a: [1, 2], b: [3, 4] };\n    println(\"{} {}\", q.a, q.b[1]);\n}\n",
+    "stdout": "[0.5, 1.5, 2.5] 1 5\n[0.5, 1.5, 2.5] [9.0, 9.0, 9.0]\nBody { pos: [9.0, 9.0, 9.0], vel: [1.0, 1.0, 1.0], mass: 5.0 }\n3 7 [0.5, 0.5, 0.5, 9.0]\n4\n7\n9\n[1.0, 2.0, 3.0, 4.0] [6.0, 6.0, 6.0, 6.0] 3\n[0.5, 0.5, 0.5, 9.0] 2\ntri [0, 1, 2] 2\n[1, 2] 4\n"
+  },
+  {
+    "name": "array-as-slice",
+    "note": "an array is a slice where one is expected: `&a` and `&mut a` as `&[T]`/`&mut [T]`, `[u8; N]` as `&[u8]`, sub-slices `a[lo: hi]`, slice methods on the array, copy_from with its length checked",
+    "source": "fn total(s: &[f64]) -> f64 {\n    mut t = 0.0;\n    for i in s.len() {\n        t = t + s[i];\n    }\n    return t;\n}\nfn bump(s: &mut [u64]) {\n    for i in s.len() {\n        s[i] += 1;\n    }\n}\nfn count(b: &[u8]) -> u64 {\n    return b.len();\n}\nfn main() {\n    a: [f64; 4] = [1.0, 2.0, 3.0, 4.0];\n    println(total(&a));\n    println(total(&a[1: 3]));\n    mut u: [u64; 3] = [5, 3, 9];\n    bump(&mut u);\n    println(\"{} {}\", u, u.contains(4));\n    s := &a[1: 4];\n    println(s.len());\n    name: [u8; 4] = [104, 105, 33, 0];\n    println(count(&name));\n    mut buf: [f32; 3] = [0.0; 3];\n    buf.copy_from(&f32[1.5, 2.5, 3.5]);\n    println(buf);\n}\n",
+    "stdout": "10\n5\n[6, 4, 10] true\n3\n4\n[1.5, 2.5, 3.5]\n"
+  },
+  {
+    "name": "array-copy-from-length-aborts",
+    "note": "copy_from checks the source's length against N at run time",
+    "backends": [
+      "native"
+    ],
+    "source": "fn main() {\n    mut u: [u64; 3] = [0; 3];\n    v := u64[1, 2];\n    u.copy_from(&v);\n}\n",
+    "signal": "SIGABRT",
+    "stderr": "error: array length mismatch: got 2 elements for an array of 3\n"
+  },
+  {
+    "name": "array-subslice-out-of-range-aborts",
+    "backends": [
+      "native"
+    ],
+    "source": "fn main() {\n    a: [u64; 3] = [1, 2, 3];\n    k: u64 = 4;\n    s := &a[1: k];\n    println(s.len());\n}\n",
+    "signal": "SIGABRT"
+  },
+  {
+    "name": "reject-array-mutable-slice-of-shared",
+    "reject": true,
+    "source": "fn bump(s: &mut [u64]) {\n    s[0] = 1;\n}\nfn main() {\n    a: [u64; 3] = [1, 2, 3];\n    bump(&a);\n}\n",
+    "diagnostic": ""
+  },
+  {
+    "name": "reject-array-vector-pop-option",
+    "reject": true,
+    "note": "pop's result is an option, whose payload is one word until enums are inline; `pop()!` takes the element",
+    "source": "fn main() {\n    mut v: [u8; 2][] = [[1, 2]];\n    x := v.pop();\n}\n",
+    "diagnostic": "an array as pop's option"
+  },
+  {
+    "name": "array-record-and-handle-elements",
+    "note": "arrays of plain records, of extern records and of C words, elements reached in place",
+    "source": "extern \"C\" record Px { x: i32, w: f32 }\nstruct V2 {\n    x: f64,\n    y: f64\n}\nfn main() {\n    mut ps: [Px; 2] = [Px { x: 1, w: 0.5 }, Px { x: 2, w: 1.5 }];\n    ps[1].x = 7;\n    println(\"{} {} {}\", ps[0].w, ps[1].x, ps[1].w);\n    mut vs: [V2; 3] = [V2 { x: 1.0, y: 2.0 }, V2 { x: 3.0, y: 4.0 }, V2 { x: 5.0, y: 6.0 }];\n    vs[2] = V2 { x: 9.0, y: 9.5 };\n    println(\"{} {} {}\", vs[0].y, vs[2].x, vs[2].y);\n    mut sum = 0.0;\n    for v in &vs {\n        sum = sum + v.x;\n    }\n    println(sum);\n    mut p: CPtr;\n    ptrs: [CPtr; 2] = [p, p];\n    println(ptrs.len());\n}\n",
+    "stdout": "0.5 7 1.5\n2 9 9.5\n13\n2\n"
+  },
+  {
+    "name": "array-by-value",
+    "note": "arrays as arguments and results by value (fixed-arrays.md, A3): an argument is a copy the callee owns, a result comes back boxed until results travel in registers (unboxed stage 3c) and the caller copies it into its own frame and frees the box",
+    "source": "fn add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {\n    return [a[0] + b[0], a[1] + b[1], a[2] + b[2]];\n}\nfn scaled(x: [f64; 4], k: f64) -> [f64; 4] {\n    mut a = x;\n    for i in 4 {\n        a[i] = a[i] * k;\n    }\n    return a;\n}\nfn sum8(a: [u64; 8]) -> u64 {\n    mut t = 0;\n    for i in 8 {\n        t += a[i];\n    }\n    return t;\n}\nfn squares() -> [u64; 8] {\n    mut out: [u64; 8] = [0; 8];\n    for i in 8 {\n        out[i] = i * i;\n    }\n    return out;\n}\nfn first<T>(x: T, y: T) -> T {\n    return x;\n}\nfn main() {\n    v := add([1.0, 2.0, 3.0], [0.5, 0.5, 0.5]);\n    println(v);\n    p: [f64; 4] = [1.0, 2.0, 3.0, 4.0];\n    q := scaled(p, 2.0);\n    println(\"{} {}\", p, q);\n    s := squares();\n    println(\"{} {}\", s, sum8(s));\n    big: [u64; 8] = [1; 8];\n    println(sum8(big));\n    mut acc: [f32; 3] = [0.0; 3];\n    for i in 3 {\n        acc = add(acc, [1.0, 2.0, 3.0]);\n    }\n    println(acc);\n    println(add(add(v, v), v));\n    println(first([1u8, 2u8], [3u8, 4u8]));\n}\n",
+    "stdout": "[1.5, 2.5, 3.5]\n[1.0, 2.0, 3.0, 4.0] [2.0, 4.0, 6.0, 8.0]\n[0, 1, 4, 9, 16, 25, 36, 49] 140\n8\n[3.0, 6.0, 9.0]\n[4.5, 7.5, 10.5]\n\u0001\u0002\n"
+  },
+  {
+    "name": "array-owned-elements",
+    "note": "arrays of owners - strings, vectors, records that own data, options - move, drop their elements at the end of their scope, replace an element by exchanging it (the old one dropped), and are returned and passed by value; the program ends with nothing allocated",
+    "source": "struct Item {\n    name: string,\n    tags: u64[]\n}\nfn names() -> [string; 3] {\n    return [\"red\".text(), \"green\".text(), \"blue\".text()];\n}\nfn longest(a: &[string; 3]) -> u64 {\n    mut best = 0;\n    for s in a {\n        if s.len() > best {\n            best = s.len();\n        }\n    }\n    return best;\n}\nfn take(a: [string; 3]) -> u64 {\n    return a[0].len() + a[2].len();\n}\nfn main() {\n    mut n = names();\n    println(n);\n    println(longest(&n));\n    n[1] = \"violet\".text();\n    println(\"{} {}\", n[1], n[1].len());\n    m := n;\n    println(take(m));\n    mut items: [Item; 2] = [Item { name: \"a\".text(), tags: u64[1] }, Item { name: \"b\".text(), tags: u64[2, 3] }];\n    items[0].tags.push(9);\n    println(\"{} {}\", items[0].tags, items[1].name);\n    items[1] = Item { name: \"c\".text(), tags: u64[] };\n    println(items[1].name);\n    mut v: [u64[]; 2] = [u64[1], u64[2]];\n    v = [u64[5, 6], u64[]];\n    println(\"{} {}\", v[0], v[1].len());\n    o: [u64?; 2] = [Some(1), None];\n    println(o.len());\n}\n",
+    "stdout": "[\"red\", \"green\", \"blue\"]\n5\nviolet 6\n7\n[1, 9] b\nc\n[5, 6] 0\n2\n"
+  },
+  {
+    "name": "array-owned-reassigned-in-a-loop",
+    "source": "fn main() {\n    mut a: [string; 2] = [\"x\".text(), \"y\".text()];\n    a = [\"p\".text(), \"q\".text()];\n    println(a);\n    for i in 2 {\n        a = [format(\"{}{}\", a[1], i), \"r\".text()];\n    }\n    println(a);\n}\n",
+    "stdout": "[\"p\", \"q\"]\n[\"r1\", \"r\"]\n",
+    "note": "assigning a whole array of owners drops the elements it held; the loop's literal reads the variable while it is built"
+  },
+  {
+    "name": "reject-array-owned-repeat",
+    "reject": true,
+    "source": "fn main() {\n    a: [string; 2] = [\"x\".text(); 2];\n}\n",
+    "diagnostic": "a repeated element must be a plain value"
+  },
+  {
+    "name": "reject-array-owned-copy",
+    "reject": true,
+    "source": "fn main() {\n    a: [string; 2] = [\"x\".text(), \"y\".text()];\n    b := a.copy();\n}\n",
+    "diagnostic": "copy requires an array of plain values"
+  },
+  {
+    "name": "reject-array-owned-moved",
+    "reject": true,
+    "note": "an array of owners moves, whatever its size",
+    "source": "fn main() {\n    a: [string; 1] = [\"x\".text()];\n    b := a;\n    println(a[0]);\n}\n",
+    "diagnostic": "`a` was moved"
+  },
+  {
+    "name": "reject-array-owned-field",
+    "reject": true,
+    "note": "an array of owners is not a field yet: records with drops are not inline until unboxed stage 4",
+    "source": "struct S {\n    names: [string; 2]\n}\nfn main() {\n}\n",
+    "diagnostic": "an array as a field, when its elements own data, is not supported yet"
+  },
+  {
+    "name": "reject-array-owned-vector-element",
+    "reject": true,
+    "source": "fn main() {\n    v: [string; 2][] = [];\n}\n",
+    "diagnostic": "an array as a vector's element, when its elements own data, is not supported yet"
+  },
+  {
+    "name": "array-generic-length",
+    "note": "a value parameter is an array's length (fixed-arrays.md, A4): inferred from the argument's array type, given explicitly, or a record's value parameter; each length is its own specialisation",
+    "source": "fn sum<@n: u64>(a: &[f32; n]) -> f32 {\n    mut t: f32 = 0.0;\n    for i in n {\n        t = t + a[i];\n    }\n    return t;\n}\nfn first<T, @n: u64>(a: &[T; n]) -> u64 {\n    return a.len();\n}\nfn zeros<@n: u64>() -> [u64; n] {\n    return [0; n];\n}\nstruct Mat<@R: u64, @C: u64> {\n    m: [[f32; C]; R]\n}\nfn trace<@k: u64>(m: &Mat<k, k>) -> f32 {\n    mut t: f32 = 0.0;\n    for i in k {\n        t = t + m.m[i][i];\n    }\n    return t;\n}\nfn main() {\n    a: [f32; 3] = [1.0, 2.0, 3.0];\n    b: [f32; 5] = [1.0; 5];\n    println(\"{} {}\", sum(&a), sum(&b));\n    u: [u8; 4] = [1, 2, 3, 4];\n    println(first(&u));\n    z := zeros<4>();\n    println(z);\n    m := Mat<2, 2> { m: [[1.0, 2.0], [3.0, 4.0]] };\n    println(trace(&m));\n}\n",
+    "stdout": "6 5\n4\n[0, 0, 0, 0]\n5\n"
+  },
+  {
+    "name": "reject-array-generic-length-mismatch",
+    "reject": true,
+    "note": "one value parameter fixes one length: two arrays of different lengths do not both fit it",
+    "source": "fn dot<@n: u64>(a: &[f32; n], b: &[f32; n]) -> f32 {\n    return a[0] * b[0];\n}\nfn main() {\n    a: [f32; 3] = [1.0; 3];\n    b: [f32; 4] = [1.0; 4];\n    println(dot(&a, &b));\n}\n",
+    "diagnostic": "one length parameter, two lengths"
+  },
+  {
+    "name": "closure-bounds-p17-no-callable-bound",
+    "note": "P17: callable bounds on a type parameter are deferred (Q5)",
+    "source": "fn apply<R, F: Fn()->R>(f: F) -> R { return f(); }\nfn main() { n := 3; println(apply(|| -> u64 n + 1)); }\n",
+    "reject": true,
+    "diagnostic": "expected `,`, found `(`"
+  },
+  {
+    "name": "fuzz-extern-unmatched-closer-is-a-diagnostic",
+    "source": "extern \"C\" fn f(x: u64) > u64;\nfn main() {}\n",
+    "reject": true,
+    "diagnostic": "expected `;`, found `>`",
+    "note": "A closer with no opener in an extern signature (the fuzzer's mutation of byval-record.grl) underflowed extern_has_body's depth counter: an arithmetic-overflow abort of the compiler. The scan now stops and the parser reports the token."
+  },
+  {
+    "name": "fuzz-file-ending-in-a-comment-without-newline",
+    "source": "// only a comment, no newline",
+    "reject": true,
+    "diagnostic": "no `main`",
+    "note": "A file whose last line is a `//` comment with no newline (the fuzzer's truncation of a test) made iface_scan read past the end: its loops used `&`, which evaluates both sides, so `text[i]` was read at i == len. Now `&&`."
+  },
+  {
+    "name": "fuzz-file-of-one-slash",
+    "source": "/",
+    "reject": true,
+    "diagnostic": "expected `fn`, found `/`",
+    "note": "A file ending in a lone `/` read text[i + 1] past the end in iface_scan's comment test (`&` for `&&`)."
+  },
+  {
+    "name": "refinement-wrapper-two-word-result",
+    "source": "struct P {\n    lo: u64,\n    hi: u64\n}\nfn mk(a: u64, b: u64 where a <= b) -> P {\n    return P { lo: a, hi: b };\n}\nfn seven() -> u64 {\n    return 7;\n}\nfn main() {\n    p := mk(2, 5);\n    println(p.lo);\n    println(p.hi);\n    x := seven();\n    q := mk(2, x);\n    println(q.lo);\n    println(q.hi);\n}\n",
+    "stdout": "2\n5\n2\n7\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "a two-word record returned from a refined function, through the body (proved) and through the wrapper (unproved): the facts that keep rdx live at the return are keyed by the body's own `.proved` symbol and repeated for the wrapper"
+  },
+  {
+    "name": "refinement-wrapper-dest-result",
+    "source": "struct Q {\n    a: u64,\n    b: u64,\n    c: u64,\n    d: u64\n}\nfn mk(a: u64, b: u64 where a <= b) -> Q {\n    return Q { a: a, b: b, c: a + b, d: b - a };\n}\nfn many(a: u64, b: u64, c: u64, d: u64, e: u64, k: u64 where k > 0) -> Q {\n    return Q { a: a + k, b: b + k, c: c + k, d: d + e + k };\n}\nfn seven() -> u64 {\n    return 7;\n}\nfn main() {\n    p := mk(2, 5);\n    println(p.a + p.b + p.c + p.d);\n    x := seven();\n    q := mk(2, x);\n    println(q.a + q.b + q.c + q.d);\n    r := many(1, 2, 3, 4, 5, 1);\n    println(r.a + r.b + r.c + r.d);\n    s := many(1, 2, 3, 4, 5, x);\n    println(s.a + s.b + s.c + s.d);\n}\n",
+    "stdout": "17\n23\n19\n43\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "a four-word record comes back through the caller's destination address, a hidden argument after the declared ones: the wrapper forwards it, also when the arguments pass seven words and go through the record"
   }
 ]

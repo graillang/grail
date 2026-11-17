@@ -1,0 +1,53 @@
+// JSON: build a 10 MB document of objects (integers, strings, arrays, a nested object), parse it
+// with the standard library into a dynamic value, walk it and serialise it again; prints the
+// totals and the length of the serialised text.
+use json;
+
+struct Totals {
+    ints: u64,
+    strings: u64,
+    nodes: u64,
+}
+fn walk<a, b>(v: (&a json::Value), t: (&b mut Totals)) {
+    t.nodes += 1;
+    match v {
+        Int(i) => {
+            t.ints = wrapping_add(t.ints, u64(i));
+        },
+        Str(s) => {
+            t.strings += s.len();
+        },
+        Array(items) => {
+            for i in items.len() {
+                walk(&items[i], t);
+            }
+        },
+        Object(members) => {
+            for i in members.len() {
+                t.strings += members[i].key.len();
+                walk(&members[i].value, t);
+            }
+        },
+        _ => {},
+    }
+}
+fn main() {
+    n: u64 := 92000;
+    mut text = "{\"items\":[";
+    for i in n {
+        if i > 0 {
+            text.append(",");
+        }
+        text.append("{\"id\":");
+        text.append(format("{},\"name\":\"item{}\",\"tags\":[\"t{}\",\"u{}\"],\"value\":{},\"nested\":", i, i, i % 7, i % 13, i * 37 % 100003));
+        text.append("{\"a\":");
+        text.append(format("{},\"b\":[1,2,3],\"label\":\"n{}\"", i % 100, i % 1000));
+        text.append("}}");
+    }
+    text.append("]}");
+    doc := json::parse(&text)!;
+    mut t = Totals { ints: 0, strings: 0, nodes: 0 };
+    walk(&doc, &mut t);
+    out := json::to_text(&doc);
+    println("{} {} {} {} {}", text.len(), t.nodes, t.ints, t.strings, out.len());
+}

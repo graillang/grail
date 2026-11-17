@@ -136,11 +136,12 @@ test('the Performance chapter renders every committed result file', () => {
   const chapter = book.chapters.find(c => c.slug === 'performance');
   expect(chapter).toBeDefined();
   const text = readFileSync(sourcePath(chapter.source), 'utf8');
-  for (const name of ['bench-rivals', 'compile-rivals', 'sched-rivals']) {
+  for (const name of ['bench-rivals', 'engine', 'compile-rivals', 'sched-rivals']) {
     expect(existsSync(join(root, 'bench/results', `${name}.json`))).toBe(true);
     expect(text).toContain(`{{perf:${name}`);
   }
   const html = expand(text, book);
-  for (const id of ['chart-release', 'chart-dev', 'chart-compile', 'chart-scheduler']) expect(html).toContain(`id="${id}"`);
+  for (const id of ['chart-bench-rivals-release', 'chart-bench-rivals-dev', 'chart-engine-release', 'chart-engine-dev', 'chart-compile-rivals-compile', 'chart-sched-rivals-scheduler']) expect(html).toContain(`id="${id}"`);
+  expect(new Set(html.match(/id="chart-[^"]+"/g)).size).toBe(html.match(/id="chart-[^"]+"/g).length); // no id twice
   expect(html).toContain('higher is better');
 });

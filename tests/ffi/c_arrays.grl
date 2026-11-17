@@ -1,8 +1,7 @@
 module ffi_c_arrays;
 
-// A C array inside a C record is declared `f: [T; N]` and laid out inline, as C lays it out. Grail
-// code reads it whole as a vector (`T[]`, or bytes for `[u8; N]`) and assigns it whole from one of
-// exactly N elements - there is no pointer into it to index past its end.
+// A C array inside a C record is declared `f: [T; N]` and laid out inline, as C lays it out: it is a
+// fixed-size array, indexed in place, borrowed as a slice and assigned whole.
 extern "C" record Pt { x: i32, w: f32 }
 extern "C" record Dev { kind: u16, name: [u8; 16], ids: [u32; 4], weights: [f32; 3], pts: [Pt; 2], deltas: [i8; 3], tail: i64 }
 
@@ -17,9 +16,9 @@ extern "C" lib "shim.o" fn c_ca_ints() -> CPtr;
 extern "C" lib "shim.o" fn c_ca_pts() -> CPtr;
 
 // A fixed C char buffer holds a NUL-terminated name: the bytes up to the first NUL.
-fn until_nul(b: u8[]) -> u8[] {
+fn until_nul(b: &[u8]) -> u8[] {
     mut out = u8[];
-    for x in &b {
+    for x in b {
         if x == 0 {
             return out;
         }
@@ -30,12 +29,12 @@ fn until_nul(b: u8[]) -> u8[] {
 
 fn main() -> u64 {
     @assert(size_of(Dev) == 80, "Dev has C's layout");
-    mut d = Dev { kind: 0, name: u8[0; 16], ids: u32[0; 4], weights: f32[0.0; 3], pts: Pt[Pt { x: 0, w: 0.0 }, Pt { x: 0, w: 0.0 }], deltas: i8[0; 3], tail: 0 };
+    mut d = Dev { kind: 0, name: [0; 16], ids: [0; 4], weights: [0.0; 3], pts: [Pt { x: 0, w: 0.0 }, Pt { x: 0, w: 0.0 }], deltas: [0; 3], tail: 0 };
     unsafe {
         println(c_ca_size());
         c_ca_fill(&mut d);
     }
-    println(until_nul(d.name).text());
+    println(until_nul(&d.name).text());
     ids := d.ids;
     println("{} {} {}", ids.len(), ids[0], ids[3]);
     w := d.weights;
