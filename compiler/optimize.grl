@@ -718,7 +718,31 @@ fn live_pass<a, c, d, e>(o: (&a mut ir::Body), lin: (&c mut u64[]), fx: (&d Live
     exchange(settled, same);
     return changed;
 }
+// What liveness reads of a body - each line's opcode, deletion and operands - folded into one word.
+fn body_print<a>(o: (&a ir::Body)) -> u64 {
+    mut h: u64 = 14695981039346656037;
+    for i in o.op.len() {
+        h = wrapping_mul(h ^ o.op[i], 1099511628211);
+        h = wrapping_mul(h ^ o.del[i], 1099511628211);
+        h = wrapping_mul(h ^ o.k0[i] ^ (o.v0[i] << 8), 1099511628211);
+        h = wrapping_mul(h ^ o.k1[i] ^ (o.v1[i] << 8), 1099511628211);
+        h = wrapping_mul(h ^ o.m0[i] ^ (o.m1[i] << 17), 1099511628211);
+        h = wrapping_mul(h ^ o.s0[i] ^ (o.e1[i] << 32), 1099511628211);
+    }
+    return h;
+}
 fn dead_defs<a, b>(o: (&a mut ir::Body), s: &b [u8], first: u64, last: u64) {
+    // Nothing changed since a run that removed nothing: this one would remove nothing either.
+    before := body_print(&o);
+    if (o.dd_still != 0) && (o.dd_print == before) {
+        return ();
+    }
+    dead_defs_run(&mut o, view(s), first, last);
+    after := body_print(&o);
+    exchange(&mut o.dd_print, after);
+    exchange(&mut o.dd_still, u64(after == before));
+}
+fn dead_defs_run<a, b>(o: (&a mut ir::Body), s: &b [u8], first: u64, last: u64) {
     mut lin = u64[];
     for i in last {
         lin.push(0);
