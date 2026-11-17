@@ -285,6 +285,11 @@ struct Constant {
 // A run-tier value of the program: a module binding `NAME := f(...);` or a static `@f(...)`. Every
 // probe defines a wrapper for each (ct_probe_wrappers), so code the probe compiles reads a value by
 // calling its initialiser instead of starting another probe (docs/design/comptime-speed.md, R1).
+// A value the build's batch probe computed (ct_batch), looked up by run_tier before it starts a probe.
+struct CtDone {
+    key: u8[],
+    res: CTRes
+}
 struct CtCall {
     module: u8[],
     name: u8[],
@@ -533,6 +538,11 @@ struct C {
     no_sites: u64,
     // `--check`: stop after the last diagnostic can have been given.
     check_only: u64,
+    // A check-only run with no unit store writes no assembly, so the text emitters (`o`, `on`, the
+    // slot and label spellers) write nothing while this is 1 (docs/design/compile-speed.md). The
+    // stream is never read back in such a run, except by a diagnostic (`fail` turns this off) and
+    // for a body's own label (func turns it off around that).
+    quiet: u64,
     // --f1-what=N: a test aid that records a deliberately wrong F1 kind for every binding, so the
     // checks --verify-facts emits can be shown to fire (docs/design/typed-ir.md, "Tests that catch
     // a wrong fact"). 0, the default, records the type the front end actually has.
@@ -607,6 +617,17 @@ struct C {
     res_synced: u64,
     bond_head: u64[],
     bond_next: u64[],
+    // The same bonds by holder (`bond_hhead[place]`, `bond_hnext[bond]`), and `bond_under[place]`
+    // nonzero when some bond's holder is that place or lies inside it; `bond_unranged` when a holder
+    // was not a place yet, which sends every question back to the whole list (bonds_sync).
+    bond_hhead: u64[],
+    bond_hnext: u64[],
+    bond_under: u64[],
+    bond_unranged: u64,
+    // For each `<` of the loaded file, the `>` that closes it (or the token count when none does),
+    // when `angle_ok` says the table is about the token stream there now (angle_sync).
+    angle_close: u64[],
+    angle_ok: u64,
     spec_em_slots: u64[],
     spec_em_keys: u64[],
     drop_em_slots: u64[],
@@ -706,6 +727,9 @@ struct C {
     constants: Constant[],
     statics: Static[],
     ct_calls: CtCall[],
+    ct_done: CtDone[],
+    // Where the batch probe writes the bodies each value reached (ct_write_deps), or empty.
+    ct_deps_path: u8[],
     // Where a static read parks the result of a call it makes only for its effect.
     static_scratch: u64,
     impl_params: ImplParams[],
@@ -884,6 +908,8 @@ struct C {
     // interned type, so a reference can never outrun its definition.
     drop_refs: u64[],
     drop_names: u8[][],
+    // By interned type: 1 once the drop walk has emitted its helper or found it emitted (emit_drops).
+    drop_walked: u64[],
     spec_emitted: u8[][],
     spell_lenient: u64,
     spell_failed: u64,
@@ -972,9 +998,8 @@ struct C {
     fx_pending_alloc: u64,
     fx_pending_panic: u64,
     fx_bounded: u64,
-    // Where the body being recorded starts in `c.out`, whether it is trusted code (the runtime, a drop
-    // helper) and how many calls it has recorded.
-    fx_out_start: u64,
+    // Whether the body being recorded is trusted code (the runtime, a drop helper) and how many calls
+    // it has recorded.
     fx_trusted: u64,
     fx_calls: u64,
     // A refined parameter's check in the checked entry: the caller's obligation, not a body edge.
@@ -1039,11 +1064,12 @@ struct C {
     reg_types: u64[],
     // The bodies applied from units, for the optimiser (ir::Known).
     known: ir::Known,
-    // Armed (par_start) but not forked yet: the walk forks when it has compiled `par_threshold`
-    // bodies the store did not have (par_fork), over the source still ahead of it.
+    // Armed (par_start) but not forked yet: the walk forks when par_decide finds the rest worth it,
+    // over the source still ahead of it (par_fork).
     par_armed: u64,
-    par_misses: u64,
-    par_threshold: u64,
+    // When and where in the source the walk's first body began (par_decide), 0 before it.
+    par_t0: u64,
+    par_p0: u64,
     par_sizes: u64[],
     fn_hits: u64,
     fn_filed: u64,
@@ -1058,7 +1084,33 @@ struct C {
     // body being emitted did the thing (`fn_uses`, read by fn_marks), and how many bodies each rule
     // excluded in this run (`fn_why`, printed with the run's account).
     fn_uses: u64[],
-    fn_why: u64[]
+    fn_why: u64[],
+    // Sources that came from the command line with a `@derive` expansion appended to them
+    // (docs/design/derives.md). The expansion is part of the file from the pass that can see the
+    // declaration's fields, and every later load has to return the same bytes: a generic body is
+    // replayed from its file after the passes are over, and its token positions must still name the
+    // text they were recorded against.
+    file_text: u8[][],
+    // The derives `@derive(...)` asked of the declaration that follows, as a bit per derive, and
+    // where the attribute was written (a diagnostic about the declaration points at it).
+    derive_pending: u64,
+    dr_pos: u64,
+    // The generic parameters of the declaration a pending derive applies to - captured where the
+    // declaration reads them, because a generated implementation repeats them - and which of them
+    // occur in a field, which is where the derive's interface becomes a bound.
+    dr_rnames: u8[][],
+    dr_tnames: u8[][],
+    dr_bounds: u64[],
+    dr_constraints: u64[][],
+    dr_used: u64[],
+    // (declaration, derives) pairs, recorded when an expansion was generated and read again in the
+    // pass where every implementation is known and the derives can be checked field by field.
+    dr_applied: u64[],
+    // The pass a derive is being expanded in, for --show-derives and for the call trace.
+    dr_pass: u64,
+    // The expansions this file's declarations asked for in the pass being parsed (dr_parse_tail).
+    dr_tail: u8[],
+    dr_trace: u64
 }
 
 fn same<a, b>(x: &a [u8], y: &b [u8]) -> bool {
@@ -1218,12 +1270,18 @@ fn decl_index_sync<a>(c: (&a mut C)) -> unit {
 
 // ---- output ----
 fn o<a, b>(c: (&a mut C), s: &b [u8]) -> unit {
+    if c.quiet != 0 {
+        return ();
+    }
     for i in s.len() {
         c.out.push(s[i]);
     }
     return ();
 }
 fn on<a>(c: (&a mut C), n: u64) -> unit {
+    if c.quiet != 0 {
+        return ();
+    }
     if 9 < n {
         on(&mut c, n / 10);
     }
@@ -1786,6 +1844,11 @@ fn debug_type_of<a>(c: (&a mut C), ty: u64, c_layout: u64) -> u64 {
         if (c.debug_types[et].kind == 0) & (c.debug_types[et].size != 8) {
             et = debug_base(&mut c, view("u64"), 7, 8);
         }
+        // A plain record or a C record element is stored inline, its words (or C bytes) one after
+        // another (unboxed-values.md, stage 1b): the element is the record itself, not a pointer.
+        if flat_bytes(&mut c, elem) != 0 {
+            et = c.debug_types[et].pointee;
+        }
         mut name = debug_type_name(&mut c, elem);
         push_bytes(&mut name, view("[]"));
         return debug_header(&mut c, view(name), et);
@@ -1830,14 +1893,21 @@ fn debug_type_of<a>(c: (&a mut C), ty: u64, c_layout: u64) -> u64 {
         name := c.decls[d].name.copy();
         count := c.decls[d].count;
         before := c.debug_types.len();
-        s := debug_type_add(&mut c, DebugType { name: name, kind: 2, enc: 0, size: 8 * count, pointee: 0, members: DebugMember[] });
+        // The record's words as they are laid out: a plain record field is inline, its words where
+        // field_word puts them (unboxed-values.md, stage 1b).
+        words := record_words(&mut c, base_type(&mut c, ty));
+        s := debug_type_add(&mut c, DebugType { name: name, kind: 2, enc: 0, size: 8 * words, pointee: 0, members: DebugMember[] });
         if s < before {
             return debug_pointer(&mut c, s);
         }
         mut members = DebugMember[];
         for i in count {
             fty := field_ty(&mut c, d, i);
-            members.push(DebugMember { name: c.fields[c.decls[d].first + i].name.copy(), ty: debug_type_of(&mut c, fty, 0), offset: 8 * i });
+            mut mt = debug_type_of(&mut c, fty, 0);
+            if inline_field(&mut c, ty, i) {
+                mt = c.debug_types[mt].pointee;
+            }
+            members.push(DebugMember { name: c.fields[c.decls[d].first + i].name.copy(), ty: mt, offset: 8 * field_word(&mut c, ty, i) });
         }
         exchange(&mut c.debug_types[s].members, members);
         return debug_pointer(&mut c, s);
@@ -1879,9 +1949,14 @@ fn debug_type_of<a>(c: (&a mut C), ty: u64, c_layout: u64) -> u64 {
         return debug_type_add(&mut c, DebugType { name: copy_bytes(view("view")), kind: 2, enc: 0, size: 16, pointee: 0, members: members });
     }
     if k == 7 {
-        // A reference is the address of its referent's slot.
+        // A reference is the address of its referent's word - except a reference to a record, which
+        // is the record's own address (`direct`, unboxed-values.md stage 1a), so it is described as
+        // the record value is: a pointer to its fields.
         referent := ty_arg(&mut c, ty);
         inner := debug_type_of(&mut c, referent, 0);
+        if direct(&mut c, referent) {
+            return inner;
+        }
         return debug_pointer(&mut c, inner);
     }
     if (k != 18) & (k != 19) & (k != 21) & (k != 22) {
@@ -3074,6 +3149,9 @@ fn val(t: u64, ty: u64) -> Val {
 
 // Every intermediate and binding has an rbp-relative eight-byte stack slot.
 fn stack_slot<a>(c: (&a mut C), id: u64) -> unit {
+    if c.quiet != 0 {
+        return ();
+    }
     c.out.push(45);
     on(&mut c, (id + 1) * 8);
     o(&mut c, view("(%rbp)"));
@@ -3135,11 +3213,16 @@ fn tls_bss<a>(c: (&a mut C)) -> unit {
             o(&mut c, view(".globl rt_tls_record\n"));
         }
     }
+    if (own_object(&c) == false) & (c.backend != 0) & tls_bridge(&mut c) {
+        // The LLVM half reads the TLS word by name in inline assembly (llvm.grl, the
+        // thread-pointer read), from another object: it must be visible to the link.
+        o(&mut c, view(".globl rt_tls_record\n.hidden rt_tls_record\n"));
+    }
     o(&mut c, view("ud2\n"));
     if tls_bridge(&mut c) {
         tls_thread_stubs(&mut c);
     }
-    o(&mut c, view(".bss\n.p2align 4\nrt_state: .zero 8192\n"));
+    o(&mut c, view(".bss\n.p2align 4\nrt_state: .zero 4096\n"));
     if tls_bridge(&mut c) {
         o(&mut c, view(".section .tbss,\"awT\",@nobits\n.p2align 3\nrt_tls_record: .zero 8\n"));
     }
@@ -3327,6 +3410,9 @@ fn tls_leave<a>(c: (&a mut C), slot: u64) -> unit {
 }
 fn save<a>(c: (&a mut C)) -> u64 {
     n := fresh(&mut c);
+    if c.quiet != 0 {
+        return n;
+    }
     o(&mut c, view("movq %rax,"));
     stack_slot(&mut c, n);
     c.out.push(10);
@@ -3370,6 +3456,9 @@ fn save_result<a>(c: (&a mut C), ret: u64) -> u64 {
     return save(&mut c);
 }
 fn get<a, b>(c: (&a mut C), id: u64, reg: &b [u8]) -> unit {
+    if c.quiet != 0 {
+        return ();
+    }
     o(&mut c, view("movq "));
     stack_slot(&mut c, id);
     c.out.push(44);
@@ -3441,6 +3530,9 @@ fn scope_undo<a>(c: (&a mut C)) -> unit {
 // `<unit prefix>_<n>` outside a function, `<unit prefix>_<f>_<n>` inside one: what follows `.L`,
 // `.F`, `.Lrfp` and `.Lrfr`. Copies, because `o` borrows `c` mutably and the prefix is a field of it.
 fn scoped_number<a>(c: (&a mut C), n: u64) -> unit {
+    if c.quiet != 0 {
+        return ();
+    }
     prefix := c.lpart.copy();
     o(&mut c, view(prefix));
     c.out.push(95);
@@ -4495,11 +4587,17 @@ fn bond_kind<a>(c: (&a mut C), holder: u64, loan: u64, guard: u64) -> unit {
     if (holder == 0) || (loan == 0) {
         return ();
     }
-    for i in c.bonds.len() {
-        mut b = &c.bonds[i];
-        if (b.holder == holder) & (b.loan == loan) & (b.guard == guard) {
+    // Only the holder's own bonds can be the same bond (bonds_sync).
+    bonds_sync(&mut c);
+    mut j = 0;
+    if holder < c.bond_hhead.len() {
+        j = c.bond_hhead[holder];
+    }
+    while j != 0 {
+        if (c.bonds[j - 1].loan == loan) & (c.bonds[j - 1].guard == guard) {
             return ();
         }
+        j = c.bond_hnext[j - 1];
     }
     c.bonds.push(Bond { holder: holder, loan: loan, guard: guard });
     return ();
@@ -4514,6 +4612,10 @@ fn loan_live<a>(c: (&a mut C), loan: u64) -> u64 {
 }
 fn transfer_bonds<a>(c: (&a mut C), src: u64, dst: u64) -> unit {
     if (src == 0) || (dst == 0) {
+        return ();
+    }
+    // A source no bond is held under has nothing to pass on (bond_under).
+    if !bond_under(&mut c, src) {
         return ();
     }
     n := c.bonds.len();
@@ -4532,6 +4634,10 @@ fn transfer_bonds<a>(c: (&a mut C), src: u64, dst: u64) -> unit {
 }
 fn return_bonds<a>(c: (&a mut C), src: u64, dst: u64, aggregate: u64) -> unit {
     if (src == 0) || (dst == 0) {
+        return ();
+    }
+    // A source no bond is held under has nothing to pass on (bond_under).
+    if !bond_under(&mut c, src) {
         return ();
     }
     n := c.bonds.len();
@@ -4573,13 +4679,56 @@ fn bonds_sync<a>(c: (&a mut C)) -> unit {
         }
         c.bond_next.push(c.bond_head[loan]);
         c.bond_head[loan] = at + 1;
+        holder := c.bonds[at].holder;
+        while c.bond_hhead.len() <= holder {
+            c.bond_hhead.push(0);
+        }
+        c.bond_hnext.push(c.bond_hhead[holder]);
+        c.bond_hhead[holder] = at + 1;
+        // A place's parent never changes, so the marks only accumulate; a marked place's parents are
+        // marked already.
+        if c.check.places.len() < holder {
+            exchange(&mut c.bond_unranged, 1);
+        }
+        mut p = holder;
+        while (p != 0) & (p <= c.check.places.len()) {
+            while c.bond_under.len() <= p {
+                c.bond_under.push(0);
+            }
+            if c.bond_under[p] != 0 {
+                break;
+            }
+            c.bond_under[p] = 1;
+            p = c.check.places[p - 1].parent;
+        }
     }
     return ();
 }
 fn bonds_swapped<a>(c: (&a mut C)) -> unit {
     exchange(&mut c.bond_head, u64[]);
     exchange(&mut c.bond_next, u64[]);
+    exchange(&mut c.bond_hhead, u64[]);
+    exchange(&mut c.bond_hnext, u64[]);
+    exchange(&mut c.bond_under, u64[]);
+    exchange(&mut c.bond_unranged, 0);
     return ();
+}
+// Whether some bond's holder is `place` or lies inside it: `ownership::ancestor(place, holder)` asked
+// of every bond, answered from the marks bonds_sync leaves up each holder's parents.
+fn bond_under<a>(c: (&a mut C), place: u64) -> bool {
+    bonds_sync(&mut c);
+    if c.bond_unranged != 0 {
+        for i in c.bonds.len() {
+            if ownership::ancestor(&c.check, place, c.bonds[i].holder) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if (place == 0) || (c.check.places.len() < place) || (c.bond_under.len() <= place) {
+        return false;
+    }
+    return c.bond_under[place] != 0;
 }
 // The record list was replaced by another one: what `resource` remembers is about the old list.
 fn resources_swapped<a>(c: (&a mut C)) -> unit {
@@ -5231,9 +5380,10 @@ fn last_name<a, b>(c: (&a mut C), name: &b [u8], from: u64, to: u64) -> u64 {
             }
             depth = depth - 1;
         }
+        // The tokens are read in place: this scan visits every token of the scope for every
+        // binding, and copying each one out to compare it was most of a check's allocations.
         if (kind == 1) & (hidden == 0) & (pending == 0) {
-            token := tok_text(&mut c, i);
-            if same(view(token), view("mut")) {
+            if (en - st == 3) && (c.src[st] == 109) && (c.src[st + 1] == 117) && (c.src[st + 2] == 116) {
                 mut declaration = 1;
                 if i != 0 {
                     if kind_at(&mut c, i - 1) == 38 {
@@ -5241,15 +5391,36 @@ fn last_name<a, b>(c: (&a mut C), name: &b [u8], from: u64, to: u64) -> u64 {
                     }
                 }
                 if declaration != 0 {
-                    declared := tok_text(&mut c, i + 1);
-                    if same(view(declared), view(name)) {
+                    // Past the last token is the empty text, as `tok_text` has it.
+                    mut declared = name.len() == 0;
+                    if i + 1 < c.toks.len() {
+                        ds := c.toks[i + 1].start;
+                        de := c.toks[i + 1].end;
+                        declared = de - ds == name.len();
+                        mut j = 0;
+                        while declared && (j < name.len()) {
+                            if c.src[ds + j] != name[j] {
+                                declared = false;
+                            }
+                            j = j + 1;
+                        }
+                    }
+                    if declared {
                         pending = depth + 1;
                         skip = i + 1;
                     }
                 }
             }
             if kind_at(&mut c, i + 1) == 261 {
-                if same(view(token), view(name)) {
+                mut named = en - st == name.len();
+                mut j = 0;
+                while named && (j < name.len()) {
+                    if c.src[st + j] != name[j] {
+                        named = false;
+                    }
+                    j = j + 1;
+                }
+                if named {
                     pending = depth + 1;
                     skip = i;
                 }
@@ -5338,13 +5509,8 @@ fn expire_locals<a>(c: (&a mut C)) -> unit {
         mut carrier = k == 5 || k == 7 || k == 27;
         root := place_of(&mut c, slot);
         if (k == 6) || (k == 8) || (k == 26) {
-            for j in c.bonds.len() {
-                mut b = &c.bonds[j];
-                holder := b.holder;
-                if ownership::ancestor(&c.check, root, holder) {
-                    carrier = true;
-                    break;
-                }
+            if bond_under(&mut c, root) {
+                carrier = true;
             }
         }
         if carrier {
@@ -6114,18 +6280,49 @@ fn observe<a>(c: (&a mut C), slot: u64) -> unit {
     k := ty_kind(&mut c, ty);
     if (k == 5) || (k == 7) || (k == 27) {
         mut checked = 0;
-        for i in c.bonds.len() {
-            mut b = &c.bonds[i];
-            h := b.holder;
-            loan := b.loan;
-            guard := b.guard;
-            if (guard == 0) & ownership::ancestor(&c.check, h, place) {
-                if loan_live(&mut c, loan) != 0 {
-                    checked = 1;
-                    if ownership::use_loan(&c.check, loan, 0) != 0 {
-                        fail(&mut c, view("reference is suspended or expired"));
+        // The bonds held by `place` or by a place it lies inside (bonds_sync): the holders are the
+        // place's own chain of parents. The order they are visited in is not the list's, which no
+        // answer depends on - each refusal is the same diagnostic at the same token.
+        bonds_sync(&mut c);
+        if c.bond_unranged != 0 {
+            for i in c.bonds.len() {
+                mut b = &c.bonds[i];
+                h := b.holder;
+                loan := b.loan;
+                guard := b.guard;
+                if (guard == 0) & ownership::ancestor(&c.check, h, place) {
+                    if loan_live(&mut c, loan) != 0 {
+                        checked = 1;
+                        if ownership::use_loan(&c.check, loan, 0) != 0 {
+                            fail(&mut c, view("reference is suspended or expired"));
+                        }
                     }
                 }
+            }
+        } else {
+            mut h = place;
+            if c.check.places.len() < place {
+                h = 0;
+            }
+            while h != 0 {
+                mut j = 0;
+                if h < c.bond_hhead.len() {
+                    j = c.bond_hhead[h];
+                }
+                while j != 0 {
+                    loan := c.bonds[j - 1].loan;
+                    guard := c.bonds[j - 1].guard;
+                    if guard == 0 {
+                        if loan_live(&mut c, loan) != 0 {
+                            checked = 1;
+                            if ownership::use_loan(&c.check, loan, 0) != 0 {
+                                fail(&mut c, view("reference is suspended or expired"));
+                            }
+                        }
+                    }
+                    j = c.bond_hnext[j - 1];
+                }
+                h = c.check.places[h - 1].parent;
             }
         }
         if checked == 0 {
@@ -7101,6 +7298,8 @@ fn fail<a, b>(c: (&a mut C), msg: &b [u8]) -> unit {
     if c.par_me != 0 {
         host::exit(3);
     }
+    // The diagnostic is rendered through the emitters.
+    exchange(&mut c.quiet, 0);
     p := c.pos;
     m := tok_text(&mut c, p);
     // The offending token's width: the caret run under the primary line, and the width a driver
@@ -7397,8 +7596,8 @@ fn eat<a, b>(c: (&a mut C), s: &b [u8]) -> bool {
     return true;
 }
 fn expect<a, b>(c: (&a mut C), s: &b [u8]) -> unit {
-    want := s.copy();
     if !eat(&mut c, s) {
+        want := s.copy();
         mut msg = copy_bytes(view("expected `"));
         push_bytes(&mut msg, view(want));
         msg.push(96);
@@ -9533,7 +9732,6 @@ fn pv_loop_kill<a>(c: (&a mut C), open: u64, end: u64) -> unit {
     mut i = open + 1;
     while i < end {
         if kind_at(&mut c, i) == 1 {
-            n := tok_text(&mut c, i);
             nk := kind_at(&mut c, i + 1);
             // `x = ...` and `x += ...` change what the name means from here on.
             mut hit = u64((nk == 61) || ((261 < nk) & (nk < 269)));
@@ -9549,13 +9747,13 @@ fn pv_loop_kill<a>(c: (&a mut C), open: u64, end: u64) -> unit {
             if (hit == 0) & (2 <= i) {
                 // `&mut x` lends x out exclusively, so a call in the body may write it.
                 if (kind_at(&mut c, i - 1) == 1) & (kind_at(&mut c, i - 2) == 38) {
-                    w := tok_text(&mut c, i - 1);
-                    if same(view(w), view("mut")) {
+                    if is_at(&mut c, i - 1, view("mut")) {
                         hit = 1;
                     }
                 }
             }
             if hit != 0 {
+                n := tok_text(&mut c, i);
                 pv_ir_wrote(&mut c, view(n));
             }
         }
@@ -10366,6 +10564,7 @@ fn load_file<a>(c: (&a mut C), index: u64) -> unit {
         load_file_reset(&mut c);
         return ();
     }
+    exchange(&mut c.angle_ok, 0);
     if c.file_loaded != 0 {
         parked := c.file_loaded - 1;
         mut slot = c.file_cache_index.len();
@@ -10412,7 +10611,25 @@ fn load_file<a>(c: (&a mut C), index: u64) -> unit {
             host::exit(1);
         }
         push_bytes(&mut path, view(arg));
-        src = host::read_file(view(path));
+        mut cached = 0;
+        if index < c.file_text.len() {
+            // A file a `@derive` expanded into: the bytes this build has already seen, expansion
+            // included, so a token position recorded in an earlier pass still names the same text.
+            held := c.file_text[index].copy();
+            if held.len() != 0 {
+                src = held;
+                cached = 1;
+            }
+        }
+        if cached == 0 {
+            if host::exists(view(arg)) == 0 {
+                host::print(view("grail: cannot read input file "));
+                host::print(view(arg));
+                host::print(view("\n"));
+                host::exit(1);
+            }
+            src = host::read_file(view(path));
+        }
     }
     mut toks = Tok[];
     lexed := lexer::tokenize(view(src));
@@ -10911,10 +11128,25 @@ fn transfer_capability<a, b>(
         }
         return true;
     }
-    // An associated type of a parameter has no capability bounds to rely on; nor does an interface
-    // object, whose concrete type is unknown.
-    if (k == 30) || (k == 33) {
+    // An associated type of a parameter has no capability bounds to rely on.
+    if k == 30 {
         return deny(&mut c, 8);
+    }
+    // An interface object is what its type says (`dyn<Send> I`): its concrete type is checked when
+    // it is boxed, and a bare `dyn I` says nothing.
+    if k == 33 {
+        mut need = CLOSURE_SEND;
+        if shared != 0 {
+            need = CLOSURE_SHARE;
+        }
+        if (ty_mode(&mut c, ty) & need) != 0 {
+            return true;
+        }
+        return deny(&mut c, 14);
+    }
+    // The referent of a `&dyn I`.
+    if k == 35 {
+        return transfer_capability(&mut c, arg, shared, &mut trail, depth + 1);
     }
     // A capability proof (kind 9) carries its own bits: 1 transferable, 2 shareable.
     if k == 9 {
@@ -11115,6 +11347,7 @@ fn transfer_capability<a, b>(
 //  11 a job handle, which cannot be shared
 //  12 a closure type from a signature that does not state the bound
 //  13 an FnMut closure, which cannot be shared
+//  14 an interface object whose dyn type states no Send / Share bound
 fn deny<a>(c: (&a mut C), code: u64) -> u64 {
     if c.cap_denial == 0 {
         exchange(&mut c.cap_denial, code);
@@ -11176,6 +11409,8 @@ fn cap_denial_text<a, b>(c: (&a mut C), out: (&b mut u8[])) -> unit {
                                             dput(&mut out, view("a closure whose type does not say what it captured (write `Fn<Send>(..)` or `Fn<Share>(..)` where the type is written)"));
                                         } else if code == 13 {
                                             dput(&mut out, view("an FnMut closure, which cannot be shared"));
+                                        } else if code == 14 {
+                                            dput(&mut out, view("an interface object whose type does not say what the value behind it may do (write `dyn<Send> I` or `dyn<Share> I`)"));
                                         } else {
                                             dput(&mut out, view("a type that nests too deeply to classify"));
                                         }
@@ -12150,11 +12385,22 @@ fn dyn_box<a>(c: (&a mut C), v: Val, expected: u64) -> Val {
         fail(&mut c, view("this type does not implement the interface the dyn type names"));
     }
     // The type, or - for a value whose type cannot show a borrow it holds (a record with a closure
-    // field) - the value itself: a `dyn` erases both.
-    if contains_borrow(&mut c, concrete, 0)
-        || (may_hide_borrow(&mut c, concrete) && holds_live_loan(&mut c, place_of(&mut c, v.t))) {
-        fail(&mut c, view("a dyn value cannot hold borrowed data: its lifetime would be lost"));
+    // field) - the value itself: a `dyn` erases both. `dyn<s> I` may hold borrows: the cell keeps
+    // the value's loans and carries `s`, so the region checks follow it.
+    borrowing := type_regions(&mut c, expected).len() != 0;
+    if !borrowing && (contains_borrow(&mut c, concrete, 0)
+        || (may_hide_borrow(&mut c, concrete) && holds_live_loan(&mut c, place_of(&mut c, v.t)))) {
+        fail(&mut c, view("a dyn value cannot hold borrowed data: its lifetime would be lost; write `dyn<s> I` to keep the borrow"));
     }
+    // The bounds the dyn type states are met by the concrete type, checked here where it is known.
+    dyn_bits := ty_mode(&mut c, expected);
+    if (dyn_bits & CLOSURE_SEND) != 0 {
+        require_capability_named(&mut c, concrete, 0, view("value boxed as `dyn<Send>`"));
+    }
+    if (dyn_bits & CLOSURE_SHARE) != 0 {
+        require_capability_named(&mut c, concrete, 1, view("value boxed as `dyn<Share>`"));
+    }
+    source_place := place_of(&mut c, v.t);
     fixed := type_args(&mut c, expected);
     for j in fixed.len() {
         given := project(&mut c, concrete, id * 1024 + j);
@@ -12179,7 +12425,27 @@ fn dyn_box<a>(c: (&a mut C), v: Val, expected: u64) -> Val {
     rec_store(&mut c, cell, 1, table);
     move_out(&mut c, val(v.t, v.ty));
     own(&mut c, cell, expected);
+    if borrowing {
+        return_bonds(&mut c, source_place, place_of(&mut c, cell), 1);
+    }
     return val(cell, expected);
+}
+// A `dyn<B> I` value used as `dyn<B'> I` with fewer bounds: the same cell and vtable, so nothing is
+// converted. 1 when it may be.
+fn dyn_converts<a>(c: (&a mut C), actual: u64, expected: u64) -> u64 {
+    if (ty_kind(&mut c, actual) != 33) || (ty_kind(&mut c, expected) != 33) {
+        return 0;
+    }
+    have := ty_mode(&mut c, actual);
+    want := ty_mode(&mut c, expected);
+    if (want & have) != want {
+        return 0;
+    }
+    if (type_regions(&mut c, actual).len() != 0) && (type_regions(&mut c, expected).len() == 0) {
+        return 0;
+    }
+    plain := intern_args(&mut c, 33, ty_arg(&mut c, actual), want, type_regions(&mut c, expected), type_args(&mut c, actual));
+    return same_type(&mut c, plain, expected);
 }
 // Record the (interface, concrete type) pair whose vtable this program builds; both an owned `dyn I`
 // and a `&dyn I` need one.
@@ -12930,6 +13196,12 @@ fn same_type<a>(c: (&a mut C), x: u64, y: u64) -> u64 {
         if aa != bb {
             return 0;
         }
+        if ty_mode(&mut c, x) != ty_mode(&mut c, y) {
+            return 0;
+        }
+        if type_regions(&mut c, x).len() != type_regions(&mut c, y).len() {
+            return 0;
+        }
         xa := type_args(&mut c, x);
         ya := type_args(&mut c, y);
         if xa.len() != ya.len() {
@@ -12978,6 +13250,10 @@ fn contains_borrow<a>(c: (&a mut C), ty: u64, depth: u64) -> bool {
 fn borrow_walk<a, b>(c: (&a mut C), ty: u64, trail: (&b mut u64[])) -> bool {
     k := ty_kind(&mut c, ty);
     arg := ty_arg(&mut c, ty);
+    // `dyn<s> I` holds borrows from `s`.
+    if (k == 33) && (type_regions(&mut c, ty).len() != 0) {
+        return true;
+    }
     if k == 5 || k == 7 || k == 27 {
         return true;
     }
@@ -13173,6 +13449,19 @@ fn source_type_name<a>(c: (&a mut C), ty: u64) -> u8[] {
         push_bytes(&mut out, view(inner));
         return out;
     }
+    if k == 33 {
+        // `dyn<Send> Peek`, `dyn Iterator<Item = u64>`.
+        push_bytes(&mut out, view("dyn"));
+        drs := type_regions(&mut c, ty);
+        mut rname = u8[];
+        if (drs.len() == 1) && (drs[0] != 0) && (drs[0] <= c.rnames.len()) {
+            rname = c.rnames[drs[0] - 1].copy();
+        }
+        closure_bounds_text_named(&mut out, ty_mode(&mut c, ty), view(rname));
+        out.push(32);
+        push_bytes(&mut out, view(c.interfaces[arg - 1].name));
+        return out;
+    }
     if k == 35 {
         // The referent of a borrowed interface object prints as the dyn type it names, so
         // `&dyn Shape` reads back as it was written.
@@ -13246,6 +13535,24 @@ fn require_type<a>(c: (&a mut C), actual: u64, expected: u64) -> unit {
         // one whose bounds its captures meet): the same record, so nothing is converted.
         if closure_converts(&mut c, actual, want) != 0 {
             return ();
+        }
+        if dyn_converts(&mut c, actual, want) != 0 {
+            return ();
+        }
+        if (ty_kind(&mut c, actual) == 33) && (ty_kind(&mut c, want) == 33) && (ty_arg(&mut c, actual) == ty_arg(&mut c, want)) {
+            have := ty_mode(&mut c, actual);
+            need := ty_mode(&mut c, want);
+            if (need & have) != need {
+                mut msg = copy_bytes(view("`"));
+                push_bytes(&mut msg, view(source_type_name(&mut c, actual)));
+                push_bytes(&mut msg, view("` does not say what the value behind it may do, so it cannot be used as `"));
+                push_bytes(&mut msg, view(source_type_name(&mut c, want)));
+                push_bytes(&mut msg, view("`: a bound is checked where the value is boxed, so state it there"));
+                fail(&mut c, view(msg));
+            }
+            if (type_regions(&mut c, actual).len() != 0) && (type_regions(&mut c, want).len() == 0) {
+                fail(&mut c, view("this `dyn` holds a borrow - it is `dyn<s> I` - and a bare `dyn I` holds none: keep the lifetime in the type"));
+            }
         }
         // `Fn` and `FnMut` have the same signature and differ only in whether a call needs
         // exclusive access: say so instead of reporting a shape mismatch.
@@ -14041,7 +14348,7 @@ fn lifetime_candidate<a>(c: (&a mut C), p: u64) -> bool {
         return false;
     }
     // `&dyn I` is a reference to an interface object, not lifetime `dyn`.
-    if same(view(n), view("dyn")) && (kind_at(&mut c, p + 1) == 1) {
+    if same(view(n), view("dyn")) && ((kind_at(&mut c, p + 1) == 1) || (kind_at(&mut c, p + 1) == 60)) {
         return false;
     }
     return token_starts_type(&mut c, p + 1) || is_at(&mut c, p + 1, view("mut"));
@@ -14200,7 +14507,7 @@ fn parse_reference<a>(c: (&a mut C)) -> u64 {
 }
 // Whether the type before the parser is `dyn I`: what `&dyn I` in a body borrows.
 fn dyn_type_ahead<a>(c: (&a mut C)) -> bool {
-    return is(&mut c, view("dyn")) && (kind_at(&mut c, c.pos + 1) == 1);
+    return is(&mut c, view("dyn")) && ((kind_at(&mut c, c.pos + 1) == 1) || (kind_at(&mut c, c.pos + 1) == 60));
 }
 // `*T` / `*mut T`: a raw pointer (kind 34, argument T, mode 1 when mutable). It is one word, Copy
 // and has no drop; every operation on it needs an `unsafe` block (docs/design/unsafe.md).
@@ -14225,8 +14532,20 @@ fn parse_type_base<a>(c: (&a mut C)) -> u64 {
         return parse_raw_pointer(&mut c);
     }
     // `dyn I` / `dyn module::I`: a value of any type implementing I, chosen at run time.
-    if is(&mut c, view("dyn")) && (kind_at(&mut c, c.pos + 1) == 1) {
+    if is(&mut c, view("dyn")) && ((kind_at(&mut c, c.pos + 1) == 1) || (kind_at(&mut c, c.pos + 1) == 60)) {
         advance(&mut c);
+        // `dyn<Send> I`, `dyn<Send, Share> I`, `dyn<s> I` (docs/design/dyn-and-callable-bounds.md):
+        // the bounds an interface object states about the value behind it, read by the same list
+        // as a closure type's. `Owned` is never written: a bare `dyn I` already holds no borrow,
+        // and `dyn<s> I` is the form that may.
+        mut dyn_regions = u64[];
+        mut dyn_bits = 0;
+        if is(&mut c, view("<")) {
+            dyn_bits = closure_bounds_list(&mut c, false, &mut dyn_regions);
+            if (dyn_bits & CLOSURE_OWNED) != 0 {
+                fail(&mut c, view("`Owned` is not written on `dyn`: a `dyn I` holds no borrow already; `dyn<s> I` is the one that may"));
+            }
+        }
         first := ident(&mut c);
         mut m = module_copy(&mut c);
         mut n = first.copy();
@@ -14282,7 +14601,7 @@ fn parse_type_base<a>(c: (&a mut C)) -> u64 {
         if !known {
             c.dyn_ifaces.push(id);
         }
-        return intern_args(&mut c, 33, id, 0, u64[], fixed);
+        return intern_args(&mut c, 33, id, dyn_bits, dyn_regions, fixed);
     }
     // `&&T`, which the lexer reads as one `&&` token: a shared reference to `&T`, elided lifetime.
     if eat(&mut c, view("&&")) {
@@ -14922,7 +15241,25 @@ fn decl<a>(c: (&a mut C), pass: u64) -> unit {
     types := c.tnames.len();
     bounds := copy_numbers(&c.type_bounds);
     constraints := copy_constraints(&c.type_interfaces);
+    // `@derive(...)` before this declaration: the derives belong to it, and the parameters a
+    // generated implementation repeats are the ones it just read.
+    derive_bits := exchange(&mut c.derive_pending, 0);
+    if derive_bits != 0 {
+        exchange(&mut c.dr_rnames, copy_names(&c.rnames));
+        exchange(&mut c.dr_tnames, copy_names(&c.tnames));
+        exchange(&mut c.dr_bounds, copy_numbers(&c.type_bounds));
+        exchange(&mut c.dr_constraints, copy_constraints(&c.type_interfaces));
+    }
     if pass != 2 {
+        if (pass == 3) & (derive_bits != 0) {
+            // Every implementation in the build is known by the last pass, which is where a derive
+            // is checked: a field whose type cannot do what the derive needs names itself.
+            here := module_copy(&mut c);
+            found := find_decl(&mut c, view(here), view(name));
+            if found != 0 {
+                dr_check(&mut c, found - 1, derive_bits);
+            }
+        }
         if pass == 1 {
             m := module_copy(&mut c);
             mut kind = copy_bytes(view("struct"));
@@ -15094,17 +15431,35 @@ fn decl<a>(c: (&a mut C), pass: u64) -> unit {
             constraints: constraints,
         }
     );
+    if derive_bits != 0 {
+        exchange(&mut c.dr_pass, pass);
+        dr_expand(&mut c, d - 1, derive_bits);
+    }
     return ();
 }
 // Words that start a statement or expression inside a body; they cannot name a binding or
 // parameter. Declaration heads (`fn`, `struct`, `module`, `use`, ...) are recognised only at the
 // top level and may name bindings.
 fn is_keyword<a>(name: &a [u8]) -> bool {
-    words := u8[][copy_bytes(view("mut")), copy_bytes(view("if")), copy_bytes(view("else")), copy_bytes(view("while")), copy_bytes(view("for")), copy_bytes(view("in")), copy_bytes(view("loop")), copy_bytes(view("match")), copy_bytes(view("return")), copy_bytes(view("break")), copy_bytes(view("continue")), copy_bytes(view("unsafe")), copy_bytes(view("true")), copy_bytes(view("false"))];
-    for i in words.len() {
-        if same(view(words[i]), view(name)) {
-            return true;
-        }
+    // Asked of every binding: matched by length and then bytes, with nothing built per question.
+    n := name.len();
+    if n == 2 {
+        return (name[0] == 105) && ((name[1] == 102) || (name[1] == 110));
+    }
+    if n == 3 {
+        return ((name[0] == 109) && (name[1] == 117) && (name[2] == 116)) || ((name[0] == 102) && (name[1] == 111) && (name[2] == 114));
+    }
+    if n == 4 {
+        return same(name, view("else")) || same(name, view("loop")) || same(name, view("true"));
+    }
+    if n == 5 {
+        return same(name, view("while")) || same(name, view("match")) || same(name, view("break")) || same(name, view("false"));
+    }
+    if n == 6 {
+        return same(name, view("return")) || same(name, view("unsafe"));
+    }
+    if n == 8 {
+        return same(name, view("continue"));
     }
     return false;
 }
@@ -15239,13 +15594,11 @@ fn fact_seq_arg<a>(c: (&a mut C), callee: &[u8], seq: u64, seqty: u64) -> unit {
     llvm::fact_header_arg(&mut c.facts, name, c.f1_ord, cn, hw, wd);
     return ();
 }
-// Whether this compile records type facts: the LLVM lifter always wants them, and so does the typed
-// IR when `--emit-ir` asks for it (a plain native build records nothing and pays nothing).
+// Whether this compile records type facts: always, outside an `unsafe module` and validation. The
+// LLVM lifter reads them, the typed IR does for `--emit-ir`, and the native optimiser keeps a
+// slice's `data` and `len` in registers from them (optimize.grl `desc_choose`).
 fn wants_facts<a>(c: (&a C)) -> bool {
-    if (c.validating != 0) || (c.raw != 0) || (c.facts_fn.len() == 0) {
-        return false;
-    }
-    return (c.backend != 0) || (c.emit_ir != 0);
+    return (c.validating == 0) && (c.raw == 0) && (c.facts_fn.len() != 0);
 }
 fn emit_slot_fact<a>(c: (&a mut C), ty: u64, slot: u64) -> unit {
     // An `unsafe module` type-checks nothing, so in one a slot's declared type says nothing about
@@ -16536,7 +16889,7 @@ fn receiver_shorthand<a>(c: (&a mut C)) -> (u64, u64) {
     if is(&mut c, view("&")) {
         receiver = 1;
     } else {
-        if (kind(&mut c) == 1) & same(view(tok_text(&mut c, c.pos)), view("self")) {
+        if (kind(&mut c) == 1) & is_at(&mut c, c.pos, view("self")) {
             next := kind_at(&mut c, c.pos + 1);
             if (next == 41) || (next == 44) || (next == 59) {
                 receiver = 2;
@@ -17486,7 +17839,9 @@ fn fn_flags_now<a>(c: (&a mut C)) -> u8[] {
         if (i == 1 + c.arg_offset) || (i == 0) {
             skip = 1;
         }
-        if same(view(w), view("--fn-cache")) || same(view(w), view("--fn-cache-id")) || same(view(w), view("--fn-cache-quiet")) {
+        // `--check` changes no body's text or registrations (a check stops after the bodies are
+        // emitted), so a check's units and a build's are the same units.
+        if same(view(w), view("--fn-cache")) || same(view(w), view("--fn-cache-id")) || same(view(w), view("--fn-cache-quiet")) || same(view(w), view("--check")) {
             skip = 1;
         }
         if 0 < i {
@@ -17588,9 +17943,6 @@ fn fn_facts_restore<a>(c: (&a mut C), data: &a [u8]) -> unit {
 // Anything a worker does not finish - an error in a body, a crash - sends the rest of the walk to
 // this process, which then reports what one process reports.
 //
-// The least source, in bytes, worth a worker of its own: below it a fork and a pipe cost more than
-// the bodies do.
-const PAR_MIN: u64 = 131072;
 fn par_debug<a>(msg: &a [u8]) -> unit {
     if host::env(view("GRAIL_DEBUG")).len() != 0 {
         host::print(view(msg));
@@ -17626,11 +17978,18 @@ fn par_start<a>(c: (&a mut C), files: u64) -> unit {
     if (jobs::count() < 2) & (host::env(view("GRAIL_BODY_SLICE")).len() == 0) {
         return ();
     }
+    // The size of each input, from the file system: reloading every file to measure it cost a
+    // tokenisation of the whole program per run.
     mut sizes = u64[];
     mut i = 2;
     while i < files {
-        load_file(&mut c, i);
-        sizes.push(c.src.len());
+        parts := host::stat(view(input_path(&c, i)), 1);
+        if 2 < parts.len() {
+            sizes.push(parts[2]);
+        } else {
+            load_file(&mut c, i);
+            sizes.push(c.src.len());
+        }
         i += 1;
     }
     if c.fn_surface.len() == 0 {
@@ -17642,25 +18001,106 @@ fn par_start<a>(c: (&a mut C), files: u64) -> unit {
     }
     exchange(&mut c.par_sizes, sizes);
     exchange(&mut c.par_armed, 1);
-    exchange(&mut c.par_misses, 0);
-    // With no store every body is compiled, so the first one is reason enough; with one, a rebuild
-    // after an edit compiles a handful and should not pay for workers.
-    mut threshold = 1;
-    if c.fn_dir.len() != 0 {
-        threshold = 16;
-    }
-    if host::env(view("GRAIL_BODY_SLICE")).len() != 0 {
-        threshold = 1;
-    }
-    exchange(&mut c.par_threshold, threshold);
+    exchange(&mut c.par_t0, 0);
     return ();
 }
 // The walk is at the body at byte `off` of file `file` and has compiled enough misses: fork workers
 // for the source from here on. 1 in a worker (which skips this body: it is the parent's), 0 here.
-fn par_fork<a>(c: (&a mut C), file: u64, off: u64) -> u64 {
+// Where the walk is, in bytes of the source counted over the files in order.
+fn par_pos<a>(c: (&a C), file: u64, off: u64) -> u64 {
+    mut at = 0;
+    for k in c.par_sizes.len() {
+        if k + 2 < file {
+            at += c.par_sizes[k];
+        }
+    }
+    return at + off;
+}
+// This process's CPU time in milliseconds - user and system ticks from /proc/self/stat, which a
+// loaded machine does not inflate the way it does the wall clock - or the monotonic clock where
+// there is no such file.
+fn par_cpu_ms() -> u64 {
+    stat := host::read_file(view("/proc/self/stat"));
+    mut close = stat.len();
+    for i in stat.len() {
+        if stat[i] == 41 {
+            close = i;
+        }
+    }
+    if stat.len() <= close {
+        return host::now_ms();
+    }
+    // After the command's closing parenthesis: state, then ten fields, then utime and stime.
+    mut field = 0;
+    mut value = 0;
+    mut ticks = 0;
+    mut i = close + 2;
+    while i < stat.len() {
+        ch := stat[i];
+        if ch == 32 {
+            if (field == 11) || (field == 12) {
+                ticks += value;
+            }
+            field += 1;
+            value = 0;
+            if 12 < field {
+                break;
+            }
+        } else if (48 <= ch) & (ch <= 57) {
+            value = value * 10 + u64(ch - 48);
+        }
+        i += 1;
+    }
+    return ticks * 10;
+}
+// How many processes the rest of the walk is worth, measured rather than guessed from sizes: the
+// walk compiles on its own for its first 50 ms of CPU, and from how far through the source that
+// took it estimates what the rest would take here. Under half a second it does not fork at all -
+// a small module, or a rebuild whose bodies are mostly hits, is cheaper in one process - and above
+// it, one process per 150 ms of the estimate, up to the job count. 0 means not yet, or never (the
+// walk is then disarmed). GRAIL_BODY_SLICE forces workers at the first body.
+fn par_decide<a>(c: (&a mut C), file: u64, off: u64) -> u64 {
+    if host::env(view("GRAIL_BODY_SLICE")).len() != 0 {
+        return jobs::count();
+    }
+    now := par_cpu_ms();
+    pos := par_pos(&c, file, off);
+    if c.par_t0 == 0 {
+        exchange(&mut c.par_t0, now + 1);
+        exchange(&mut c.par_p0, pos);
+        return 0;
+    }
+    elapsed := now + 1 - c.par_t0;
+    if elapsed < 50 {
+        return 0;
+    }
+    mut total = 0;
+    for k in c.par_sizes.len() {
+        total += c.par_sizes[k];
+    }
+    done := pos - c.par_p0;
+    if (done == 0) || (total <= pos) {
+        exchange(&mut c.par_armed, 0);
+        return 0;
+    }
+    estimate := (total - pos) * elapsed / done;
+    if estimate < 500 {
+        exchange(&mut c.par_armed, 0);
+        return 0;
+    }
+    mut want = estimate / 150;
+    if jobs::count() < want {
+        want = jobs::count();
+    }
+    if want < 2 {
+        exchange(&mut c.par_armed, 0);
+        return 0;
+    }
+    return want;
+}
+fn par_fork<a>(c: (&a mut C), file: u64, off: u64, want: u64) -> u64 {
     exchange(&mut c.par_armed, 0);
     slice := host::env(view("GRAIL_BODY_SLICE"));
-    forced := slice.len() != 0;
     // The bytes still ahead, over the files from this one on.
     mut ahead = u64[];
     mut total = 0;
@@ -17676,17 +18116,11 @@ fn par_fork<a>(c: (&a mut C), file: u64, off: u64) -> u64 {
         ahead.push(n);
         total += n;
     }
-    mut wanted = jobs::count();
-    if !forced {
-        while (1 < wanted) && (total / wanted < PAR_MIN) {
-            wanted -= 1;
-        }
-    }
-    if wanted < 2 {
+    if want < 2 {
         return 0;
     }
     mut js = jobs::open();
-    j := jobs::workers(&mut js, wanted);
+    j := jobs::workers(&mut js, want);
     if j < 2 {
         jobs::give_all(&mut js);
         return 0;
@@ -18338,13 +18772,6 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     // The facts an obligation may read start at this body's entry (pv_begin).
     exchange(&mut c.body_lo, start);
     exchange(&mut c.body_hi, end);
-    for i in c.locals.len() {
-        mut l = &c.locals[i];
-        name := l.name.copy();
-        last := last_name(&mut c, view(name), start, end);
-        mut l = &mut c.locals[i];
-        exchange(&mut l.last, last);
-    }
     // On Win64 a C caller passes rcx/rdx/r8/r9 (then the stack after a 32-byte home area) and
     // expects rdi, rsi and xmm6-xmm15 preserved; the body uses Grail's SysV-shaped convention. A
     // callback is therefore a Win64 thunk under the C symbol that saves those registers, moves
@@ -18404,7 +18831,10 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             par_unit = par_take(&mut c, owner, c.file, at_off, &mut par_outcome);
         }
     }
-    if fn_open(&mut c, view(unit)) {
+    // With no store, a unit is only something a worker hands this process; for a body this process
+    // compiles itself there is nothing to key or to file.
+    own_only := (c.fn_dir.len() == 0) & (c.par_me == 0) & (par_unit.key.len() == 0);
+    if fn_open(&mut c, view(unit)) & !own_only {
         // The symbol the label will spell: `body_label` is the one spelling both `func_directive`
         // and the label use, so a unit's key names exactly the symbol its bytes define.
         fn_symbol := body_label(&c, view(m), view(name), view(export_symbol), export);
@@ -18458,11 +18888,11 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             c.fn_kept = c.fn_kept + 1;
         }
     }
-    // This body was not a hit: when the walk has compiled enough of those, the rest goes to workers.
+    // This body was not a hit: whether the rest is worth workers (par_decide).
     if (c.par_armed != 0) & (pass == 3) & (c.current_spec == 0) & (c.validating == 0) {
-        c.par_misses = c.par_misses + 1;
-        if c.par_threshold <= c.par_misses {
-            if par_fork(&mut c, c.file, at_off) != 0 {
+        want := par_decide(&mut c, c.file, at_off);
+        if want != 0 {
+            if par_fork(&mut c, c.file, at_off, want) != 0 {
                 // A worker: this body is the parent's.
                 exchange(&mut c.fn_rec, 0);
                 part(&mut c, view(unit));
@@ -18474,6 +18904,15 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                 return ();
             }
         }
+    }
+    // Where each parameter is last used: only a body that is compiled here needs it, so a hit, a
+    // body a worker skips and a body handed to a worker do not scan for it.
+    for i in c.locals.len() {
+        mut l = &c.locals[i];
+        name := l.name.copy();
+        last := last_name(&mut c, view(name), start, end);
+        mut l = &mut c.locals[i];
+        exchange(&mut l.last, last);
     }
     part(&mut c, view(unit));
     scope_begin(&mut c);
@@ -18543,9 +18982,12 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             c.out.push(10);
         }
     }
+    // Spelled even in a quiet run: it is read back.
+    quiet := exchange(&mut c.quiet, 0);
     label_at := c.out.len();
     export_name(&mut c, view(m), view(name), view(body_symbol), export);
     label_end := c.out.len();
+    exchange(&mut c.quiet, quiet);
     exchange(&mut c.proved_label, 0);
     // The body's own label, exactly as a `call` to it spells it: the effect facts are keyed by it.
     mut fx_label = u8[];
@@ -18721,9 +19163,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             c.lnext[part_lunit - 1] = part_label;
             c.rnext[part_lunit - 1] = part_ref;
         }
-        while out_mark < c.out.len() {
-            c.out.pop()!;
-        }
+        c.out.truncate(out_mark);
         // Facts describe the text just discarded, so they go with it.
         llvm::facts_truncate(&mut c.facts, fact_mark);
         edge_mark := c.fx_edge_mark;
@@ -18826,9 +19266,12 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                 par_record(&mut c, at_off, 1, &produced);
                 par_mine = 0;
             }
-            while apply_mark < c.out.len() {
-                c.out.pop()!;
+            // A worker's own output is thrown away: what it made is the unit just recorded, and
+            // taking the body back out to put it in again would be work for nothing.
+            if c.par_me != 0 {
+                return ();
             }
+            c.out.truncate(apply_mark);
             llvm::facts_truncate(&mut c.facts, fact_mark);
             while fn_drop_mark < c.drop_refs.len() {
                 c.drop_refs.pop()!;
@@ -21063,10 +21506,12 @@ fn ct_trace_report<a>(trace: &a [u8]) -> u8[] {
     mut start = 0;
     for i in trace.len() + 1 {
         if (i == trace.len()) || (trace[i] == 10) {
-            if (i > start) && (trace[start] != 64) {
-                for j in start..i {
-                    out.push(trace[j]);
-                }
+            line := slice_bytes(trace, start, i);
+            // Not the probe's own frames (its generated source is no one's program) and not the
+            // `timeout` wrapper's note about the core the abort left.
+            keep := (i > start) && (trace[start] != 64) && !ct_list_has_sub(view(line), view(".probe.grl")) && !ct_list_has_prefix(view(line), view("timeout: "));
+            if keep {
+                push_bytes(&mut out, view(line));
                 out.push(10);
             }
             start = i + 1;
@@ -21150,7 +21595,781 @@ fn ct_list_has_prefix<a, b>(text: &a [u8], prefix: &b [u8]) -> bool {
     }
     return true;
 }
+// Compile, link and run a probe program (cached by its text and every input file) and answer what
+// it printed. `text` names the call in messages; `key` is the value it computes, if it is one. With
+// `soft` set a failure is not reported: `status` says it (non-zero), the probe compile's errors are
+// discarded, and the caller decides (the batch falls back to one probe per value, which reports).
+fn ct_probe_exec<a, b, d, e>(c: (&a mut C), probe: &b [u8], text: &d [u8], key: &e [u8], soft: u64, status_out: (&a mut u64)) -> u8[] {
+    exchange(status_out, 0);
+    // The cache key: the probe and every input file.
+    mut keyed = copy_bytes(probe);
+    offset := c.arg_offset;
+    argc := host::argc();
+    mut files = u8[][];
+    mut fi = offset + 2;
+    if c.probe_mode != 0 {
+        // A probe compile's own first file is its probe; a nested probe takes the program's files.
+        fi = offset + 3;
+    }
+    while fi < argc {
+        path := host::arg(fi);
+        files.push(path.copy());
+        push_bytes(&mut keyed, view(path));
+        push_bytes(&mut keyed, view(host::read_file(view(path))));
+        fi += 1;
+    }
+    // The files the module roots added are inputs of the value too: the probe is compiled with the
+    // same roots, so a change to a resolved module changes what the call computes.
+    for i in c.mod_files.len() {
+        path := c.mod_files[i];
+        files.push(path.copy());
+        push_bytes(&mut keyed, view(path));
+        push_bytes(&mut keyed, view(host::read_file(view(path))));
+    }
+    digest := iface_digest(&keyed);
+    mut dir = copy_bytes(view(".work/comptime/"));
+    for i in 24 {
+        dir.push(digest[i]);
+    }
+    out_path := path_cat(view(dir), view("/value"));
+    if host::exists(view(out_path)) == 0 {
+        mut mk = u8[][copy_bytes(view("mkdir")), copy_bytes(view("-p")), dir.copy()];
+        host::command(mk);
+        // Compiles that run the same call at once (parallel test shards, a parallel build) share
+        // `dir`: each builds under names of its own - keyed by this compile's output path - and
+        // only the finished value is published, by rename, so no one reads a half-written file.
+        own_key := iface_digest(&host::arg(offset + 1));
+        mut tag = copy_bytes(view("/"));
+        for i in 12 {
+            tag.push(own_key[i]);
+        }
+        probe_src := path_cat(view(path_cat(view(dir), view(tag))), view(".probe.grl"));
+        probe_s := path_cat(view(path_cat(view(dir), view(tag))), view(".probe.s"));
+        probe_exe := path_cat(view(path_cat(view(dir), view(tag))), view(".probe"));
+        value_tmp := path_cat(view(path_cat(view(dir), view(tag))), view(".value"));
+        host::write_file(view(probe_src), view(probe));
+        self := host::exe_path();
+        mut cmd = ct_shell_quote(view(self));
+        mut opt = 1;
+        while opt < offset + 1 {
+            a := host::arg(opt);
+            // The probe is a compile of the same program, so it resolves `use` in the same roots; the
+            // options that change what the code means travel with it.
+            if starts_with(view(a), view("--overflow=")) {
+                cmd.push(32);
+                push_bytes(&mut cmd, view(a));
+            } else if same(view(a), view("--module-root")) {
+                cmd.push(32);
+                push_bytes(&mut cmd, view("--module-root"));
+                cmd.push(32);
+                push_bytes(&mut cmd, view(ct_shell_quote(view(host::arg(opt + 1)))));
+                opt += 1;
+            }
+            opt += 1;
+        }
+        // Probes share a function cache of their own: the runtime and the standard library are most
+        // of a probe's compile and are the same in every probe (comptime-speed.md); a probe never
+        // replays a normal compile's bodies, whose static reads are compiled differently.
+        push_bytes(&mut cmd, view(" --fn-cache .work/comptime/fn --fn-cache-quiet"));
+        push_bytes(&mut cmd, view(" --target x86_64 --comptime-probe "));
+        push_bytes(&mut cmd, view(ct_shell_quote(view(probe_s))));
+        cmd.push(32);
+        push_bytes(&mut cmd, view(ct_shell_quote(view(probe_src))));
+        for i in files.len() {
+            cmd.push(32);
+            push_bytes(&mut cmd, view(ct_shell_quote(view(files[i]))));
+        }
+        mut pending = host::env(view("GRAIL_COMPTIME_PENDING"));
+        if key.len() != 0 {
+            if pending.len() != 0 {
+                pending.push(44);
+            }
+            push_bytes(&mut pending, key);
+        }
+        depth_text := host::env(view("GRAIL_COMPTIME_DEPTH"));
+        mut depth = 0;
+        for i in depth_text.len() {
+            depth = depth * 10 + u64(depth_text[i] - 48);
+        }
+        if 8 <= depth {
+            if soft != 0 {
+                exchange(status_out, 1);
+                return u8[];
+            }
+            fail(&mut c, view("compile-time calls nest more than 8 deep"));
+        }
+        mut compile = copy_bytes(view("GRAIL_COMPTIME_DEPTH="));
+        decimal(&mut compile, depth + 1);
+        if c.ct_deps_path.len() != 0 {
+            push_bytes(&mut compile, view(" GRAIL_COMPTIME_DEPS="));
+            push_bytes(&mut compile, view(ct_shell_quote(view(c.ct_deps_path))));
+        }
+        push_bytes(&mut compile, view(" GRAIL_COMPTIME_PENDING="));
+        push_bytes(&mut compile, view(ct_shell_quote(view(pending))));
+        compile.push(32);
+        push_bytes(&mut compile, view(cmd));
+        if soft != 0 {
+            // A diagnostic is printed on stdout; the value's own probe reports it if it matters.
+            push_bytes(&mut compile, view(" > /dev/null 2>&1"));
+        }
+        mut sh = u8[][copy_bytes(view("sh")), copy_bytes(view("-c")), compile];
+        if host::command(sh) != 0 {
+            if soft != 0 {
+                exchange(status_out, 1);
+                return u8[];
+            }
+            mut msg = copy_bytes(view("compile-time call `"));
+            push_bytes(&mut msg, text);
+            push_bytes(&mut msg, view("` did not compile (the errors above)"));
+            fail(&mut c, view(msg));
+        }
+        asm := host::read_file(view(probe_s));
+        if ct_list_has_sub(view(asm), view("// grail-link: ")) {
+            if soft != 0 {
+                exchange(status_out, 1);
+                return u8[];
+            }
+            fail(&mut c, view("compile-time code cannot call C: the call reaches an extern function"));
+        }
+        mut cc = host::env(view("GRAIL_CC"));
+        if cc.len() == 0 {
+            cc = copy_bytes(view("cc"));
+        }
+        mut link = u8[][cc, copy_bytes(view("-nostdlib")), copy_bytes(view("-static")), copy_bytes(view("-o")), probe_exe.copy(), probe_s.copy()];
+        if host::command(link) != 0 {
+            if soft != 0 {
+                exchange(status_out, 1);
+                return u8[];
+            }
+            fail(&mut c, view("compile-time call: linking the probe failed (needs cc)"));
+        }
+        mut run = copy_bytes(view("GRAIL_COMPTIME=1 timeout 30 "));
+        push_bytes(&mut run, view(ct_shell_quote(view(probe_exe))));
+        push_bytes(&mut run, view(" > "));
+        push_bytes(&mut run, view(ct_shell_quote(view(value_tmp))));
+        // The probe's stderr carries its trace (`@enter`/`@leave`/`@cycle` lines from the value
+        // functions) and, on a failure, the runtime's report; both are read back below.
+        err_tmp := path_cat(view(path_cat(view(dir), view(tag))), view(".err"));
+        push_bytes(&mut run, view(" 2> "));
+        push_bytes(&mut run, view(ct_shell_quote(view(err_tmp))));
+        mut sh2 = u8[][copy_bytes(view("sh")), copy_bytes(view("-c")), run];
+        status := host::command(sh2);
+        if (status != 0) && (soft != 0) {
+            exchange(status_out, status);
+            return u8[];
+        }
+        if status != 0 {
+            trace := host::read_file(view(err_tmp));
+            report := ct_trace_report(view(trace));
+            if report.len() != 0 {
+                host::write_fd(2, view(report));
+            }
+            mut msg = u8[];
+            if key.len() != 0 {
+                push_bytes(&mut msg, view("compile-time value `"));
+                push_bytes(&mut msg, key);
+                push_bytes(&mut msg, view("` = `"));
+            } else {
+                push_bytes(&mut msg, view("compile-time call `"));
+            }
+            push_bytes(&mut msg, text);
+            if status == 124 {
+                push_bytes(&mut msg, view("` ran past the 30 s limit"));
+            } else if status == 4 {
+                cycle := ct_trace_cycle(view(trace));
+                if cycle.len() != 0 {
+                    msg = cycle;
+                } else {
+                    push_bytes(&mut msg, view("` reads a constant that is still being computed: the constants depend on each other in a cycle"));
+                }
+            } else if status == 134 {
+                push_bytes(&mut msg, view("` stopped with a runtime error while compiling (above)"));
+            } else if status == 3 {
+                push_bytes(&mut msg, view("` was refused an effect compile-time code may not have (above)"));
+            } else {
+                push_bytes(&mut msg, view("` exited with status "));
+                decimal(&mut msg, status);
+                push_bytes(&mut msg, view(" while compiling"));
+            }
+            fail(&mut c, view(msg));
+        }
+        mut mv = u8[][copy_bytes(view("mv")), copy_bytes(view("-f")), value_tmp.copy(), out_path.copy()];
+        host::command(mv);
+        mut tidy = u8[][copy_bytes(view("rm")), copy_bytes(view("-f")), probe_src.copy(), probe_s.copy(), probe_exe.copy(), err_tmp.copy()];
+        host::command(tidy);
+    }
+    if host::exists(view(out_path)) == 0 {
+        return u8[];
+    }
+    return host::read_file(view(out_path));
+}
+// ---- R3: compile-time values cached by what they reach (docs/design/comptime-speed.md) ----------
+//
+// A value's cache entry is keyed by its identity - the compiler, the options, the target, the value's
+// name, its call and its type - and records what its computation depended on: the declaration
+// surface that is not functions (types, aliases, constants), the text of every function body the
+// probe reached from the value's function (its effect call graph), and the calls of the other values
+// it read. A later build uses the entry when all of those are still what they were, so an edit
+// anywhere else runs no probe.
+
+// The hash of a function's declaration as written: its tokens from `pos` through the closing brace
+// of its body (or the `;` of a body-less one), so spacing and comments do not count.
+fn ct_decl_hash<a>(c: (&a mut C), file: u64, pos: u64) -> u8[] {
+    saved_file := c.file;
+    saved_pos := c.pos;
+    if (file != 0) && (file != saved_file) {
+        load_file(&mut c, file);
+        exchange(&mut c.file, file);
+    }
+    mut text = u8[];
+    mut i = pos;
+    mut depth = 0;
+    while i < c.toks.len() {
+        k := kind_at(&mut c, i);
+        if k == 0 {
+            break;
+        }
+        push_bytes(&mut text, view(tok_text(&mut c, i)));
+        text.push(32);
+        if k == 40 {
+            depth += 1;
+        }
+        if (k == 41) && (depth > 0) {
+            depth -= 1;
+        }
+        if (depth == 0) && (k == 59) {
+            break;
+        }
+        if (depth == 0) && (k == 123) {
+            mut braces = 1;
+            i += 1;
+            while (braces > 0) && (i < c.toks.len()) {
+                kb := kind_at(&mut c, i);
+                if kb == 0 {
+                    break;
+                }
+                push_bytes(&mut text, view(tok_text(&mut c, i)));
+                text.push(32);
+                if kb == 123 {
+                    braces += 1;
+                }
+                if kb == 125 {
+                    braces -= 1;
+                }
+                i += 1;
+            }
+            break;
+        }
+        i += 1;
+    }
+    if (file != 0) && (file != saved_file) {
+        load_file(&mut c, saved_file);
+        exchange(&mut c.file, saved_file);
+    }
+    exchange(&mut c.pos, saved_pos);
+    return fncache::hash(view(text));
+}
+// Whether a source file is the runtime, a platform module or the standard library: those are covered
+// by their files' contents in every value's identity (ct_std_digest), not body by body.
+fn ct_std_file<a>(c: (&a mut C), file: u64) -> bool {
+    path := file_path(&mut c, file);
+    if in_std_dir(view(path)) != 0 {
+        return true;
+    }
+    mut cut = 0;
+    for i in path.len() {
+        if (path[i] == 47) || (path[i] == 92) {
+            cut = i + 1;
+        }
+    }
+    base := slice_bytes(view(path), cut, path.len());
+    return same(view(base), view("runtime.grl")) || same(view(base), view("os-linux.grl")) || same(view(base), view("os-windows.grl")) || same(view(base), view("darwin.grl"));
+}
+// The contents of every runtime, platform and standard-library file this compile read.
+fn ct_std_digest<a>(c: (&a mut C)) -> u8[] {
+    mut all = u8[];
+    mut f = 2;
+    while f < c.mod_base + c.mod_files.len() {
+        if ct_std_file(&mut c, f) {
+            path := file_path(&mut c, f);
+            push_bytes(&mut all, view(path));
+            push_bytes(&mut all, view(fncache::hash(view(host::read_file(view(path))))));
+        }
+        f += 1;
+    }
+    return fncache::hash(view(all));
+}
+// What a run-tier value's call is, as a dependency of another value that read it.
+fn ct_call_hash<a>(c: (&a mut C), k: u64) -> u8[] {
+    mut t = copy_bytes(view("value "));
+    push_bytes(&mut t, view(c.ct_calls[k].module));
+    push_bytes(&mut t, view("::"));
+    push_bytes(&mut t, view(c.ct_calls[k].name));
+    t.push(32);
+    push_bytes(&mut t, view(c.ct_calls[k].text));
+    return fncache::hash(view(t));
+}
+fn ct_call_index<a, b>(c: (&a C), tag: &b [u8]) -> u64 {
+    for k in c.ct_calls.len() {
+        t := ct_value_tag(view(c.ct_calls[k].module), view(c.ct_calls[k].name));
+        if same(view(t), tag) {
+            return k + 1;
+        }
+    }
+    return 0;
+}
+// In a probe compile, after the call graph is solved: for every value function the probe defines,
+// the bodies it reaches, written to GRAIL_COMPTIME_DEPS as `TAG H <hash>` (a body's text) and
+// `TAG V <tag>` (another value it read).
+fn ct_write_deps<a>(c: (&a mut C)) -> unit {
+    path := host::env(view("GRAIL_COMPTIME_DEPS"));
+    if (c.probe_mode == 0) || (path.len() == 0) {
+        return ();
+    }
+    n := c.fx_syms.len();
+    mut adj = u64[][];
+    for i in n {
+        adj.push(u64[]);
+    }
+    for e in c.fx_edge_from.len() {
+        from := c.fx_edge_from[e];
+        // The probe makes no effect claim, so the solver did not resolve the edges: look them up.
+        name := c.fx_edge_name[e].copy();
+        mut to = 0;
+        if name.len() != 0 {
+            to = fx_lookup(&mut c, view(name));
+        }
+        if (to != 0) && (from < n) {
+            adj[from].push(to - 1);
+        }
+    }
+    value_prefix := "f_grail_probe_grail_value__";
+    mut out = u8[];
+    // A body's hash, once: many values reach the same functions.
+    mut memo = u8[][];
+    mut memo_done = u64[];
+    for i in n {
+        memo.push(u8[]);
+        memo_done.push(0);
+    }
+    for w in n {
+        if !ct_list_has_prefix(view(c.fx_syms[w]), view(value_prefix)) {
+            continue;
+        }
+        tag := slice_bytes(view(c.fx_syms[w]), value_prefix.len(), c.fx_syms[w].len());
+        mut seen = u64[];
+        for i in n {
+            seen.push(0);
+        }
+        mut work = u64[w];
+        seen[w] = 1;
+        while work.len() != 0 {
+            v := work.pop()!;
+            for j in adj[v].len() {
+                t := adj[v][j];
+                if seen[t] == 0 {
+                    seen[t] = 1;
+                    sym := c.fx_syms[t].copy();
+                    if ct_list_has_prefix(view(sym), view(value_prefix)) {
+                        // Another value: its own call is the dependency, not what it reaches.
+                        push_bytes(&mut out, view(tag));
+                        push_bytes(&mut out, view(" V "));
+                        push_bytes(&mut out, view(slice_bytes(view(sym), value_prefix.len(), sym.len())));
+                        out.push(10);
+                        continue;
+                    }
+                    work.push(t);
+                    if ct_list_has_prefix(view(sym), view("f_grail_probe_")) {
+                        continue;
+                    }
+                    if (t < c.fx_body.len()) && (c.fx_body[t] != 0) && (c.fx_fn_file[t] != 0) {
+                        if memo_done[t] == 0 {
+                            memo_done[t] = 1;
+                            tfile := c.fx_fn_file[t];
+                            if !ct_std_file(&mut c, tfile) {
+                                tpos := c.fx_fn_pos[t];
+                                memo[t] = ct_decl_hash(&mut c, tfile, tpos);
+                            }
+                        }
+                        if memo[t].len() != 0 {
+                            push_bytes(&mut out, view(tag));
+                            push_bytes(&mut out, view(" H "));
+                            push_bytes(&mut out, view(memo[t]));
+                            out.push(10);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    host::write_file(view(path), view(out));
+    return ();
+}
+// The declaration surface a value can read that is not a function: records and enums with their
+// fields, aliases, constants. Adding or editing a function does not change it.
+fn ct_types_digest<a>(c: (&a mut C)) -> u8[] {
+    mut out = u8[];
+    old_lenient := exchange(&mut c.spell_lenient, 1);
+    old_failed := exchange(&mut c.spell_failed, 0);
+    mut deps = u64[];
+    for i in c.decls.len() {
+        iface_ws(&mut out, view(c.decls[i].module));
+        iface_ws(&mut out, view(c.decls[i].name));
+        iface_wv(&mut out, c.decls[i].is_enum);
+        iface_wv(&mut out, c.decls[i].c_layout);
+        nf := c.decls[i].count;
+        first := c.decls[i].first;
+        iface_wv(&mut out, nf);
+        for j in nf {
+            fname := c.fields[first + j].name.copy();
+            fty := c.fields[first + j].ty;
+            iface_ws(&mut out, view(fname));
+            iface_w_type(&mut c, &mut out, &mut deps, fty);
+        }
+    }
+    for i in c.aliases.len() {
+        iface_ws(&mut out, view(c.aliases[i].module));
+        iface_ws(&mut out, view(c.aliases[i].name));
+        ty := c.aliases[i].ty;
+        iface_w_type(&mut c, &mut out, &mut deps, ty);
+    }
+    for i in c.constants.len() {
+        iface_ws(&mut out, view(c.constants[i].module));
+        iface_ws(&mut out, view(c.constants[i].name));
+        iface_ws(&mut out, view(c.constants[i].text));
+        iface_wv(&mut out, c.constants[i].value);
+    }
+    exchange(&mut c.spell_lenient, old_lenient);
+    exchange(&mut c.spell_failed, old_failed);
+    return fncache::hash(view(out));
+}
+// A value's identity: the compiler, the options, the target, the value, its call and its type.
+fn ct_value_id<a, b>(c: (&a mut C), k: u64, ty: u64, std: &b [u8]) -> u8[] {
+    mut t = copy_bytes(view("grail-ctv 1\n"));
+    push_bytes(&mut t, std);
+    t.push(10);
+    push_bytes(&mut t, view(host::exe_path()));
+    t.push(10);
+    push_bytes(&mut t, view(fn_flags_now(&mut c)));
+    t.push(10);
+    decimal(&mut t, c.target);
+    t.push(10);
+    push_bytes(&mut t, view(c.ct_calls[k].module));
+    push_bytes(&mut t, view("::"));
+    push_bytes(&mut t, view(c.ct_calls[k].name));
+    t.push(10);
+    push_bytes(&mut t, view(c.ct_calls[k].text));
+    t.push(10);
+    push_bytes(&mut t, view(type_name(&mut c, ty)));
+    return fncache::hash(view(t));
+}
+fn ct_entry_path<a>(id: &a [u8]) -> u8[] {
+    mut p = copy_bytes(view(".work/comptime/v/"));
+    push_bytes(&mut p, id);
+    return p;
+}
+// The cached flat value of entry `id`, or empty when there is no entry or one of what it read has
+// changed. `known` is every current function declaration's hash, `types` the current digest.
+fn ct_entry_valid<a, b>(c: (&a mut C), id: &b [u8], types: &b [u8], known: (&a u8[][])) -> u8[] {
+    path := ct_entry_path(id);
+    if host::exists(view(path)) == 0 {
+        return u8[];
+    }
+    data := host::read_file(view(path));
+    mut at = 0;
+    mut start = 0;
+    while at < data.len() {
+        if data[at] != 10 {
+            at += 1;
+            continue;
+        }
+        line := slice_bytes(view(data), start, at);
+        at += 1;
+        start = at;
+        if same(view(line), view("value")) {
+            return slice_bytes(view(data), at, data.len());
+        }
+        if ct_list_has_prefix(view(line), view("types ")) {
+            if !same(view(slice_bytes(view(line), 6, line.len())), types) {
+                return u8[];
+            }
+        } else if ct_list_has_prefix(view(line), view("H ")) {
+            h := slice_bytes(view(line), 2, line.len());
+            mut hit = false;
+            for i in known.len() {
+                if same(view(known[i]), view(h)) {
+                    hit = true;
+                    break;
+                }
+            }
+            if !hit {
+                return u8[];
+            }
+        } else if ct_list_has_prefix(view(line), view("V ")) {
+            // `V tag hash`: the other value's call is still that call.
+            rest := slice_bytes(view(line), 2, line.len());
+            mut sp = 0;
+            while (sp < rest.len()) && (rest[sp] != 32) {
+                sp += 1;
+            }
+            tag := slice_bytes(view(rest), 0, sp);
+            want := slice_bytes(view(rest), sp + 1, rest.len());
+            ki := ct_call_index(&c, view(tag));
+            if ki == 0 {
+                return u8[];
+            }
+            if !same(view(ct_call_hash(&mut c, ki - 1)), view(want)) {
+                return u8[];
+            }
+        }
+    }
+    return u8[];
+}
+// Skip one value of type `ty` in the flat form (static_dump_src): the reader static_bake uses,
+// without emitting anything.
+fn static_flat_skip<a>(c: (&a mut C), ty: u64, text: &a [u8], at: (&a mut u64)) -> unit {
+    if integer(&mut c, ty) || is_bool(&mut c, ty) {
+        static_read_num(text, &mut at);
+        return ();
+    }
+    if ty == 3 {
+        n := static_read_num(text, &mut at);
+        exchange(at, *at + n + 1);
+        return ();
+    }
+    if (ty == 2) || (ty_kind(&mut c, ty) == 6) {
+        mut elem = int_type(&mut c, 8, 0);
+        if ty != 2 {
+            elem = ty_arg(&mut c, ty);
+        }
+        n := static_read_num(text, &mut at);
+        for j in n {
+            static_flat_skip(&mut c, elem, text, &mut at);
+        }
+        return ();
+    }
+    d := ty_arg(&mut c, ty);
+    first := c.decls[d].first;
+    for j in c.decls[d].count {
+        fty := c.fields[first + j].ty;
+        static_flat_skip(&mut c, fty, text, &mut at);
+    }
+    return ();
+}
+// One value of the batch's output turned into what run_tier would have answered for it.
+fn ct_res_from_flat<a>(c: (&a mut C), ty: u64, text: &a [u8], at: (&a mut u64)) -> CTRes {
+    if integer(&mut c, ty) || is_bool(&mut c, ty) {
+        v := static_read_num(text, &mut at);
+        return CTRes { ty: ty, value: v, text: u8[] };
+    }
+    if ty == 3 {
+        n := static_read_num(text, &mut at);
+        mut bytes = u8[];
+        for j in n {
+            if *at + j < text.len() {
+                bytes.push(text[*at + j]);
+            }
+        }
+        exchange(at, *at + n + 1);
+        return CTRes { ty: 3, value: 0, text: bytes };
+    }
+    if ct_seq_elem(&mut c, ty) != NO_TYPE {
+        // The elements at the element's C width, as run_tier lays a table out.
+        elem := ct_seq_elem(&mut c, ty);
+        width := ffi_field_size(&mut c, elem);
+        n := static_read_num(text, &mut at);
+        mut data = u8[];
+        for j in n {
+            v := static_read_num(text, &mut at);
+            for b in width {
+                data.push(u8((v >> (8 * b)) & 255));
+            }
+        }
+        return CTRes { ty: ty, value: n, text: data };
+    }
+    start := *at;
+    static_flat_skip(&mut c, ty, text, &mut at);
+    return CTRes { ty: ty, value: 0, text: slice_bytes(text, start, *at) };
+}
+// R2 (docs/design/comptime-speed.md): every run-tier value of the build not computed yet, in one
+// probe that prints each after a `#k` line, in the flat form. The results go to `ct_done`, which
+// run_tier answers from. If the batch fails - a value does not compile, panics, is refused an
+// effect, exits, or the values form a cycle - nothing is recorded, and each value is computed
+// by its own probe where it is needed, which reports the failure at the value.
+fn ct_batch<a>(c: (&a mut C)) -> unit {
+    if c.probe_mode != 0 {
+        return ();
+    }
+    mut keys = u8[][];
+    mut types = u64[];
+    mut calls = u64[];
+    mut ids = u8[][];
+    mut uses = u8[][];
+    mut body = u8[];
+    // R3: what the cached entries are checked against, worked out once.
+    mut known = u8[][];
+    mut digest = u8[];
+    mut prepared = false;
+    mut std = u8[];
+    for k in c.ct_calls.len() {
+        m := c.ct_calls[k].module.copy();
+        n := c.ct_calls[k].name.copy();
+        if c.ct_calls[k].is_static != 0 {
+            st := find_static(&mut c, view(m), view(n));
+            if (st == 0) || (c.statics[st - 1].state != 0) {
+                continue;
+            }
+        } else {
+            kc := find_constant(&mut c, view(m), view(n));
+            if (kc == 0) || (c.constants[kc - 1].ty != CT_PENDING) {
+                continue;
+            }
+        }
+        ty := ct_call_type(&mut c, k);
+        if !is_type_id(ty) || !static_baked_type(&mut c, ty) {
+            continue;
+        }
+        mut key = m.copy();
+        push_bytes(&mut key, view("::"));
+        push_bytes(&mut key, view(n));
+        if std.len() == 0 {
+            std = ct_std_digest(&mut c);
+        }
+        id := ct_value_id(&mut c, k, ty, view(std));
+        if host::exists(view(ct_entry_path(view(id)))) != 0 {
+            if !prepared {
+                prepared = true;
+                digest = ct_types_digest(&mut c);
+                for f in c.funcs.len() {
+                    ffile := c.funcs[f].file;
+                    fpos := c.funcs[f].pos;
+                    if (ffile != 0) && !ct_std_file(&mut c, ffile) {
+                        known.push(ct_decl_hash(&mut c, ffile, fpos));
+                    }
+                }
+            }
+            flat := ct_entry_valid(&mut c, view(id), view(digest), &known);
+            if flat.len() != 0 {
+                mut fat = 0;
+                res := ct_res_from_flat(&mut c, ty, view(flat), &mut fat);
+                c.ct_done.push(CtDone { key: key.copy(), res: res });
+                continue;
+            }
+        }
+        ct_add_use(&mut uses, view(m));
+        mut var = copy_bytes(view("grail_v"));
+        decimal(&mut var, keys.len());
+        push_bytes(&mut body, view("    println(\"#"));
+        decimal(&mut body, keys.len());
+        push_bytes(&mut body, view("\");\n    "));
+        push_bytes(&mut body, view(var));
+        push_bytes(&mut body, view(" := "));
+        push_bytes(&mut body, view(key));
+        push_bytes(&mut body, view(";\n"));
+        static_dump_src(&mut c, ty, view(var), 0, &mut body);
+        keys.push(key);
+        types.push(ty);
+        calls.push(k);
+        ids.push(id);
+    }
+    if keys.len() == 0 {
+        return ();
+    }
+    wrappers := ct_probe_wrappers(&mut c, &mut uses);
+    mut probe = copy_bytes(view("module grail_probe;\n\n"));
+    for u in uses.len() {
+        push_bytes(&mut probe, view("use "));
+        push_bytes(&mut probe, view(uses[u]));
+        push_bytes(&mut probe, view(";\n"));
+    }
+    push_bytes(&mut probe, view("use host;\n\n"));
+    push_bytes(&mut probe, view(wrappers));
+    push_bytes(&mut probe, view("fn main() -> u64 {\n"));
+    push_bytes(&mut probe, view(body));
+    push_bytes(&mut probe, view("    return 0;\n}\n"));
+    mut status = 0;
+    host::command(u8[][copy_bytes(view("mkdir")), copy_bytes(view("-p")), copy_bytes(view(".work/comptime/v"))]);
+    deps_path := path_cat(view(".work/comptime/v/deps."), view(iface_digest(&probe)));
+    host::command(u8[][copy_bytes(view("rm")), copy_bytes(view("-f")), deps_path.copy()]);
+    exchange(&mut c.ct_deps_path, deps_path.copy());
+    printed := ct_probe_exec(&mut c, view(probe), view("the build's compile-time values"), view(""), 1, &mut status);
+    exchange(&mut c.ct_deps_path, u8[]);
+    if (status != 0) || (printed.len() == 0) {
+        return ();
+    }
+    mut at = 0;
+    mut results = CtDone[];
+    mut flats = u8[][];
+    for k in keys.len() {
+        // `#k` and its newline.
+        if (at >= printed.len()) || (printed[at] != 35) {
+            return ();
+        }
+        exchange(&mut at, at + 1);
+        idx := static_read_num(view(printed), &mut at);
+        if idx != k {
+            return ();
+        }
+        vstart := at;
+        res := ct_res_from_flat(&mut c, types[k], view(printed), &mut at);
+        results.push(CtDone { key: keys[k].copy(), res: res });
+        flats.push(slice_bytes(view(printed), vstart, at));
+    }
+    // R3: an entry per value - what it read, then the value - when the probe said what it reached.
+    if host::exists(view(deps_path)) != 0 {
+        deps := host::read_file(view(deps_path));
+        if digest.len() == 0 {
+            digest = ct_types_digest(&mut c);
+        }
+        for k in keys.len() {
+            tag := ct_value_tag(view(c.ct_calls[calls[k]].module), view(c.ct_calls[calls[k]].name));
+            mut entry = copy_bytes(view("grail-ctv 1\ntypes "));
+            push_bytes(&mut entry, view(digest));
+            entry.push(10);
+            mut start = 0;
+            for i in deps.len() + 1 {
+                if (i == deps.len()) || (deps[i] == 10) {
+                    line := slice_bytes(view(deps), start, i);
+                    start = i + 1;
+                    if (line.len() > tag.len() + 3) && ct_list_has_prefix(view(line), view(tag)) && (line[tag.len()] == 32) {
+                        rest := slice_bytes(view(line), tag.len() + 1, line.len());
+                        if ct_list_has_prefix(view(rest), view("H ")) {
+                            push_bytes(&mut entry, view(rest));
+                            entry.push(10);
+                        } else if ct_list_has_prefix(view(rest), view("V ")) {
+                            other := slice_bytes(view(rest), 2, rest.len());
+                            ki := ct_call_index(&c, view(other));
+                            if ki != 0 {
+                                push_bytes(&mut entry, view("V "));
+                                push_bytes(&mut entry, view(other));
+                                entry.push(32);
+                                push_bytes(&mut entry, view(ct_call_hash(&mut c, ki - 1)));
+                                entry.push(10);
+                            }
+                        }
+                    }
+                }
+            }
+            push_bytes(&mut entry, view("value\n"));
+            push_bytes(&mut entry, view(flats[k]));
+            host::write_file(view(ct_entry_path(view(ids[k]))), view(entry));
+        }
+        host::command(u8[][copy_bytes(view("rm")), copy_bytes(view("-f")), deps_path.copy()]);
+    }
+    for r in results.len() {
+        c.ct_done.push(CtDone { key: results[r].key.copy(), res: CTRes { ty: results[r].res.ty, value: results[r].res.value, text: results[r].res.text.copy() } });
+    }
+    return ();
+}
 fn run_tier<a, b, d, e>(c: (&a mut C), module: &b [u8], text: &d [u8], key: &e [u8]) -> CTRes {
+    if key.len() != 0 {
+        for i in c.ct_done.len() {
+            if same(view(c.ct_done[i].key), key) {
+                r := &c.ct_done[i].res;
+                return CTRes { ty: r.ty, value: r.value, text: r.text.copy() };
+            }
+        }
+    }
     // The call's function, for its result type.
     toks := lexer::tokenize(text);
     if (toks.len() < 3) || (toks[0].kind != 1) {
@@ -21233,161 +22452,8 @@ fn run_tier<a, b, d, e>(c: (&a mut C), module: &b [u8], text: &d [u8], key: &e [
     } else {
         push_bytes(&mut probe, view(";\n    println(v);\n    return 0;\n}\n"));
     }
-    // The cache key: the probe and every input file.
-    mut keyed = probe.copy();
-    offset := c.arg_offset;
-    argc := host::argc();
-    mut files = u8[][];
-    mut fi = offset + 2;
-    if c.probe_mode != 0 {
-        // A probe compile's own first file is its probe; a nested probe takes the program's files.
-        fi = offset + 3;
-    }
-    while fi < argc {
-        path := host::arg(fi);
-        files.push(path.copy());
-        push_bytes(&mut keyed, view(path));
-        push_bytes(&mut keyed, view(host::read_file(view(path))));
-        fi += 1;
-    }
-    // The files the module roots added are inputs of the value too: the probe is compiled with the
-    // same roots, so a change to a resolved module changes what the call computes.
-    for i in c.mod_files.len() {
-        path := c.mod_files[i];
-        files.push(path.copy());
-        push_bytes(&mut keyed, view(path));
-        push_bytes(&mut keyed, view(host::read_file(view(path))));
-    }
-    digest := iface_digest(&keyed);
-    mut dir = copy_bytes(view(".work/comptime/"));
-    for i in 24 {
-        dir.push(digest[i]);
-    }
-    out_path := path_cat(view(dir), view("/value"));
-    if host::exists(view(out_path)) == 0 {
-        mut mk = u8[][copy_bytes(view("mkdir")), copy_bytes(view("-p")), dir.copy()];
-        host::command(mk);
-        // Compiles that run the same call at once (parallel test shards, a parallel build) share
-        // `dir`: each builds under names of its own - keyed by this compile's output path - and
-        // only the finished value is published, by rename, so no one reads a half-written file.
-        own_key := iface_digest(&host::arg(offset + 1));
-        mut tag = copy_bytes(view("/"));
-        for i in 12 {
-            tag.push(own_key[i]);
-        }
-        probe_src := path_cat(view(path_cat(view(dir), view(tag))), view(".probe.grl"));
-        probe_s := path_cat(view(path_cat(view(dir), view(tag))), view(".probe.s"));
-        probe_exe := path_cat(view(path_cat(view(dir), view(tag))), view(".probe"));
-        value_tmp := path_cat(view(path_cat(view(dir), view(tag))), view(".value"));
-        host::write_file(view(probe_src), view(probe));
-        self := host::exe_path();
-        mut cmd = ct_shell_quote(view(self));
-        mut opt = 1;
-        while opt < offset + 1 {
-            a := host::arg(opt);
-            // The probe is a compile of the same program, so it resolves `use` in the same roots; the
-            // options that change what the code means travel with it.
-            if starts_with(view(a), view("--overflow=")) {
-                cmd.push(32);
-                push_bytes(&mut cmd, view(a));
-            } else if same(view(a), view("--module-root")) {
-                cmd.push(32);
-                push_bytes(&mut cmd, view("--module-root"));
-                cmd.push(32);
-                push_bytes(&mut cmd, view(ct_shell_quote(view(host::arg(opt + 1)))));
-                opt += 1;
-            }
-            opt += 1;
-        }
-        push_bytes(&mut cmd, view(" --target x86_64 --comptime-probe "));
-        push_bytes(&mut cmd, view(ct_shell_quote(view(probe_s))));
-        cmd.push(32);
-        push_bytes(&mut cmd, view(ct_shell_quote(view(probe_src))));
-        for i in files.len() {
-            cmd.push(32);
-            push_bytes(&mut cmd, view(ct_shell_quote(view(files[i]))));
-        }
-        mut pending = host::env(view("GRAIL_COMPTIME_PENDING"));
-        if key.len() != 0 {
-            if pending.len() != 0 {
-                pending.push(44);
-            }
-            push_bytes(&mut pending, key);
-        }
-        depth_text := host::env(view("GRAIL_COMPTIME_DEPTH"));
-        mut depth = 0;
-        for i in depth_text.len() {
-            depth = depth * 10 + u64(depth_text[i] - 48);
-        }
-        if 8 <= depth {
-            fail(&mut c, view("compile-time calls nest more than 8 deep"));
-        }
-        mut compile = copy_bytes(view("GRAIL_COMPTIME_DEPTH="));
-        decimal(&mut compile, depth + 1);
-        push_bytes(&mut compile, view(" GRAIL_COMPTIME_PENDING="));
-        push_bytes(&mut compile, view(ct_shell_quote(view(pending))));
-        compile.push(32);
-        push_bytes(&mut compile, view(cmd));
-        mut sh = u8[][copy_bytes(view("sh")), copy_bytes(view("-c")), compile];
-        if host::command(sh) != 0 {
-            mut msg = copy_bytes(view("compile-time call `"));
-            push_bytes(&mut msg, text);
-            push_bytes(&mut msg, view("` did not compile (the errors above)"));
-            fail(&mut c, view(msg));
-        }
-        asm := host::read_file(view(probe_s));
-        if ct_list_has_sub(view(asm), view("// grail-link: ")) {
-            fail(&mut c, view("compile-time code cannot call C: the call reaches an extern function"));
-        }
-        mut cc = host::env(view("GRAIL_CC"));
-        if cc.len() == 0 {
-            cc = copy_bytes(view("cc"));
-        }
-        mut link = u8[][cc, copy_bytes(view("-nostdlib")), copy_bytes(view("-static")), copy_bytes(view("-o")), probe_exe.copy(), probe_s.copy()];
-        if host::command(link) != 0 {
-            fail(&mut c, view("compile-time call: linking the probe failed (needs cc)"));
-        }
-        mut run = copy_bytes(view("GRAIL_COMPTIME=1 timeout 30 "));
-        push_bytes(&mut run, view(ct_shell_quote(view(probe_exe))));
-        push_bytes(&mut run, view(" > "));
-        push_bytes(&mut run, view(ct_shell_quote(view(value_tmp))));
-        // The probe's stderr carries its trace (`@enter`/`@leave`/`@cycle` lines from the value
-        // functions) and, on a failure, the runtime's report; both are read back below.
-        err_tmp := path_cat(view(path_cat(view(dir), view(tag))), view(".err"));
-        push_bytes(&mut run, view(" 2> "));
-        push_bytes(&mut run, view(ct_shell_quote(view(err_tmp))));
-        mut sh2 = u8[][copy_bytes(view("sh")), copy_bytes(view("-c")), run];
-        status := host::command(sh2);
-        if status != 0 {
-            trace := host::read_file(view(err_tmp));
-            report := ct_trace_report(view(trace));
-            if report.len() != 0 {
-                host::write_fd(2, view(report));
-            }
-            mut msg = copy_bytes(view("compile-time call `"));
-            push_bytes(&mut msg, text);
-            if status == 124 {
-                push_bytes(&mut msg, view("` ran past the 30 s limit"));
-            } else if status == 4 {
-                cycle := ct_trace_cycle(view(trace));
-                if cycle.len() != 0 {
-                    msg = cycle;
-                } else {
-                    push_bytes(&mut msg, view("` reads a constant that is still being computed: the constants depend on each other in a cycle"));
-                }
-            } else {
-                push_bytes(&mut msg, view("` aborted (exit "));
-                decimal(&mut msg, status);
-                push_bytes(&mut msg, view(")"));
-            }
-            fail(&mut c, view(msg));
-        }
-        mut mv = u8[][copy_bytes(view("mv")), copy_bytes(view("-f")), value_tmp.copy(), out_path.copy()];
-        host::command(mv);
-        mut tidy = u8[][copy_bytes(view("rm")), copy_bytes(view("-f")), probe_src.copy(), probe_s.copy(), probe_exe.copy(), err_tmp.copy()];
-        host::command(tidy);
-    }
-    printed := host::read_file(view(out_path));
+    mut probe_status = 0;
+    printed := ct_probe_exec(&mut c, view(probe), text, key, 0, &mut probe_status);
     if (rty == 3) || static_structured(&mut c, rty) {
         return CTRes { ty: rty, value: 0, text: printed };
     }
@@ -23182,6 +24248,9 @@ fn toplevel<a>(c: (&a mut C), pass: u64) -> unit {
     while kind(&mut c) != 0 {
         toplevel_item(&mut c, pass);
     }
+    if c.dr_tail.len() != 0 {
+        dr_parse_tail(&mut c, pass);
+    }
     return ();
 }
 // One module-level item.
@@ -23211,6 +24280,977 @@ fn ref_strict_form<a>(c: (&a mut C)) -> u64 {
     exchange(&mut c.strict_next, 1);
     return 1;
 }
+// ---- derives (docs/design/derives.md) --------------------------------------------------------------
+//
+// `@derive(Eq, Ord, Hash, Clone, Debug)` before a `struct` or an `enum` writes the implementations
+// the type would otherwise spell by hand. There is no macro system: the compiler renders fixed Grail
+// source for the derives that were asked for, appends it to the file's own text and lets the
+// ordinary parser read it, so the generated methods are checked, borrowed and dropped exactly like
+// hand-written ones. What makes them field-wise is the comptime `@for` over the type's fields, which
+// the generated source carries.
+//
+// The implementations are the standard library's own interfaces - `ops::Eq`, `order::Ord`,
+// `hash::Hash` and `clone::Clone` (lib/clone.grl) - and `Debug` is the inherent `show` the formatter
+// already calls, so `println("{}", v)` picks it up with no new mechanism.
+fn dr_eq() -> u64 {
+    return 1;
+}
+fn dr_ord() -> u64 {
+    return 2;
+}
+fn dr_hash() -> u64 {
+    return 4;
+}
+fn dr_clone() -> u64 {
+    return 8;
+}
+fn dr_debug() -> u64 {
+    return 16;
+}
+// The bit one derive name asks for, 0 when the name is not a derive.
+fn dr_bit<a>(name: &a [u8]) -> u64 {
+    if same(view(name), view("Eq")) {
+        return dr_eq();
+    }
+    if same(view(name), view("Ord")) {
+        return dr_ord();
+    }
+    if same(view(name), view("Hash")) {
+        return dr_hash();
+    }
+    if same(view(name), view("Clone")) {
+        return dr_clone();
+    }
+    if same(view(name), view("Debug")) {
+        return dr_debug();
+    }
+    return 0;
+}
+// The name one derive bit is written as, for a diagnostic.
+fn dr_name(bit: u64) -> string {
+    if bit == dr_eq() {
+        return "Eq";
+    }
+    if bit == dr_ord() {
+        return "Ord";
+    }
+    if bit == dr_hash() {
+        return "Hash";
+    }
+    if bit == dr_clone() {
+        return "Clone";
+    }
+    return "Debug";
+}
+// `@derive(Eq, Ord, Hash, Clone, Debug)`: the derives the next declaration asks for. The shape is
+// `@strict`'s - no `;` form, further attributes may follow, the next declaration consumes them. 1
+// when one was consumed.
+fn dr_attr_form<a>(c: (&a mut C)) -> u64 {
+    next := c.pos + 1;
+    if kind_at(&mut c, next) != 1 {
+        return 0;
+    }
+    word := tok_text(&mut c, next);
+    if !same(view(word), view("derive")) {
+        return 0;
+    }
+    at := c.pos;
+    if c.derive_pending != 0 {
+        fail(&mut c, view("`@derive` is written once: list every derive inside it"));
+    }
+    advance(&mut c);
+    advance(&mut c);
+    expect(&mut c, view("("));
+    mut bits = 0;
+    while true {
+        here := c.pos;
+        if kind(&mut c) != 1 {
+            fail(&mut c, view("`@derive` names derives: Eq, Ord, Hash, Clone or Debug"));
+        }
+        name := tok_text(&mut c, here);
+        bit := dr_bit(view(name));
+        if bit == 0 {
+            mut msg = copy_bytes(view("unknown derive `"));
+            push_bytes(&mut msg, view(name));
+            push_bytes(&mut msg, view("`: the derives are Eq, Ord, Hash, Clone and Debug"));
+            exchange(&mut c.pos, here);
+            fail(&mut c, view(msg));
+        }
+        if (bits & bit) != 0 {
+            mut msg = copy_bytes(view("derive `"));
+            push_bytes(&mut msg, view(name));
+            push_bytes(&mut msg, view("` is listed twice"));
+            exchange(&mut c.pos, here);
+            fail(&mut c, view(msg));
+        }
+        bits = bits | bit;
+        advance(&mut c);
+        if eat(&mut c, view(")")) {
+            break;
+        }
+        expect(&mut c, view(","));
+    }
+    exchange(&mut c.derive_pending, bits);
+    exchange(&mut c.dr_pos, at);
+    return 1;
+}
+// The interface a derive implements, as the module and name the generated header names: 0 when that
+// interface is not part of this build.
+fn dr_interface<a, b>(c: (&a mut C), module: &b [u8], name: &b [u8]) -> u64 {
+    return find_interface(&c, view(module), view(name));
+}
+// Whether a field type mentions the type parameter `index`, directly or inside a vector, reference
+// or nominal type: the derived implementation has to carry the derive's interface as a bound on
+// those parameters only, so a type that never compares one is not restricted by it.
+fn dr_uses<a>(c: (&a mut C), ty: u64, index: u64, depth: u64) -> bool {
+    if depth > 8 {
+        return true;
+    }
+    k := ty_kind(&mut c, ty);
+    if k == 9 {
+        return ty_arg(&mut c, ty) == index;
+    }
+    if (k == 10) || (k == 6) || (k == 7) || (k == 27) || (k == 13) || (k == 14) || (k == 16) || (k == 20) || (k == 29) || (k == 30) || (k == 33) || (k == 35) {
+        inner := ty_arg(&mut c, ty);
+        if dr_uses(&mut c, inner, index, depth + 1) {
+            return true;
+        }
+    }
+    args := type_args(&mut c, ty);
+    for i in args.len() {
+        t := args[i];
+        if dr_uses(&mut c, t, index, depth + 1) {
+            return true;
+        }
+    }
+    return false;
+}
+// The generated implementation headers repeat the declaration's own parameters - its `Send`/`Share`
+// classifications, its interface bounds and, on the parameters a field mentions, the interface this
+// derive implements - so an instantiation of the type has exactly the constraints it was declared
+// with. `iface` names that interface (empty for the inherent `show`, which needs no bound).
+fn dr_head<a, b, d>(c: (&a mut C), out: (&b mut u8[]), name: &d [u8], iface: &d [u8], iface_id: u64) -> unit {
+    types := c.dr_tnames.len();
+    lifes := c.dr_rnames.len();
+    push_bytes(&mut out, view("impl"));
+    if (types + lifes) != 0 {
+        push_bytes(&mut out, view("<"));
+        for i in lifes {
+            rname := c.dr_rnames[i].copy();
+            if i != 0 {
+                push_bytes(&mut out, view(", "));
+            }
+            push_bytes(&mut out, view(rname));
+        }
+        for i in types {
+            if (i != 0) || (lifes != 0) {
+                push_bytes(&mut out, view(", "));
+            }
+            tname := c.dr_tnames[i].copy();
+            push_bytes(&mut out, view(tname));
+            bits := c.dr_bounds[i];
+            mut more = 0;
+            if (bits & 1) != 0 {
+                push_bytes(&mut out, view(": Send"));
+                more = 1;
+            }
+            if (bits & 2) != 0 {
+                if more != 0 {
+                    push_bytes(&mut out, view(" + Share"));
+                } else {
+                    push_bytes(&mut out, view(": Share"));
+                }
+                more = 1;
+            }
+            reqs := copy_numbers(&c.dr_constraints[i]);
+            for k in reqs.len() {
+                id := reqs[k];
+                if (id != 0) & (id <= c.interfaces.len()) {
+                    imod := c.interfaces[id - 1].module.copy();
+                    iname := c.interfaces[id - 1].name.copy();
+                    if more != 0 {
+                        push_bytes(&mut out, view(" + "));
+                    } else {
+                        push_bytes(&mut out, view(": "));
+                    }
+                    push_bytes(&mut out, view(imod));
+                    push_bytes(&mut out, view("::"));
+                    push_bytes(&mut out, view(iname));
+                    more = 1;
+                }
+            }
+            used := c.dr_used[i];
+            if (iface_id != 0) & (used != 0) {
+                if more != 0 {
+                    push_bytes(&mut out, view(" + "));
+                } else {
+                    push_bytes(&mut out, view(": "));
+                }
+                push_bytes(&mut out, view(iface));
+            }
+        }
+        push_bytes(&mut out, view(">"));
+    }
+    push_bytes(&mut out, view(" "));
+    if iface.len() != 0 {
+        push_bytes(&mut out, view(iface));
+        push_bytes(&mut out, view(" for "));
+    }
+    push_bytes(&mut out, view(name));
+    if (types + lifes) != 0 {
+        push_bytes(&mut out, view("<"));
+        for i in lifes {
+            rname := c.dr_rnames[i].copy();
+            if i != 0 {
+                push_bytes(&mut out, view(", "));
+            }
+            push_bytes(&mut out, view(rname));
+        }
+        for i in types {
+            tname := c.dr_tnames[i].copy();
+            if (i != 0) || (lifes != 0) {
+                push_bytes(&mut out, view(", "));
+            }
+            push_bytes(&mut out, view(tname));
+        }
+        push_bytes(&mut out, view(">"));
+    }
+    push_bytes(&mut out, view(" {\n"));
+    return ();
+}
+// The `N`th variant (or field) name of a declaration, and its payload type (unit for a variant with
+// no payload and for a record field that has one).
+fn dr_field_name<a>(c: (&a mut C), d: u64, index: u64) -> u8[] {
+    first := c.decls[d].first;
+    return c.fields[first + index].name.copy();
+}
+fn dr_field_type<a>(c: (&a mut C), d: u64, index: u64) -> u64 {
+    return field_ty(&mut c, d, index);
+}
+// `aN`/`bN`: the payload a match arm binds, and the one the other side's arm binds.
+fn dr_bind<a, b>(c: (&a mut C), out: (&b mut u8[]), prefix: &b [u8], index: u64) -> unit {
+    push_bytes(&mut out, view(prefix));
+    decimal(&mut out, index);
+    return ();
+}
+// One payload comparison for an enum arm. A nominal payload (a record, an enum, a type parameter) is
+// reached through a reference, so it compares through its own implementation; a scalar, text or
+// bytes payload is compared with the operator the language gives it, and a scalar payload binds by
+// value, so the interface form takes its address.
+fn dr_eq_payload<a, b>(c: (&a mut C), out: (&b mut u8[]), pty: u64, left: &b [u8], right: &b [u8]) -> unit {
+    k := ty_kind(&mut c, pty);
+    if (k == 8) || (k == 9) || (k == 10) {
+        push_bytes(&mut out, view("ops::Eq::eq("));
+        push_bytes(&mut out, view(left));
+        push_bytes(&mut out, view(", "));
+        push_bytes(&mut out, view(right));
+        push_bytes(&mut out, view(")"));
+    } else {
+        push_bytes(&mut out, view(left));
+        push_bytes(&mut out, view(" == "));
+        push_bytes(&mut out, view(right));
+    }
+    return ();
+}
+fn dr_ord_payload<a, b>(c: (&a mut C), out: (&b mut u8[]), pty: u64, left: &b [u8], right: &b [u8]) -> unit {
+    k := ty_kind(&mut c, pty);
+    if (k == 8) || (k == 9) || (k == 10) {
+        push_bytes(&mut out, view("order::Ord::less("));
+        push_bytes(&mut out, view(left));
+        push_bytes(&mut out, view(", "));
+        push_bytes(&mut out, view(right));
+        push_bytes(&mut out, view(")"));
+    } else {
+        push_bytes(&mut out, view(left));
+        push_bytes(&mut out, view(" < "));
+        push_bytes(&mut out, view(right));
+    }
+    return ();
+}
+// The address a payload binding needs: a scalar binds by value, everything else as a reference to
+// the payload.
+fn dr_bind_ref<a, b>(c: (&a mut C), out: (&b mut u8[]), pty: u64, name: &b [u8]) -> unit {
+    if scalar(&mut c, pty) {
+        push_bytes(&mut out, view("&"));
+    }
+    push_bytes(&mut out, view(name));
+    return ();
+}
+// The implementation `@derive(Eq)` writes: field by field in declaration order, or variant by
+// variant with the payloads compared per variant.
+fn dr_eq_block<a, b, d>(c: (&a mut C), out: (&b mut u8[]), d: u64, name: &d [u8], is_enum: u64, count: u64) -> unit {
+    dr_head(&mut c, &mut out, view(name), view("ops::Eq"), dr_eq());
+    push_bytes(&mut out, view("    fn eq(self: &Self, other: &Self) -> bool {\n"));
+    if is_enum == 0 {
+        push_bytes(&mut out, view("        mut equal = true;\n"));
+        push_bytes(&mut out, view("        @for f in fields(Self) {\n"));
+        push_bytes(&mut out, view("            if !(self.@f == other.@f) { equal = false; }\n"));
+        push_bytes(&mut out, view("        }\n"));
+        push_bytes(&mut out, view("        return equal;\n"));
+    } else {
+        push_bytes(&mut out, view("        match self {\n"));
+        for i in count {
+            vname := dr_field_name(&mut c, d, i);
+            pty := dr_field_type(&mut c, d, i);
+            has := pty != 1;
+            push_bytes(&mut out, view("            "));
+            push_bytes(&mut out, view(vname));
+            if has {
+                mut a = u8[];
+                dr_bind(&mut c, &mut a, view("a"), i);
+                push_bytes(&mut out, view("("));
+                push_bytes(&mut out, view(a));
+                push_bytes(&mut out, view(")"));
+            }
+            push_bytes(&mut out, view(" => { match other { "));
+            for j in count {
+                wname := dr_field_name(&mut c, d, j);
+                push_bytes(&mut out, view(wname));
+                if has {
+                    mut b = u8[];
+                    dr_bind(&mut c, &mut b, view("b"), j);
+                    push_bytes(&mut out, view("("));
+                    push_bytes(&mut out, view(b));
+                    push_bytes(&mut out, view(")"));
+                }
+                push_bytes(&mut out, view(" => { return "));
+                if i != j {
+                    push_bytes(&mut out, view("false"));
+                } else if !has {
+                    push_bytes(&mut out, view("true"));
+                } else {
+                    mut a = u8[];
+                    dr_bind(&mut c, &mut a, view("a"), i);
+                    mut b = u8[];
+                    dr_bind(&mut c, &mut b, view("b"), j);
+                    dr_eq_payload(&mut c, &mut out, pty, view(a), view(b));
+                }
+                push_bytes(&mut out, view("; }, "));
+            }
+            push_bytes(&mut out, view("} },\n"));
+        }
+        push_bytes(&mut out, view("        }\n"));
+    }
+    push_bytes(&mut out, view("    }\n}\n"));
+    return ();
+}
+// `@derive(Ord)`: lexicographic over the fields, and over the variants by declaration order first.
+fn dr_ord_block<a, b, d>(c: (&a mut C), out: (&b mut u8[]), d: u64, name: &d [u8], is_enum: u64, count: u64) -> unit {
+    dr_head(&mut c, &mut out, view(name), view("order::Ord"), dr_ord());
+    push_bytes(&mut out, view("    fn less<a, b>(left: (&a Self), right: (&b Self)) -> bool {\n"));
+    if is_enum == 0 {
+        push_bytes(&mut out, view("        @for f in fields(Self) {\n"));
+        push_bytes(&mut out, view("            if left.@f < right.@f { return true; }\n"));
+        push_bytes(&mut out, view("            if right.@f < left.@f { return false; }\n"));
+        push_bytes(&mut out, view("        }\n"));
+        push_bytes(&mut out, view("        return false;\n"));
+    } else {
+        push_bytes(&mut out, view("        match left {\n"));
+        for i in count {
+            vname := dr_field_name(&mut c, d, i);
+            pty := dr_field_type(&mut c, d, i);
+            has := pty != 1;
+            push_bytes(&mut out, view("            "));
+            push_bytes(&mut out, view(vname));
+            if has {
+                mut a = u8[];
+                dr_bind(&mut c, &mut a, view("a"), i);
+                push_bytes(&mut out, view("("));
+                push_bytes(&mut out, view(a));
+                push_bytes(&mut out, view(")"));
+            }
+            push_bytes(&mut out, view(" => { match right { "));
+            for j in count {
+                wname := dr_field_name(&mut c, d, j);
+                push_bytes(&mut out, view(wname));
+                if has {
+                    mut b = u8[];
+                    dr_bind(&mut c, &mut b, view("b"), j);
+                    push_bytes(&mut out, view("("));
+                    push_bytes(&mut out, view(b));
+                    push_bytes(&mut out, view(")"));
+                }
+                push_bytes(&mut out, view(" => { return "));
+                if i < j {
+                    push_bytes(&mut out, view("true"));
+                } else if i > j {
+                    push_bytes(&mut out, view("false"));
+                } else if !has {
+                    push_bytes(&mut out, view("false"));
+                } else {
+                    mut a = u8[];
+                    dr_bind(&mut c, &mut a, view("a"), i);
+                    mut b = u8[];
+                    dr_bind(&mut c, &mut b, view("b"), j);
+                    dr_ord_payload(&mut c, &mut out, pty, view(a), view(b));
+                }
+                push_bytes(&mut out, view("; }, "));
+            }
+            push_bytes(&mut out, view("} },\n"));
+        }
+        push_bytes(&mut out, view("        }\n"));
+    }
+    push_bytes(&mut out, view("    }\n}\n"));
+    return ();
+}
+// `@derive(Hash)`: every field's hash is written into one `hash::Hasher` in declaration order, and an
+// enum writes its variant index first. The fold is the hasher's own - the fields' bytes are the
+// stream - so two values that `Eq` reports equal always produce the same stream.
+fn dr_hash_block<a, b, d>(c: (&a mut C), out: (&b mut u8[]), d: u64, name: &d [u8], is_enum: u64, count: u64) -> unit {
+    dr_head(&mut c, &mut out, view(name), view("hash::Hash"), dr_hash());
+    push_bytes(&mut out, view("    fn hash<a, b>(self: (&a Self), state: (&b mut hash::Hasher)) {\n"));
+    if is_enum == 0 {
+        push_bytes(&mut out, view("        @for f in fields(Self) {\n"));
+        push_bytes(&mut out, view("            hash::Hash::hash(&self.@f, state);\n"));
+        push_bytes(&mut out, view("        }\n"));
+    } else {
+        push_bytes(&mut out, view("        match self {\n"));
+        for i in count {
+            vname := dr_field_name(&mut c, d, i);
+            pty := dr_field_type(&mut c, d, i);
+            has := pty != 1;
+            push_bytes(&mut out, view("            "));
+            push_bytes(&mut out, view(vname));
+            if has {
+                mut a = u8[];
+                dr_bind(&mut c, &mut a, view("a"), i);
+                push_bytes(&mut out, view("("));
+                push_bytes(&mut out, view(a));
+                push_bytes(&mut out, view(")"));
+            }
+            push_bytes(&mut out, view(" => { hash::write_num(state, "));
+            decimal(&mut out, i);
+            push_bytes(&mut out, view("); "));
+            if has {
+                push_bytes(&mut out, view("hash::Hash::hash("));
+                mut a = u8[];
+                dr_bind(&mut c, &mut a, view("a"), i);
+                dr_bind_ref(&mut c, &mut out, pty, view(a));
+                push_bytes(&mut out, view(", state); "));
+            }
+            push_bytes(&mut out, view("},\n"));
+        }
+        push_bytes(&mut out, view("        }\n"));
+    }
+    push_bytes(&mut out, view("    }\n}\n"));
+    return ();
+}
+// `@derive(Clone)`: a field-wise copy through each field type's own `clone`. A borrowed view has
+// nothing to copy into, so it is refused rather than shared.
+fn dr_clone_block<a, b, d>(c: (&a mut C), out: (&b mut u8[]), d: u64, name: &d [u8], is_enum: u64, count: u64) -> unit {
+    dr_head(&mut c, &mut out, view(name), view("clone::Clone"), dr_clone());
+    push_bytes(&mut out, view("    fn clone(self: &Self) -> Self {\n"));
+    if is_enum == 0 {
+        push_bytes(&mut out, view("        return "));
+        push_bytes(&mut out, view(name));
+        push_bytes(&mut out, view(" { "));
+        for i in count {
+            fname := dr_field_name(&mut c, d, i);
+            if i != 0 {
+                push_bytes(&mut out, view(", "));
+            }
+            push_bytes(&mut out, view(fname));
+            push_bytes(&mut out, view(": self."));
+            push_bytes(&mut out, view(fname));
+            push_bytes(&mut out, view(".clone()"));
+        }
+        push_bytes(&mut out, view(" };\n"));
+    } else {
+        push_bytes(&mut out, view("        match self {\n"));
+        for i in count {
+            vname := dr_field_name(&mut c, d, i);
+            pty := dr_field_type(&mut c, d, i);
+            has := pty != 1;
+            push_bytes(&mut out, view("            "));
+            push_bytes(&mut out, view(vname));
+            if has {
+                mut a = u8[];
+                dr_bind(&mut c, &mut a, view("a"), i);
+                push_bytes(&mut out, view("("));
+                push_bytes(&mut out, view(a));
+                push_bytes(&mut out, view(")"));
+            }
+            push_bytes(&mut out, view(" => { return "));
+            push_bytes(&mut out, view(name));
+            push_bytes(&mut out, view("::"));
+            push_bytes(&mut out, view(vname));
+            if has {
+                push_bytes(&mut out, view("(clone::Clone::clone("));
+                mut a = u8[];
+                dr_bind(&mut c, &mut a, view("a"), i);
+                dr_bind_ref(&mut c, &mut out, pty, view(a));
+                push_bytes(&mut out, view("))"));
+            }
+            push_bytes(&mut out, view("; },\n"));
+        }
+        push_bytes(&mut out, view("        }\n"));
+    }
+    push_bytes(&mut out, view("    }\n}\n"));
+    return ();
+}
+// `@derive(Debug)`: a `debug::Debug` implementation that renders the value as
+// `Name { field: value, ... }` (and a variant as `Name(payload)`), plus the inherent `show` the
+// formatter already calls - so `println("{}", v)` and `v.debug()` are the same text. The body
+// concatenates text instead of using `format`, because a generic field's `.debug()` is only known
+// to be text once the type is instantiated.
+fn dr_debug_block<a, b, d>(c: (&a mut C), out: (&b mut u8[]), d: u64, name: &d [u8], is_enum: u64, count: u64) -> unit {
+    dr_head(&mut c, &mut out, view(name), view("debug::Debug"), dr_debug());
+    push_bytes(&mut out, view("    fn debug(self: &Self) -> string {\n"));
+    if is_enum == 0 {
+        push_bytes(&mut out, view("        return format(\""));
+        push_bytes(&mut out, view(name));
+        push_bytes(&mut out, view(" {{ "));
+        for i in count {
+            fname := dr_field_name(&mut c, d, i);
+            if i != 0 {
+                push_bytes(&mut out, view(", "));
+            }
+            push_bytes(&mut out, view(fname));
+            push_bytes(&mut out, view(": {}"));
+        }
+        push_bytes(&mut out, view(" }}\", "));
+        for i in count {
+            fname := dr_field_name(&mut c, d, i);
+            if i != 0 {
+                push_bytes(&mut out, view(", "));
+            }
+            push_bytes(&mut out, view("self."));
+            push_bytes(&mut out, view(fname));
+            push_bytes(&mut out, view(".debug()"));
+        }
+        push_bytes(&mut out, view(");\n"));
+    } else {
+        push_bytes(&mut out, view("        match self {\n"));
+        for i in count {
+            vname := dr_field_name(&mut c, d, i);
+            pty := dr_field_type(&mut c, d, i);
+            has := pty != 1;
+            push_bytes(&mut out, view("            "));
+            push_bytes(&mut out, view(vname));
+            mut a = u8[];
+            if has {
+                dr_bind(&mut c, &mut a, view("a"), i);
+                push_bytes(&mut out, view("("));
+                push_bytes(&mut out, view(a));
+                push_bytes(&mut out, view(")"));
+            }
+            push_bytes(&mut out, view(" => { return "));
+            if !has {
+                push_bytes(&mut out, view("\""));
+                push_bytes(&mut out, view(vname));
+                push_bytes(&mut out, view("\".text()"));
+            } else {
+                push_bytes(&mut out, view("format(\""));
+                push_bytes(&mut out, view(vname));
+                push_bytes(&mut out, view("({})\", "));
+                push_bytes(&mut out, view(a));
+                push_bytes(&mut out, view(".debug())"));
+            }
+            push_bytes(&mut out, view("; },\n"));
+        }
+        push_bytes(&mut out, view("        }\n"));
+    }
+    push_bytes(&mut out, view("    }\n}\n"));
+    // The formatter's own hook: `{}` meets a value of this type, and `show` is what it calls.
+    dr_head(&mut c, &mut out, view(name), view(""), 0);
+    push_bytes(&mut out, view("    fn show(self: &Self) -> string {\n"));
+    push_bytes(&mut out, view("        return debug::Debug::debug(self);\n"));
+    push_bytes(&mut out, view("    }\n}\n"));
+    return ();
+}
+// The derives a declaration asked for, checked against its fields where the impl table is complete.
+// A missing implementation names the field (or variant) and its type, because a silent omission
+// would make `==` or `hash` quietly wrong.
+fn dr_check<a>(c: (&a mut C), d: u64, bits: u64) -> unit {
+    name := c.decls[d].name.copy();
+    is_enum := c.decls[d].is_enum;
+    count := c.decls[d].count;
+    mut where_ = u8[];
+    if is_enum != 0 {
+        push_bytes(&mut where_, view("variant"));
+    } else {
+        push_bytes(&mut where_, view("field"));
+    }
+    mut every = 0;
+    if (bits & dr_eq()) != 0 {
+        every = dr_eq();
+    }
+    if (bits & dr_ord()) != 0 {
+        every = every | dr_ord();
+    }
+    if (bits & dr_hash()) != 0 {
+        every = every | dr_hash();
+    }
+    if (bits & dr_clone()) != 0 {
+        every = every | dr_clone();
+    }
+    if (bits & dr_debug()) != 0 {
+        every = every | dr_debug();
+    }
+    if count == 0 {
+        dr_fail(&mut c, view(name), every, view(""), view(""), view(""), view("the type has no fields or variants to derive from"));
+        return ();
+    }
+    if (bits & dr_eq()) != 0 {
+        if dr_interface(&mut c, view("ops"), view("Eq")) == 0 {
+            dr_need_module(&mut c, view(name), view("Eq"), view("ops"));
+        }
+    }
+    if (bits & dr_ord()) != 0 {
+        if dr_interface(&mut c, view("order"), view("Ord")) == 0 {
+            dr_need_module(&mut c, view(name), view("Ord"), view("order"));
+        }
+    }
+    if (bits & dr_hash()) != 0 {
+        if dr_interface(&mut c, view("hash"), view("Hash")) == 0 {
+            dr_need_module(&mut c, view(name), view("Hash"), view("hash"));
+        }
+    }
+    if (bits & dr_clone()) != 0 {
+        if dr_interface(&mut c, view("clone"), view("Clone")) == 0 {
+            dr_need_module(&mut c, view(name), view("Clone"), view("clone"));
+        }
+    }
+    if (bits & dr_debug()) != 0 {
+        if dr_interface(&mut c, view("debug"), view("Debug")) == 0 {
+            dr_need_module(&mut c, view(name), view("Debug"), view("debug"));
+        }
+    }
+    for i in count {
+        fname := dr_field_name(&mut c, d, i);
+        fty := dr_field_type(&mut c, d, i);
+        // A variant with no payload carries nothing to compare, order, hash, clone or print.
+        if (is_enum != 0) & (fty == 1) {
+            continue;
+        }
+        ftype := source_type_name(&mut c, fty);
+        if (bits & dr_eq()) != 0 {
+            if !dr_eq_ok(&mut c, fty, is_enum) {
+                if (is_enum != 0) & (ty_kind(&mut c, fty) == 8) {
+                    // A payload is reached through a reference, so it compares through its own
+                    // implementation rather than the built-in structural comparison.
+                    dr_fail(&mut c, view(name), dr_eq(), view(where_), view(fname), view(ftype), view("it has no `ops::Eq` implementation: add `@derive(Eq)` to its type"));
+                } else {
+                    dr_fail(&mut c, view(name), dr_eq(), view(where_), view(fname), view(ftype), view("it cannot be compared: equality needs a scalar, text, bytes, a record or an enum"));
+                }
+            }
+        }
+        if (bits & dr_ord()) != 0 {
+            if !dr_ord_ok(&mut c, fty, is_enum) {
+                dr_fail(&mut c, view(name), dr_ord(), view(where_), view(fname), view(ftype), view("it has no total order: order a field whose type does, or add `@derive(Ord)` to it"));
+            }
+        }
+        if (bits & dr_hash()) != 0 {
+            if !dr_hash_ok(&mut c, fty) {
+                dr_fail(&mut c, view(name), dr_hash(), view(where_), view(fname), view(ftype), view("it has no `hash::Hash` implementation: add `@derive(Hash)` to its type"));
+            }
+        }
+        if (bits & dr_clone()) != 0 {
+            if !dr_clone_ok(&mut c, fty) {
+                if dr_borrowed(&mut c, fty) {
+                    dr_fail(&mut c, view(name), dr_clone(), view(where_), view(fname), view(ftype), view("a borrowed view cannot be deep-cloned: `@derive(Clone)` needs owned fields"));
+                } else {
+                    dr_fail(&mut c, view(name), dr_clone(), view(where_), view(fname), view(ftype), view("it has no `clone::Clone` implementation: add `@derive(Clone)` to its type"));
+                }
+            }
+        }
+        if (bits & dr_debug()) != 0 {
+            if !dr_debug_ok(&mut c, fty) {
+                dr_fail(&mut c, view(name), dr_debug(), view(where_), view(fname), view(ftype), view("it has no `debug::Debug` implementation: add `@derive(Debug)` to its type"));
+            }
+        }
+    }
+    return ();
+}
+fn dr_borrowed<a>(c: (&a mut C), ty: u64) -> bool {
+    k := ty_kind(&mut c, ty);
+    return (k == 5) || (k == 7) || (k == 27);
+}
+// Equality: the operator the language gives the field type. A record or an enum compares
+// structurally when it has no implementation, so only a type with no `==` at all is refused here -
+// and a variant payload, reached through a reference, needs the implementation.
+fn dr_eq_ok<a>(c: (&a mut C), ty: u64, payload: u64) -> bool {
+    k := ty_kind(&mut c, ty);
+    if (k == 9) || (k == 10) {
+        return true;
+    }
+    if (k == 8) {
+        if payload == 0 {
+            return true;
+        }
+        id := dr_interface(&mut c, view("ops"), view("Eq"));
+        return find_implementation(&mut c, id, ty) != 0;
+    }
+    if (ty == 0) || (k == 3) || (k == 4) || (k == 18) || (k == 19) || (k == 21) || (k == 22) {
+        return true;
+    }
+    return false;
+}
+// Order: the built-in orderings, or the field type's own `order::Ord` implementation.
+fn dr_ord_ok<a>(c: (&a mut C), ty: u64, payload: u64) -> bool {
+    k := ty_kind(&mut c, ty);
+    if (k == 9) || (k == 10) {
+        return true;
+    }
+    if (k == 8) {
+        id := dr_interface(&mut c, view("order"), view("Ord"));
+        return find_implementation(&mut c, id, ty) != 0;
+    }
+    return (ty == 0) || (k == 3) || (k == 4) || (k == 18) || (k == 21);
+}
+fn dr_hash_ok<a>(c: (&a mut C), ty: u64) -> bool {
+    k := ty_kind(&mut c, ty);
+    if (k == 9) || (k == 10) {
+        return true;
+    }
+    id := dr_interface(&mut c, view("hash"), view("Hash"));
+    if id == 0 {
+        return true;
+    }
+    return find_implementation(&mut c, id, ty) != 0;
+}
+fn dr_clone_ok<a>(c: (&a mut C), ty: u64) -> bool {
+    k := ty_kind(&mut c, ty);
+    if (k == 9) || (k == 10) {
+        return true;
+    }
+    id := dr_interface(&mut c, view("clone"), view("Clone"));
+    if id == 0 {
+        return true;
+    }
+    return find_implementation(&mut c, id, ty) != 0;
+}
+// Formatting: the field type's own `debug::Debug` implementation.
+fn dr_debug_ok<a>(c: (&a mut C), ty: u64) -> bool {
+    k := ty_kind(&mut c, ty);
+    if (k == 9) || (k == 10) {
+        return true;
+    }
+    id := dr_interface(&mut c, view("debug"), view("Debug"));
+    if id == 0 {
+        return true;
+    }
+    return find_implementation(&mut c, id, ty) != 0;
+}
+// `@derive(NAME)` on `T`: variant `v` has ... . One message shape for every refusal, so the reader
+// learns where the derive is, which derive refused and which field it was about.
+fn dr_fail<a, b, d, e>(c: (&a mut C), name: &b [u8], bit: u64, where_: &d [u8], field: &e [u8], ty: &e [u8], why: &e [u8]) -> unit {
+    mut msg = copy_bytes(view("`@derive("));
+    push_bytes(&mut msg, view(dr_name(bit)));
+    push_bytes(&mut msg, view(")` on `"));
+    push_bytes(&mut msg, view(name));
+    push_bytes(&mut msg, view("`"));
+    if field.len() != 0 {
+        push_bytes(&mut msg, view(": "));
+        push_bytes(&mut msg, view(where_));
+        push_bytes(&mut msg, view(" `"));
+        push_bytes(&mut msg, view(field));
+        push_bytes(&mut msg, view("`"));
+        if ty.len() != 0 {
+            push_bytes(&mut msg, view(" of type `"));
+            push_bytes(&mut msg, view(ty));
+            push_bytes(&mut msg, view("`"));
+        }
+        push_bytes(&mut msg, view(": "));
+    } else {
+        push_bytes(&mut msg, view(": "));
+    }
+    push_bytes(&mut msg, view(why));
+    fail(&mut c, view(msg));
+    return ();
+}
+fn dr_need_module<a, b, d>(c: (&a mut C), name: &b [u8], bit_name: &d [u8], module: &d [u8]) -> unit {
+    mut msg = copy_bytes(view("`@derive("));
+    push_bytes(&mut msg, view(bit_name));
+    push_bytes(&mut msg, view(")` on `"));
+    push_bytes(&mut msg, view(name));
+    push_bytes(&mut msg, view("` needs the `"));
+    push_bytes(&mut msg, view(module));
+    push_bytes(&mut msg, view("` module in the build: pass its file (`lib/"));
+    push_bytes(&mut msg, view(module));
+    push_bytes(&mut msg, view(".grl`)"));
+    fail(&mut c, view(msg));
+    return ();
+}
+// The generated source becomes part of the file it was asked for: it is appended to the file's own
+// text and parsed, in the same pass and by the same parser, right after the file's own items. Every
+// later load of that file returns the same bytes, so a token position recorded in one pass still
+// names the same text in the next - which is what a generic body replayed from its file needs.
+fn dr_append<a>(c: (&a mut C), text: u8[]) -> unit {
+    push_bytes(&mut c.dr_tail, view(text));
+    return ();
+}
+// Parse the expansions this file's declarations asked for. The text goes onto the end of the file's
+// own source, the whole file is lexed again (the prefix is unchanged, so every earlier position is
+// still valid) and the parser walks the new tail as ordinary top-level items.
+fn dr_parse_tail<a>(c: (&a mut C), pass: u64) -> unit {
+    text := exchange(&mut c.dr_tail, u8[]);
+    mut before = c.toks.len();
+    while before != 0 {
+        before = before - 1;
+        if kind_at(&mut c, before) == 0 {
+            break;
+        }
+    }
+    if c.dr_trace != 0 {
+        mut mark = u8[];
+        push_bytes(&mut mark, view("// tail pass "));
+        decimal(&mut mark, pass);
+        push_bytes(&mut mark, view(" before "));
+        decimal(&mut mark, before);
+        push_bytes(&mut mark, view(" src "));
+        decimal(&mut mark, c.src.len());
+        push_bytes(&mut mark, view("\n"));
+        host::print(view(mark));
+    }
+    push_bytes(&mut c.src, view(text));
+    here := c.file;
+    mut held = c.file_text.len();
+    while held < here {
+        c.file_text.push(u8[]);
+        held = held + 1;
+    }
+    if held == here {
+        c.file_text.push(c.src.copy());
+    } else {
+        push_bytes(&mut c.file_text[here], view(text));
+    }
+    lexed := lexer::tokenize(view(c.src));
+    mut toks = Tok[];
+    mut line = 1;
+    mut col = 1;
+    mut at = 0;
+    for i in lexed.len() {
+        t := &lexed[i];
+        while at < t.start {
+            if c.src[at] == 10 {
+                line += 1;
+                col = 1;
+            } else {
+                col += 1;
+            }
+            at += 1;
+        }
+        toks.push(Tok { kind: t.kind, start: t.start, end: t.end, line: line, col: col });
+    }
+    drop(lexed);
+    exchange(&mut c.toks, toks);
+    exchange(&mut c.pos, before);
+    while kind(&mut c) != 0 {
+        toplevel_item(&mut c, pass);
+    }
+    return ();
+}
+// The whole expansion of one declaration: every derive it asked for, in a fixed order, rendered as
+// source and spliced after the declaration.
+fn dr_expand<a>(c: (&a mut C), d: u64, bits: u64) -> unit {
+    if dr_recorded(&mut c, d) != 0 {
+        // Already expanded for this declaration: a file can be walked more than once in a pass,
+        // and the expansion belongs to the declaration, not to the walk.
+        return ();
+    }
+    name := c.decls[d].name.copy();
+    count := c.decls[d].count;
+    is_enum := c.decls[d].is_enum;
+    for i in c.dr_bounds.len() {
+        if (c.dr_bounds[i] & 4) != 0 {
+            mut msg = copy_bytes(view("`@derive` on `"));
+            push_bytes(&mut msg, view(name));
+            push_bytes(&mut msg, view("`: a value parameter (`@"));
+            push_bytes(&mut msg, view(c.dr_tnames[i]));
+            push_bytes(&mut msg, view("`) cannot be repeated in a generated implementation"));
+            fail(&mut c, view(msg));
+        }
+    }
+    // Each derive implements a standard-library interface, and the generated `impl` names it: a
+    // build without that module cannot have the derive, and says which file to add.
+    if (bits & dr_eq()) != 0 {
+        if dr_interface(&mut c, view("ops"), view("Eq")) == 0 {
+            dr_need_module(&mut c, view(name), view("Eq"), view("ops"));
+        }
+    }
+    if (bits & dr_ord()) != 0 {
+        if dr_interface(&mut c, view("order"), view("Ord")) == 0 {
+            dr_need_module(&mut c, view(name), view("Ord"), view("order"));
+        }
+    }
+    if (bits & dr_hash()) != 0 {
+        if dr_interface(&mut c, view("hash"), view("Hash")) == 0 {
+            dr_need_module(&mut c, view(name), view("Hash"), view("hash"));
+        }
+    }
+    if (bits & dr_clone()) != 0 {
+        if dr_interface(&mut c, view("clone"), view("Clone")) == 0 {
+            dr_need_module(&mut c, view(name), view("Clone"), view("clone"));
+        }
+    }
+    if (bits & dr_debug()) != 0 {
+        if dr_interface(&mut c, view("debug"), view("Debug")) == 0 {
+            dr_need_module(&mut c, view(name), view("Debug"), view("debug"));
+        }
+    }
+    mut used = u64[];
+    for i in c.dr_tnames.len() {
+        mut hit = 0;
+        for k in count {
+            fty := dr_field_type(&mut c, d, k);
+            if dr_uses(&mut c, fty, i, 0) {
+                hit = 1;
+            }
+        }
+        used.push(hit);
+    }
+    exchange(&mut c.dr_used, used);
+    c.dr_applied.push(d);
+    c.dr_applied.push(bits);
+    mut out = u8[];
+    push_bytes(&mut out, view("\n"));
+    if (bits & dr_eq()) != 0 {
+        dr_eq_block(&mut c, &mut out, d, view(name), is_enum, count);
+    }
+    if (bits & dr_ord()) != 0 {
+        dr_ord_block(&mut c, &mut out, d, view(name), is_enum, count);
+    }
+    if (bits & dr_hash()) != 0 {
+        dr_hash_block(&mut c, &mut out, d, view(name), is_enum, count);
+    }
+    if (bits & dr_clone()) != 0 {
+        dr_clone_block(&mut c, &mut out, d, view(name), is_enum, count);
+    }
+    if (bits & dr_debug()) != 0 {
+        dr_debug_block(&mut c, &mut out, d, view(name), is_enum, count);
+    }
+    if c.dr_trace != 0 {
+        // `--show-derives`: the source each `@derive` generated, labelled with the declaration it
+        // belongs to and the file it was written in.
+        mut mark = u8[];
+        push_bytes(&mut mark, view("// @derive on "));
+        push_bytes(&mut mark, view(name));
+        push_bytes(&mut mark, view(" pass "));
+        decimal(&mut mark, c.dr_pass);
+        push_bytes(&mut mark, view(" ("));
+        paths := file_path(&mut c, c.file);
+        push_bytes(&mut mark, view(paths));
+        push_bytes(&mut mark, view(")\n"));
+        host::print(view(mark));
+        host::print(view(out));
+    }
+    dr_append(&mut c, out);
+    return ();
+}
+// The derives a declaration recorded when it was expanded, and the check they imply. A declaration
+// without derives answers 0.
+fn dr_recorded<a>(c: (&a mut C), d: u64) -> u64 {
+    mut i = 0;
+    while i < c.dr_applied.len() {
+        if c.dr_applied[i] == d {
+            return c.dr_applied[i + 1];
+        }
+        i = i + 2;
+    }
+    return 0;
+}
+
 // ---- checked effects (G26, docs/design/effects.md) ------------------------------------------------
 //
 // `@no_alloc` and `@no_panic` are claims about a function *and everything it calls*, and the compiler
@@ -23379,7 +25419,6 @@ fn fx_begin<a, b, d>(c: (&a mut C), sym: &b [u8], name: &d [u8], file: u64, pos:
     c.fx_entry_panic[k] = 0;
     trusted := c.raw;
     exchange(&mut c.fx_trusted, trusted);
-    exchange(&mut c.fx_out_start, c.out.len());
     edges := c.fx_edge_from.len();
     exchange(&mut c.fx_edge_mark, edges);
     exchange(&mut c.fx_calls, 0);
@@ -23534,6 +25573,22 @@ fn raw_call_is_sites_helper<a>(c: (&a mut C)) -> bool {
     sym := c.fx_syms[c.fx_cur - 1].copy();
     return same(view(sym), view("rt_sites_fill")) || same(view(sym), view("_rt_sites_fill"));
 }
+// A call through the import table to a named operating-system function. In the runtime (trusted code)
+// it is what a `syscall` instruction is on Linux: the OS does the work, so it neither allocates on the
+// Grail heap (whose roots are `rt_alloc` and `rt_grow`) nor reaches a Grail failure entry, and it
+// records no edge - only the `call` the IR check counts. Anywhere else an imported function is code
+// the compiler does not see, and stays an unknown edge (docs/design/effects.md).
+fn call_import_out<a, b>(c: (&a mut C), text: &b [u8]) -> unit {
+    if c.raw == 0 {
+        call_slot_out(&mut c, view(text), view("an imported function"));
+        return ();
+    }
+    if c.fx_cur != 0 {
+        fx_called(&mut c);
+    }
+    o(&mut c, text);
+    return ();
+}
 // The compiler's own dispatch inside trusted code (a closure's drop through the slot its own body
 // installed): every body it can reach is recorded itself, so it is not an unknown.
 fn call_dispatch_out<a, b>(c: (&a mut C), text: &b [u8]) -> unit {
@@ -23621,7 +25676,6 @@ fn fx_helper<a, b>(c: (&a mut C), sym: &b [u8]) -> unit {
     c.fx_own_alloc[k] = 0;
     c.fx_own_panic[k] = 0;
     exchange(&mut c.fx_trusted, 1);
-    exchange(&mut c.fx_out_start, c.out.len());
     exchange(&mut c.fx_calls, 0);
     exchange(&mut c.fx_cur, k + 1);
     return ();
@@ -24601,8 +26655,12 @@ fn toplevel_item<a>(c: (&a mut C), pass: u64) -> unit {
                     if fx_attr_form(&mut c) != 0 {
                         attrs = 1;
                     } else {
-                        ct_form(&mut c, pass, 1);
-                        return ();
+                        if dr_attr_form(&mut c) != 0 {
+                            attrs = 1;
+                        } else {
+                            ct_form(&mut c, pass, 1);
+                            return ();
+                        }
                     }
                 }
             }
@@ -24636,6 +26694,10 @@ fn toplevel_item<a>(c: (&a mut C), pass: u64) -> unit {
         }
         if c.fx_pending_panic != 0 {
             fail(&mut c, view("`@no_panic` applies to a function"));
+        }
+        if c.derive_pending != 0 {
+            exchange(&mut c.pos, c.dr_pos);
+            fail(&mut c, view("`@derive(...)` applies to a struct or an enum"));
         }
         exchange(&mut c.strict_next, 0);
         return ();
@@ -28151,9 +30213,7 @@ fn emit_specializations<a>(c: (&a mut C)) -> unit {
             part_label := c.label;
             part_ref := c.ref_next;
             replay_function(&mut c, i);
-            while saved < c.out.len() {
-                c.out.pop()!;
-            }
+            c.out.truncate(saved);
             exchange(&mut c.part, part_mark);
             exchange(&mut c.lpart, part_lpart);
             exchange(&mut c.label, part_label);
@@ -30431,7 +32491,7 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
             get(&mut c, args[3], view("%r9"));
         }
         win32_link(&mut c, view(api));
-        call_slot_out(&mut c, view("call *__imp_"), view("an imported function"));
+        call_import_out(&mut c, view("call *__imp_"));
         o(&mut c, view(api));
         o(&mut c, view("(%rip)\n"));
         o(&mut c, view("addq $"));
@@ -30508,7 +32568,7 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
                 &mut c,
                 view("subq $48,%rsp\nxorl %ecx,%ecx\nmovl $12288,%r8d\nmovl $4,%r9d\n")
             );
-            call_slot_out(&mut c, view("call *__imp_VirtualAlloc(%rip)\n"), view("an imported function"));
+            call_import_out(&mut c, view("call *__imp_VirtualAlloc(%rip)\n"));
             o(
                 &mut c,
                 view("addq $48,%rsp\n")
@@ -35216,9 +37276,7 @@ fn isolated_body_type<a, b, d>(c: (&a mut C), start: u64, names: (&b u8[][]), pa
     v := expr(&mut c, 0);
     result := v.ty;
     exchange(&mut c.pos, enter);
-    while out_mark < c.out.len() {
-        c.out.pop()!;
-    }
+    c.out.truncate(out_mark);
     fx_edges_truncate(&mut c, fx_edge_trial);
     exchange(&mut c.fx_calls, fx_calls_trial);
     while closures_mark < c.closures.len() {
@@ -38717,24 +40775,36 @@ fn simple_type_head<a, b>(c: (&a mut C), name: &b [u8]) -> bool {
     return false;
 }
 // `Name[` or `Name<...>[` in expression position: a type-first collection literal.
+// The `<`/`>` matching of the loaded token stream, made once per file: a stack of the open `<`, each
+// `>` closing the latest, which is where a walk from that `<` counting the two would stop.
+fn angle_sync<a>(c: (&a mut C)) -> unit {
+    if c.angle_ok != 0 {
+        return ();
+    }
+    n := c.toks.len();
+    mut close = u64[n; n];
+    mut open = u64[];
+    for i in n {
+        k := c.toks[i].kind;
+        if k == 60 {
+            open.push(i);
+        }
+        if (k == 62) & (open.len() != 0) {
+            close[open.pop()!] = i;
+        }
+    }
+    exchange(&mut c.angle_close, close);
+    exchange(&mut c.angle_ok, 1);
+    return ();
+}
 fn type_literal_ahead<a, b>(c: (&a mut C), name: &b [u8]) -> bool {
     p := c.pos;
     if kind_at(&mut c, p) == 60 {
-        mut depth = 0;
-        mut q = p;
-        while q < c.toks.len() {
-            k := kind_at(&mut c, q);
-            if k == 60 {
-                depth += 1;
-            }
-            if k == 62 {
-                depth -= 1;
-                if depth == 0 {
-                    break;
-                }
-            }
-            q += 1;
-        }
+        // The `>` that brings the count of `<` minus `>` back to where it was before this `<`
+        // (angle_sync): every `a < b` asked this, and with no `>` after it the walk went to the end
+        // of the file.
+        angle_sync(&mut c);
+        q := c.angle_close[p];
         if kind_at(&mut c, q + 1) != 91 {
             return false;
         }
@@ -40433,8 +42503,7 @@ fn len_bound_ahead<a, b>(c: (&a mut C), name: &b [u8]) -> u8[] {
     if (kind_at(&mut c, p) != 1) || (kind_at(&mut c, p + 1) != 46) || (kind_at(&mut c, p + 3) != 40) || (kind_at(&mut c, p + 4) != 41) || (kind_at(&mut c, p + 5) != 123) {
         return u8[];
     }
-    method := tok_text(&mut c, p + 2);
-    if !same(view(method), view("len")) {
+    if !is_at(&mut c, p + 2, view("len")) {
         return u8[];
     }
     base := tok_text(&mut c, p);
@@ -40470,8 +42539,7 @@ fn len_bound_ahead<a, b>(c: (&a mut C), name: &b [u8]) -> u8[] {
                 if (nk == 46) & (j + 5 < c.toks.len()) {
                     if (kind_at(&mut c, j + 3) == 40)
                         & (kind_at(&mut c, j + 4) == 41) {
-                        m := tok_text(&mut c, j + 2);
-                        if same(view(m), view("len")) {
+                        if is_at(&mut c, j + 2, view("len")) {
                             ok = 1;
                         }
                     }
@@ -41137,7 +43205,7 @@ fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
         first = map_expression(&mut c, expected);
     } else {
         after_open := c.pos + 1;
-        if is(&mut c, view("(")) & is_at(&mut c, after_open, view("dyn")) & (kind_at(&mut c, after_open + 1) == 1) {
+        if is(&mut c, view("(")) & is_at(&mut c, after_open, view("dyn")) & ((kind_at(&mut c, after_open + 1) == 1) || (kind_at(&mut c, after_open + 1) == 60)) {
             // `(dyn I)[...]`: the parenthesised spelling of the same literal.
             ty := parse_type_base(&mut c);
             first = finish_type_literal(&mut c, ty);
@@ -45744,8 +47812,16 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
         at = at + 1;
         kind := ty_kind(&mut c, ty);
         arg := ty_arg(&mut c, ty);
+        // `drop_refs` has a type once per naming: a type this walk has settled is settled.
+        if (ty < c.drop_walked.len()) && (c.drop_walked[ty] != 0) {
+            continue;
+        }
         if concrete_type(&mut c, ty) {
             if needs_drop(&mut c, ty) {
+                while c.drop_walked.len() <= ty {
+                    c.drop_walked.push(0);
+                }
+                c.drop_walked[ty] = 1;
                 // One definition per key, not per interned index: two indices can describe the same
                 // drop - a view of one element type and a view of another both only release the
                 // backing store - and the key is what decides identity. The body is a function of
@@ -46153,7 +48229,7 @@ pub fn iface_digest<a>(data: &a [u8]) -> u8[] {
 // tree the reader read, so the format stays inspectable without a second parser.
 // Format 7 added the effect summary rows of every listed function; format 8 gives an `Atomic<T>`
 // its element type.
-const IFACE_VERSION: u64 = 8;
+const IFACE_VERSION: u64 = 9;
 const IFACE_TAG_MODULE: u64 = 1;
 const IFACE_TAG_TRAILER: u64 = 2;
 const IFACE_TAG_LINK: u64 = 3;
@@ -51101,11 +53177,24 @@ pub fn main() -> u64 {
         range_facts: 0,
         no_sites: 0,
         check_only: 0,
+        quiet: 0,
         f1_what: 0,
         debug_funcs: DebugFunc[],
         debug_vars: DebugVar[],
         debug_types: DebugType[],
         arg_offset: 0,
+        file_text: u8[][],
+        derive_pending: 0,
+        dr_pos: 0,
+        dr_rnames: u8[][],
+        dr_tnames: u8[][],
+        dr_bounds: u64[],
+        dr_constraints: u64[][],
+        dr_used: u64[],
+        dr_applied: u64[],
+        dr_pass: 0,
+        dr_tail: u8[],
+        dr_trace: 0,
         overflow: 1,
         strict_bool_report: 0,
         exports: u8[][],
@@ -51150,6 +53239,12 @@ pub fn main() -> u64 {
         res_synced: 0,
         bond_head: u64[],
         bond_next: u64[],
+        bond_hhead: u64[],
+        bond_hnext: u64[],
+        bond_under: u64[],
+        bond_unranged: 0,
+        angle_close: u64[],
+        angle_ok: 0,
         spec_em_slots: u64[],
         spec_em_keys: u64[],
         drop_em_slots: u64[],
@@ -51206,6 +53301,8 @@ pub fn main() -> u64 {
         constants: Constant[],
         statics: Static[],
         ct_calls: CtCall[],
+        ct_done: CtDone[],
+        ct_deps_path: u8[],
         static_scratch: 0,
         impl_params: ImplParams[],
         receiver: 0,
@@ -51316,6 +53413,7 @@ pub fn main() -> u64 {
         drop_generic: 0,
         drop_refs: u64[],
         drop_names: u8[][],
+        drop_walked: u64[],
         spec_emitted: u8[][],
         spell_lenient: 0,
         spell_failed: 0,
@@ -51372,7 +53470,6 @@ pub fn main() -> u64 {
         fx_pending_alloc: 0,
         fx_pending_panic: 0,
         fx_bounded: 0,
-        fx_out_start: 0,
         fx_trusted: 0,
         fx_calls: 0,
         fx_entry_panic: u64[],
@@ -51413,8 +53510,8 @@ pub fn main() -> u64 {
         reg_types: u64[],
         known: ir::no_known(),
         par_armed: 0,
-        par_misses: 0,
-        par_threshold: 0,
+        par_t0: 0,
+        par_p0: 0,
         par_sizes: u64[],
         fn_hits: 0,
         fn_filed: 0,
@@ -51538,7 +53635,12 @@ pub fn main() -> u64 {
     }
     while offset + 1 < argc {
         option := host::arg(offset + 1);
-        if same(view(option), view("--comptime-probe")) {
+        if same(view(option), view("--show-derives")) {
+            // `--show-derives`: print the source `@derive` wrote for each declaration, so a program
+            // can see what the compiler generated without a debugger (docs/design/derives.md).
+            exchange(&mut c.dr_trace, 1);
+            offset += 1;
+        } else if same(view(option), view("--comptime-probe")) {
             // Internal: this compile builds the probe for a compile-time call. The probe file comes
             // first, so the program's own entry file (which may omit its `module` line) is second.
             exchange(&mut c.probe_mode, 1);
@@ -51943,6 +54045,10 @@ pub fn main() -> u64 {
         if pass == 2 {
             jobs::phase(view("declarations"));
             par_start(&mut c, n);
+            // From the bodies on, a check writes no text (`quiet`); a unit store would keep it.
+            if (c.check_only != 0) & (c.fn_dir.len() == 0) {
+                exchange(&mut c.quiet, 1);
+            }
         }
         mut i = 2;
         while i < n {
@@ -51995,6 +54101,9 @@ pub fn main() -> u64 {
                     }
                 }
             }
+            // Every run-tier value of the build in one probe (comptime-speed R2), before anything
+            // asks for one: the interfaces below, the function cache's surface, the bodies.
+            ct_batch(&mut c);
             iface_emit_all(&mut c);
         }
         if (pass == 1) & (c.shift_decls != 0) {
@@ -52070,6 +54179,7 @@ pub fn main() -> u64 {
     if c.probe_mode == 0 {
         fx_report(&mut c);
     }
+    ct_write_deps(&mut c);
     iface_emit_facts(&mut c);
     if c.skip_bodies.len() != 0 {
         // Every error this compile has is reported; the program is still rejected, and nothing it
@@ -52224,7 +54334,7 @@ pub fn main() -> u64 {
         o(
             &mut c,
             view(
-                "ud2\nrt_win_thread_start:\nsubq $56,%rsp\nmovq %rdi,32(%rsp)\nmovq %rsi,40(%rsp)\nmovq %rcx,%rdi\ncall rt_win_thread_main\nmovq 32(%rsp),%rdi\nmovq 40(%rsp),%rsi\naddq $56,%rsp\nret\n.bss\n.p2align 4\nrt_state: .zero 8192\n"
+                "ud2\nrt_win_thread_start:\nsubq $56,%rsp\nmovq %rdi,32(%rsp)\nmovq %rsi,40(%rsp)\nmovq %rcx,%rdi\ncall rt_win_thread_main\nmovq 32(%rsp),%rdi\nmovq 40(%rsp),%rsi\naddq $56,%rsp\nret\n.bss\n.p2align 4\nrt_state: .zero 4096\n"
             )
         );
     } else {
@@ -52235,12 +54345,12 @@ pub fn main() -> u64 {
         o(
             &mut c,
             view(
-                "ud2\nrt_win_thread_start:\npushq %rbp\nmovq %rsp,%rbp\ncall rt_win_thread_main\npopq %rbp\nret\n.bss\n.p2align 4\nrt_state: .zero 8192\n"
+                "ud2\nrt_win_thread_start:\npushq %rbp\nmovq %rsp,%rbp\ncall rt_win_thread_main\npopq %rbp\nret\n.bss\n.p2align 4\nrt_state: .zero 4096\n"
             )
         );
     } else {
     if (c.target == 3) || (c.target == 4) {
-        o(&mut c, view("ud2\n.bss\n.p2align 4\nrt_state: .zero 8192\n"));
+        o(&mut c, view("ud2\n.bss\n.p2align 4\nrt_state: .zero 4096\n"));
     } else {
         if c.plat == 1 {
             o(

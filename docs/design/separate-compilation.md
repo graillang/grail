@@ -38,9 +38,9 @@ version, flags)`.
 
 ### Interface contents
 
-A versioned, length-counted record stream with one writer and one reader (format 8, built; see
+A versioned, length-counted record stream with one writer and one reader (format 9, built; see
 "Format 4 as built" below; format 7 added the effect summary rows of every listed function, and
-format 8 gives an `Atomic<T>` its element type). This section described a line-oriented text format when it was written;
+format 8 gives an `Atomic<T>` its element type; format 9 the bounds of a `dyn<..> I`). This section described a line-oriented text format when it was written;
 A versioned, length-counted record stream with one writer and one reader (format 7, built; see
 "Format 4 as built" below). This section described a line-oriented text format when it was written;
 that shape was replaced because its reader was a hand-written parser of a file the compiler had just
@@ -619,7 +619,7 @@ to look like. Nothing else should parse the bytes: a tool that needs to know wha
 runs the dump, and a test that needs to *corrupt* one changes a byte it located through the record
 framing (`tools/interface-test.mjs` does exactly that). The dump's shape is as stable as the format
 version: a field added to a record appears on the line of the record it belongs to, and a script that
-reads the dump sees the same grammar across format 8 files.
+reads the dump sees the same grammar across format 9 files.
 reads the dump sees the same grammar across format 7 files.
 
 ### The surface, computed structurally

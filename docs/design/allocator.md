@@ -137,3 +137,16 @@ path is a function of its own (`rt_alloc_shared`, `rt_free_shared`).
 **Known cost, to revisit.** That split puts one extra call on every threaded allocation and free
 (`rt_alloc` -> `rt_alloc_shared`). It was accepted to keep the one-thread path unmoved; when the
 optimiser can inline the threaded path without growing the one-thread frame, the call should go.
+
+## The one-thread path's cost (measured)
+
+`grail check` on the 104k-line scaling program (the release compiler, callgrind, the main checking
+process): 11.9M allocations and 13.4M frees. Before: about 96 instructions per allocation and 44 per
+free - a loop doubling the class size up to the request, and an overflow check after nearly every
+address addition (the runtime is compiled with checked arithmetic). After: the class of a request up
+to 240 bytes is a compare chain (`rt_alloc_bin`), a block's class from its power-of-two size the
+same (`rt_block_bin`), the arithmetic on process-state and arena addresses wraps, a reused block of
+the two smallest classes is cleared with fixed stores, and the own-mapping free is out of line. About
+38 per allocation - the pop or bump is about 20, the rest clearing a reused block for the bytes asked
+for, which callers depend on - and about 30 per free, wrapper included. The process went from
+4.88 G to 3.86 G instructions (-21%), the whole check's CPU time from 3.21 s to 2.89 s.
