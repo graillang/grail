@@ -1,5 +1,17 @@
 ## Unreleased
 
+- **Closures given for a generic `F` live in the frame (S6(A)).** A closure whose type is its own
+  literal's - a local closure, or one passed for a callable-bound parameter - is now held as its
+  environment's words in the caller's frame, copied on a move and dropped in place, and called
+  directly: no heap object, as in Rust. It is boxed once, where it meets an erased `Fn(..)` type, a job
+  or thread payload, or a `&Fn(..)` parameter. A closure written inside a generic function sees that
+  specialisation's types, so it may call a captured callable-bound `f` (`|i| f()` inside `pool::run`'s
+  adapters). Bound violations through a generic `F` now give the same messages as through `Fn(..)`.
+- **Fix: every closure expression is a type of its own.** Two closure literals with the same
+  signature and environment shape compared equal inside a generic type, so `k = keep(|| ..)` could
+  replace a `Keep<F>` built from another literal; calls through it then ran the first literal's body
+  (callable-bound calls are direct), and a borrowing closure could outlive what it borrowed. It is now
+  a type mismatch, as in Rust.
 - **`bytes::copy_back(v, distance, length)`**: the LZ77 match copy, appending `length` bytes copied
   from `distance` back (overlap allowed, as DEFLATE and zstd require), a word at a time when the
   distance is at least eight. Inflate and zstd use it instead of a push per byte: the 20 MB zstd
@@ -9,6 +21,9 @@
   growing moved out of `rt_push` into a cold `rt_push_slow`, so the call a release program makes
   into the runtime no longer saves five registers on every push. Abundance's slowest program
   (abgeo) runs 6% fewer instructions; `rt_push` went from 17% to 6-8% of its time.
+- **Native backend: a scaled array index is computed once per straight line.** nbody's `p[i*3+k]`
+  computed `3*i` again for every `k`; it is now computed once into a free scratch register and the
+  later accesses read `8k(%rdi,%r8,8)`. nbody executes 5% fewer instructions.
 
 - Fixed: an interface whose methods carry default bodies could not be read back and written again
   unchanged ("does not round-trip"): the reader kept a default body only as the source it compiles,
