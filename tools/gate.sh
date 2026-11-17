@@ -72,6 +72,9 @@ done
 # The per-function unit store against the whole corpus: no store, an empty one, a warm one - and
 # the same with --debug - must write the same assembly (docs/design/incremental-compilation.md).
 leg unit-identity bun tools/test-native.mjs x86_64 --unit-identity --jobs 4
+# The internal assembler's oracle: every corpus program's object byte-identical to clang's from the
+# same text, then run (tools/asm-oracle.mjs).
+leg asm-oracle env GRAIL_ASM_ORACLE=1 bun tools/test-native.mjs x86_64 --jobs 4
 # The LLVM backend on the emulated targets: the `vec` cases every gate (a minute each; generics,
 # hashmaps and threads go through the weak-symbol and atomics paths that broke there before), and one
 # third of the corpus. The third is derived from the tree being gated, not the date, so the same tree
@@ -88,7 +91,7 @@ for i in 1 2 3; do
 done
 
 # Tool suites: independent of each other (each has its own .work directory).
-for t in test-selfhost test-ffi test-cli interface-test cache-test split-test test-facts test-optimiser-jumps test-optimiser-atomics test-atomics-litmus test-debug-lines abundance-test borg-test grammar-test lsp-test overflow-parity-test jobs-test; do
+for t in test-selfhost test-ffi test-cli interface-test cache-test split-test test-facts test-optimiser-jumps test-optimiser-atomics test-atomics-litmus test-debug-lines abundance-test borg-test grammar-test lsp-test overflow-parity-test jobs-test pkg-test; do
   leg $t bun tools/$t.mjs
 done
 leg windows bun tools/windows.mjs check

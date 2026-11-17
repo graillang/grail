@@ -1,0 +1,73 @@
+use pool;
+// Plain records through the calls the runtime makes itself: parallel_map over a vector of Vec3
+// returning Vec3 (three words: boxed by its return) and returning a two-word record (rax:rdx, boxed
+// by the result adapter), by a function and by a closure; the end-of-main leak check balances it.
+struct Vec3 {
+    x: f64,
+    y: f64,
+    z: f64
+}
+struct Pair {
+    a: u64,
+    b: u64
+}
+fn scale(v: Vec3, k: f64) -> Vec3 {
+    return Vec3 { x: v.x * k, y: v.y * k, z: v.z * k };
+}
+fn split(v: Vec3, k: f64) -> Pair {
+    return Pair { a: u64(v.x * k), b: u64(v.y + v.z) };
+}
+struct Big {
+    a: u64,
+    b: u64,
+    c: u64
+}
+fn pairing(i: u64, k: u64) -> Pair {
+    return Pair { a: i * k, b: i + k };
+}
+fn tasks<s>(scope: (&s Scope<u64>), unused: u64) -> u64 {
+    t := spawn(scope, 21, pairing);
+    p := join(t);
+    return p.a + p.b;
+}
+fn main() -> u64 {
+    mut v = Vec3[];
+    mut w = Vec3[];
+    for i in 1000 {
+        f := f64(i);
+        v.push(Vec3 { x: f, y: f + 1.0, z: f + 2.0 });
+        w.push(Vec3 { x: f, y: f + 1.0, z: f + 2.0 });
+    }
+    scaled := parallel_map(v, 2.0, scale);
+    mut sx = 0.0;
+    for p in &scaled {
+        sx = sx + p.x + p.y + p.z;
+    }
+    println(sx);
+    pairs := parallel_map(w, 3.0, split);
+    mut t = 0;
+    for p in &pairs {
+        t = t + p.a + p.b;
+    }
+    println(t);
+    mut u = Vec3[];
+    for i in 10 {
+        u.push(Vec3 { x: f64(i), y: 0.0, z: 1.0 });
+    }
+    base := 5;
+    near := parallel_map(u, 1.0, |q: Vec3, k: f64| -> Pair Pair { a: u64(q.x * k) + base, b: u64(q.z) });
+    mut s = 0;
+    for p in &near {
+        s = s + p.a * 10 + p.b;
+    }
+    println(s);
+    println(task_scope(7, tasks));
+    k := 4;
+    j := pool::spawn(|| -> Big Big { a: k, b: k * 2, c: k * 3 });
+    big := pool::wait(j);
+    println(big.a + big.b + big.c);
+    j2 := pool::spawn(|| -> Pair Pair { a: k + 1, b: k + 2 });
+    two := pool::wait(j2);
+    println(two.a * two.b);
+    return 0;
+}

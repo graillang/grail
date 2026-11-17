@@ -7,6 +7,7 @@ use bindgen;
 use pkg;
 use jobs;
 use xxhash;
+use asm_x86;
 
 // The `grail` command-line tool. The same binary is the compiler: subcommands drive it by
 // re-invoking itself (`grail [--target T] OUT.s ENTRY.grl MODULE.grl...`), then assemble and link.
@@ -1061,15 +1062,26 @@ fn compile_mode<a, b, d, e, g, k>(
         triple = copy(view("--target=x86_64-pc-windows-msvc"));
         pe = 1;
     }
+    // The assembler: the compiler's own (`grail asm`, compiler/asm_x86.grl) for a Linux x86-64
+    // build it covers, clang otherwise. `GRAIL_ASSEMBLER` and `--assembler=clang` choose clang.
+    internal := eq(view(target), view("x86_64"))
+        && (host::env(view("GRAIL_ASSEMBLER")).len() == 0)
+        && (release == 0)
+        && (((flags / 16384) % 2) == 0);
     mut assemble = u8[][tool(view("GRAIL_ASSEMBLER"), view("clang"))];
+    if internal {
+        assemble = u8[][host::exe_path(), copy(view("asm"))];
+    }
     if eq(view(target), view("riscv64")) {
         triple = copy(view("--target=riscv64-linux-gnu"));
         emulation = copy(view("elf64lriscv"));
         assemble.push(copy(view("-march=rv64imafd")));
         assemble.push(copy(view("-mabi=lp64d")));
     }
-    assemble.push(triple);
-    assemble.push(copy(view("-c")));
+    if !internal {
+        assemble.push(triple);
+        assemble.push(copy(view("-c")));
+    }
     command := build_argv(
         h: &h,
         entry: view(entry),
@@ -1115,7 +1127,7 @@ fn compile_mode<a, b, d, e, g, k>(
     at := source_start(&command, view(asm));
     if (whole == 0)
         & (split == 0)
-        & (check_only == 0)
+        & ((check_only == 0) || (cache != 0))
         & (iface.len() == 0)
         & (at < command.len())
         & linux_target(view(target)) {
@@ -1213,7 +1225,18 @@ fn compile_mode<a, b, d, e, g, k>(
         }
         return built;
     }
-    if host::command(command) != 0 {
+    // The internal assembler runs inside the compiler run when the build is one object: the run
+    // writes the object itself (`--object`), and the assembly file keeps only the link notes.
+    inproc := internal && (split == 0) && (check_only == 0);
+    mut run = u8[][];
+    for k in command.len() {
+        run.push(item(&command, k));
+        if inproc && (k == 0) {
+            run.push(copy(view("--object")));
+            run.push(object.copy());
+        }
+    }
+    if host::command(run) != 0 {
         return 1;
     }
     if check_only != 0 {
@@ -1253,7 +1276,7 @@ fn compile_mode<a, b, d, e, g, k>(
     } else {
         assemble.push(copy(view(object)));
     }
-    if host::command(assemble) != 0 {
+    if !inproc && (host::command(assemble) != 0) {
         say(view("grail: assembling failed (needs clang)"));
         return 1;
     }
@@ -1813,6 +1836,95 @@ fn unit_file<a, b, d, e, g>(
 }
 // Whether every module `g` reads is finished: the base (the runtime) for all of them, then the
 // modules it uses.
+// A check's record of one module: what a run that reads it needs - its interface and its facts - and
+// no object, so a build never takes it for its own (unit_restore asks for the object). Filed under
+// the same key as a build's record, in a kind of its own.
+fn unit_file_check<a, b, e, g>(store: (&a mut Cache), key: &b [u8], ifaces: &e [u8], name: &g [u8]) -> unit {
+    mut record = u8[];
+    push_bytes(&mut record, view("// grail-cache-check 1\nmodule "));
+    push_bytes(&mut record, view(name));
+    record.push(10);
+    for ext in 2 {
+        mut suffix = copy(view(".iface"));
+        mut word = copy(view("iface "));
+        if ext == 1 {
+            suffix = copy(view(".facts"));
+            word = copy(view("facts "));
+        }
+        file := path_join(view(ifaces), view(cat(view(name), view(suffix))));
+        if host::exists(view(file)) != 0 {
+            b := cache_blob_put(&mut store, view(file));
+            if b.len() != 64 {
+                return ();
+            }
+            push_bytes(&mut record, view(word));
+            push_bytes(&mut record, view(b));
+            record.push(10);
+        }
+    }
+    cache_record_put(&mut store, view("check"), view(key), view(record));
+    return ();
+}
+// A check's restore: a build's record of the module (the same key) or a check's, of which only the
+// interface and the facts are put back.
+fn unit_restore_check<a, b, e, g>(store: (&a mut Cache), key: &b [u8], ifaces: &e [u8], name: &g [u8]) -> bool {
+    for kind in 2 {
+        mut what = copy(view("unit"));
+        if kind == 1 {
+            what = copy(view("check"));
+        }
+        path := cache_record_path(view(store.root), view(what), view(key));
+        if host::exists(view(path)) == 0 {
+            continue;
+        }
+        cache_touch(view(store.root), view(what), view(key));
+        rows := lines(view(host::read_file(view(path))));
+        mut ok = true;
+        mut blobs = u8[][];
+        mut dests = u8[][];
+        for i in rows.len() {
+            w := words(view(item(&rows, i)));
+            if (2 <= w.len()) & (eq(view(item(&w, 0)), view("iface")) || eq(view(item(&w, 0)), view("facts"))) {
+                b := item(&w, 1);
+                if !cache_blob_ok(&mut store, view(b)) {
+                    ok = false;
+                }
+                mut suffix = copy(view(".iface"));
+                if eq(view(item(&w, 0)), view("facts")) {
+                    suffix = copy(view(".facts"));
+                }
+                blobs.push(b);
+                dests.push(path_join(view(ifaces), view(cat(view(name), view(suffix)))));
+            }
+        }
+        if !ok {
+            continue;
+        }
+        mut restored = true;
+        for i in blobs.len() {
+            if cache_blob_restore(&mut store, view(blobs[i]), view(dests[i]), 0) != 0 {
+                restored = false;
+            }
+        }
+        if restored {
+            return true;
+        }
+    }
+    return false;
+}
+// The first module of `reads` that has errors, or was not checked because of them (done == 2).
+fn failed_read<a, b>(groups: (&a ModuleGroup[]), reads: (&b u8[][])) -> u8[] {
+    for r in reads.len() {
+        g := group_of(groups, view(reads[r]));
+        if (g != 0) && (groups[g - 1].done == 2) {
+            return groups[g - 1].name.copy();
+        }
+    }
+    return u8[];
+}
+fn reads_failed<a, b>(groups: (&a ModuleGroup[]), reads: (&b u8[][])) -> bool {
+    return failed_read(groups, reads).len() != 0;
+}
 fn unit_ready<a, b>(groups: (&a ModuleGroup[]), base: (&b u8[][]), g: u64) -> bool {
     for b in base.len() {
         if eq(view(base[b]), view(groups[g].name)) {
@@ -1955,6 +2067,16 @@ fn per_module_build<a, d, e, g, k, m, n, x, y, jb, ev>(
     }
     entry_name := groups[0].name.copy();
     base := u8[][copy(view("runtime"))];
+    // A check: each module's run stops when its diagnostics are given (`--check`), nothing is
+    // assembled or linked, and a module with errors does not stop the others - the modules that
+    // read it are not checked, and the ones that do not still are.
+    mut checking = false;
+    for f in flags.len() {
+        if eq(view(item(&flags, f)), view("--check")) {
+            checking = true;
+        }
+    }
+    mut failed = 0;
     // A release unit is compiled by the LLVM backend: the compile command carries the word.
     mut release = 0;
     for f in flags.len() {
@@ -2014,9 +2136,19 @@ fn per_module_build<a, d, e, g, k, m, n, x, y, jb, ev>(
             // made this one ready), so their interfaces are whole; the run is told to read those
             // and no others, whatever else is in the directory by now.
             reads := unit_reads(&groups, &base, g);
+            // A module that reads one with errors is not checked: its turn records that.
+            if checking && reads_failed(&groups, &reads) {
+                state[g] = 4;
+                continue;
+            }
             if cache != 0 {
                 keys[g] = unit_key(&mut store, id, view(target), view(name), &groups[g].files, view(ifaces), &reads);
-                if unit_restore(&mut store, view(keys[g]), view(stem), view(ifaces), view(name)) {
+                if checking {
+                    if unit_restore_check(&mut store, view(keys[g]), view(ifaces), view(name)) {
+                        state[g] = 2;
+                        continue;
+                    }
+                } else if unit_restore(&mut store, view(keys[g]), view(stem), view(ifaces), view(name)) {
                     state[g] = 2;
                     continue;
                 }
@@ -2067,32 +2199,49 @@ fn per_module_build<a, d, e, g, k, m, n, x, y, jb, ev>(
             if !eq(view(name), view(entry_name)) {
                 compile.push(copy(view("--no-entry")));
             }
+            // The internal assembler (`grail asm`) runs inside the module's compiler run.
+            inproc := !checking && (prefix.len() == 2) && eq(view(item(&prefix, 1)), view("asm"));
+            if inproc {
+                compile.push(copy(view("--object")));
+                compile.push(cat(view(stem), view(".o")));
+            }
             compile.push(cat(view(stem), view(".s")));
             for f in groups[g].files.len() {
                 compile.push(groups[g].files[f].copy());
             }
-            run.push(decimal(compile.len()));
-            for k in compile.len() {
-                run.push(compile[k].copy());
-            }
-            unit_object := cat(view(stem), view(".o"));
-            run.push(decimal(prefix.len() + 3));
-            for k in prefix.len() {
-                run.push(item(&prefix, k));
-            }
-            run.push(cat(view(stem), view(".s")));
-            run.push(copy(view("-o")));
-            if release != 0 {
-                run.push(release_part(view(unit_object)));
-                steps := release_optimise(&prefix, view(cat(view(stem), view(".s"))), view(unit_object), view(emulation));
-                for q in steps.len() {
-                    run.push(decimal(steps[q].len()));
-                    for w in steps[q].len() {
-                        run.push(item(&steps[q], w));
-                    }
+            if checking {
+                // Only the compiler: a check has no assembly to turn into an object.
+                run = u8[][];
+                for k in compile.len() {
+                    run.push(compile[k].copy());
                 }
             } else {
-                run.push(unit_object.copy());
+                run.push(decimal(compile.len()));
+                for k in compile.len() {
+                    run.push(compile[k].copy());
+                }
+                // In-process assembly needs no steps: the compiler run wrote the object (`--object`).
+                unit_object := cat(view(stem), view(".o"));
+                if !inproc {
+                    run.push(decimal(prefix.len() + 3));
+                    for k in prefix.len() {
+                        run.push(item(&prefix, k));
+                    }
+                    run.push(cat(view(stem), view(".s")));
+                    run.push(copy(view("-o")));
+                    if release != 0 {
+                        run.push(release_part(view(unit_object)));
+                        steps := release_optimise(&prefix, view(cat(view(stem), view(".s"))), view(unit_object), view(emulation));
+                        for q in steps.len() {
+                            run.push(decimal(steps[q].len()));
+                            for w in steps[q].len() {
+                                run.push(item(&steps[q], w));
+                            }
+                        }
+                    } else {
+                        run.push(unit_object.copy());
+                    }
+                }
             }
             pair := host::pipe();
             mut child_env = u8[][];
@@ -2126,6 +2275,20 @@ fn per_module_build<a, d, e, g, k, m, n, x, y, jb, ev>(
                 )
             );
             return 1;
+        }
+        if state[pick] == 4 {
+            // Not checked: it reads a module with errors, whose interface it would be checked
+            // against. One line, in the order the modules are recorded, and its readers in turn.
+            pick_reads := unit_reads(&groups, &base, pick);
+            mut line = cat(view("grail: not checked: `"), view(groups[pick].name));
+            line = cat(view(line), view("` depends on `"));
+            line = cat(view(line), view(failed_read(&groups, &pick_reads)));
+            line = cat(view(line), view("`, which has errors"));
+            say(view(line));
+            groups[pick].done = 2;
+            failed += 1;
+            built += 1;
+            continue;
         }
         if state[pick] == 0 {
             // Ready, and not started only because every processor is busy. One running module is
@@ -2161,6 +2324,12 @@ fn per_module_build<a, d, e, g, k, m, n, x, y, jb, ev>(
         stem := path_join(view(dir), view(name));
         unit_asm := cat(view(stem), view(".s"));
         unit_obj := cat(view(stem), view(".o"));
+        if (state[pick] == 2) && checking {
+            store.hits += 1;
+            groups[pick].done = 1;
+            built += 1;
+            continue;
+        }
         if state[pick] == 2 {
             store.hits += 1;
         } else {
@@ -2186,6 +2355,24 @@ fn per_module_build<a, d, e, g, k, m, n, x, y, jb, ev>(
             }
             if said.len() != 0 {
                 host::print(view(said));
+            }
+            if checking && (status != 0) {
+                // A check goes on: this module's errors are given, the modules that read it are not
+                // checked, and the others still are.
+                groups[pick].done = 2;
+                failed += 1;
+                built += 1;
+                continue;
+            }
+            if checking {
+                if cache != 0 {
+                    store.misses += 1;
+                    store.names.push(name.copy());
+                    unit_file_check(&mut store, view(keys[pick]), view(ifaces), view(name));
+                }
+                groups[pick].done = 1;
+                built += 1;
+                continue;
             }
             if status != 0 {
                 // The modules still running are left to finish; nothing of theirs is recorded.
@@ -2215,6 +2402,12 @@ fn per_module_build<a, d, e, g, k, m, n, x, y, jb, ev>(
         }
         groups[pick].done = 1;
         built += 1;
+    }
+    if checking {
+        if cache != 0 {
+            cache_report(&mut store, 2);
+        }
+        return u64(failed != 0);
     }
     if link_objects(view(output), view(target), view(emulation), &objects, &link) != 0 {
         return 1;
@@ -2330,6 +2523,7 @@ fn link_objects<a, b, d, e, g>(
 //   map/prog/<key>   every input the build reads, the compiler and the toolchain  -> the image
 //   map/lnk/<key>    the object set, the link inputs and the linker               -> the image
 //   map/mod/<key>    one module's inputs and the assembler                        -> its object
+//   map/check/<key>  one module's inputs, checked (a unit key)                    -> its interface
 //
 // The store is content addressed under .work/cache/<target>:
 //
@@ -2428,6 +2622,7 @@ fn cache_ensure<a>(c: (&a mut Cache)) -> unit {
     host::mkdir(view(path_join(view(c.root), view("map/lnk"))));
     host::mkdir(view(path_join(view(c.root), view("map/mod"))));
     host::mkdir(view(path_join(view(c.root), view("map/unit"))));
+    host::mkdir(view(path_join(view(c.root), view("map/check"))));
     host::mkdir(view(path_join(view(c.root), view("stage"))));
     // One generation per build that opens the store: what `grail cache prune` measures age in.
     generation := cache_generation(view(c.root)) + 1;
@@ -2607,7 +2802,7 @@ fn cache_command<a>(args: (&a u8[][])) -> u64 {
         root := path_join(view(base), view(item(&targets, t)));
         now := cache_generation(view(root));
         mut live = u8[];
-        kinds := u8[][copy(view("prog")), copy(view("lnk")), copy(view("mod")), copy(view("unit"))];
+        kinds := u8[][copy(view("prog")), copy(view("lnk")), copy(view("mod")), copy(view("unit")), copy(view("check"))];
         for k in kinds.len() {
             dir := path_join(view(path_join(view(root), view("map"))), view(item(&kinds, k)));
             if host::exists(view(dir)) == 0 {
@@ -2917,6 +3112,10 @@ fn cache_build_id<a, b, d, e, g>(
             i += 2;
         } else if eq(view(a), view("--diagnostics-json")) & (i + 1 < argv.len()) {
             i += 2;
+        } else if eq(view(a), view("--check")) {
+            // A check and a build of one module read the same inputs and agree on its interface:
+            // the key is the same, and a check reuses a build's record (unit_restore_check).
+            i += 1;
         } else {
             if (eq(view(a), view("--interface")) || eq(view(a), view("--emit-interface")))
                 & (i + 1 < argv.len()) {
@@ -2951,6 +3150,8 @@ fn cache_build_id<a, b, d, e, g>(
     id.flags = native::iface_digest(&flagbuf);
     exe := host::exe_path();
     id.compiler = cache_digest_file(&mut c, view(exe));
+    // The assembler's identity: clang's `--version`, or for the internal assembler (`grail asm`) the
+    // compiler's own digest above, which is the same binary.
     id.assembler = cache_tool_id(&mut c, assemble);
     mut linker = u8[][
         tool(view("GRAIL_LINKER"), view("ld.lld")),
@@ -3071,7 +3272,9 @@ fn cache_report<a>(c: (&a mut Cache), relinked: u64) -> unit {
         host::print(view(")"));
     }
     host::print(view("; "));
-    if relinked == 0 {
+    if relinked == 2 {
+        host::print(view("checked"));
+    } else if relinked == 0 {
         host::print(view("image reused"));
     } else {
         host::print(view("image linked"));
@@ -3326,6 +3529,9 @@ struct Options {
     // build store. `cache_quiet` is set when the store is used because it is the default rather
     // than because `--cache` asked: the build then prints no cache line.
     no_cache: u64,
+    // `--assembler=clang`: assemble with clang where the internal assembler would (the fallback
+    // kept until the internal one's oracle has been green through one landing).
+    asm_clang: u64,
     cache_quiet: u64,
     // `--emit-ir`: the compiler writes the typed IR of the optimized stream beside the assembly.
     emit_ir: u64,
@@ -3362,7 +3568,7 @@ struct Options {
 // cache keys on. Bit 0 check only, 1 debug, 2 deny ambient host, 3 split, 4/5 overflow, 6 cache,
 // 7 whole program, 8 no runtime-error location table, 9 verify the facts a proof leaned on,
 // 10 strict refinements, 11 write the typed IR beside the assembly, 12 the store is used by default
-// (no cache line is printed).
+// (no cache line is printed), 13 release, 14 assemble with clang rather than the internal assembler.
 // The compiler's flag word. `check_only` is the `--check` bit, which is about the caller rather than
 // the options, so it is an argument instead of an option field.
 fn flag_bits<a>(o: (&a Options), check_only: bool = false) -> u64 {
@@ -3392,7 +3598,9 @@ fn flag_bits<a>(o: (&a Options), check_only: bool = false) -> u64 {
         * 8192
         // A release build wraps by default; `--overflow=` on the command line still decides.
         + u64((o.release != 0) && (o.overflow == 0))
-        * 16;
+        * 16
+        + o.asm_clang
+        * 16384;
 }
 // ---- The driver's own flags, as a table ----------------------------------------------------------
 // One row per word the driver reads: `word` is what the command line says, `kind` says what follows
@@ -3433,6 +3641,7 @@ const F_NO_ENTRY: u64 = 13;
 const F_VERIFY_FACTS: u64 = 14;
 const F_STRICT: u64 = 15;
 const F_NO_CACHE: u64 = 17;
+const F_ASM_CLANG: u64 = 19;
 const F_EMIT_IR: u64 = 16;
 const F_OUTPUT: u64 = 20;
 const F_TARGET: u64 = 21;
@@ -3463,6 +3672,7 @@ fn flag_table() -> Flag[] {
         Flag { word: copy(view("--whole-program")), kind: FLAG_SWITCH, field: F_WHOLE },
         Flag { word: copy(view("--cache")), kind: FLAG_SWITCH, field: F_CACHE },
         Flag { word: copy(view("--no-cache")), kind: FLAG_SWITCH, field: F_NO_CACHE },
+        Flag { word: copy(view("--assembler=clang")), kind: FLAG_SWITCH, field: F_ASM_CLANG },
         Flag { word: copy(view("--overflow=wrap")), kind: FLAG_SWITCH, field: F_OVERFLOW_WRAP },
         Flag {
             word: copy(view("--overflow=checked")),
@@ -3580,6 +3790,8 @@ fn switch_on<a>(o: (&a mut Options), field: u64) {
         o.strict = 1;
     } else if field == F_NO_CACHE {
         o.no_cache = 1;
+    } else if field == F_ASM_CLANG {
+        o.asm_clang = 1;
     } else if field == F_EMIT_IR {
         o.emit_ir = 1;
     } else if field == F_VERIFY {
@@ -3653,6 +3865,7 @@ fn options<a>(args: (&a u8[][])) -> Options {
         emit_ir: 0,
         release: 0,
         no_cache: 0,
+        asm_clang: 0,
         cache_quiet: 0,
         watch: 0,
         interval: 0,
@@ -3854,6 +4067,26 @@ fn check_command<a>(args: (&a u8[][])) -> u64 {
     h := home();
     if h.runtime.len() == 0 {
         return 1;
+    }
+    // A check goes through the build store as a build does (docs/design/incremental-compilation.md,
+    // "An incremental check"): one run per module, a module whose inputs did not move is not run
+    // again, and inside a run the unchanged bodies are replayed - so a check after an edit costs the
+    // edited module, not the program.
+    if (o.cache == 0)
+        & (o.no_cache == 0)
+        & linux_target(view(o.target))
+        & (o.debug == 0)
+        & (o.split == 0)
+        & (o.whole == 0)
+        & (o.iface.len() == 0)
+        & (o.iface_emit == 0)
+        & (o.emit_ir == 0)
+        & (o.watch == 0)
+        & (o.no_entry == 0)
+        & (o.inputs.len() == 0)
+        & (o.diag.len() == 0) {
+        o.cache = 1;
+        o.cache_quiet = 1;
     }
     if o.watch != 0 {
         return watch(&h, &mut o, 1);
@@ -4636,7 +4869,18 @@ fn test_failure<a, b>(file: &a [u8], status: u64, log_path: &b [u8], note: &b [u
 }
 // Build and run one test program in this process. With `log` non-empty its output is captured.
 fn test_run_here<a, b, d>(h: (&a Home), o: (&a TestOptions), file: &a [u8], log: &b [u8]) -> u64 {
-    modules := u8[][];
+    // In a project, a test sees the root's modules and every dependency's - its dev-dependencies
+    // too, which no other build sees (docs/packages.md): the plan grail.lock already resolved.
+    mut modules = u8[][];
+    if host::exists(view("grail.toml")) != 0 {
+        p := pkg::plan(1);
+        if p.name.len() == 0 {
+            return 1;
+        }
+        for i in p.modules.len() {
+            modules.push(item(&p.modules, i));
+        }
+    }
     out := test_binary(view(file));
     status := compile(h: h, entry: view(file), modules: &modules, output: view(out), target: view(o.target), flags: test_bits(&o));
     if status != 0 {
@@ -5814,6 +6058,7 @@ pub fn is_command<a>(name: &a [u8]) -> bool {
         || eq(view(name), view("cache"))
         || eq(view(name), view("unit-build"))
         || eq(view(name), view("explain"))
+        || eq(view(name), view("asm"))
         || eq(view(name), view("doc"))
         || eq(view(name), view("bindgen"))
         || eq(view(name), view("install"))
@@ -5886,6 +6131,9 @@ pub fn run() -> u64 {
     }
     if eq(view(name), view("bindgen")) {
         return bindgen::run(&args);
+    }
+    if eq(view(name), view("asm")) {
+        return asm_x86::command(&args);
     }
     if eq(view(name), view("doc")) {
         return doc_command(&args);

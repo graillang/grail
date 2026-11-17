@@ -1425,6 +1425,42 @@ build records nothing and pays nothing. When the table is wanted the optimizer i
 compile (`ir::index_facts`, a 4096-bucket table by body symbol) so a slot lookup is a scan of one
 body's few facts rather than a scan of the whole table per slot the program writes.
 
+## Implemented: the IR (2026-11-13) and the effects move (2026-11-14)
+
+**Stage 1, the IR.** `compiler/ir.grl` holds what a body is (the instruction record moved out of
+`optimize.grl`, the stream parser, the operand algebra) and the typed layer over it: one value per
+definition of a location, reads bound inside the block (0 = the slot, kept at a label), a type and
+width per value from the fact table, and the body's calls in emission order. `--emit-ir` writes the
+units beside the assembly. The optimizer's passes and the native backend are unchanged in what they
+decide.
+
+**Stage 2, the effects move.** `fx_end` no longer counts `call` lines in a body's bytes: the front
+end records what each claiming body emitted (its count), the IR
+answers with `ir::count_calls`, and `fx_check_calls` compares them once the program has been walked.
+An indirect refusal now names its target (`fx_edge_why`, `iface_reason`), so a `dyn` receiver's call
+reads "the target is interface `Shape` of module `m`".
+
+**Byte identity, measured** with `tools/ssair-bytes.mjs` (per emitted function, against the tree-built
+compiler from before the change):
+
+| input | function units | differing |
+| --- | --- | --- |
+| the compiler's own sources (`--self`) | 2,512 (stage 1) / 2,519 (stage 2) | 0 |
+| 40-case corpus slice | 50,324 | 0 |
+| 30-case corpus slice after the effects move | 37,755 | 0 |
+| full corpus, 623 cases | 703,006 | 0 real |
+
+The full-corpus row is quoted honestly: that run ran 20 compilers at once on a host at load 48 and
+flagged 21 cases, every one of them an artifact (a killed process reports no output; two cases had a
+peer delete their input). All five that mattered re-ran serially as identical (1,258 / 1,266 / 1,261 /
+1,256 / 1,258 units, 0 differing), so the number is ">=703k units compared, 0 real differences", not a
+clean sweep of a quiet host. `tools/ssair-ir.mjs` holds the serializer to its own counts, refuses a
+value id outside its unit's table, and asserts that asking for the IR cannot change the assembly.
+
+**Stage 3 has since landed** as the per-function codegen cache (`--fn-cache`, `compiler/fncache.grl`);
+`docs/design/incremental-compilation.md` is its note. (A `.proved` replay range that the effects
+record carried here went away on 2026-11-16 with the copied entry it described.)
+
 ## What this does not do
 
 - It does not remove the front end's text emission. That is the *next* structural step (a builder API

@@ -18,40 +18,36 @@ use order;
 // `Some(len)`/`None` to `position`/`find`.
 
 impl<T> T[] {
-    pub fn map<U>(self, f: FnMut(T) -> U) -> U[] {
+    pub fn map<U, Cb: FnMut(T) -> U>(self, f: Cb) -> U[] {
         mut call = f;
         mut source = self;
-        mut reversed = T[];
-        while let Some(popped) = source.pop() {
-            reversed.push(popped);
-        }
+        mut reversed = source;
+        reversed.reverse();
         mut out = U[];
-        while let Some(popped) = reversed.pop() {
+        while reversed.len() != 0 {
+            popped := reversed.pop()!;
             out.push(call(popped));
         }
         return out;
     }
     // fold consumes the vector and moves each element into `step` in order.
-    pub fn fold<A>(self, initial: A, step: FnMut(A, T) -> A) -> A {
+    pub fn fold<A, Cb: FnMut(A, T) -> A>(self, initial: A, step: Cb) -> A {
         mut call = step;
         mut source = self;
-        mut reversed = T[];
-        while let Some(popped) = source.pop() {
-            reversed.push(popped);
-        }
+        mut reversed = source;
+        reversed.reverse();
         mut acc = initial;
-        while let Some(popped) = reversed.pop() {
+        while reversed.len() != 0 {
+            popped := reversed.pop()!;
             acc = call(acc, popped);
         }
         return acc;
     }
-    pub fn filter(self, keep: FnMut(&T) -> bool) -> T[] {
+    pub fn filter<Cb: FnMut(&T) -> bool>(self, keep: Cb) -> T[] {
         mut call = keep;
         mut source = self;
-        mut reversed = T[];
-        while let Some(popped) = source.pop() {
-            reversed.push(popped);
-        }
+        mut reversed = source;
+        reversed.reverse();
         mut out = T[];
         while reversed.len() != 0 {
             value := reversed.pop()!;
@@ -61,13 +57,11 @@ impl<T> T[] {
         }
         return out;
     }
-    pub fn filter_map<U>(self, f: FnMut(&T) -> U?) -> U[] {
+    pub fn filter_map<U, Cb: FnMut(&T) -> U?>(self, f: Cb) -> U[] {
         mut call = f;
         mut source = self;
-        mut reversed = T[];
-        while let Some(popped) = source.pop() {
-            reversed.push(popped);
-        }
+        mut reversed = source;
+        reversed.reverse();
         mut out = U[];
         while reversed.len() != 0 {
             value := reversed.pop()!;
@@ -77,52 +71,47 @@ impl<T> T[] {
         }
         return out;
     }
-    pub fn flat_map<U>(self, f: FnMut(T) -> U[]) -> U[] {
+    pub fn flat_map<U, Cb: FnMut(T) -> U[]>(self, f: Cb) -> U[] {
         mut call = f;
         mut source = self;
-        mut reversed = T[];
-        while let Some(popped) = source.pop() {
-            reversed.push(popped);
-        }
+        mut reversed = source;
+        reversed.reverse();
         mut out = U[];
         while reversed.len() != 0 {
             part := call(reversed.pop()!);
             mut rest = part;
-            mut back = U[];
-            while let Some(popped) = rest.pop() {
-                back.push(popped);
-            }
-            while let Some(popped) = back.pop() {
+            mut back = rest;
+            back.reverse();
+            while back.len() != 0 {
+                popped := back.pop()!;
                 out.push(popped);
             }
         }
         return out;
     }
-    pub fn for_each(self, f: FnMut(T) -> unit) {
+    pub fn for_each<Cb: FnMut(T) -> unit>(self, f: Cb) {
         mut call = f;
         mut source = self;
-        mut reversed = T[];
-        while let Some(popped) = source.pop() {
-            reversed.push(popped);
-        }
-        while let Some(popped) = reversed.pop() {
+        mut reversed = source;
+        reversed.reverse();
+        while reversed.len() != 0 {
+            popped := reversed.pop()!;
             call(popped);
         }
         return ();
     }
     // The one value `step` combines every element into, or None for an empty vector.
-    pub fn reduce(self, step: FnMut(T, T) -> T) -> T? {
+    pub fn reduce<Cb: FnMut(T, T) -> T>(self, step: Cb) -> T? {
         mut call = step;
         mut source = self;
-        mut reversed = T[];
-        while let Some(popped) = source.pop() {
-            reversed.push(popped);
-        }
+        mut reversed = source;
+        reversed.reverse();
         if reversed.len() == 0 {
             return None;
         }
         mut acc = reversed.pop()!;
-        while let Some(popped) = reversed.pop() {
+        while reversed.len() != 0 {
+            popped := reversed.pop()!;
             acc = call(acc, popped);
         }
         return Some(acc);
@@ -135,7 +124,7 @@ impl<T> T[] {
     pub fn iter(&self) -> iter::Iter<(&T)> {
         return iter::refs(self);
     }
-    pub fn any(&self, test: FnMut(&T) -> bool) -> bool {
+    pub fn any<Cb: FnMut(&T) -> bool>(&self, test: Cb) -> bool {
         mut call = test;
         for x in self {
             if call(x) {
@@ -144,7 +133,7 @@ impl<T> T[] {
         }
         return false;
     }
-    pub fn all(&self, test: FnMut(&T) -> bool) -> bool {
+    pub fn all<Cb: FnMut(&T) -> bool>(&self, test: Cb) -> bool {
         mut call = test;
         for x in self {
             if !call(x) {
@@ -154,7 +143,7 @@ impl<T> T[] {
         return true;
     }
     // How many elements pass `test`.
-    pub fn count(&self, test: FnMut(&T) -> bool) -> u64 {
+    pub fn count<Cb: FnMut(&T) -> bool>(&self, test: Cb) -> u64 {
         mut call = test;
         mut n = 0;
         for x in self {
@@ -165,7 +154,7 @@ impl<T> T[] {
         return n;
     }
     // The first element passing `test`, or None.
-    pub fn find(&self, test: FnMut(&T) -> bool) -> (&T)? {
+    pub fn find<Cb: FnMut(&T) -> bool>(&self, test: Cb) -> (&T)? {
         mut call = test;
         for i in self.len() {
             if call(&self[i]) {
@@ -175,7 +164,7 @@ impl<T> T[] {
         return None;
     }
     // The index of the first element passing `test`, or None.
-    pub fn position(&self, test: FnMut(&T) -> bool) -> u64? {
+    pub fn position<Cb: FnMut(&T) -> bool>(&self, test: Cb) -> u64? {
         mut call = test;
         for i in self.len() {
             if call(&self[i]) {
@@ -209,10 +198,8 @@ impl<T> T[] {
 impl<T: hash::Equal> T[] {
     pub fn dedup(self) -> T[] {
         mut source = self;
-        mut reversed = T[];
-        while let Some(popped) = source.pop() {
-            reversed.push(popped);
-        }
+        mut reversed = source;
+        reversed.reverse();
         mut out = T[];
         while reversed.len() != 0 {
             value := reversed.pop()!;
@@ -347,7 +334,7 @@ impl<T: order::Ord> T[] {
         return true;
     }
     // The smallest/largest element by a u64 key computed once per element, or None when empty.
-    pub fn min_by_key(&self, key_of: FnMut(&T) -> u64) -> (&T)? {
+    pub fn min_by_key<Cb: FnMut(&T) -> u64>(&self, key_of: Cb) -> (&T)? {
         mut key = key_of;
         if self.len() == 0 {
             return None;
@@ -363,7 +350,7 @@ impl<T: order::Ord> T[] {
         }
         return Some(&self[best]);
     }
-    pub fn max_by_key(&self, key_of: FnMut(&T) -> u64) -> (&T)? {
+    pub fn max_by_key<Cb: FnMut(&T) -> u64>(&self, key_of: Cb) -> (&T)? {
         mut key = key_of;
         if self.len() == 0 {
             return None;
@@ -386,7 +373,7 @@ impl<T: order::Ord> T[] {
 // are moved, never copied, and the comparator is called from one place. O(n log n). The comparator
 // is an FnMut (it may count its calls); the order of the calls is the merge's, not specified.
 impl<T> T[] {
-    pub fn sort_by(&mut self, order_by: FnMut(&T, &T) -> bool) {
+    pub fn sort_by<Cb: FnMut(&T, &T) -> bool>(&mut self, order_by: Cb) {
         mut less = order_by;
         n := self.len();
         mut idx = u64[0; n];
@@ -430,7 +417,7 @@ impl<T> T[] {
         return ();
     }
     // Stable sort by a u64 key computed once per element, in element order.
-    pub fn sort_by_key(&mut self, key_of: FnMut(&T) -> u64) {
+    pub fn sort_by_key<Cb: FnMut(&T) -> u64>(&mut self, key_of: Cb) {
         mut key = key_of;
         n := self.len();
         mut keys = u64[0; n];
@@ -501,10 +488,12 @@ fn merge_sorted<T: order::Ord>(items: T[]) -> T[] {
             out_rev.push(b.pop()!);
         }
     }
-    while let Some(popped) = a.pop() {
+    while a.len() != 0 {
+        popped := a.pop()!;
         out_rev.push(popped);
     }
-    while let Some(popped) = b.pop() {
+    while b.len() != 0 {
+        popped := b.pop()!;
         out_rev.push(popped);
     }
     return reversed(out_rev);
@@ -512,10 +501,8 @@ fn merge_sorted<T: order::Ord>(items: T[]) -> T[] {
 
 fn reversed<T>(items: T[]) -> T[] {
     mut source = items;
-    mut out = T[];
-    while let Some(popped) = source.pop() {
-        out.push(popped);
-    }
+    mut out = source;
+    out.reverse();
     return out;
 }
 

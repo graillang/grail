@@ -13,7 +13,9 @@
 //  (e) interfaces  - an interface tampered the way `tools/interface-test.mjs` tampers one (edit,
 //                    re-digested, manifest rewritten) misses the module that reads it, and only it;
 //  (f) corruption  - a corrupted store entry is a miss and a rebuild, never a wrong binary, and the
-//                    entry is repaired instead of missing forever.
+//                    entry is repaired instead of missing forever;
+//  (m) comptime    - a compile-time value reruns its probe when a body it reached changes, and only
+//                    then.
 //
 // (c) is also where the *independence* of a module's emitted text is pinned, by measurement rather
 // than by argument: every label is minted in its module's own namespace from a counter that restarts
@@ -931,6 +933,61 @@ function proveMemoKeys() {
   return { hits };
 }
 
+// ---- (m) an incremental check ----------------------------------------------------------------
+// `grail check` runs one compiler per module through the store, as a build does: a module whose
+// inputs did not move is not checked again, and in a module that is, the unchanged bodies replay.
+// A module with errors reports them; the modules that read it get one line each and are not
+// checked; the modules that do not read it are still checked. Diagnostics are the module's own.
+function proveCheck() {
+  const dir = join(work, 'check');
+  rmSync(dir, { recursive: true, force: true });
+  mkdirSync(join(dir, 'src'), { recursive: true });
+  writeFileSync(join(dir, 'grail.toml'), '[package]\nname = "chk"\nversion = "0.1.0"\n');
+  const mod = (name, body, uses = '') => writeFileSync(join(dir, `src/${name}.grl`), `module ${name};\n${uses}\npub fn f${name}(x: u64) -> u64 {\n    return ${body};\n}\n`);
+  mod('a', 'x + 1');
+  mod('b', 'x + 2');
+  mod('c', 'a::fa(x) + 3', 'use a;\n');
+  writeFileSync(join(dir, 'src/main.grl'), 'use a;\nuse b;\nuse c;\n\nfn main() {\n    println(a::fa(1) + b::fb(2) + c::fc(3));\n}\n');
+  const env = { ...process.env, GRAIL_CACHE_DIR: join(dir, 'store') };
+  const check = () => {
+    const r = spawnSync(compiler, ['check', '--cache'], { cwd: dir, encoding: 'utf8', env, timeout: 900_000 });
+    return { status: r.status, out: `${r.stdout}${r.stderr}`, line: cacheLine(`${r.stdout}${r.stderr}`) };
+  };
+  const cold = check();
+  assert.equal(cold.status, 0, `the cold check failed\n${cold.out}`);
+  assert.equal(cold.line.hits, 0, `a cold check reuses nothing\n${cold.out}`);
+  const again = check();
+  assert.equal(again.line.misses, 0, `an unchanged tree checks nothing again\n${again.out}`);
+  mod('b', 'x + 22');
+  const edited = check();
+  assert.deepEqual(edited.line.names, ['b'], `an edit to b checks b alone\n${edited.out}`);
+  assert.deepEqual(forModule(unitLines(edited.out), 'b'), { hits: 0, filed: 1, kept: 0 }, `inside b, the edited body is the one checked\n${edited.out}`);
+  // Errors in two modules that do not read each other: both are reported, and their readers are not
+  // checked - one line each.
+  mod('a', 'x + "one"');
+  mod('b', 'x + true');
+  const broken = check();
+  assert.equal(broken.status, 1, `a check with errors fails\n${broken.out}`);
+  assert.match(broken.out, /src\/a\.grl:4:/, `a's error is reported\n${broken.out}`);
+  assert.match(broken.out, /src\/b\.grl:4:/, `b's error is reported\n${broken.out}`);
+  assert.match(broken.out, /^grail: not checked: `c` depends on `a`, which has errors$/m, `c is not checked\n${broken.out}`);
+  assert.match(broken.out, /^grail: not checked: `main` depends on `a`, which has errors$/m, `main is not checked\n${broken.out}`);
+  // An error in a module nothing else reads leaves every other module checked.
+  mod('a', 'x + 1');
+  mod('b', 'x + 2');
+  writeFileSync(join(dir, 'src/main.grl'), 'use a;\nuse c;\n\nfn main() {\n    println(a::fa(1) + c::fc(3) + true);\n}\n');
+  const leaf = check();
+  assert.equal(leaf.status, 1, `an error in main fails the check\n${leaf.out}`);
+  assert.doesNotMatch(leaf.out, /not checked/, `nothing reads main\n${leaf.out}`);
+  // A build after checks reuses their units: every body of the edited module and the rest replay.
+  writeFileSync(join(dir, 'src/main.grl'), 'use a;\nuse b;\nuse c;\n\nfn main() {\n    println(a::fa(1) + b::fb(2) + c::fc(3));\n}\n');
+  const built = spawnSync(compiler, ['build', '--cache'], { cwd: dir, encoding: 'utf8', env, timeout: 900_000 });
+  assert.equal(built.status, 0, `the build after the checks failed\n${built.stdout}${built.stderr}`);
+  const bodies = sum(unitLines(`${built.stdout}${built.stderr}`));
+  assert.ok(bodies.hits > 0, `a build replays the units a check filed\n${built.stdout}`);
+  return { cold, edited, broken };
+}
+
 function reportIndependent(independent, registrations) {
   const t = value => `${value.toFixed(1)}ms`;
   console.log(`(j) one body   ${independent.bodies} bodies with drop helpers and specialisations, all units; after each edit one is emitted and the rest replay, byte-identical`);
@@ -943,6 +1000,12 @@ function reportIndependent(independent, registrations) {
 // ---- run --------------------------------------------------------------------------------------
 // The timings come first, from an empty store, so "cold" means cold.
 // `--units` runs only the per-function sections (j) and (k), for work on that layer.
+if (flags.includes('--check')) {
+  const checks = proveCheck();
+  console.log(`(m) check      ${checks.edited.line.hits} modules reused after one edit`);
+  console.log('incremental check verified');
+  process.exit(0);
+}
 if (flags.includes('--units')) {
   const registrations = proveRegistrations();
   const independent = proveIndependentUnits(flags.includes('--big') ? 1000 : 150);
@@ -960,10 +1023,64 @@ const corruption = proveCorruption();
 const pruning = provePruning();
 const modules = proveModules();
 const editCost = proveEditCost(flags.includes('--big') ? 2000 : 400);
+// (m) compile-time values (docs/design/comptime-speed.md, R3): a value is cached with what its
+// computation read - the bodies the probe reached, the non-function declarations, the other values -
+// so an edit elsewhere runs no probe, and an edit to a body the value reached runs exactly one. The
+// probes are counted by the link each one makes (GRAIL_CC), in a project of its own.
+function proveComptimeValues() {
+  const dir = join(work, 'comptime');
+  rmSync(dir, { recursive: true, force: true });
+  mkdirSync(dir, { recursive: true });
+  const log = join(dir, 'cc.log');
+  const wrapper = join(dir, 'cc.sh');
+  writeFileSync(wrapper, `#!/bin/sh\necho link >> ${log}\nexec cc "$@"\n`, { mode: 0o755 });
+  const source = (step, extra) => `static A: u64 = @fa();
+static B: u64 = @fb();
+fn fa() -> u64 {
+    mut t = 0;
+    for i in 10 {
+        t += i * ${step};
+    }
+    return t;
+}
+fn fb() -> u64 {
+    return 7;
+}
+${extra}
+fn main() -> u64 {
+    println(A);
+    println(B);
+    return 0;
+}
+`;
+  const file = join(dir, 'main.grl');
+  const step = (text) => {
+    writeFileSync(file, text);
+    writeFileSync(log, '');
+    const result = spawnSync(compiler, ['run', file, '--no-cache'], { cwd: dir, encoding: 'utf8', env: { ...process.env, GRAIL_CC: wrapper }, timeout: 600_000 });
+    assert.equal(result.status, 0, `compile-time values: the build failed: ${result.stdout}${result.stderr}`);
+    return { out: result.stdout, probes: readFileSync(log, 'utf8').split('\n').filter(Boolean).length };
+  };
+  const cold = step(source(1, ''));
+  assert.equal(cold.out, '45\n7\n');
+  assert.equal(cold.probes, 1, 'a cold build computes every value in one probe');
+  const warm = step(source(1, ''));
+  assert.equal(warm.probes, 0, 'an unchanged build runs no probe');
+  const elsewhere = step(source(1, 'fn unrelated() -> u64 {\n    return 1;\n}\n'));
+  assert.equal(elsewhere.probes, 0, 'an edit no value reached runs no probe');
+  const reached = step(source(2, 'fn unrelated() -> u64 {\n    return 1;\n}\n'));
+  assert.equal(reached.out, '90\n7\n');
+  assert.equal(reached.probes, 1, 'an edit to a body a value reached runs the probe again');
+  const again = step(source(2, 'fn unrelated() -> u64 {\n    return 2;\n}\n'));
+  assert.equal(again.probes, 0, 'and after it, an edit elsewhere runs none');
+  return { cold, warm, elsewhere, reached, again };
+}
+const comptimeValues = proveComptimeValues();
 const units = proveUnits(flags.includes('--big') ? 2000 : 400);
 const registrations = proveRegistrations();
 const independent = proveIndependentUnits(flags.includes('--big') ? 1000 : 150);
 const memoKeys = proveMemoKeys();
+const checks = proveCheck();
 const finalStore = proveStore();
 
 const ms = value => `${value.toFixed(1)}ms`;
@@ -996,7 +1113,9 @@ for (const item of [
 }
 console.log(`               ${ms(units.clean.ms).padStart(10)}  a clean build of the same tree (no cache at all)`);
 reportIndependent(independent, registrations);
+console.log(`(m) check      a check after an edit to one module checks it alone (${checks.edited.line.hits} modules reused); errors in two modules are both reported and their readers are not checked`);
 console.log(`(l) memo keys  a warm rebuild of the compiler: ${memoKeys.hits} bodies replayed, every remembered optimisation checked against a fresh one`);
 console.log(`(f) pruning    --keep 0 after an edit dropped ${pruning.pruned.records} records and ${pruning.pruned.blobs} blobs; next build ${pruning.again.hits} hit, ${pruning.again.misses} miss`);
+console.log(`(m) comptime   probes: cold ${comptimeValues.cold.probes}, unchanged ${comptimeValues.warm.probes}, an edit elsewhere ${comptimeValues.elsewhere.probes}, an edit to a reached body ${comptimeValues.reached.probes}, then elsewhere again ${comptimeValues.again.probes}`);
 console.log('');
 console.log('build cache verified');

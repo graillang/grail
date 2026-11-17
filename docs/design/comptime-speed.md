@@ -126,3 +126,46 @@ reports "`f()` did not compile" with the probe's first error.
    function uses invalidates it. Measure: warm after an unrelated edit, target zero probes.
 4. **(b), only if large programs show the probe compile as the cost.** Measure the probe compile on
    the largest program in the tree (the compiler itself) before deciding.
+
+## As built (2026-11-17): R6, R1, R2, R3
+
+Decided by the director: R1-R3 and R6 as recommended, R4 later and measured, R5 no.
+
+- **R6** (7dde547): `next_error` returns at once in a probe; a probe reports its first error.
+- **R1** (d263ae0): every probe defines `grail_value__M__N()` and `grail_cycle__M__N()` for every
+  run-tier value of the program (`ct_probe_wrappers`). Inside a probe a read of a run-tier static is
+  a guarded lazy initialisation (`static_probe_init`: storage word and guard in `.data`, 0 / 1
+  computing / 2 done) and a read of a module binding calls its value function at each read; a read
+  that finds a value being computed calls its `grail_cycle__` and stops the probe, and the trace
+  the value functions write on stderr (`@enter`/`@leave`/`@cycle`) names the cycle with its path
+  (`ct_trace_cycle`). No probe starts another. Effect claims and `@strict` refusals are the
+  program's and are not checked in a probe; the probe skips the leak check.
+- **R2** (c0e3a65): `ct_batch` runs at the end of the second pass: every value not computed yet, in
+  one probe that prints each after `#k` in the flat form; `run_tier` answers from the results. A
+  failed batch records nothing, and each value then runs its own probe, whose failure names the
+  value, its call and its declaration - a failed check (a probe's abort is now SIGABRT: os-linux
+  lets compile-time code signal its own process), a refused effect, an exit status.
+- **R3** (c0e3a65): an entry per value in `.work/comptime/v/<id>`. The id covers the compiler (its
+  path), the options, the target, the runtime and standard-library files' contents, the value's
+  name, call and type. The entry records the non-function declaration digest, the hash of every
+  program function body the value's computation reached (the probe's call graph,
+  `ct_write_deps`), and the calls of the other values it read; it is used when all of those still
+  hold (`ct_entry_valid`). Probes compile with a function cache of their own (`.work/comptime/fn`).
+
+Measured (CPU seconds, getrusage of the build's processes; wall time was meaningless under the
+landing gate's load), the program of section 1:
+
+| values | cold (no probe cache) | cold, probe function cache warm | warm | after an unrelated edit |
+|---|---|---|---|---|
+| 0 | 1.32 | - | 1.40 | 1.35 |
+| 1 | 2.59 (1 probe) | - | 1.46 (0) | 1.42 (0) |
+| 10 | 2.86 (1 probe) | - | 1.45 (0) | 1.42 (0) |
+| 100 | 3.65 (1 probe) | 2.30 (1 probe) | 1.59 (0) | 1.65 (0) |
+
+So 100 values cost one probe: +2.3 s on a first build, +0.9 s once the probes' function cache is
+warm, and no probe on a warm rebuild or after an edit no value reached. `tools/cache-test.mjs` (m)
+pins the probe counts: cold 1, unchanged 0, an edit elsewhere 0, an edit to a reached body 1.
+
+Not done: `@f()` inside an expression still runs its own probe (it is not collected into the batch:
+a body may sit in an untaken `@if`); R4 (a probe that compiles only what it reaches) is measured
+against the remaining +0.9 s when it is taken up.
