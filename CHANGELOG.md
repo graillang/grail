@@ -1,5 +1,10 @@
 ## Unreleased
 
+- **zstd decodes with fewer allocations and a word-at-a-time bit reader.** The sequence-code tables
+  were vector literals built on every lookup (four per sequence) and the backward bit reader took
+  one bit per step; the tables are static text indexed in place and the reader assembles whole
+  bytes. A 20 MB archive (126 MB out): Grail-LLVM 44.8G -> 14.4G instructions (4.38 -> 1.43 s;
+  libzstd 0.29 s), Grail-native 124G -> 35.2G.
 - **jpeg decodes without an allocation per block or per pixel.** The zigzag table was a vector
   literal built on every lookup, each 8x8 IDCT allocated its 64-entry work area and each 1-D pass
   returned a fresh vector, and every pixel was assembled in a vector of its own before being copied
