@@ -11902,7 +11902,14 @@ fn pv_arith_proof<a>(c: (&a mut C), k: u64, lstart: u64, rstart: u64, rend: u64)
         lmax := pv_index_max(&mut c, &ifacts, lstart, rstart - 1);
         rmax := pv_index_max(&mut c, &ifacts, rstart, rend);
         limit: i64 = 1099511627776;
-        if (0 <= lmax) && (0 <= rmax) && (lmax <= limit) && (rmax <= limit) {
+        // A sum of two values at most 2^40 is far from 2^63; a product needs its own bound: two
+        // operands at most 2^40 each can reach 2^80, so the product of the bounds must stay below
+        // 2^62.
+        mut fits = (0 <= lmax) && (0 <= rmax) && (lmax <= limit) && (rmax <= limit);
+        if fits && (k == 42) && (rmax != 0) {
+            fits = lmax <= 4611686018427387904 / rmax;
+        }
+        if fits {
             exchange(&mut c.pv_arith_ok, 1);
             return ();
         }
@@ -33839,13 +33846,12 @@ fn pv_span_bound<a>(c: (&a mut C), facts: (&a Atom[]), lo: u64, hi: u64, exact: 
             if (m2 < 0) || !pv_u64_term(&mut c, view(t2)) {
                 return -1;
             }
-            if (m > limit) || (m2 > limit) {
+            // The product is tested before it is formed: two bounds up to 2^40 multiply to 2^80,
+            // which wraps the compiler's own 64-bit arithmetic and could compare as small.
+            if (m > limit) || (m2 > limit) || ((m2 != 0) && (m > limit / m2)) {
                 return -1;
             }
             m = m * m2;
-            if m > limit {
-                return -1;
-            }
             i = i + 1 + u2;
         }
         total = total + m;
