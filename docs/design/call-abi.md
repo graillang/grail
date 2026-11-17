@@ -290,6 +290,13 @@ optimiser_labels, then S6 after unboxed 3a lands (it builds on 3a's frame aggreg
 
 ## S6 design: closures without a heap environment
 
+**Superseded.** The per-parameter escape-summary scheme below was rejected: a use-after-free must
+not rest on an inference carried in interface text. What was built instead: S6 (B) - a closure
+literal passed to a call-scoped, non-`Owned` `Fn(..)` parameter (init_parameter's rule, no lifetime)
+gets a frame environment (landed); S6 (A) - closures for a generic `F` held inline as their
+environment record (stage 4 representation), owned by /root/closure_bounds_design as part of 2c.
+The original proposal is kept for the record.
+
 Today a closure literal is `rt_rec(2 + captures)` holding `{code, drop, captures...}`, the closure
 value is that record's address, and a call passes the address of the word holding it (`direct()`
 says a `.closure` record is not direct). Every literal allocates; every owner frees.
