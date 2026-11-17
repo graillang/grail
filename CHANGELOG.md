@@ -1,5 +1,11 @@
 ## Unreleased
 
+- **jpeg decodes without an allocation per block or per pixel.** The zigzag table was a vector
+  literal built on every lookup, each 8x8 IDCT allocated its 64-entry work area and each 1-D pass
+  returned a fresh vector, and every pixel was assembled in a vector of its own before being copied
+  out. The table is now static text, the IDCT works in scratch kept between blocks, and pixels go
+  straight to the image. A 2048x2048 photo: Grail-LLVM 6.9G -> 1.6G instructions (0.60 -> 0.14 s;
+  it was 25.8G before the runtime's division fix), Grail-native 38.6G -> 24.3G.
 - **Short floats print without big integers.** A double whose shortest form has at most 15 digits
   and lies in [1e-7, 1e22) (`0.25`, `1.037`, `123.5`) is printed from a candidate checked exactly
   with one correctly rounded operation (Clinger), with the same text as before; longer ones still
