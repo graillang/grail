@@ -28,6 +28,11 @@
   builds) wrote their `sha256sum` output to one file in the store, and one run could take another's
   digest and file a module under another module's interface ("core.iface describes module `io`").
   Each such command now writes to a directory it claims for itself.
+- Removed: `--assembler=clang`. The internal assembler has been byte-identical to clang through a
+  landing on every target it covers, so Linux x86-64, AArch64 and RISC-V builds always use it and
+  `GRAIL_ASSEMBLER` no longer overrides it there (it still names the C compiler and the assembler
+  for release builds, macOS and Windows).
+
 - **C calls with floats are optimised in release builds (call ABI S8a).** A function that called a
   C function with `f64`/`f32` arguments or a float result had to stay unoptimised on the LLVM
   backend (its floats travel in vector registers a lifted call did not carry). The front end now
@@ -199,8 +204,7 @@
   re-reads the module's assembly (`--object`), and its objects are byte-identical to clang's from the same text
   (`tools/asm-oracle.mjs`; the gate's `asm-oracle` leg checks every corpus program). In the release
   compiler it assembles the syn4000 program's 35 MB of assembly in 0.41 s against clang's 1.37 s,
-  and the self-compile's 119 MB in 1.1 s against 5.2 s. `--assembler=clang` (and `GRAIL_ASSEMBLER`)
-  still choose clang; the flag goes once the oracle has been green through one landing. Debug
+  and the self-compile's 119 MB in 1.1 s against 5.2 s. Debug
   builds go through it too (it writes `.debug_line` from `.file`/`.loc` as LLVM does); the other
   targets still use clang. It lowers the portable atomic operations as it reads them, so an x86
   build no longer rewrites the whole stream for them first. It keeps each object's function units
