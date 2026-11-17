@@ -486,9 +486,6 @@ struct C {
     // 1 with --verify-facts: the lifter checks every word a fact treats as an f32, and every word
     // it treats as a sequence header.
     verify_facts: u64,
-    // `--frame-records` (docs/design/unboxed-values.md, stage 3a, off by default until it is the
-    // only representation): a plain record lives in frame slots, never in a box of its own.
-    frame_records: u64,
     // Slots holding a plain record that a holder boxed (an enum payload, a popped element, a call
     // result): owning one copies it into the frame and frees the box (materialise).
     boxed: u64[],
@@ -12904,7 +12901,10 @@ fn tuple_element_bind<a, b>(c: (&a mut C), names: (&b u8[][]), ty: u64, slot: u6
         bind(&mut c, names[i].copy(), fty, part, 0);
     }
     move_out(&mut c, val(slot, ty));
+    if !framed(&mut c, ty) {
+        // A plain record's words are its frame's: only a boxed record has a shell to free.
     invoke(&mut c, view("rt_free"), one(slot));
+    }
     return ();
 }
 // `(a, b, c) := expr;` - a tuple's elements bound to new names; `_` skips one (it is dropped).
@@ -12939,7 +12939,10 @@ fn tuple_destructure<a>(c: (&a mut C)) -> unit {
         bind(&mut c, names[i].copy(), fty, part, 0);
     }
     move_out(&mut c, val(held.t, held.ty));
+    if !framed(&mut c, held.ty) {
+        // A plain record's words are its frame's: only a boxed record has a shell to free.
     invoke(&mut c, view("rt_free"), one(held.t));
+    }
     return ();
 }
 
@@ -13015,7 +13018,10 @@ fn record_destructure<a>(c: (&a mut C)) -> unit {
         bind(&mut c, names[i].copy(), fty, part, 0);
     }
     move_out(&mut c, val(held.t, held.ty));
+    if !framed(&mut c, held.ty) {
+        // A plain record's words are its frame's: only a boxed record has a shell to free.
     invoke(&mut c, view("rt_free"), one(held.t));
+    }
     return ();
 }
 
@@ -22425,6 +22431,15 @@ fn pop_locals<a>(c: (&a mut C), mark: u64) -> unit {
 }
 // Loads, addresses and stores record fields.
 fn rec_load<a>(c: (&a mut C), base: u64, k: u64, address: u64) -> u64 {
+    slot := word_load(&mut c, base, k, address);
+    if (k == 1) & (address == 0) {
+        // Word 1 read on its own is an enum's payload (record fields go through field_load): a
+        // plain record there is the enum's box.
+        c.boxed.push(slot);
+    }
+    return slot;
+}
+fn word_load<a>(c: (&a mut C), base: u64, k: u64, address: u64) -> u64 {
     get(&mut c, base, view("%rax"));
     if address != 0 {
         o(&mut c, view("leaq "));
@@ -22433,12 +22448,7 @@ fn rec_load<a>(c: (&a mut C), base: u64, k: u64, address: u64) -> u64 {
     }
     on(&mut c, k * 8);
     o(&mut c, view("(%rax),%rax\n"));
-    slot := save(&mut c);
-    if (c.frame_records != 0) & (k == 1) & (address == 0) {
-        // Word 1 of an enum is its payload: a framed record there is the enum's box.
-        c.boxed.push(slot);
-    }
-    return slot;
+    return save(&mut c);
 }
 fn rec_store<a>(c: (&a mut C), base: u64, k: u64, value: u64) -> unit {
     get(&mut c, base, view("%rcx"));
@@ -22590,20 +22600,18 @@ fn inline_address<a>(c: (&a mut C), base: u64, ty: u64, k: u64) -> u64 {
     c.interior.push(slot);
     return slot;
 }
-// Whether `ty` is a plain record kept in the frame (--frame-records): such a value is the address of
-// frame words, its drop frees nothing, and a holder that keeps it past the statement boxes it.
-// The push of an inline element: it frees the source box, unless records are framed and the source
-// is frame words (but a C record is always a box).
+// The push of an inline element: a plain record's source is frame words and stays; an extern "C"
+// record's source is a box, which the push frees.
 fn flat_push<a>(c: (&a mut C), elem: u64) -> string {
     if framed(&mut c, elem) {
         return "rt_pushwk";
     }
     return "rt_pushw";
 }
+// Whether `ty` is a plain record, which lives in the frame (docs/design/unboxed-values.md, stage 3a):
+// its value is the address of frame words, its drop frees nothing, and a holder that keeps it past
+// the statement boxes it.
 fn framed<a>(c: (&a mut C), ty: u64) -> bool {
-    if c.frame_records == 0 {
-        return false;
-    }
     return plain(&mut c, ty);
 }
 // N adjacent fresh frame slots holding one value, declared to every pass by an aggregate fact
@@ -22775,7 +22783,7 @@ fn field_load<a>(c: (&a mut C), base: u64, ty: u64, k: u64, address: u64) -> u64
         return inline_address(&mut c, base, ty, k);
     }
     word := field_word(&mut c, ty, k);
-    return rec_load(&mut c, base, word, address);
+    return word_load(&mut c, base, word, address);
 }
 // C-layout field access: exact byte offset, exact field width. Fields narrower than
 // eight bytes use portable byte-wise helpers so every target stays correct without
@@ -31183,7 +31191,12 @@ fn adopt_value<a>(c: (&a mut C), v: Val, start: u64, end: u64, expected: u64) ->
         if found == 1 {
             source := place_of(&mut c, v.t);
             tag := imm(&mut c, which);
-            slot := invoke(&mut c, view("rt_enum"), two(tag, v.t));
+            mut payload = v.t;
+            if framed(&mut c, v.ty) {
+                // An enum is a holder: the record it carries is its box.
+                payload = frame_box(&mut c, v.t, v.ty);
+            }
+            slot := invoke(&mut c, view("rt_enum"), two(tag, payload));
             own(&mut c, slot, expected);
             dest := place_of(&mut c, slot);
             transfer_bonds(&mut c, source, dest);
@@ -31807,6 +31820,10 @@ fn isolated_body_type<a, b, d>(c: (&a mut C), start: u64, names: (&b u8[][]), pa
     saved_pointers := exchange(&mut c.pointers, Pointer[]);
     saved_origins := exchange(&mut c.origins, Origin[]);
     saved_next := exchange(&mut c.next, 0);
+    // Slot numbers restart in the nested body, so what is known about this function's slots is set
+    // aside with them.
+    saved_interior := exchange(&mut c.interior, u64[]);
+    saved_boxed := exchange(&mut c.boxed, u64[]);
     saved_scope := exchange(&mut c.scope_end, end);
     saved_loop_start := exchange(&mut c.loop_start, 0);
     saved_loop_end := exchange(&mut c.loop_end, 0);
@@ -31855,6 +31872,8 @@ fn isolated_body_type<a, b, d>(c: (&a mut C), start: u64, names: (&b u8[][]), pa
     exchange(&mut c.pointers, saved_pointers);
     exchange(&mut c.origins, saved_origins);
     exchange(&mut c.next, saved_next);
+    exchange(&mut c.interior, saved_interior);
+    exchange(&mut c.boxed, saved_boxed);
     exchange(&mut c.scope_end, saved_scope);
     exchange(&mut c.loop_start, saved_loop_start);
     exchange(&mut c.loop_end, saved_loop_end);
@@ -32548,6 +32567,11 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
         exchange(&mut c.resources, Resource[]);
         resources_swapped(&mut c);
         exchange(&mut c.next, 0);
+        exchange(&mut c.interior, u64[]);
+        exchange(&mut c.boxed, u64[]);
+        // Facts made in the body (a frame record, a DynPair) are about the body's own frame, under
+        // the symbol it is emitted as.
+        exchange(&mut c.facts_fn, body_label(&c, view(".closure"), view(symbol), view(""), 0));
         exchange(&mut c.scope_end, 0);
         exchange(&mut c.loop_start, 0);
         exchange(&mut c.loop_end, 0);
@@ -39768,7 +39792,10 @@ fn record_match<a>(c: (&a mut C), sslot: u64, sty: u64, x: Val, byref: u64, refm
                 }
             }
         }
+        if !framed(&mut c, xty) {
+            // A plain record's words are its frame's: only a boxed record has a shell to free.
         invoke(&mut c, view("rt_free"), one(xt));
+        }
     }
     expect(&mut c, view("=>"));
     if byref != 0 {
@@ -41219,6 +41246,16 @@ fn assignment_tail<a, b>(c: (&a mut C), l: u64, id: u64, ty: u64, target: u64, t
     if through != 0 {
         ref_store(&mut c, target, fieldty, v.t);
     } else {
+        if framed(&mut c, v.ty) {
+            // The binding gets words of its own: the value's may be a temporary of a site that runs
+            // again while the binding still holds it (`prev = cur; cur = f(cur)`).
+            materialise(&mut c, v.t, v.ty);
+            copy := frame_copy(&mut c, v.t, v.ty);
+            get(&mut c, copy, view("%rax"));
+            o(&mut c, view("movq %rax,"));
+            stack_slot(&mut c, v.t);
+            c.out.push(10);
+        }
         get(&mut c, v.t, view("%rax"));
         o(&mut c, view("movq %rax,"));
         stack_slot(&mut c, target);
@@ -42362,7 +42399,7 @@ const IFACE_TAG_STATIC: u64 = 19;
 // the module header record and rendered back verbatim by `grail iface dump`, so the single-source
 // rule survives the encoding: nothing else in this compiler knows how the ABI is written.
 fn iface_dyn_abi() -> string {
-    return "abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0 ref record = address record plain = inline";
+    return "abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0 ref record = address record plain = inline plain record = frame";
 }
 
 // ---- writing ----
@@ -46857,7 +46894,6 @@ pub fn main() -> u64 {
         f1_counts: u64[],
         f1_ord: 0,
         verify_facts: 0,
-        frame_records: 0,
         boxed: u64[],
         emit_ir: 0,
         range_facts: 0,
@@ -47522,9 +47558,6 @@ pub fn main() -> u64 {
                                         } else {
                                         if same(view(option), view("--verify-facts")) {
                                             exchange(&mut c.verify_facts, 1);
-                                            offset += 1;
-                                        } else if same(view(option), view("--frame-records")) {
-                                            exchange(&mut c.frame_records, 1);
                                             offset += 1;
                                         } else if same(view(option), view("--emit-ir")) {
                                             exchange(&mut c.emit_ir, 1);
