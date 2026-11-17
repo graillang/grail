@@ -1,5 +1,8 @@
 ## Unreleased
 
+- Small allocations clear their block with two fixed stores instead of the general loop: every
+  request up to 16 bytes (a tree node, a box) is served from the smallest bin, whose blocks hold at
+  least 16. bench/bintrees.grl: Grail-LLVM 4.89G -> 4.15G instructions, Grail-native 14.2G -> 13.7G.
 - `grail build --release --report checks` reports the checks that survived LLVM's optimisation and
   the thin-LTO link: it reads the linked image (llvm-objdump; `GRAIL_OBJDUMP` overrides it) and
   counts each branch from a program function to rt_fail, rt_trap, rt_abort (with its `.cold` parts)
