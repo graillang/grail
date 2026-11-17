@@ -19375,5 +19375,23 @@
       }
     ],
     "note": "the sieve's shape: `limit := n - (k & 1)` is at most n (100), `i <= limit` and `j <= limit` hold in the loops, so `j += i`, `i * i` and `i += 1` cannot overflow - the bounds chain through `limit` - and no overflow check is left in the function"
+  },
+  {
+    "name": "generic-closure-param-named-function",
+    "note": "a named function given for an erased closure-typed parameter of a generic function (`then: FnMut(T, C) -> R`): its signature fixes the type arguments and it becomes the closure value (was `generic argument shape mismatch`)",
+    "source": "fn apply<T, C, R>(x: T, ctx: C, then: FnMut(T, C) -> R) -> R { mut f = then; return f(x, ctx); }\nfn pair<T>(a: T, b: u64) -> u64 { return b + 1; }\nfn main() { println(apply(5, 10, pair<u64>)); }\n",
+    "stdout": "11\n"
+  },
+  {
+    "name": "generic-closure-param-named-generic-function",
+    "note": "...a generic function's instance passed on from another generic function, the lock-callback shape (`with(&mut m, x, grow<T>)`)",
+    "source": "struct Box1<T> { v: T }\nfn with<T, C, R: Owned>(m: (&mut Box1<T>), ctx: C, then: FnMut((&mut T), C) -> R) -> R { mut f = then; return f(&mut m.v, ctx); }\nfn grow<T>(r: (&mut T[]), x: T) -> u64 { r.push(x); return r.len(); }\nfn run<T>(m: (&mut Box1<T[]>), x: T) -> u64 { return with(&mut m, x, grow<T>); }\nfn main() { mut b = Box1 { v: u64[1] }; println(run(&mut b, 9)); }\n",
+    "stdout": "2\n"
+  },
+  {
+    "name": "generic-lent-closures-before-types-fixed",
+    "note": "closures given to a generic function's lent `Fn(..)` parameters before every type argument is fixed (`R` comes from the last one) are lent frame environments, not boxes - Condition::wait_with's shape",
+    "source": "fn wait_with<T, C, R>(x: T, ctx: C, ready: Fn((&T), (&C)) -> bool, then: FnMut(T, C) -> R) -> R? { mut f = then; if ready(&x, &ctx) { return Some(f(x, ctx)); } return None; }\nfn main() {\n    mut s: u64 = 0;\n    for i in 1000 {\n        k := i % 7;\n        got := wait_with(i, k, |x: (&u64), c: (&u64)| -> bool *x % 2 == 0, |x: u64, c: u64| -> u64 x + c);\n        if let Some(v) = got { s += v; }\n    }\n    println(s);\n}\n",
+    "stdout": "250997\n"
   }
 ]

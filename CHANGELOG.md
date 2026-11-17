@@ -1,5 +1,11 @@
 ## Unreleased
 
+- **Capture-free and named-function callbacks to generic functions cost no allocation, and named
+  functions are accepted.** A closure given for a lent `Fn(..)` parameter of a generic function was
+  boxed whenever the call's type arguments were not all fixed yet - `Condition::wait_with`'s two
+  callbacks were two heap records per channel send/receive; it is now a frame environment
+  (bench/chan ping: 810M to 502M instructions). A named function given for such a parameter
+  (`with(&mut m, x, grow<T>)`) was "generic argument shape mismatch"; it is accepted.
 - The orphan rule's diagnostic names the modules: an `impl I for T` written outside the modules that
   declare `I` and `T` now says where it was written, where the interface and the type are declared
   (or that no module declares the type, leaving only the interface's), and the fix - move the impl
