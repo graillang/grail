@@ -104,7 +104,8 @@ function run(argv) {
 
 export function checkFile(source, work, assembler, target = 'x86_64') {
   const stem = join(work, basename(source).replace(/\.s$/, ''));
-  const clang = run(['clang', `--target=${target}-linux-gnu`, '-c', source, '-o', `${stem}.clang.o`]);
+  const flags = target === 'riscv64' ? ['-march=rv64imafd', '-mabi=lp64d'] : [];
+  const clang = run(['clang', `--target=${target}-linux-gnu`, ...flags, '-c', source, '-o', `${stem}.clang.o`]);
   if (clang.status !== 0) return `clang failed: ${clang.stderr}`;
   const ours = run([...assembler, ...(target === 'x86_64' ? [] : ['--target', target]), source, '-o', `${stem}.grail.o`]);
   if (ours.status !== 0) return `internal assembler failed: ${ours.stdout}${ours.stderr}`;
