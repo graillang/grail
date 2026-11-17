@@ -25,7 +25,8 @@
 //   bun tools/bench-rivals.mjs [--runs N] [--metric cpu|instructions] [--compiler PATH | --branch REF] [NAME...]
 //   --compiler names the Grail compiler; --branch REF builds REF's (tools/rivals/common.mjs) and
 //   takes the runtime and libraries from REF's tree, the programs from this one, so the twins stay
-//   the same. Default: GRAIL_COMPILER, else this tree's. The tables name the commit measured. ffi_call is measured when
+//   the same. Default: GRAIL_COMPILER, else this tree's. The tables name the commit measured. ffi_call is this tree's
+//   when it has bench/ffi_call.grl; otherwise it is measured when
 //   GRAIL_SCHED_TREE names a checkout of a branch that has bench/ffi_call.grl (with its compiler
 //   built, `bun tools/native.mjs build` there, or named by GRAIL_SCHED_COMPILER); its figure is the
 //   program's own per-call time.
@@ -72,10 +73,11 @@ const measured = [...columns, ...nativeColumns];
 const names = argv.length ? argv
   : readdirSync(join(root, 'bench')).filter(f => f.endsWith('.grl')).map(f => f.slice(0, -4))
     .filter(name => existsSync(join(root, 'bench', `${name}.c`)) && existsSync(join(root, 'bench/rivals', `${name}.rs`))).sort()
-    .concat(schedTree && existsSync(join(schedTree, 'bench/ffi_call.grl')) ? ['ffi_call'] : []);
+    // ffi_call is this tree's when it has one, else the scheduler tree's (GRAIL_SCHED_TREE).
+    .concat(!existsSync(join(root, 'bench/ffi_call.grl')) && schedTree && existsSync(join(schedTree, 'bench/ffi_call.grl')) ? ['ffi_call'] : []);
 
 function build(name) {
-  const tree = name === 'ffi_call' ? schedTree : root;
+  const tree = name === 'ffi_call' && !existsSync(join(root, 'bench/ffi_call.grl')) ? schedTree : root;
   const dir = join(work, name);
   mkdirSync(dir, { recursive: true });
   const ctext = readFileSync(join(tree, 'bench', `${name}.c`), 'utf8');
@@ -88,7 +90,7 @@ function build(name) {
   const lib = tree === root ? measuredGrail.tree : tree;
   const grailInputs = [join(tree, 'bench', `${name}.grl`), join(lib, 'lib/core.grl')];
   // ffi_call says `use host`: the compiler proper finds a module only under a module root.
-  const grailOptions = { runtime: join(lib, 'compiler/runtime.grl'), osRuntime: join(lib, 'compiler/os-linux.grl'), extra: tree === root ? [] : ['--module-root', join(tree, 'lib')] };
+  const grailOptions = { runtime: join(lib, 'compiler/runtime.grl'), osRuntime: join(lib, 'compiler/os-linux.grl'), extra: name === 'ffi_call' ? ['--module-root', join(lib, 'lib')] : [] };
   const exe = {};
   exe['grail-native'] = compileProgram(compiler, grailInputs, join(dir, 'native'), { ...grailOptions, backend: 'native', overflow: 'checked' });
   exe['grail-llvm'] = compileProgram(compiler, grailInputs, join(dir, 'llvm'), { ...grailOptions, backend: 'llvm', overflow: 'wrap' });
@@ -128,7 +130,7 @@ const selfReported = (name, r) => name === 'ffi_call' ? Number(r.stderr.match(/^
 const load = [loadavg()];
 const results = {};
 const fmt = (name, v) => v === undefined ? '-' : name === 'ffi_call' ? `${v.toFixed(2)}ns` : metric === 'instructions' ? `${(v / 1e9).toFixed(2)}G` : `${v.toFixed(3)}`;
-console.log(`Grail: ${measuredGrail.commit}${names.includes('ffi_call') ? '; ffi_call: the scheduler tree ' + schedTree : ''}`);
+console.log(`Grail: ${measuredGrail.commit}${names.includes('ffi_call') && !existsSync(join(root, 'bench/ffi_call.grl')) ? '; ffi_call: the scheduler tree ' + schedTree : ''}`);
 console.log(`bench-rivals: ${metric === 'instructions' ? 'user-space instructions (G)' : 'CPU seconds (user+sys)'}, best of ${runs}; ffi_call: ns per call as the program reports it`);
 console.log(`${'program'.padEnd(10)} ${heads.map(h => h.padStart(12)).join(' ')}   native/dev-best  LLVM/release-best`);
 let failed = 0;
