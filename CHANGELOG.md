@@ -1,5 +1,10 @@
 ## Unreleased
 
+- **The optimiser's liveness is linear in a function's length.** The register and frame-slot
+  liveness behind dead-store removal, prologue zeroing and register colouring looked at every
+  candidate slot on every line of every round; each line's effect is now worked out once per pass
+  and read through a slot-to-candidate table. The output is byte-identical; compiling the compiler
+  takes 20% fewer instructions, and a cold `grail build` of a 1000-function file 5.7% fewer.
 - **Release builds compile a module's LLVM code in parallel.** `grail llvm-compile` cuts a lifted
   module into parts - shared declarations, each function in one part, internal functions renamed
   per unit - and runs `clang -O2` on all of them at once under the jobserver, then joins them. A
@@ -103,6 +108,13 @@
   indices; `mid <= len` is checked as it runs.
 - Fix: a bare `return;` in a function that takes a borrow no longer reports "returned borrow escapes
   its declared input lifetime" (its unit value was read from the first parameter's slot).
+- **A closure passed straight to a `Fn(..)` parameter no longer allocates (call ABI S6 B).** A
+  closure literal that is the whole argument for a plain `Fn(..)`/`FnMut(..)` parameter without
+  `Owned` or a lifetime - which the checker keeps inside the call - builds its environment in the
+  caller's frame, with an in-place drop, instead of `rt_rec`/`rt_free`. A 10 M-call loop through
+  such a parameter: native 1,400 M -> 930 M instructions, LLVM 1,400 M -> 450 M.
+- Release builds lift the foreign-call marker's register save around `rt_foreign_lost`;
+  `GRAIL_LLVM_WHY=FUNCTION` prints the instruction that keeps FUNCTION unoptimised.
 
 - **Text costs less to build and parse.** A string literal is checked to be UTF-8 while compiling,
   so making a `string` of it is a copy with no run-time check; appending a `string` onto a `string`
@@ -622,6 +634,24 @@
   CreatePipe's attributes live in process state.
 - Added: sockets on Windows. `lib/net.grl`'s TCP layer now works on `windows-x86_64` instead of reporting `ENOSYS`: Winsock is started once per process (`WSAStartup` 2.2) and cleaned up on exit, a socket is an overlapped `WSASocketW` descriptor in the platform's own record list, and a receive or send is an overlapped `WSARecv`/`WSASend` whose completion the waiter takes from the request's own event - on an offload thread, so a task blocked on a socket parks and never holds a worker. `connect` is ConnectEx, resolved through `WSAIoctl(SIO_GET_EXTENSION_FUNCTION_POINTER)` because no DLL exports it on every stack, with `SO_UPDATE_CONNECT_CONTEXT` and a forced bind (and a blocking fallback), and `raw_win_call` now passes up to eight word arguments with the Win64 caller frame so the extension pointer can be called. `accept` is a blocking `accept` on an offload thread: `AcceptEx` was implemented first and withdrawn, because under Wine - the only host that runs these tests - it and a cooperative accept both complete only for an already-queued connection. Winsock errors map onto the errno space the portable layer reports (`WSAEWOULDBLOCK` never reaches a task, and `WSAECONNRESET`/`WSAECONNABORTED` on a receive are end of stream, not an error). `win-sockets-echo` runs the whole path under Wine, non-ASCII text included. Not implemented: driving sockets from the I/O completion port (it cannot be verified on this host, and the design says what it would need), UDP (`WSARecvFrom`/`WSASendTo` have no portable operation or library API to reach them), and cancellation of a task blocked in a socket call. Design and evidence: *Sockets* and *Sockets: what is verified* in docs/design/windows-backend.md.
 - Added: wide-character paths on Windows. Every file and process entry point is now the `-W` one - `CreateFileW`, `CreateDirectoryW`, `DeleteFileW`, `RemoveDirectoryW`, `GetFileAttributesW`, `GetCurrentDirectoryW`, `GetModuleFileNameW`, `CreateProcessW`, `GetCommandLineW`, `GetEnvironmentStringsW`/`FreeEnvironmentStringsW` - so a file name outside the system code page is no longer mangled into the ANSI code page. One convention holds it together: every entry point in `compiler/os-windows.grl` takes and returns UTF-8, and `rt_win_wide`/`rt_win_utf8_of` convert at the FFI boundary in a fixed 128 KiB arena (five 16 KiB slots, no user allocation), so no call site converts by hand. The encoder refuses invalid UTF-8 with `EINVAL` instead of replacing bytes - overlong forms, bare continuation bytes, truncated sequences, encoded surrogates and code points above U+10FFFF - and encodes a code point past U+FFFF as the surrogate pair UTF-16 requires; text the OS hands back with an unpaired surrogate becomes U+FFFD in the one inbound helper, because refusing `argv[0]` would leave a process with no arguments. `CreateProcessW` gets the MSVC quoting rules applied to UTF-16 units (`rt_win_quote_w`/`rt_win_split_w`), so an argument survives the trip in both directions, and its environment block is UTF-16 with `CREATE_UNICODE_ENVIRONMENT` - without that flag Windows reads a non-NULL block as ANSI and the child sees an empty environment. `host::list_dir` works on Windows for the first time: a read-only open of a directory returns an enumeration backed by `FindFirstFileW`, and `rt_syscall(217)` rewrites the find results into the `dirent64` stream the portable decoder already parses, as the Darwin module does for `getdirentries64`. `GetModuleFileNameW` also wires `host::exe_path` (it answered nothing before). Six dead Win32 import declarations are gone with their entries: `ExitThread`, `GetEnvironmentVariableA`, `SetFilePointerEx`, `FlushFileBuffers`, `MoveFileA` (no portable rename operation calls it) and `GetSystemTimeAsFileTime`. `tools/test-windows.mjs` now fails the suite if any case's object imports an ANSI entry point, and runs `win-unicode-paths` under Wine: Latin-1, CJK and emoji file names, a non-ASCII directory, a non-ASCII working directory and argument, and the `EINVAL` refusal. Design: *Text at the Win32 boundary* in docs/design/windows-backend.md.
+- Bounds checks: an index that is a sum of `term * constant` products and constants - `p[i * 3 +
+  k]` - is proved in bounds when every term has a literal upper bound in the facts and the largest
+  value the sum can take is below the length (a fixed array's constant, or a vector's `len()` the
+  facts know). The sum is bounded far below 2^64, so a release build computes the value that was
+  proved. nbody's own array checks go from 24 to 0. A name the facts equate with a literal (`n := 256`) reads as that literal, and a loop count they make
+  constant (`for i in n * n`) bounds the loop variable and the vectors a push loop fills: matmul's
+  checks go from 6 to 0.
+  The same interval facts prove the index arithmetic itself cannot overflow (`i * 3 + k` with `i < 5`,
+  `k < 3`): `*` and `+` on such operands carry no overflow check in any build (nbody: 44 traps in its
+  own functions -> 2). A proved byte store (`composite[j] = 1`) is one instruction (sieve: 1 -> 0).
+  Under `--verify-facts` a check a proof removed is kept and still not counted as a failure, so
+  `@no_panic` accepts the same functions in both builds (a kept index check and a proved call
+  through the checking wrapper both name the proof).
+
+- Bounds checks: a vector filled from empty by a counted loop - `for i in n { v.push(x); }`, one
+  push per iteration, no `break` or `continue` - has `v.len == n` after the loop, so a later
+  `for i in n { v[i] }` indexes without a check. The ECS benchmark's update loop loses all 18 of its
+  checks. A push inside a branch, an early exit, or a vector that was not empty states nothing.
 
 - **Fixed: an LLVM-backend miscompile of a vector grown through its address.** A call handed `&mut v`
   receives the slot's address, not the header word, so the lifter did not count it as a call that
