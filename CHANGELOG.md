@@ -1,5 +1,9 @@
 ## Unreleased
 
+- `grail build --cpu=x86-64-v2|v3|v4|native` builds for an x86-64 CPU level. `@if target.features.NAME`
+  (avx2, fma, sse4_2, avx512f, ...) tests the level at compile time. At v3 and above, `mul_add` is one
+  `vfmadd231ps`/`pd` on both backends; the release build's IR carries `"target-cpu"`, which ThinLTO
+  needs. Other targets refuse `--cpu`.
 - png unfilters the common layout through addresses (`bytes::data_addr`, new) into an image sized
   once, under the length guard that already bounds every row, instead of a push and a checked index
   per byte. The 4K png: Grail-LLVM 6.44G -> 5.50G instructions (0.71 -> 0.61 s; stb_image 0.41 s),
