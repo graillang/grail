@@ -41749,9 +41749,21 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
             // The prover runs on a closure's body as on a function's (docs/design/refinements.md):
             // its loop bounds and conditions prove its indices. A closure has no refined
             // parameters, so it starts with no facts - but for a zip callback's lengths.
+            // The enclosing body's prover state is set aside whole and comes back after, so a
+            // closure emitted in the middle of a function leaves that function's facts as they were.
             saved_preds := exchange(&mut c.cur_ppreds, Pred[]);
             saved_lo := exchange(&mut c.body_lo, start);
             saved_hi := exchange(&mut c.body_hi, end);
+            saved_on := c.pv_on;
+            saved_kill := exchange(&mut c.pv_kill_log, u8[][]);
+            saved_indexed := exchange(&mut c.pv_indexed, u8[][]);
+            saved_facts := exchange(&mut c.pv_facts, Atom[]);
+            saved_marks := exchange(&mut c.pv_marks, u64[]);
+            saved_trmarks := exchange(&mut c.pv_trmarks, u64[]);
+            saved_trail := exchange(&mut c.pv_trail, Atom[]);
+            saved_pending := exchange(&mut c.pv_pending, Atom[]);
+            saved_trown := exchange(&mut c.pv_trown, u64[]);
+            saved_caps := exchange(&mut c.pv_caps, u8[][]);
             pv_begin(&mut c);
             eq := c.closures[i].entry_eq;
             if (eq > 1) && pv_ir_live(&c) {
@@ -41768,6 +41780,16 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
             exchange(&mut c.cur_ppreds, saved_preds);
             exchange(&mut c.body_lo, saved_lo);
             exchange(&mut c.body_hi, saved_hi);
+            exchange(&mut c.pv_on, saved_on);
+            exchange(&mut c.pv_kill_log, saved_kill);
+            exchange(&mut c.pv_indexed, saved_indexed);
+            exchange(&mut c.pv_facts, saved_facts);
+            exchange(&mut c.pv_marks, saved_marks);
+            exchange(&mut c.pv_trmarks, saved_trmarks);
+            exchange(&mut c.pv_trail, saved_trail);
+            exchange(&mut c.pv_pending, saved_pending);
+            exchange(&mut c.pv_trown, saved_trown);
+            exchange(&mut c.pv_caps, saved_caps);
             if (c.terminated == 0) & (ret != 1) {
                 fail(&mut c, view("closure may fall through without return"));
             }
