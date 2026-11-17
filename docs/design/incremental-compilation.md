@@ -51,7 +51,9 @@ change (a call's argument setup, an inline body, a drop helper's shape).
 The store is `.work/cache/<target>/`, and it is keyed, not timestamped:
 
 ```
-blob/<sha256>      artifact bytes; the file name is the digest of the bytes inside
+blob/<digest>      artifact bytes; the file name is the digest of the bytes inside
+fp/<id>            one file at one stamp: its digest, and a source's module, `use`s and `@embed`
+inputs/<key>       a command's resolved module set and the stamps it holds under
 map/prog/<key>     the linked image, plus the output path and the link inputs
 map/lnk/<key>      the linked image
 map/mod/<key>      one module run: its object, its interface, its link inputs
@@ -68,8 +70,9 @@ A *key* is the digest of a text record that names every input the artifact is a 
 - the image: every input the build read, each with its digest, plus the output name and the
   contents of every file a `// grail-link:` note names.
 
-Every write lands in `stage/` and is renamed into place; a blob is only handed back after its bytes
-have been hashed again and matched against the name it is filed under. A truncated, edited,
+Every write lands in `stage/` and is renamed into place; a blob is only handed back when its bytes
+hash to the name it is filed under - answered by its `fp/` record while the blob keeps the stamp it
+was filed with, and by hashing it again once anything has written it since. A truncated, edited,
 corrupted or unreadable entry is a miss and a rebuild, and filing the repaired artifact replaces
 the damaged entry instead of leaving it to miss forever (`tools/cache-test.mjs`, (e)).
 
