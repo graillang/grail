@@ -1,5 +1,11 @@
 ## Unreleased
 
+- Fixed: the internal assembler refused `.hidden` (the runtime's `rt_sites_fill`), so every LLVM
+  release build failed at `grail asm`. It now takes `.hidden`, `.protected`, `.internal` and
+  `.comm`, and `.word` is 32 bits on AArch64. `tests/asm/` holds every ELF directive the
+  compiler, runtime and LLVM backend write, checked byte-for-byte against clang by the landing
+  suite `asm-oracle` (`bun tools/asm-oracle.mjs --suite`).
+
 - Fixed two compiler aborts on malformed input found by the front-end fuzzer: an unmatched `)` or
   `>` in an `extern` signature (an arithmetic overflow), and a file ending in a `//` comment or a `/`
   with no newline (an out-of-bounds read). Both are ordinary diagnostics now.
