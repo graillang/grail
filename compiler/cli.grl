@@ -2287,6 +2287,21 @@ fn unit_build_command<a>(args: (&a u8[][])) -> u64 {
     }
     return 0;
 }
+// This process's id, from /proc/self/stat (Linux); empty where there is no such file.
+fn own_pid() -> u8[] {
+    if host::exists(view("/proc/self/stat")) == 0 {
+        return u8[];
+    }
+    text := host::read_file(view("/proc/self/stat"));
+    mut out = u8[];
+    for i in text.len() {
+        if (text[i] < 48) || (57 < text[i]) {
+            break;
+        }
+        out.push(text[i]);
+    }
+    return out;
+}
 fn per_module_build<a, d, e, g, k, m, n, x, y, jb, ev>(
     command: (&a u8[][]),
     at: u64,
@@ -2326,6 +2341,7 @@ fn per_module_build<a, d, e, g, k, m, n, x, y, jb, ev>(
     }
     entry_name := groups[0].name.copy();
     base := u8[][copy(view("runtime"))];
+    self_pid := own_pid();
     // A check: each module's run stops when its diagnostics are given (`--check`), nothing is
     // assembled or linked, and a module with errors does not stop the others - the modules that
     // read it are not checked, and the ones that do not still are.
@@ -2511,6 +2527,11 @@ fn per_module_build<a, d, e, g, k, m, n, x, y, jb, ev>(
             mut child_env = u8[][];
             for k in env.len() {
                 child_env.push(item(&env, k));
+            }
+            // The run dies with this driver (os-linux.grl, rt_parent_watch): a driver killed by a
+            // timeout, an editor or the OOM killer leaves no compiler running on behind it.
+            if self_pid.len() != 0 {
+                child_env.push(cat(view("GRAIL_PARENT="), view(self_pid)));
             }
             pid := host::spawn(run, child_env, pair[1], pair[1]);
             host::close(pair[1]);
