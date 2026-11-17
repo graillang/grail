@@ -710,6 +710,31 @@ fn label_of<a>(line: &a [u8]) -> u8[] {
     }
     return out;
 }
+// The slot symbols of the vtable `name` in the native data lines: the `.quad SYM` lines after
+// `name:`, all of them plain symbols; empty when `name` is not such a table.
+fn vtable_words<a>(data: (&u8[][]), name: &a [u8]) -> u8[][] {
+    mut out = u8[][];
+    if !starts(name, view(".V")) {
+        return out;
+    }
+    mut label = copy(name);
+    label.push(58);
+    for i in data.len() {
+        if eq(view(data[i]), view(label)) {
+            mut k = i + 1;
+            while (k < data.len()) && starts(view(data[k]), view(".quad ")) {
+                sym := sub(view(data[k]), 6, data[k].len());
+                if (sym.len() == 0) || has(view(sym), view("+")) || has(view(sym), view("-")) || ((sym[0] >= 48) && (sym[0] <= 57)) {
+                    return u8[][];
+                }
+                out.push(sym);
+                k += 1;
+            }
+            return out;
+        }
+    }
+    return out;
+}
 fn is_local_label<a>(name: &a [u8]) -> bool {
     return starts(name, view(".L"));
 }
@@ -8937,6 +8962,7 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
             }
         }
     }
+    mut slot_symbols = u8[][];
     for i in l.refs.len() {
         r := view(l.refs[i]);
         if set_has(&lifted, r) || set_has(&exported, r) {
@@ -8989,10 +9015,43 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
             }
             put(&mut ir, view(")\n"));
         } else {
+            // A vtable (`.V<hash>`, weak in the native data) is defined here too, with its slots, so
+            // LLVM sees the method a known vtable's slot holds and can call it directly and inline
+            // it (call ABI, devirtualisation). Both copies are weak and identical.
+            table := if target == 0 { vtable_words(&data, r) } else { u8[][] };
+            if table.len() != 0 {
+                put(&mut ir, view("@\""));
+                put(&mut ir, view(name));
+                put(&mut ir, view("\" = weak_odr hidden constant ["));
+                num(&mut ir, table.len());
+                put(&mut ir, view(" x ptr] ["));
+                for k in table.len() {
+                    if k != 0 {
+                        put(&mut ir, view(", "));
+                    }
+                    put(&mut ir, view("ptr @\""));
+                    put(&mut ir, view(table[k]));
+                    ir.push(34);
+                    slot_symbols.push(copy(view(table[k])));
+                }
+                put(&mut ir, view("], align 8\n"));
+                continue;
+            }
             put(&mut ir, view("@\""));
             put(&mut ir, view(name));
             put(&mut ir, view("\" = external hidden global i8\n"));
         }
+    }
+    // The vtables' slots that nothing above declared: functions native code defines.
+    for k in slot_symbols.len() {
+        sym := view(slot_symbols[k]);
+        if set_has(&lifted, sym) || set_has(&exported, sym) {
+            continue;
+        }
+        set_add(&mut exported, sym);
+        put(&mut ir, view("@\""));
+        put(&mut ir, sym);
+        put(&mut ir, view("\" = external hidden global i8\n"));
     }
     // Lifted functions native code does not name are internal (inlinable and removable).
     mut thunks = u8[];
