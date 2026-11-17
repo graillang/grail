@@ -46751,6 +46751,182 @@ fn type_literal_ahead<a, b>(c: (&a mut C), name: &b [u8]) -> bool {
     m := module_copy(&mut c);
     return find_decl(&mut c, view(m), view(n)) != 0;
 }
+// ---- constant promotion of literal vectors -------------------------------------------------------
+//
+// `table := u64[1, 0, 1];` whose elements are integer literals, bound to an immutable name that the
+// rest of its block only indexes (`table[i]`) or measures (`table.len()`), is one read-only object
+// emitted once - the layout a baked static has (static_seq_object) - instead of a vector built on
+// the heap at every execution. Freeing it is a no-op (its blocks are in state 2), so the binding
+// keeps its owned type and every use reads as before. Anything else - a `mut` binding, a use that
+// could move, mutate or borrow it into something longer-lived, a closure in its scope, a shadowing
+// declaration - keeps the fresh vector.
+fn promote_literal_ok<a>(c: (&a mut C), cty: u64) -> bool {
+    if (c.raw != 0) || (c.probe_mode != 0) {
+        return false;
+    }
+    elem := ct_seq_elem(&mut c, cty);
+    if (elem == NO_TYPE) || !integer(&mut c, elem) || is_bool(&mut c, elem) {
+        return false;
+    }
+    // `NAME := ELEM[` at the start of a statement.
+    at := c.pos;
+    if at < 4 {
+        return false;
+    }
+    if !same(view(tok_text(&mut c, at - 2)), view(":=")) || (kind_at(&mut c, at - 3) != 1) {
+        return false;
+    }
+    before := tok_text(&mut c, at - 4);
+    if !(same(view(before), view(";")) || same(view(before), view("{")) || same(view(before), view("}"))) {
+        return false;
+    }
+    name := tok_text(&mut c, at - 3);
+    // The elements: integer literals, each optionally negated, then `]` and `;`.
+    mut i = at + 1;
+    mut count = 0;
+    while true {
+        if same(view(tok_text(&mut c, i)), view("-")) {
+            i += 1;
+        }
+        if kind_at(&mut c, i) != 2 {
+            return false;
+        }
+        i += 1;
+        count += 1;
+        t := tok_text(&mut c, i);
+        if same(view(t), view(",")) {
+            i += 1;
+            if same(view(tok_text(&mut c, i)), view("]")) {
+                break;
+            }
+            continue;
+        }
+        if same(view(t), view("]")) {
+            break;
+        }
+        return false;
+    }
+    if (count == 0) || !same(view(tok_text(&mut c, i + 1)), view(";")) {
+        return false;
+    }
+    // Every later mention of the name in its block.
+    mut j = i + 2;
+    mut depth = 0;
+    mut prev = u8[];
+    while j < c.toks.len() {
+        k := kind_at(&mut c, j);
+        if k == 0 {
+            break;
+        }
+        t := tok_text(&mut c, j);
+        if k == 123 {
+            depth += 1;
+        }
+        if k == 125 {
+            if depth == 0 {
+                break;
+            }
+            depth -= 1;
+        }
+        // A closure in scope could capture it by value.
+        if (same(view(t), view("|")) || same(view(t), view("||"))) && (same(view(prev), view("(")) || same(view(prev), view(",")) || same(view(prev), view("=")) || same(view(prev), view(":=")) || same(view(prev), view("return"))) {
+            return false;
+        }
+        if (k == 1) && same(view(t), view(name)) && !same(view(prev), view(".")) && !same(view(prev), view("::")) {
+            next := tok_text(&mut c, j + 1);
+            if same(view(next), view("[")) {
+                // A read: the index expression, then anything but an assignment.
+                mut d = 0;
+                mut m = j + 1;
+                while m < c.toks.len() {
+                    km := kind_at(&mut c, m);
+                    if km == 0 {
+                        return false;
+                    }
+                    tm := tok_text(&mut c, m);
+                    if same(view(tm), view("[")) {
+                        d += 1;
+                    }
+                    if same(view(tm), view("]")) {
+                        d -= 1;
+                        if d == 0 {
+                            break;
+                        }
+                    }
+                    m += 1;
+                }
+                after := tok_text(&mut c, m + 1);
+                if (after.len() != 0) && (after[after.len() - 1] == 61) && !same(view(after), view("==")) && !same(view(after), view("<=")) && !same(view(after), view(">=")) && !same(view(after), view("!=")) {
+                    return false;
+                }
+            } else if same(view(next), view(".")) {
+                if !same(view(tok_text(&mut c, j + 2)), view("len")) || !same(view(tok_text(&mut c, j + 3)), view("(")) {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+        prev = t;
+        j += 1;
+    }
+    return true;
+}
+fn promoted_literal<a>(c: (&a mut C), cty: u64) -> Val {
+    elem := ct_seq_elem(&mut c, cty);
+    mut width = 8;
+    if cty == 2 {
+        width = 1;
+    } else {
+        e := carray_elem_of(&mut c, elem);
+        if e[2] == 3 {
+            width = 1;
+        }
+        if e[2] == 4 {
+            width = 4;
+        }
+    }
+    expect(&mut c, view("["));
+    mut bytes = u8[];
+    mut n = 0;
+    while !is(&mut c, view("]")) {
+        mut neg = false;
+        if eat(&mut c, view("-")) {
+            neg = true;
+        }
+        lit_at := c.pos;
+        t := tok_text(&mut c, c.pos);
+        mut v = literal_value(&mut c, view(t));
+        if literal_fits(&mut c, elem, v, u64(neg)) == 0 {
+            exchange(&mut c.pos, lit_at);
+            fail(&mut c, view(literal_range_msg_v(&mut c, elem, v, u64(neg))));
+        }
+        advance(&mut c);
+        if neg {
+            v = wrapping_sub(0, v);
+        }
+        for b in width {
+            bytes.push((v >> (8 * b)) & 255);
+        }
+        n += 1;
+        if !eat(&mut c, view(",")) {
+            break;
+        }
+    }
+    expect(&mut c, view("]"));
+    if c.plat == 1 {
+        o(&mut c, view(".pushsection __DATA,__const\n"));
+    } else {
+        o(&mut c, view(".pushsection .rodata\n"));
+    }
+    obj := static_seq_object(&mut c, &bytes, n);
+    o(&mut c, view(".popsection\nleaq "));
+    lname(&mut c, obj);
+    o(&mut c, view("(%rip),%rax\n"));
+    slot := save(&mut c);
+    own(&mut c, slot, cty);
+    return val(slot, cty);
+}
 fn finish_type_literal<a>(c: (&a mut C), ty: u64) -> Val {
     mut out = ty;
     while is(&mut c, view("[")) {
@@ -46763,6 +46939,9 @@ fn finish_type_literal<a>(c: (&a mut C), ty: u64) -> Val {
     }
     if is(&mut c, view("[")) {
         mut cty = vec_of(&mut c, out);
+        if promote_literal_ok(&mut c, cty) {
+            return promoted_literal(&mut c, cty);
+        }
         return collection_literal(&mut c, cty, (cty == 2));
     }
     slot := apply(&mut c, view("rt_new"), u64[]);

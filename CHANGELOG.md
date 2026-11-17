@@ -1,5 +1,11 @@
 ## Unreleased
 
+- **Constant promotion of literal vectors.** `table := u64[1, 0, 1, ...];` whose elements are integer
+  literals, bound to an immutable name the rest of its block only indexes or measures, is now one
+  read-only object emitted once instead of a vector built on the heap at every execution (meshopt's
+  `can_collapse`/`has_opposite` rebuilt a 36-entry table per call). A literal that is mutated,
+  moved, returned, borrowed out or captured by a closure still allocates fresh.
+
 - **`bench-rivals` no longer charts a build that printed the wrong answer.** It already failed the
   run when a build's output differed from C's, but still wrote that build's figures into the
   results, so a miscompiled program could chart as the fastest. Such a figure is now left out and

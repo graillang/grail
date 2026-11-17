@@ -1,5 +1,41 @@
 [
   {
+    "name": "const-promote-literal-tables",
+    "source": "fn can_collapse(a: u64, b: u64) -> u64 {\n    table := u64[1, 1, 1, 1, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0];\n    return table[a * 6 + b];\n}\nfn narrow(i: u64) -> i64 {\n    t := i16[-32768, -1, 32767];\n    return i64(t[i]) + i64(t.len());\n}\nfn bytes(i: u64) -> u8 {\n    b := u8[65, 66, 255];\n    return b[i];\n}\n@no_alloc\nfn hot(a: u64, b: u64) -> u64 {\n    table := u64[3, 5, 7, 9];\n    if a < table.len() {\n        return table[a] + b;\n    }\n    return 0;\n}\nfn main() -> u64 {\n    mut s = 0;\n    for a in 6 {\n        for b in 6 {\n            s += can_collapse(a, b);\n        }\n    }\n    println(s);\n    println(narrow(0));\n    println(narrow(2));\n    println(bytes(2));\n    println(hot(3, 1));\n    return 0;\n}\n",
+    "stdout": "15\n-32765\n32770\n255\n10\n",
+    "asmAbsent": [
+      {
+        "in": "f_main_can_collapse",
+        "text": "rt_new"
+      },
+      {
+        "in": "f_main_can_collapse",
+        "text": "rt_push"
+      },
+      {
+        "in": "f_main_narrow",
+        "text": "rt_new"
+      },
+      {
+        "in": "f_main_bytes",
+        "text": "rt_new"
+      }
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "note": "constant promotion: an integer vector literal bound to an immutable name that is only indexed or measured is one read-only object emitted once (meshopt's per-call 36-entry tables); no allocation at the use, so a `@no_alloc` function may hold one"
+  },
+  {
+    "name": "const-promote-mutated-or-moved-allocates",
+    "source": "fn grows() -> u64 {\n    mut t = u64[1, 2, 3];\n    t.push(4);\n    t[0] = 10;\n    return t[0] + t.len();\n}\nfn take(v: u64[]) -> u64 {\n    mut w = v;\n    w.push(9);\n    return w.len();\n}\nfn moved() -> u64 {\n    t := u64[1, 2, 3];\n    return take(t);\n}\nfn returned() -> u64[] {\n    t := u64[4, 5];\n    return t;\n}\nfn shared(v: &u64[]) -> u64 {\n    return v.len();\n}\nfn borrowed() -> u64 {\n    t := u64[1, 2];\n    return shared(&t);\n}\nfn main() -> u64 {\n    println(grows());\n    println(grows());\n    println(moved());\n    mut r = returned();\n    r.push(6);\n    println(r.len());\n    println(r[2]);\n    r2 := returned();\n    println(r2.len());\n    println(borrowed());\n    return 0;\n}\n",
+    "stdout": "14\n14\n4\n3\n6\n2\n2\n",
+    "targets": [
+      "x86_64"
+    ],
+    "note": "a literal that is mutated (`mut`, push, index assignment), moved into an owned parameter, returned, or borrowed out keeps a fresh vector per execution: calling grows() twice gives the same answer, and a moved or returned literal can be pushed to (a promoted one is read-only data, so either would fault)"
+  },
+  {
     "name": "reject-1",
     "source": "module rejected;fn main(){data:=u8[];data.push(1);}",
     "reject": true
