@@ -3420,12 +3420,36 @@ fn tls_enter_callback<a>(c: (&a mut C), slot: u64, adopt: u64) -> unit {
         tp_write(&mut c);
     }
     mark(&mut c, done);
+    callback_pin(&mut c, view("addq"));
+    return ();
+}
+// While a callback runs there are C frames under it on this stack, so the task (if this thread is
+// running one) must not resume on another thread: thread-record word 120 counts the callbacks this
+// thread is inside, and rt_suspend blocks the thread instead of switching the task away while it
+// is non-zero. Clobbers %rax only.
+fn callback_pin<a, b>(c: (&a mut C), op: &b [u8]) -> unit {
+    if c.target == 0 {
+        other := label(&mut c);
+        done := label(&mut c);
+        o(&mut c, view("cmpq $0,rt_state+184(%rip)\n"));
+        jump(&mut c, view("je"), other);
+        o(&mut c, view("movq %fs:rt_tls_record@tpoff,%rax\n"));
+        jump(&mut c, view("jmp"), done);
+        mark(&mut c, other);
+        o(&mut c, view("movq %fs:0,%rax\n"));
+        mark(&mut c, done);
+    } else {
+        o(&mut c, view("tpget\n"));
+    }
+    o(&mut c, view(op));
+    o(&mut c, view(" $1,120(%rax)\n"));
     return ();
 }
 // Leave a callback: restore the caller's thread pointer, then, if this entry adopted the thread,
 // clear `rt_tls_record` (now on the caller's TCB, so the TLS word is addressable) and unmap the
 // record. Runs before the return value is loaded, so it may clobber any register.
 fn tls_leave_callback<a>(c: (&a mut C), slot: u64, adopt: u64) -> unit {
+    callback_pin(&mut c, view("subq"));
     tls_leave(&mut c, slot);
     done := label(&mut c);
     o(&mut c, view("movq "));
