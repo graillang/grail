@@ -69,6 +69,14 @@
   `__m256` at `--cpu=x86-64-v3`, and `float32x4_t`/`float64x2_t`/`int32x4_t` on AArch64, in arguments and
   results. A 4-lane dot product in C costs half the instructions per call of the scalar-argument
   version. Windows x64, RV64 and a 256-bit vector without AVX are refused with a diagnostic.
+- **`byval` records after the argument registers run out now reach C intact on AArch64 and
+  RISC-V.** On AArch64 a record that no longer fits the registers left goes on the stack and, per
+  AAPCS64, every later argument of that kind follows it there; Grail kept putting the next double in
+  `d7` or the next integer in `x7`, where C does not look. On RISC-V such a record was put on the
+  stack instead of falling back to integer registers, and a 16-byte record with only `a7` left was
+  not split between `a7` and the stack. New fixture `tests/ffi/abi_edges.grl` (all three ELF
+  targets, both backends, and Windows x86-64 under Wine).
+
 - **`bench-rivals` no longer charts a build that printed the wrong answer.** It already failed the
   run when a build's output differed from C's, but still wrote that build's figures into the
   results, so a miscompiled program could chart as the fastest. Such a figure is now left out and

@@ -1,0 +1,29 @@
+module ffi_abi_edges;
+
+// Argument-register exhaustion and an indirect result beside eight integer arguments: where the
+// target ABIs part ways once registers run out. C side and the per-ABI rules: tests/ffi/edges_shim.c.
+extern "C" record EdD2 { a: f64, b: f64 }
+extern "C" record EdF2 { a: f32, b: f32 }
+extern "C" record EdI2 { a: i64, b: i64 }
+extern "C" record EdR24 { x: i64, y: i64, z: i64 }
+extern "C" lib "shim.o" fn c_fp_spill(d0: f64, d1: f64, d2: f64, d3: f64, d4: f64, d5: f64, d6: f64, s: byval EdD2, t: f64) -> i64;
+extern "C" lib "shim.o" fn c_fp_spill8(d0: f64, d1: f64, d2: f64, d3: f64, d4: f64, d5: f64, d6: f64, d7: f64, s: byval EdF2) -> i64;
+extern "C" lib "shim.o" fn c_int_spill5(a: i64, b: i64, c: i64, d: i64, e: i64, s: byval EdI2, t: i64) -> i64;
+extern "C" lib "shim.o" fn c_int_spill7(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, s: byval EdI2, t: i64) -> i64;
+extern "C" lib "shim.o" fn c_ret24_8(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64) -> EdR24;
+fn main() -> u64 {
+    d2 := EdD2 { a: 3.0, b: 4.0 };
+    f2 := EdF2 { a: f32(5.0), b: f32(6.0) };
+    i2 := EdI2 { a: 7, b: 8 };
+    unsafe {
+        println(c_fp_spill(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, d2, 9.0));
+        println(c_fp_spill8(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, f2));
+        println(c_int_spill5(1, 2, 3, 4, 5, i2, 9));
+        println(c_int_spill7(1, 2, 3, 4, 5, 6, 7, i2, 9));
+        r := c_ret24_8(1, 2, 3, 4, 5, 6, 7, 8);
+        println(r.x);
+        println(r.y);
+        println(r.z);
+    }
+    return 0;
+}
