@@ -48,13 +48,13 @@ export function perfBlock(spec, directory = resultsDirectory) {
   const [name, part] = spec.split('#');
   if (!/^[a-z][a-z0-9-]*$/.test(name)) throw new Error(`Invalid results name: ${name}`);
   const data = JSON.parse(readFileSync(join(directory, `${name}.json`), 'utf8'));
-  if (!part) return renderResults(data);
+  if (!part) return renderResults(data, name);
   if (part === 'provenance') return provenance(data);
   // `#a|b`: the first of the tables the file has - a file charted by instructions carries a CPU-time
   // table where one charted by CPU time carries an instructions table.
   const table = part.split('|').map(id => data.tables.find(t => t.id === id)).find(Boolean);
   if (!table) throw new Error(`bench/results/${name}.json has no table ${part}`);
-  return `${table.chart ? chart(table, data) : ''}${numbers(table)}`;
+  return `${table.chart ? chart(table, data, name) : ''}${numbers(table)}`;
 }
 export function expand(text, book, used = new Set()) {
   return text.replace(/\{\{(example|source|perf):([^}]+)\}\}/g, (_, kind, id) => {

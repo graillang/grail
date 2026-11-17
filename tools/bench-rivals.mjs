@@ -72,7 +72,7 @@ const measured = [...columns, ...nativeColumns];
 
 const names = argv.length ? argv
   : readdirSync(join(root, 'bench')).filter(f => f.endsWith('.grl')).map(f => f.slice(0, -4))
-    .filter(name => existsSync(join(root, 'bench', `${name}.c`)) && existsSync(join(root, 'bench/rivals', `${name}.rs`))).sort()
+    .filter(name => existsSync(join(root, 'bench', `${name}.c`)) && (existsSync(join(root, 'bench/rivals', `${name}.rs`)) || existsSync(join(root, 'bench/rivals', `${name}-rs/Cargo.toml`)))).sort()
     // ffi_call is this tree's when it has one, else the scheduler tree's (GRAIL_SCHED_TREE).
     .concat(!existsSync(join(root, 'bench/ffi_call.grl')) && schedTree && existsSync(join(schedTree, 'bench/ffi_call.grl')) ? ['ffi_call'] : []);
 
@@ -89,15 +89,26 @@ function build(name) {
   // compiler's tree.
   const lib = tree === root ? measuredGrail.tree : tree;
   const grailInputs = [join(tree, 'bench', `${name}.grl`), join(lib, 'lib/core.grl')];
-  // ffi_call says `use host`: the compiler proper finds a module only under a module root.
-  const grailOptions = { runtime: join(lib, 'compiler/runtime.grl'), osRuntime: join(lib, 'compiler/os-linux.grl'), extra: name === 'ffi_call' ? ['--module-root', join(lib, 'lib')] : [] };
+  // A program that says `use host` (ffi_call) or `use json` finds the module under the module root.
+  const grailOptions = { runtime: join(lib, 'compiler/runtime.grl'), osRuntime: join(lib, 'compiler/os-linux.grl'), extra: ['--module-root', join(lib, 'lib')] };
   const exe = {};
   exe['grail-native'] = compileProgram(compiler, grailInputs, join(dir, 'native'), { ...grailOptions, backend: 'native', overflow: 'checked' });
   exe['grail-llvm'] = compileProgram(compiler, grailInputs, join(dir, 'llvm'), { ...grailOptions, backend: 'llvm', overflow: 'wrap' });
   run(['clang', '-O2', '-ffp-contract=off', ...cflags, join(tree, 'bench', `${name}.c`), '-o', exe.c = join(dir, 'c'), '-lm']);
   run(['clang', '-O2', '-march=native', '-ffp-contract=off', ...cflags, join(tree, 'bench', `${name}.c`), '-o', exe['c-native'] = join(dir, 'c-native'), '-lm']);
-  if (have.rust) run(['rustc', '--edition', '2021', '-C', 'opt-level=3', '-C', 'target-cpu=native', join(rivals, `${name}.rs`), '-o', exe['rust-native'] = join(dir, 'rust-native')]);
-  if (have.rust) {
+  // A twin that needs a crate (json: serde_json) is a cargo project, bench/rivals/NAME-rs, built
+  // from the offline registry with cargo's release and dev profiles; the rest are one file for rustc.
+  const crate = join(rivals, `${name}-rs`);
+  if (have.rust && existsSync(join(crate, 'Cargo.toml'))) {
+    const cargo = (profile, target, flags = '') => {
+      run(['cargo', 'build', '--offline', '-q', ...(profile === 'release' ? ['--release'] : [])], { cwd: crate, env: { ...env, CARGO_TARGET_DIR: join(dir, target), RUSTFLAGS: flags } });
+      return join(dir, target, profile === 'release' ? 'release' : 'debug', name);
+    };
+    exe['rust-release'] = cargo('release', 'cargo-release');
+    exe['rust-dev'] = cargo('dev', 'cargo-dev');
+    exe['rust-native'] = cargo('release', 'cargo-native', '-C target-cpu=native');
+  } else if (have.rust) {
+    run(['rustc', '--edition', '2021', '-C', 'opt-level=3', '-C', 'target-cpu=native', join(rivals, `${name}.rs`), '-o', exe['rust-native'] = join(dir, 'rust-native')]);
     run(['rustc', '--edition', '2021', '-C', 'opt-level=3', join(rivals, `${name}.rs`), '-o', exe['rust-release'] = join(dir, 'rust-release')]);
     run(['rustc', '--edition', '2021', '-C', 'opt-level=0', '-g', join(rivals, `${name}.rs`), '-o', exe['rust-dev'] = join(dir, 'rust-dev')]);
   }

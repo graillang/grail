@@ -64,6 +64,10 @@ pub struct A {
     sym_pos: u64[],
     sym_k: u64[],
     sym_bind: u64[],
+    // ELF visibility (`.hidden` 2, `.protected` 3, `.internal` 1).
+    sym_vis: u64[],
+    // `.comm` sizes.
+    sym_size: u64[],
     sym_type: u64[],
     sym_ref: u64[],
     st_id: u64[],
@@ -343,6 +347,10 @@ fn directives<a>(o: (&a mut A)) {
     def(&mut o, view(".loc"), 22);
     def(&mut o, view(".uleb128"), 23);
     def(&mut o, view(".option"), 24);
+    def(&mut o, view(".hidden"), 25);
+    def(&mut o, view(".protected"), 26);
+    def(&mut o, view(".internal"), 27);
+    def(&mut o, view(".comm"), 28);
 }
 
 pub fn new() -> A {
@@ -385,6 +393,8 @@ pub fn new() -> A {
         sym_pos: u64[],
         sym_k: u64[],
         sym_bind: u64[],
+        sym_vis: u64[],
+        sym_size: u64[],
         sym_type: u64[],
         sym_ref: u64[],
         st_id: st,
@@ -582,6 +592,8 @@ fn new_symbol<a>(o: (&a mut A), a0: u64, e: u64, h: u64) -> u64 {
     o.sym_pos.push(0);
     o.sym_k.push(0);
     o.sym_bind.push(0);
+    o.sym_vis.push(0);
+    o.sym_size.push(0);
     o.sym_type.push(0);
     o.sym_ref.push(0);
     o.sym_seen.push(0);
@@ -700,6 +712,8 @@ fn section<a, b>(o: (&a mut A), s: &b [u8], a0: u64, e: u64, ty: u64, flags: u64
     o.sym_pos.push(0);
     o.sym_k.push(0);
     o.sym_bind.push(0);
+    o.sym_vis.push(0);
+    o.sym_size.push(0);
     o.sym_type.push(3);
     o.sym_ref.push(0);
     o.sym_seen.push(0);
@@ -1281,6 +1295,9 @@ fn directive<a>(o: (&a mut A), id: u64) {
         named_section(&mut o, d, 0, d.len());
     } else if id == 17 {
         data(&mut o, 4);
+    } else if (id == 19) && (o.target != 0) {
+        // `.word` is 32 bits on AArch64 and RISC-V, 16 on x86.
+        data(&mut o, 4);
     } else if (id == 18) || (id == 19) {
         data(&mut o, 2);
     } else if id == 21 {
@@ -1318,6 +1335,33 @@ fn directive<a>(o: (&a mut A), id: u64) {
             fail(&mut o, view("unsupported `.option`"));
         }
         o.at = e;
+    } else if id == 28 {
+        // `.comm NAME,SIZE,ALIGN`: a common symbol, which the linker allocates.
+        sym := sym_operand(&mut o);
+        expect(&mut o, ',');
+        size := number(&mut o);
+        mut align = 1;
+        skip(&mut o);
+        if peek(&o) == ',' {
+            o.at += 1;
+            align = number(&mut o);
+        }
+        o.sym_sec[sym] = elf::common();
+        o.sym_pos[sym] = align;
+        o.sym_size[sym] = size;
+        o.sym_type[sym] = 1;
+        o.sym_bind[sym] = 1;
+        o.chunk_ok = 0;
+    } else if (id >= 25) && (id <= 27) {
+        sym := sym_operand(&mut o);
+        mut v = 2;
+        if id == 26 {
+            v = 3;
+        } else if id == 27 {
+            v = 1;
+        }
+        o.sym_vis[sym] = v;
+        note_attr(&mut o, sym);
     } else if id == 23 {
         take_loc(&mut o);
         map_to(&mut o, 2);
@@ -1942,7 +1986,7 @@ fn run<a>(o: (&a mut A)) -> Result {
             put_le(&mut o.sec_data[sec], at, v, o.fx_width[i]);
             continue;
         }
-        defined := (o.sym_sec[sym] != 0) && (o.sym_sec[sym] != ABS);
+        defined := (o.sym_sec[sym] != 0) && (o.sym_sec[sym] != ABS) && (o.sym_sec[sym] != elf::common());
         local := o.sym_bind[sym] == 0;
         if kind == FX_TPOFF {
             r_sec.push(sec);
@@ -2277,6 +2321,9 @@ fn line_table<a, b, c>(o: (&a mut A), pre: (&b u64[]), r_sec: (&c mut u64[]), r_
     if o.target == 1 {
         t32 = 258;
         t64 = 257;
+    } else if o.target == 2 {
+        t32 = 1;
+        t64 = 2;
     }
     for i in str_fields.len() {
         r_sec.push(line_sec);
@@ -2289,8 +2336,28 @@ fn line_table<a, b, c>(o: (&a mut A), pre: (&b u64[]), r_sec: (&c mut u64[]), r_
         r_sec.push(line_sec);
         r_off.push(set_at);
         r_type.push(t64);
-        r_sym.push(o.sec_sym[0]);
-        r_add.push(final_text(pre, o.ln_pos[0], o.ln_k[0]));
+        start := final_text(pre, o.ln_pos[0], o.ln_k[0]);
+        if o.target == 2 {
+            // RISC-V names the sequence's start through the row's own label, LLVM's first unnamed
+            // temporary `.L0 ` (the space keeps it from any name in the text; RISC-V relocations
+            // keep temporaries).
+            name := view(".L0 ").copy();
+            outer := exchange(&mut o.src, name);
+            o.nh_a = 1;
+            o.nh_e = 0;
+            l0 := symbol(&mut o, 0, 4);
+            o.src = outer;
+            o.nh_a = 1;
+            o.nh_e = 0;
+            o.sym_sec[l0] = 1;
+            o.sym_pos[l0] = start;
+            o.sym_k[l0] = 0;
+            r_sym.push(l0);
+            r_add.push(0);
+        } else {
+            r_sym.push(o.sec_sym[0]);
+            r_add.push(start);
+        }
     }
 }
 
@@ -2353,14 +2420,16 @@ fn object<a, b, c>(o: (&a mut A), pre: (&b u64[]), r_sec: (&c u64[]), r_off: (&c
             // A symbol in a TLS section is TLS - except RISC-V's mapping symbols, which LLVM leaves
             // untyped there (AArch64's it types).
             mapping := (o.target == 2) && (o.sym_name[id].len() > 0) && (o.sym_name[id][0] == '$');
-            if (sec != 0) && (sec != ABS) && ((o.sec_flags[sec - 1] & 0x400) != 0) && (ty == 0) && !mapping {
+            if (sec != 0) && (sec != ABS) && (sec != elf::common()) && ((o.sec_flags[sec - 1] & 0x400) != 0) && (ty == 0) && !mapping {
                 ty = 6;
             }
             index[id] = out.sym_name.len() + 1;
             out.sym_name.push(o.sym_name[id].copy());
             out.sym_info.push((bind << 4) | ty);
+            out.sym_other.push(o.sym_vis[id]);
+            out.sym_size.push(o.sym_size[id]);
             out.sym_sec.push(sec);
-            if (sec == 0) || (sec == ABS) {
+            if (sec == 0) || (sec == ABS) || (sec == elf::common()) {
                 out.sym_value.push(o.sym_pos[id]);
             } else {
                 out.sym_value.push(sym_final(&o, pre, id));
@@ -3375,6 +3444,7 @@ fn chunk_finish<a>(o: (&a mut A), at: u64) {
         wv(&mut u, o.sym_slot[sym]);
         wv(&mut u, o.sym_type[sym]);
         wv(&mut u, o.sym_bind[sym]);
+        wv(&mut u, o.sym_vis[sym]);
         i += 1;
     }
     wv(&mut u, o.fx_sec.len() - o.ck_fx);
@@ -3517,6 +3587,8 @@ fn symbol_in<a>(o: (&a mut A), start: u64, end: u64) -> u64 {
     o.sym_pos.push(0);
     o.sym_k.push(0);
     o.sym_bind.push(0);
+    o.sym_vis.push(0);
+    o.sym_size.push(0);
     o.sym_type.push(0);
     o.sym_ref.push(0);
     o.sym_seen.push(0);
@@ -3708,6 +3780,7 @@ fn unit_replay<a>(o: (&a mut A), u: u64) -> bool {
         sym := syms[rv(&o, &mut at, &mut bad)];
         o.sym_type[sym] = rv(&o, &mut at, &mut bad);
         o.sym_bind[sym] = rv(&o, &mut at, &mut bad);
+        o.sym_vis[sym] = rv(&o, &mut at, &mut bad);
     }
     nf := rv(&o, &mut at, &mut bad);
     for i in nf {
@@ -3867,6 +3940,8 @@ pub fn map_to<a>(o: (&a mut A), kind: u64) {
     o.sym_pos.push(pos(&o));
     o.sym_k.push(o.it_pos.len());
     o.sym_bind.push(0);
+    o.sym_vis.push(0);
+    o.sym_size.push(0);
     o.sym_type.push(0);
     o.sym_ref.push(0);
     o.sym_seen.push(0);

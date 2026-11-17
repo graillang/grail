@@ -12,7 +12,7 @@
 // (tools/native.mjs `assemble`): `GRAIL_ASM_ORACLE=1 bun tools/test-native.mjs x86_64` checks each
 // program's object and then runs the program, which is the gate's `asm-oracle` leg.
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 
 export function readElf(bytes) {
@@ -144,6 +144,18 @@ if (import.meta.main) {
       args.push(out);
     }
     console.log(`asm-oracle: ${args.length} corpus programs compiled for ${target} (${skipped} did not compile alone)`);
+  }
+  // `--suite`: the directive files in tests/asm, on every target the internal assembler covers.
+  if (args[0] === '--suite') {
+    const dir = join(import.meta.dir, '..', 'tests/asm');
+    let bad = 0;
+    for (const name of readdirSync(dir).filter(f => f.endsWith('.s')).sort()) {
+      const t = name.replace(/^.*-([a-z0-9_]+)\.s$/, '$1');
+      const result = checkFile(join(dir, name), work, assembler, t);
+      console.log(result ? `FAIL ${name}: ${result}` : `ok ${name}`);
+      if (result) bad++;
+    }
+    process.exit(bad ? 1 : 0);
   }
   let failed = 0;
   for (const file of args) {
