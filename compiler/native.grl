@@ -596,6 +596,10 @@ struct C {
     bond_hnext: u64[],
     bond_under: u64[],
     bond_unranged: u64,
+    // For each `<` of the loaded file, the `>` that closes it (or the token count when none does),
+    // when `angle_ok` says the table is about the token stream there now (angle_sync).
+    angle_close: u64[],
+    angle_ok: u64,
     spec_em_slots: u64[],
     spec_em_keys: u64[],
     drop_em_slots: u64[],
@@ -10214,6 +10218,7 @@ fn load_file<a>(c: (&a mut C), index: u64) -> unit {
         load_file_reset(&mut c);
         return ();
     }
+    exchange(&mut c.angle_ok, 0);
     if c.file_loaded != 0 {
         parked := c.file_loaded - 1;
         mut slot = c.file_cache_index.len();
@@ -37362,24 +37367,36 @@ fn simple_type_head<a, b>(c: (&a mut C), name: &b [u8]) -> bool {
     return false;
 }
 // `Name[` or `Name<...>[` in expression position: a type-first collection literal.
+// The `<`/`>` matching of the loaded token stream, made once per file: a stack of the open `<`, each
+// `>` closing the latest, which is where a walk from that `<` counting the two would stop.
+fn angle_sync<a>(c: (&a mut C)) -> unit {
+    if c.angle_ok != 0 {
+        return ();
+    }
+    n := c.toks.len();
+    mut close = u64[n; n];
+    mut open = u64[];
+    for i in n {
+        k := c.toks[i].kind;
+        if k == 60 {
+            open.push(i);
+        }
+        if (k == 62) & (open.len() != 0) {
+            close[open.pop()!] = i;
+        }
+    }
+    exchange(&mut c.angle_close, close);
+    exchange(&mut c.angle_ok, 1);
+    return ();
+}
 fn type_literal_ahead<a, b>(c: (&a mut C), name: &b [u8]) -> bool {
     p := c.pos;
     if kind_at(&mut c, p) == 60 {
-        mut depth = 0;
-        mut q = p;
-        while q < c.toks.len() {
-            k := kind_at(&mut c, q);
-            if k == 60 {
-                depth += 1;
-            }
-            if k == 62 {
-                depth -= 1;
-                if depth == 0 {
-                    break;
-                }
-            }
-            q += 1;
-        }
+        // The `>` that brings the count of `<` minus `>` back to where it was before this `<`
+        // (angle_sync): every `a < b` asked this, and with no `>` after it the walk went to the end
+        // of the file.
+        angle_sync(&mut c);
+        q := c.angle_close[p];
         if kind_at(&mut c, q + 1) != 91 {
             return false;
         }
@@ -49737,6 +49754,8 @@ pub fn main() -> u64 {
         bond_hnext: u64[],
         bond_under: u64[],
         bond_unranged: 0,
+        angle_close: u64[],
+        angle_ok: 0,
         spec_em_slots: u64[],
         spec_em_keys: u64[],
         drop_em_slots: u64[],
