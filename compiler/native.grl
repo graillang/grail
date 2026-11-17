@@ -18354,13 +18354,6 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     // The facts an obligation may read start at this body's entry (pv_begin).
     exchange(&mut c.body_lo, start);
     exchange(&mut c.body_hi, end);
-    for i in c.locals.len() {
-        mut l = &c.locals[i];
-        name := l.name.copy();
-        last := last_name(&mut c, view(name), start, end);
-        mut l = &mut c.locals[i];
-        exchange(&mut l.last, last);
-    }
     // On Win64 a C caller passes rcx/rdx/r8/r9 (then the stack after a 32-byte home area) and
     // expects rdi, rsi and xmm6-xmm15 preserved; the body uses Grail's SysV-shaped convention. A
     // callback is therefore a Win64 thunk under the C symbol that saves those registers, moves
@@ -18493,6 +18486,15 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                 return ();
             }
         }
+    }
+    // Where each parameter is last used: only a body that is compiled here needs it, so a hit, a
+    // body a worker skips and a body handed to a worker do not scan for it.
+    for i in c.locals.len() {
+        mut l = &c.locals[i];
+        name := l.name.copy();
+        last := last_name(&mut c, view(name), start, end);
+        mut l = &mut c.locals[i];
+        exchange(&mut l.last, last);
     }
     part(&mut c, view(unit));
     scope_begin(&mut c);
