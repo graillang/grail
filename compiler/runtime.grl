@@ -2066,6 +2066,32 @@ fn rt_write(s: u64, i: u64, v: u64) -> u64 {
 // and every static object the compiler emits, starts at a multiple of 16, and a view record is the
 // second word onward of a 32-byte block, so its address is 8 more than a multiple of 16. Nothing is
 // read to decide, so a view may be dropped after the vector it was taken from.
+// The `_into` forms write the view's {pointer, length} pair into `dst`, two words the caller holds
+// (a frame pair: docs/design/unboxed-values.md, views as two words), and answer `dst`.
+fn rt_slice_into(s: u64, a: u64, b: u64, dst: u64) -> u64 {
+    if (b < a) + (raw_load(wrapping_add(s, 8)) < b) {
+        rt_fail(7, a, b);
+    }
+    raw_store(dst, wrapping_add(raw_load(s), a));
+    raw_store(dst + 8, b - a);
+    return dst;
+}
+fn rt_vslice_into(s: u64, a: u64, b: u64, width: u64, dst: u64) -> u64 {
+    if (b < a) + (raw_load(wrapping_add(s, 8)) < b) {
+        rt_fail(7, a, b);
+    }
+    raw_store(dst, wrapping_add(raw_load(s), wrapping_mul(a, width)));
+    raw_store(dst + 8, b - a);
+    return dst;
+}
+fn rt_aslice_into(base: u64, a: u64, b: u64, w: u64, n: u64, dst: u64) -> u64 {
+    if (b < a) + (n < b) {
+        rt_fail(7, a, b);
+    }
+    raw_store(dst, wrapping_add(base, wrapping_mul(a, w)));
+    raw_store(dst + 8, b - a);
+    return dst;
+}
 fn rt_view_record() -> u64 {
     return rt_alloc(32) + 8;
 }
@@ -4923,6 +4949,12 @@ fn rt_job_zip_leaf(d: u64, k: u64) -> u64 {
         i += 1;
     }
     raw_call2(raw_load(d), block, 0);
+    // The views are the callback's to read, not to keep (a view is copied where it is kept).
+    i = 0;
+    while i < count {
+        rt_free(raw_load(block + 16 + i * 8));
+        i += 1;
+    }
     rt_free(block);
     return stop - start;
 }
@@ -5044,7 +5076,8 @@ fn rt_job_chunk_leaf(d: u64, k: u64) -> u64 {
     if n < stop {
         stop = n;
     }
-    // A slice of its own, which the callback drops as any slice is dropped (rt_view_free).
+    // A slice for the callback to read; it is freed when the callback returns (a view is copied
+    // where it is kept).
     slot := rt_view_record();
     raw_store(slot, raw_load(d + 16) + start * raw_load(d + 24));
     raw_store(slot + 8, stop - start);
@@ -5064,6 +5097,7 @@ fn rt_job_chunk_leaf(d: u64, k: u64) -> u64 {
     } else {
         raw_call2(f, env, slot);
     }
+    rt_free(slot);
     return stop - start;
 }
 // Split an exclusive slice into pieces of `grain` elements (the last may be shorter) and run one leaf

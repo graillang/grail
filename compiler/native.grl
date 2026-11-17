@@ -15735,13 +15735,13 @@ fn split_at_mut_statement<a>(c: (&a mut C)) -> unit {
     mut args = two(v.t, imm(&mut c, 0));
     args.push(m.t);
     args.push(imm(&mut c, width));
-    lo := apply(&mut c, view("rt_vslice"), args);
+    lo := view_into(&mut c, view("rt_vslice_into"), args);
     own(&mut c, lo, v.ty);
     view_bonds(&mut c, lo, v.t, 1, false);
     mut args2 = two(v.t, m.t);
     args2.push(len);
     args2.push(imm(&mut c, width));
-    hi := apply(&mut c, view("rt_vslice"), args2);
+    hi := view_into(&mut c, view("rt_vslice_into"), args2);
     own(&mut c, hi, v.ty);
     view_bonds(&mut c, hi, v.t, 1, false);
     ownership::close_group(&mut c.check);
@@ -29528,7 +29528,7 @@ fn member_align<a>(c: (&a mut C), ft: u64) -> u64 {
     if is_array(&mut c, t) {
         return member_align(&mut c, ty_arg(&mut c, t));
     }
-    if small_enum(&mut c, t) {
+    if small_enum(&mut c, t) || (ty_kind(&mut c, t) == 5) || (ty_kind(&mut c, t) == 27) {
         return 8;
     }
     if is_c_record(&mut c, t) != 0 {
@@ -29561,6 +29561,9 @@ fn round_up(n: u64, align: u64) -> u64 {
 // The bytes a value held as its words takes: a record's fields laid out and rounded up to its
 // alignment, then its live word (stage 4) if it has one.
 fn value_bytes<a>(c: (&a mut C), ty: u64) -> u64 {
+    if (ty_kind(&mut c, ty) == 5) || (ty_kind(&mut c, ty) == 27) {
+        return 16;
+    }
     // A closure held as its environment record (S6(A)): a word per field.
     ty := closure_record(&mut c, ty);
     if closure_env_record(&mut c, ty) {
@@ -29810,6 +29813,11 @@ fn layout_bits<a>(c: (&a mut C), alias: u64) -> u64 {
     // A record being worked out is not plain to itself (a record cannot hold itself by value).
     c.layout_memo[ty] = 1;
     mut bits = 0;
+    if (ty_kind(&mut c, ty) == 5) || (ty_kind(&mut c, ty) == 27) {
+        // A view: two words {pointer, length}, plain and held as its words (views as two words).
+        c.layout_memo[ty] = 6;
+        return 5;
+    }
     if is_c_record(&mut c, ty) != 0 {
         // An `extern "C"` record is plain C data held as its bytes in C layout wherever it is held:
         // a frame, a record, a vector (docs/design/unboxed-values.md, after stage 7). Its fields
@@ -30271,6 +30279,9 @@ fn field_reference<a>(c: (&a mut C), base: u64, ty: u64, k: u64) -> u64 {
 }
 // The words a record's own storage takes: a word per field, or an `extern "C"` record's C size.
 fn record_words<a>(c: (&a mut C), ty: u64) -> u64 {
+    if (ty_kind(&mut c, ty) == 5) || (ty_kind(&mut c, ty) == 27) {
+        return 2;
+    }
     ty := closure_record(&mut c, ty);
     if is_simd(&mut c, ty) {
         return simd_words(&mut c, ty);
@@ -32362,7 +32373,7 @@ fn coerce_view<a>(c: (&a mut C), v: Val, formal: u64) -> Val {
         }
         x := deref(&mut c, v);
         vty := intern_full(&mut c, 5, 0, mode, u64[]);
-        slot := apply(&mut c, view("rt_view"), one(x.t));
+        slot := view_of(&mut c, x.t);
         own(&mut c, slot, vty);
         view_bonds(&mut c, slot, x.t, mode, false);
         return val(slot, vty);
@@ -32372,7 +32383,7 @@ fn coerce_view<a>(c: (&a mut C), v: Val, formal: u64) -> Val {
         k := ty_kind(&mut c, v.ty);
         if (k == 2) || (k == 3) || (k == 4) {
             vty := intern_full(&mut c, 5, 0, 0, u64[]);
-            slot := apply(&mut c, view("rt_view"), one(v.t));
+            slot := view_of(&mut c, v.t);
             own(&mut c, slot, vty);
             view_bonds(&mut c, slot, v.t, 0, false);
             return val(slot, vty);
@@ -32403,7 +32414,7 @@ fn reborrow_view<a>(c: (&a mut C), v: Val, formal: u64) -> Val {
     args.push(imm(&mut c, 0));
     args.push(length);
     args.push(imm(&mut c, 1));
-    slot := invoke(&mut c, view("rt_vslice"), args);
+    slot := view_into(&mut c, view("rt_vslice_into"), args);
     vty := intern_full(&mut c, 5, 0, mode, u64[]);
     own(&mut c, slot, vty);
     view_bonds(&mut c, slot, v.t, mode, false);
@@ -33095,7 +33106,7 @@ fn array_view<a>(c: (&a mut C), xt: u64, xty: u64, mode: u64) -> Val {
     args.push(imm(&mut c, array_len(&mut c, xty)));
     args.push(imm(&mut c, array_elem_bytes(&mut c, elem)));
     args.push(imm(&mut c, array_len(&mut c, xty)));
-    slot := invoke(&mut c, view("rt_aslice"), args);
+    slot := view_into(&mut c, view("rt_aslice_into"), args);
     return array_view_value(&mut c, slot, xt, elem, mode);
 }
 fn array_view_value<a>(c: (&a mut C), slot: u64, xt: u64, elem: u64, mode: u64) -> Val {
@@ -33144,7 +33155,7 @@ fn array_subslice<a>(c: (&a mut C), value: Val, x: Val, access: u64) -> Val {
     args.push(hi.t);
     args.push(imm(&mut c, array_elem_bytes(&mut c, elem)));
     args.push(imm(&mut c, array_len(&mut c, x.ty)));
-    slot := invoke(&mut c, view("rt_aslice"), args);
+    slot := view_into(&mut c, view("rt_aslice_into"), args);
     return array_view_value(&mut c, slot, x.t, elem, mode);
 }
 // A `&T`/`&mut T` argument or initializer whose referent is an array, where `&[T]`/`&mut [T]` (or a
@@ -36065,6 +36076,21 @@ fn builtin_id<a>(n: &a [u8]) -> u64 {
     return 0;
 }
 // Calls use the target word ABI (up to six words; machine.grl selects physical registers).
+// A view is two words, {pointer, length}, held in frame words like a plain record (docs/design/
+// unboxed-values.md, views as two words): a slice writes its pair into fresh frame words of this
+// site, and the value is their address.
+fn view_into<a, b>(c: (&a mut C), f: &b [u8], args: u64[]) -> u64 {
+    dst := frame_alloc(&mut c, 2);
+    mut all = args.copy();
+    all.push(dst);
+    return invoke(&mut c, f, all);
+}
+// The view of a whole vector or string, or of a view: its header (or pair) is already a {pointer,
+// length} pair at the value's address, so the view is that address - no allocation.
+fn view_of<a>(c: (&a mut C), source: u64) -> u64 {
+    get(&mut c, source, view("%rax"));
+    return save(&mut c);
+}
 fn apply<a, b>(c: (&a mut C), f: &b [u8], args: u64[]) -> u64 {
     return invoke(&mut c, f, args);
 }
@@ -37491,7 +37517,7 @@ fn print_value<a>(c: (&a mut C), input: Val, newline: u64) -> unit {
                     print_refuse(&mut c, value.ty);
                 }
                 ty := intern_full(&mut c, 5, 0, 0, u64[]);
-                slot := apply(&mut c, view("rt_view"), one(value.t));
+                slot := view_of(&mut c, value.t);
                 own(&mut c, slot, ty);
                 view_bonds(&mut c, slot, value.t, 0, false);
                 move_out(&mut c, val(slot, ty));
@@ -38457,7 +38483,7 @@ fn builtin<a>(c: (&a mut C), id: u64) -> Val {
             }
         }
         ty := intern_full(&mut c, 5, 0, write, u64[]);
-        slot := apply(&mut c, view("rt_view"), one(xt));
+        slot := view_of(&mut c, xt);
         own(&mut c, slot, ty);
         view_bonds(&mut c, slot, xt, write, false);
         release_temporary(&mut c, input);
@@ -38607,7 +38633,7 @@ fn deref_value<a>(c: (&a mut C), a: Val) -> Val {
                 slot = save(&mut c);
                 own(&mut c, slot, ty);
             } else {
-                slot = invoke(&mut c, view("rt_view"), one(n));
+                slot = view_of(&mut c, n);
                 own(&mut c, slot, ty);
             }
             target := target_of(&mut c, a.t);
@@ -42031,7 +42057,7 @@ fn whole_slice<a>(c: (&a mut C), x: Val, write: bool) -> Val {
     mut args = two(xt, start);
     args.push(end);
     args.push(imm(&mut c, width));
-    result := apply(&mut c, view("rt_vslice"), args);
+    result := view_into(&mut c, view("rt_vslice_into"), args);
     sty := intern_full(&mut c, 27, elem, u64(write), u64[]);
     own(&mut c, result, sty);
     view_bonds(&mut c, result, xt, write, false);
@@ -45204,7 +45230,7 @@ fn reference_borrow<a>(c: (&a mut C), write: u64) -> Val {
                 info := &c.locals[l - 1];
                 source := info.id;
                 observe(&mut c, source);
-                result := apply(&mut c, view("rt_view"), one(source));
+                result := view_of(&mut c, source);
                 elem := ty_arg(&mut c, lt);
                 sty := intern_full(&mut c, 27, elem, write, u64[]);
                 own(&mut c, result, sty);
@@ -45305,8 +45331,8 @@ fn direct<a>(c: (&a mut C), alias: u64) -> bool {
         return true;
     }
     ty := base_type(&mut c, alias);
-    // An array value is the address of its bytes, as a record's is.
-    if ty_kind(&mut c, ty) == 32 {
+    // An array value is the address of its bytes, as a record's is; so is a view's (its pair).
+    if (ty_kind(&mut c, ty) == 32) || (ty_kind(&mut c, ty) == 5) || (ty_kind(&mut c, ty) == 27) {
         return true;
     }
     if ty_kind(&mut c, ty) != 8 {
@@ -47610,7 +47636,7 @@ fn vector_slice<a>(c: (&a mut C), x: Val, input: u64, access: u64) -> Val {
     mut args = two(xt, start);
     args.push(end);
     args.push(imm(&mut c, width));
-    result := apply(&mut c, view("rt_vslice"), args);
+    result := view_into(&mut c, view("rt_vslice_into"), args);
     sty := intern_full(&mut c, 27, elem, write, u64[]);
     own(&mut c, result, sty);
     view_bonds(&mut c, result, xt, write, false);
@@ -47998,7 +48024,7 @@ fn index_view_inner<a>(c: (&a mut C), value: Val, access: u64) -> Val {
         return val(result, 0);
     }
     vty := intern_full(&mut c, 5, 0, 0, u64[]);
-    slot := apply(&mut c, view("rt_view"), one(x.t));
+    slot := view_of(&mut c, x.t);
     own(&mut c, slot, vty);
     view_bonds(&mut c, slot, x.t, 0, false);
     release_temporary(&mut c, input);
@@ -48033,7 +48059,7 @@ fn index_view_inner<a>(c: (&a mut C), value: Val, access: u64) -> Val {
         expect(&mut c, view("]"));
         mut args = two(slot, start);
         args.push(end);
-        result := apply(&mut c, view("rt_slice"), args);
+        result := view_into(&mut c, view("rt_slice_into"), args);
         own(&mut c, result, vty);
         view_bonds(&mut c, result, slot, 0, false);
         release_temporary(&mut c, slot);
@@ -53423,11 +53449,16 @@ fn xx_merge(acc: u64, lane: u64) -> u64 {
     return wrapping_add(wrapping_mul(acc ^ xx_round(0, lane), XP1), XP4);
 }
 // The address of a byte sequence's first byte: the first word of the header its value points to.
+// Through the first element, so it reads the same whatever a view's own representation is (the
+// compiler compiling this may be one from before views became two words). Bit 63 tags a narrow
+// reference.
 fn bytes_base<a>(data: &a [u8]) -> u64 {
+    if data.len() == 0 {
+        return 0;
+    }
     mut v: u64 = 0;
     unsafe {
-        header := ptr_of(&data).cast(u64).read();
-        v = ptr_from_addr(u64, header).read();
+        v = ptr_of(&data[0]).addr() & 9223372036854775807;
     }
     return v;
 }
