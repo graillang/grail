@@ -9676,12 +9676,121 @@ fn pv_ir_value<a, b>(c: (&a mut C), name: &b [u8], lo: u64, hi: u64) -> unit {
     if !pv_ir_live(&c) {
         return ();
     }
+    // `v := T[]`: an empty vector, whose length a counted push loop then states (pv_push_loop).
+    if (hi == lo + 3) & (kind_at(&mut c, lo) == 1) & (kind_at(&mut c, lo + 1) == 91) & (kind_at(&mut c, lo + 2) == 93) {
+        mut len = copy_bytes(view(name));
+        push_bytes(&mut len, view(".len"));
+        pv_add(&mut c.pv_facts, 2, view(len), view("0"), 0);
+        return ();
+    }
     t := pv_span_term(&mut c, lo, hi);
     if t.len() == 0 {
         return ();
     }
     pv_add(&mut c.pv_facts, 2, view(name), view(t), 0);
     return ();
+}
+// Whether a counted loop's body (tokens between `open`, its `{`, and `end`) grows `name` by exactly
+// one element per iteration: one `name.push(...)` that is a statement of the body itself (not inside
+// a branch or an inner loop), and no other use of `name` but `name[...]` and `name.len()`. A body
+// that can leave an iteration early (`break`, `continue`) or holds a closure (which could reach the
+// vector) answers no.
+fn pv_push_once<a, b>(c: (&a mut C), open: u64, end: u64, name: &b [u8]) -> bool {
+    mut depth = 0;
+    mut pushes = 0;
+    mut i = open + 1;
+    while i < end {
+        k := kind_at(&mut c, i);
+        if k == 123 {
+            depth += 1;
+        }
+        if k == 125 {
+            if depth == 0 {
+                break;
+            }
+            depth -= 1;
+        }
+        if k == 124 {
+            return false;
+        }
+        if k == 1 {
+            t := tok_text(&mut c, i);
+            if same(view(t), view("break")) || same(view(t), view("continue")) {
+                return false;
+            }
+            after_dot := kind_at(&mut c, i - 1) == 46;
+            if same(view(t), view(name)) & !after_dot {
+                nk := kind_at(&mut c, i + 1);
+                if nk == 91 {
+                    // an element read or write: the length does not move
+                } else {
+                    if nk != 46 {
+                        return false;
+                    }
+                    m := tok_text(&mut c, i + 2);
+                    if same(view(m), view("len")) {
+                        // a read
+                    } else {
+                        if !same(view(m), view("push")) || (kind_at(&mut c, i + 3) != 40) {
+                            return false;
+                        }
+                        pk := kind_at(&mut c, i - 1);
+                        if (depth != 0) || !((pk == 123) || (pk == 59) || (pk == 125)) {
+                            return false;
+                        }
+                        pushes += 1;
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    return pushes == 1;
+}
+// Whether `name` keeps its value across the body: never assigned, never lent mutably.
+fn pv_unwritten<a, b>(c: (&a mut C), open: u64, end: u64, name: &b [u8]) -> bool {
+    if pv_literal(view(name)) {
+        return true;
+    }
+    mut i = open + 1;
+    while i < end {
+        if kind_at(&mut c, i) == 1 {
+            if same(view(tok_text(&mut c, i)), view(name)) {
+                nk := kind_at(&mut c, i + 1);
+                if (nk == 61) || ((261 < nk) & (nk < 269)) {
+                    return false;
+                }
+                if (2 <= i) && (kind_at(&mut c, i - 2) == 38) && same(view(tok_text(&mut c, i - 1)), view("mut")) {
+                    return false;
+                }
+            }
+        }
+        i += 1;
+    }
+    return true;
+}
+// The vectors a counted loop `for _ in n` fills: each local with `v.len == 0` before the loop whose
+// body pushes it once per iteration (pv_push_once). After the loop, `v.len == n`.
+fn pv_push_loop<a, b>(c: (&a mut C), open: u64, end: u64, count: &b [u8]) -> u8[][] {
+    mut out = u8[][];
+    if !pv_ir_live(&c) || (count.len() == 0) || !pv_unwritten(&mut c, open, end, view(count)) {
+        return out;
+    }
+    mut facts = Atom[];
+    pv_ir_read(&mut c, &mut facts);
+    for i in facts.len() {
+        x := &facts[i];
+        if (x.rel == 2) & (x.k == 0) & same(view(x.b), view("0")) {
+            a := x.a.copy();
+            if (a.len() > 4) && same(view(a[a.len() - 4..a.len()]), view(".len")) {
+                v := a[0..a.len() - 4].copy();
+                if pv_push_once(&mut c, open, end, view(v)) {
+                    out.push(v);
+                }
+            }
+        }
+    }
+    return out;
 }
 // `name == value` for an arm whose pattern is a single literal: `match n { 16 => ... }` states
 // `n == 16` in that arm, and the arm's own block is what ends the fact.
@@ -44022,6 +44131,12 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
             }
         }
         loop_at := pv_loop_mark(&c);
+        mut grown = u8[][];
+        mut grown_to = u8[];
+        if range == 0 {
+            grown_to = pv_span_term(&mut c, iter_at, iter_end);
+            grown = pv_push_loop(&mut c, open, loopend, view(grown_to));
+        }
         pv_ir_statement(&mut c, iter_at, c.pos);
         pv_loop_kill(&mut c, open, loopend);
         pv_ir_pending(&mut c, &guard);
@@ -44066,6 +44181,14 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
         exchange(&mut c.loop_start, oldstart);
         exchange(&mut c.loop_end, oldend);
         pv_ir_close(&mut c);
+        // Each vector the loop filled from empty holds one element per iteration (pv_push_loop).
+        for g in grown.len() {
+            mut len = grown[g].copy();
+            push_bytes(&mut len, view(".len"));
+            if pv_ir_live(&c) {
+                pv_add(&mut c.pv_facts, 2, view(len), view(grown_to), 0);
+            }
+        }
         return ();
     }
     if eat(&mut c, view("match")) {

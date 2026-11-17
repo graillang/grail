@@ -16611,5 +16611,68 @@
     "source": "fn wipe(r: &mut u64[]) {\n    r.clear();\n    return ();\n}\nfn sum_after(r: &mut u64[]) -> u64 {\n    n := r.len();\n    wipe(r);\n    mut t = 0;\n    for i in n {\n        t = wrapping_add(t, r[i]);\n    }\n    return t;\n}\nfn main() {\n    mut v = u64[1, 2, 3];\n    println(sum_after(&mut v));\n}\n",
     "signal": "SIGABRT",
     "stderr": "out of bounds"
+  },
+  {
+    "name": "bce-push-loop-length",
+    "source": "fn total(n: u64) -> u64 {\n    mut v = u64[];\n    for i in n {\n        v.push(i * 3);\n    }\n    mut s: u64 = 0;\n    for i in n {\n        s = s ^ v[i];\n    }\n    return s;\n}\nfn main() {\n    println(total(10));\n}\n",
+    "stdout": "11\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "asmAbsent": [
+      {
+        "in": "f_main_total",
+        "text": "movq $1,%rdx\ncall rt_trap"
+      },
+      {
+        "in": "f_main_total",
+        "text": "call rt_slot\n"
+      }
+    ],
+    "note": "a counted loop that pushes once per iteration onto an empty vector states `v.len == n` after it, so the reading loop indexes without a check"
+  },
+  {
+    "name": "bce-push-loop-conditional-kept",
+    "source": "fn total(n: u64) -> u64 {\n    mut v = u64[];\n    for i in n {\n        if i % 2 == 0 {\n            v.push(i);\n        }\n    }\n    mut s: u64 = 0;\n    for i in n {\n        s = s ^ v[i];\n    }\n    return s;\n}\nfn main() {\n    println(total(10));\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "",
+    "stderr": [
+      "input.grl:10:"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "a push inside a branch is not once per iteration: no length fact, the check stays and fires"
+  },
+  {
+    "name": "bce-push-loop-break-kept",
+    "source": "fn total(n: u64) -> u64 {\n    mut v = u64[];\n    for i in n {\n        if i == 4 {\n            break;\n        }\n        v.push(i);\n    }\n    mut s: u64 = 0;\n    for i in n {\n        s = s ^ v[i];\n    }\n    return s;\n}\nfn main() {\n    println(total(10));\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "",
+    "stderr": [
+      "error: index 4 out of bounds for length 4\n --> ",
+      "input.grl:11:"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "a body that can leave the loop early states nothing about the length"
+  },
+  {
+    "name": "bce-push-loop-not-empty-kept",
+    "source": "fn total(n: u64) -> u64 {\n    mut v = u64[7];\n    for i in n {\n        v.push(i);\n    }\n    mut s: u64 = 0;\n    for i in n {\n        s = s ^ v[i];\n    }\n    return s ^ v.len();\n}\nfn main() {\n    println(total(10));\n}\n",
+    "stdout": "4\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "a vector that was not empty before the loop gets no `len == n` fact (its length is n + 1); the program stays correct"
   }
 ]
