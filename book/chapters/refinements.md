@@ -151,13 +151,14 @@ A refined parameter also feeds the bounds-check elimination. `i < v.len()` on `v
 what `v[i]` needs, so the body indexes without a check - unless the body binds either name again, or
 the base is not a shared reference, in which case the bound could go stale and the check stays.
 
-## Proved calls cost nothing
+## Proved calls cannot fail
 
-A function with refined parameters has two entries. The checked one runs the parameter checks in the
-prologue; the second, `<symbol>.proved`, is the same frame and the same body with the checks skipped.
-A call site that proved every parameter's predicate calls the second; everything else - a function
-value, a `dyn` vtable entry, an interface method, a foreign call - calls the checked one, because
-nothing was proved about the code it reaches.
+A function with refined parameters checks them at its entry. A call site that proved every
+parameter's predicate makes the same call - the checks then hold by the proof, so `@no_panic`
+counts the call as one that cannot fail - and a call that proved nothing (a function value, a `dyn`
+vtable entry, a foreign call) is checked by them. The checks still run on a proved call today; a
+second entry that skipped them was a copy of the prologue taken before the optimiser rewrote it,
+and was removed. Restoring the saving without that copy is planned.
 
 Predicates travel in interface files, along with the parameters' names, so a caller in another module
 owes - and may prove - exactly what a caller in the same module does.

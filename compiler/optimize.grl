@@ -2127,7 +2127,9 @@ fn xmm_narrow<a, b>(o: (&a mut ir::Body), s: &b [u8], lsrc: (&u64[]), ldst: (&u6
                 good = true;
             }
             if (op == 1) && (o.k0[i] == 1) && (p < i) && (o.k1[p] == 1) && (o.v1[p] == o.v0[i]) {
-                if ((o.op[p] == 1) || (o.op[p] == 2)) && (o.k0[p] == 3) && (imm_value(&o, view(s), p) == 0) {
+                // imm_value is the value + 1, and 0 for an immediate it cannot read (wider than 18
+                // digits, as 2.0's bits are): only a 1 is a zero.
+                if ((o.op[p] == 1) || (o.op[p] == 2)) && (o.k0[p] == 3) && (imm_value(&o, view(s), p) == 1) {
                     good = true;
                 }
                 if (o.op[p] == 10) && (o.k0[p] == 1) && (o.v0[p] == o.v0[i]) {
@@ -2316,6 +2318,11 @@ fn inline_candidate<a, b>(o: (&a mut ir::Body), s: &b [u8], prologue: u64) {
                         return ();
                     }
                     if op == 0 || op == 31 || op == 32 || op == 45 || op == 46 {
+                        return ();
+                    }
+                    // A slot used where a register cannot stand - its address taken (`leaq -8(%rbp)`,
+                    // rt_frame) - stays a slot, so the body is not a copy with slots in registers.
+                    if ((o.k0[i] == 2) || (o.k1[i] == 2)) && !promotable_use(&o, i) {
                         return ();
                     }
                     if op == 15 {
