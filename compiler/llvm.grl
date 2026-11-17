@@ -468,6 +468,19 @@ struct L {
     // 1 after a call whose result is one word, until `%rdx` is written or a block begins: a read
     // of it then means the fact understated the result.
     rdxdead: u64,
+    // Pointer provenance of registers within the current block: a register written by `leaq` of a
+    // frame slot holds (slot pointer, byte offset), kept by `addq/subq $c` and by `movq` between
+    // registers. A memory operand through it is a getelementptr on the slot, not inttoptr of an
+    // integer, so SROA can split the slot and alias analysis can tell it from heap memory. The
+    // integer value is still stored to the register for every other use (B1,
+    // docs/design/dyn-and-callable-bounds.md).
+    pvreg: u8[][],
+    pvptr: u8[][],
+    pvoff: i64[],
+    // Frame slots that only ever hold one frame slot's address (address_slots): `asy[i]` holds the
+    // address of `asx[i]`, so a load of it has provenance on every path.
+    asy: u8[][],
+    asx: u8[][],
     rdxcallee: u8[],
     // --verify-facts: the instruction being lowered, for the message of a wrong fact.
     curline: u8[],
@@ -1008,12 +1021,84 @@ fn get_reg<a, b>(l: (&a mut L), name: &b [u8]) -> u8[] {
     }
     return v;
 }
+// The provenance entry of register `r` (1-based), or 0.
+fn prov_find<a, b>(l: &a L, r: &b [u8]) -> u64 {
+    for i in l.pvreg.len() {
+        if eq(view(l.pvreg[i]), r) {
+            return i + 1;
+        }
+    }
+    return 0;
+}
+fn prov_clear<a, b>(l: (&a mut L), r: &b [u8]) -> unit {
+    k := prov_find(&l, r);
+    if k != 0 {
+        last := l.pvreg.len() - 1;
+        if k - 1 != last {
+            lr := l.pvreg[last].copy();
+            lp := l.pvptr[last].copy();
+            lo := l.pvoff[last];
+            exchange(&mut l.pvreg[k - 1], lr);
+            exchange(&mut l.pvptr[k - 1], lp);
+            l.pvoff[k - 1] = lo;
+        }
+        l.pvreg.pop()!;
+        l.pvptr.pop()!;
+        l.pvoff.pop()!;
+    }
+    return ();
+}
+fn prov_set<a, b, c>(l: (&a mut L), r: &b [u8], ptr: &c [u8], off: i64) -> unit {
+    prov_clear(&mut l, r);
+    l.pvreg.push(copy(r));
+    l.pvptr.push(copy(ptr));
+    l.pvoff.push(off);
+    return ();
+}
+fn prov_reset<a>(l: (&a mut L)) -> unit {
+    exchange(&mut l.pvreg, u8[][]);
+    exchange(&mut l.pvptr, u8[][]);
+    exchange(&mut l.pvoff, i64[]);
+    return ();
+}
+// Whether memory operand `op` is based on a register with provenance (1) or not (0).
+fn prov_base<a, b>(l: &a L, op: &b [u8]) -> u64 {
+    mut open = op.len();
+    for i in op.len() {
+        if (op[i] == 40) & (open == op.len()) {
+            open = i;
+        }
+    }
+    if (open == op.len()) || (op.len() < open + 3) {
+        return 0;
+    }
+    inner := operands(view(sub(op, open + 1, op.len() - 1)));
+    if inner.len() == 0 {
+        return 0;
+    }
+    base := sub(view(inner[0]), 1, inner[0].len());
+    if eq(view(base), view("rbp")) {
+        return 0;
+    }
+    return u64(prov_find(&l, view(reg_name(view(base)))) != 0);
+}
+// The register an operand names (`%rax` -> `rax`), or empty for anything else.
+fn reg_operand<a>(op: &a [u8]) -> u8[] {
+    if (op.len() > 1) && (op[0] == 37) {
+        name := sub(op, 1, op.len());
+        if !is_xmm(view(name)) && (reg_width(view(name)) == 64) {
+            return reg_name(view(name));
+        }
+    }
+    return u8[];
+}
 fn set_reg<a, b, c>(l: (&a mut L), name: &b [u8], value: &c [u8]) -> unit {
     r := reg_name(name);
     if r.len() == 0 {
         bad(&mut l);
         return ();
     }
+    prov_clear(&mut l, view(r));
     if eq(view(r), view("rdx")) {
         l.rdxdead = 0;
     }
@@ -1163,6 +1248,27 @@ fn address<a, b>(l: (&a mut L), op: &b [u8]) -> u8[] {
             return def(&mut l, view("getelementptr i8, ptr {}, i64 {}"), &u8[][slot, wt]);
         }
         return def(&mut l, view("getelementptr i8, ptr %fbase, i64 {}"), &u8[][dt]);
+    }
+    // A base register known to hold a frame slot's address: the operand is a getelementptr on
+    // the slot (B1).
+    if !eq(view(base), view("rbp")) {
+        pk := prov_find(&l, view(reg_name(view(base))));
+        if pk != 0 {
+            ptr := l.pvptr[pk - 1].copy();
+            mut off = copy(view(""));
+            inum(&mut off, l.pvoff[pk - 1] + d);
+            mut total = off;
+            if inner.len() >= 2 {
+                index := get_reg(&mut l, view(sub(view(inner[1]), 1, inner[1].len())));
+                mut scale = copy(view("1"));
+                if inner.len() == 3 {
+                    scale = copy(view(inner[2]));
+                }
+                scaled := def(&mut l, view("mul i64 {}, {}"), &u8[][index, scale]);
+                total = def(&mut l, view("add i64 {}, {}"), &u8[][scaled, total]);
+            }
+            return def(&mut l, view("getelementptr i8, ptr {}, i64 {}"), &u8[][ptr, total]);
+        }
     }
     mut acc = u8[];
     if eq(view(base), view("rbp")) {
@@ -2406,6 +2512,8 @@ fn fresh_block<a>(l: (&a mut L)) -> u8[] {
     return out;
 }
 fn begin_block<a, b>(l: (&a mut L), name: &b [u8]) -> unit {
+    // A pointer value is only known to dominate the block it was made in.
+    prov_reset(&mut l);
     l.blk = block_id(&mut l, name);
     l.rdxdead = 0;
     put(&mut l.body, name);
@@ -2583,6 +2691,7 @@ fn array_element<a, b>(l: (&a mut L), target: &b [u8]) -> unit {
     return ();
 }
 fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> unit {
+    prov_reset(&mut l);
     // A call hands the argument registers on; passing a stale %rdx is not reading a result.
     l.rdxdead = 0;
     // The argument loads this call was set up with; the next call's start afresh, whichever path
@@ -3719,8 +3828,35 @@ fn instruction<a, b, c>(l: (&a mut L), line: &b [u8], facts: (&c Facts)) -> unit
         so := op_chain_off(&l, view(o[0]));
         v := value(&mut l, view(o[0]), 64);
         hk := header_operand(&l, view(o[1]));
+        srcr := reg_operand(view(o[0]));
+        mut sp = 0;
+        mut sptr = u8[];
+        mut soff: i64 = 0;
+        if srcr.len() != 0 {
+            sp = prov_find(&l, view(srcr));
+            if sp != 0 {
+                sptr = l.pvptr[sp - 1].copy();
+                soff = l.pvoff[sp - 1];
+            }
+        }
         store(&mut l, view(o[1]), view(v), 64);
         set_chain(&mut l, storage_of(&l, view(o[1])), sk, ss, so);
+        dstr := reg_operand(view(o[1]));
+        if (sp != 0) && (dstr.len() != 0) {
+            prov_set(&mut l, view(dstr), view(sptr), soff);
+        }
+        // A load of an address slot: a fresh getelementptr on the slot it points into, which
+        // dominates every block.
+        if (dstr.len() != 0) && (l.split != 0) {
+            for i in l.asy.len() {
+                if eq(view(l.asy[i]), view(o[0])) {
+                    x := l.asx[i].copy();
+                    ptr := address(&mut l, view(x));
+                    prov_set(&mut l, view(dstr), view(ptr), 0);
+                    break;
+                }
+            }
+        }
         if hk != 0 {
             // The fact is established here: this word is the header, so `data` and `len` are read
             // once on this path and the region that follows uses those two words.
@@ -3750,8 +3886,14 @@ fn instruction<a, b, c>(l: (&a mut L), line: &b [u8], facts: (&c Facts)) -> unit
     if eq(view(op), view("leaq")) {
         hk := header_operand(&l, view(o[0]));
         p := address(&mut l, view(o[0]));
-        v := def(&mut l, view("ptrtoint ptr {} to i64"), &u8[][p]);
+        v := def(&mut l, view("ptrtoint ptr {} to i64"), &u8[][p.copy()]);
         store(&mut l, view(o[1]), view(v), 64);
+        // `leaq slot(%rbp)` (a frame slot, split into allocas) or `leaq off(%reg)` through a register
+        // that already has provenance: the destination register now points into that slot.
+        dst := reg_operand(view(o[1]));
+        if (dst.len() != 0) && (l.split != 0) && (has(view(o[0]), view("(%rbp)")) || (prov_base(&l, view(o[0])) != 0)) {
+            prov_set(&mut l, view(dst), view(p), 0);
+        }
         set_chain(&mut l, storage_of(&l, view(o[1])), 0, 0, 0);
         if hk != 0 {
             // The slot's address escapes: the callee may rebind it and it may grow the header.
@@ -3766,12 +3908,34 @@ fn instruction<a, b, c>(l: (&a mut L), line: &b [u8], facts: (&c Facts)) -> unit
         }
         x := value(&mut l, view(o[1]), 64);
         y := value(&mut l, view(o[0]), 64);
+        // `addq/subq $c, %reg` on a register with provenance keeps it, at offset +-c.
+        dst := reg_operand(view(o[1]));
+        mut pk = 0;
+        mut pptr = u8[];
+        mut poff: i64 = 0;
+        mut imm_ok = false;
+        mut imm: i64 = 0;
+        if (dst.len() != 0) && (o[0].len() > 1) && (o[0][0] == 36) {
+            parsed := parse_int(view(sub(view(o[0]), 1, o[0].len())));
+            if parsed.ok != 0 {
+                imm_ok = true;
+                imm = parsed.v;
+            }
+            pk = prov_find(&l, view(dst));
+            if pk != 0 {
+                pptr = l.pvptr[pk - 1].copy();
+                poff = l.pvoff[pk - 1];
+            }
+        }
         if eq(view(op), view("addq")) {
             r := arith(&mut l, view("sadd"), view(x), view(y));
             c := def(&mut l, view("icmp ult i64 {}, {}"), &u8[][copy(view(r)), copy(view(x))]);
             set_flag(&mut l, view("C"), view(c));
             store(&mut l, view(o[1]), view(r), 64);
             chain_arith(&mut l, view(o[1]), view(o[0]), 0);
+            if (pk != 0) && imm_ok {
+                prov_set(&mut l, view(dst), view(pptr), poff + imm);
+            }
             return ();
         }
         r := arith(&mut l, view("ssub"), view(x), view(y));
@@ -3780,6 +3944,9 @@ fn instruction<a, b, c>(l: (&a mut L), line: &b [u8], facts: (&c Facts)) -> unit
         if eq(view(op), view("subq")) {
             store(&mut l, view(o[1]), view(r), 64);
             chain_arith(&mut l, view(o[1]), view(o[0]), 1);
+            if (pk != 0) && imm_ok {
+                prov_set(&mut l, view(dst), view(pptr), poff - imm);
+            }
         }
         return ();
     }
@@ -5143,6 +5310,85 @@ fn frame_split<a>(instrs: (&a u8[][]), deepest: (&a mut u64)) -> u64 {
     exchange(deepest, most);
     return 1;
 }
+// The frame slots of a function that only ever hold the address of one other frame slot (B1): every
+// write to slot Y is `leaq X(%rbp),%R` immediately followed by `movq %R,Y(%rbp)` with the same X,
+// and Y's own address is never taken. A `match` on a two-word option keeps its scrutinee's address
+// so; reading it back must keep pointing into X's alloca, in whatever block it is read.
+fn address_slots<a, b>(l: (&a mut L), instrs: (&b u8[][])) -> unit {
+    mut ys = u8[][];
+    mut xs = u8[][];
+    mut bad_ys = u8[][];
+    for m in instrs.len() {
+        line := view(instrs[m]);
+        mut sp = 0;
+        while (sp < line.len()) && (line[sp] != 32) {
+            sp += 1;
+        }
+        if sp >= line.len() {
+            continue;
+        }
+        op := sub(line, 0, sp);
+        o := operands(view(sub(line, sp + 1, line.len())));
+        if o.len() == 0 {
+            continue;
+        }
+        // The address of a slot taken: it may be written through the pointer.
+        if eq(view(op), view("leaq")) && (o.len() == 2) && has(view(o[0]), view("(%rbp)")) {
+            bad_ys.push(copy(view(o[0])));
+        }
+        last := o[o.len() - 1].copy();
+        if !has(view(last), view("(%rbp)")) {
+            continue;
+        }
+        // A write to slot `last`: the address-store form, or anything else.
+        mut x = u8[];
+        if eq(view(op), view("movq")) && (o.len() == 2) && (m > 0) && (o[0].len() > 1) && (o[0][0] == 37) {
+            prev := view(instrs[m - 1]);
+            mut psp = 0;
+            while (psp < prev.len()) && (prev[psp] != 32) {
+                psp += 1;
+            }
+            if (psp < prev.len()) && eq(view(sub(prev, 0, psp)), view("leaq")) {
+                po := operands(view(sub(prev, psp + 1, prev.len())));
+                if (po.len() == 2) && eq(view(po[1]), view(o[0])) && has(view(po[0]), view("(%rbp)")) {
+                    x = po[0].copy();
+                }
+            }
+        }
+        if x.len() == 0 {
+            bad_ys.push(last.copy());
+            continue;
+        }
+        mut found = false;
+        for i in ys.len() {
+            if eq(view(ys[i]), view(last)) {
+                found = true;
+                if !eq(view(xs[i]), view(x)) {
+                    bad_ys.push(last.copy());
+                }
+            }
+        }
+        if !found {
+            ys.push(last.copy());
+            xs.push(x);
+        }
+    }
+    exchange(&mut l.asy, u8[][]);
+    exchange(&mut l.asx, u8[][]);
+    for i in ys.len() {
+        mut ok = true;
+        for j in bad_ys.len() {
+            if eq(view(bad_ys[j]), view(ys[i])) {
+                ok = false;
+            }
+        }
+        if ok {
+            l.asy.push(ys[i].copy());
+            l.asx.push(xs[i].copy());
+        }
+    }
+    return ();
+}
 // Lowers one function into l.body; l.fail is set when any line is not understood.
 fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), facts: (&c Facts)) -> unit {
     l.body = u8[];
@@ -5303,6 +5549,12 @@ fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), fact
     }
     mut deepest: u64 = 0;
     l.split = frame_split(&instrs, &mut deepest);
+    if l.split != 0 {
+        address_slots(&mut l, &instrs);
+    } else {
+        exchange(&mut l.asy, u8[][]);
+        exchange(&mut l.asx, u8[][]);
+    }
     function_pairs(&mut l, facts, view(f.name));
     // The range facts of this function, one verdict per line (see range_proofs). The frame the
     // front end declared does not always cover every slot the body spills to, so the deepest one
@@ -8733,7 +8985,7 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
             set_add(&mut weak, view(sub(wl, 6, wl.len())));
         }
     }
-    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, pairs: u64[], pair_widths: u64[], fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], edptr: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], hstable: u64[], hesc: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, body_blk: 0, dnames: u8[][], dmap: map_new(16), hmap: map_new(16), cmap: map_new(16), sl_start: u64[], sl_lines: u64[], proof: u64[], rline: 0, ranges: ranges, sigs: set_new(16), nargs: 6, retw: 2, rdxdead: 0, rdxcallee: u8[], curline: u8[], sigerr: u8[], wrong: u8[][], area: u8[][], areaopen: 0, argwritten: 0, ffis: set_new(16), ffimem: set_new(16), entryextra: u8[], outer: u8[][], outeropen: 0, why: host::env(view("GRAIL_LLVM_WHY")), grail_bodies: set_new(16), xpend: 0, xstale: 18446744073709551615 };
+    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, pairs: u64[], pair_widths: u64[], fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], edptr: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], hstable: u64[], hesc: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, body_blk: 0, dnames: u8[][], dmap: map_new(16), hmap: map_new(16), cmap: map_new(16), sl_start: u64[], sl_lines: u64[], proof: u64[], rline: 0, ranges: ranges, sigs: set_new(16), nargs: 6, retw: 2, rdxdead: 0, pvreg: u8[][], pvptr: u8[][], pvoff: i64[], asy: u8[][], asx: u8[][], rdxcallee: u8[], curline: u8[], sigerr: u8[], wrong: u8[][], area: u8[][], areaopen: 0, argwritten: 0, ffis: set_new(16), ffimem: set_new(16), entryextra: u8[], outer: u8[][], outeropen: 0, why: host::env(view("GRAIL_LLVM_WHY")), grail_bodies: set_new(16), xpend: 0, xstale: 18446744073709551615 };
     // A function whose address is taken (`NAME(%rip)`, or named by data such as a vtable) is
     // called through a pointer by code that does not know its signature, so it keeps the six-word
     // form: an indirect call passes six words and reads rax:rdx, and LLVM must never see a call
