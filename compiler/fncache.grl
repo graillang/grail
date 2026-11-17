@@ -116,9 +116,16 @@ pub fn rs<a>(r: (&a mut Read)) -> u8[] {
 // only ever names a file or stands for a text inside a key: the key record inside the file is what
 // decides a hit, so a collision of file names costs a cache entry, never correctness.
 pub fn hash<a>(data: &a [u8]) -> u8[] {
+    // One pass over the bytes; the second half is the first mixed again with the length (the
+    // finaliser of XXH64), which is enough for a name: the key inside the file decides a hit.
+    h := xxhash::hash64(view(data), 1);
+    mut g = h ^ data.len() ^ 11400714785074694791;
+    g = wrapping_mul(g ^ (g >> 33), 14029467366897019727);
+    g = wrapping_mul(g ^ (g >> 29), 1609587929392839161);
+    g = g ^ (g >> 32);
     mut out = u8[];
-    hex64(&mut out, xxhash::hash64(view(data), 1));
-    hex64(&mut out, xxhash::hash64(view(data), 2));
+    hex64(&mut out, h);
+    hex64(&mut out, g);
     return out;
 }
 
