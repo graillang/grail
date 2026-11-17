@@ -595,6 +595,8 @@ struct C {
     temps: u64[],
     // The result adapters this object needs (box_result_thunk): closure * 4 + words.
     box_thunks: u64[],
+    // The parallel_for_zip adapters this object needs (zip_adapter): closure * 16 + slices.
+    zip_adapters: u64[],
     // Per type id: 0 not yet known, else 1 + (1 if the type is a plain record) + (2 if it is a
     // record that stores a plain record inline).
     layout_memo: u64[],
@@ -33635,6 +33637,194 @@ fn result_adapter<a>(c: (&a mut C), kind: u64, args: u64, words: u64) -> u8[] {
     }
     return name;
 }
+// The adapter rt_parallel_zip calls per piece: %rdi is a block {callback, environment, view 1 ..
+// view n}; the callback is called with the environment first when it is a closure (the closure ABI:
+// the address of the slot holding the object) and then the n views. One per shape, shared.
+fn zip_adapter<a>(c: (&a mut C), closure: bool, slices: u64) -> u8[] {
+    mut name = copy_bytes(view("grail_zip_adapter_"));
+    decimal(&mut name, u64(closure));
+    name.push(95);
+    decimal(&mut name, slices);
+    code := u64(closure) * 16 + slices;
+    mut known = false;
+    for i in c.zip_adapters.len() {
+        if c.zip_adapters[i] == code {
+            known = true;
+        }
+    }
+    if !known {
+        c.zip_adapters.push(code);
+    }
+    return name;
+}
+fn emit_zip_adapters<a>(c: (&a mut C)) -> unit {
+    if c.zip_adapters.len() == 0 {
+        return ();
+    }
+    o(&mut c, view(".text\n"));
+    for i in c.zip_adapters.len() {
+        code := c.zip_adapters[i];
+        closure := code / 16 == 1;
+        slices := code % 16;
+        name := zip_adapter(&mut c, closure, slices);
+        weak_def(&mut c);
+        push_bytes(&mut c.out, view(name));
+        c.out.push(10);
+        push_bytes(&mut c.out, view(name));
+        o(&mut c, view(":\npushq %rbp\nmovq %rsp,%rbp\nmovq %rdi,%rax\n"));
+        mut reg = 0;
+        if closure {
+            o(&mut c, view("movq 8(%rax),%rdi\n"));
+            reg = 1;
+        }
+        for k in slices {
+            o(&mut c, view("movq "));
+            on(&mut c, 16 + k * 8);
+            o(&mut c, view("(%rax),"));
+            o(&mut c, view(argreg(reg)));
+            c.out.push(10);
+            reg += 1;
+        }
+        o(&mut c, view("movq (%rax),%rax\ncall *%rax\nleave\nret\n"));
+    }
+    return ();
+}
+// parallel_for_zip(grain, f, s1, .., sn) (docs/design/simd-layout-parallel-loops.md 4.2): one split
+// of n slices - each `&mut [T]` or `&[T]`, element types independent - into pieces of `grain`
+// elements, piece k being the same index range of every slice, and f(piece of s1, .., piece of sn)
+// per piece on the pool's workers. Disjointness is constructed, as for parallel_split: each argument
+// takes its loan at the call, so naming one vector twice with one `&mut` is the ordinary borrow
+// error, and nothing the callback captures can reach them. The lengths are checked equal once.
+fn parallel_zip_builtin<a>(c: (&a mut C)) -> Val {
+    grain := expr(&mut c, 0);
+    expect(&mut c, view(","));
+    callee := expr(&mut c, 0);
+    input := callee.t;
+    mut slices = Val[];
+    while eat(&mut c, view(",")) {
+        if is(&mut c, view(")")) {
+            break;
+        }
+        slices.push(expr(&mut c, 0));
+    }
+    expect(&mut c, view(")"));
+    require_type(&mut c, grain.ty, 0);
+    if (slices.len() == 0) || (4 < slices.len()) {
+        fail(&mut c, view("parallel_for_zip takes one to four slices after the grain and the callback"));
+    }
+    mut widths = u64[];
+    for i in slices.len() {
+        sty := slices[i].ty;
+        k := ty_kind(&mut c, sty);
+        if (c.raw == 0) && (k != 27) && (k != 5) {
+            fail(&mut c, view("parallel_for_zip takes slices: write &mut data[a: b] or &data[a: b]"));
+        }
+        mut w = 8;
+        if k == 5 {
+            w = 1;
+        } else {
+            elem := ty_arg(&mut c, sty);
+            // An exclusive piece is written on a worker (transferable); a shared one is read from
+            // several at once (shareable).
+            if ty_mode(&mut c, sty) != 0 {
+                require_capability_named(&mut c, elem, 0, view("parallel_for_zip element"));
+            } else {
+                require_capability_named(&mut c, elem, 1, view("parallel_for_zip element"));
+            }
+            if contains_task(&mut c, elem, 0) {
+                fail(&mut c, view("parallel_for_zip cannot hand Task or job handles to workers"));
+            }
+            if flat_bytes(&mut c, elem) != 0 {
+                w = flat_bytes(&mut c, elem);
+            } else if narrow_code(&mut c, elem) != 0 {
+                w = 4;
+            }
+        }
+        widths.push(w);
+    }
+    function := deref(&mut c, callee);
+    mut fty = function.ty;
+    // A generic callable (`F: Fn<Share>(..) -> unit`): its bound in the template, the closure or
+    // function it is in a specialisation.
+    if (ty_kind(&mut c, fty) != 12) && (ty_kind(&mut c, fty) != 20) {
+        bound := param_callable(&mut c, fty);
+        if bound != NO_TYPE {
+            fty = bound;
+        }
+    }
+    closure := ty_kind(&mut c, fty) == 20;
+    if (ty_kind(&mut c, fty) != 12) & !closure {
+        fail(&mut c, view("parallel_for_zip requires a callable"));
+    }
+    signature := type_args(&mut c, fty);
+    if signature.len() != slices.len() {
+        mut msg = copy_bytes(view("parallel_for_zip callback takes one slice per argument ("));
+        decimal(&mut msg, slices.len());
+        push_bytes(&mut msg, view(" here), each the argument's own type"));
+        fail(&mut c, view(msg));
+    }
+    // Each callback parameter is the argument's slice: same kind and mode, same element. Lifetimes
+    // are not compared - a callable bound is higher-ranked in them, and every piece is a fresh
+    // reborrow the call outlives.
+    for i in slices.len() {
+        a := slices[i].ty;
+        p := signature[i];
+        mut same_slice = (ty_kind(&mut c, a) == ty_kind(&mut c, p)) && (ty_mode(&mut c, a) == ty_mode(&mut c, p));
+        if same_slice && (ty_kind(&mut c, a) == 27) {
+            same_slice = same_type(&mut c, base_type(&mut c, ty_arg(&mut c, a)), base_type(&mut c, ty_arg(&mut c, p))) != 0;
+        }
+        if !same_slice && (c.raw == 0) {
+            require_type(&mut c, a, p);
+        }
+    }
+    if ty_kind(&mut c, ty_arg(&mut c, fty)) != 2 {
+        fail(&mut c, view("parallel_for_zip callback returns unit: write the elements"));
+    }
+    require_parallel_closure(&mut c, fty, 1, view("closure capture"));
+    observe(&mut c, function.t);
+    mut env = imm(&mut c, 0);
+    if closure {
+        o(&mut c, view("leaq "));
+        stack_slot(&mut c, function.t);
+        o(&mut c, view(",%rax\n"));
+        env = save(&mut c);
+    }
+    get(&mut c, function.t, view("%rax"));
+    if closure {
+        o(&mut c, view("movq (%rax),%rax\n"));
+    }
+    target := save(&mut c);
+    // The {view, width} pairs, in frame words of their own.
+    pairs := frame_alloc(&mut c, slices.len() * 2);
+    for i in slices.len() {
+        observe(&mut c, slices[i].t);
+        get(&mut c, slices[i].t, view("%rax"));
+        get(&mut c, pairs, view("%rcx"));
+        o(&mut c, view("movq %rax,"));
+        on(&mut c, i * 16);
+        o(&mut c, view("(%rcx)\nmovq $"));
+        on(&mut c, widths[i]);
+        o(&mut c, view(",%rax\nmovq %rax,"));
+        on(&mut c, i * 16 + 8);
+        o(&mut c, view("(%rcx)\n"));
+    }
+    o(&mut c, view("leaq "));
+    push_bytes(&mut c.out, view(zip_adapter(&mut c, closure, slices.len())));
+    o(&mut c, view("(%rip),%rax\n"));
+    adapter := save(&mut c);
+    mut args = two(pairs, imm(&mut c, slices.len()));
+    args.push(grain.t);
+    args.push(adapter);
+    args.push(target);
+    args.push(env);
+    slot := invoke(&mut c, view("rt_parallel_zip"), args);
+    for i in slices.len() {
+        release_temporary(&mut c, slices[i].t);
+    }
+    release_temporary(&mut c, input);
+    close_loans(&mut c);
+    return own(&mut c, slot, 1);
+}
 fn emit_box_thunks<a>(c: (&a mut C)) -> unit {
     if c.box_thunks.len() == 0 {
         return ();
@@ -34046,6 +34236,9 @@ fn builtin_id<a>(n: &a [u8]) -> u64 {
     }
     if same(view(n), view("parallel_split")) {
         return 43;
+    }
+    if same(view(n), view("parallel_for_zip")) {
+        return 67;
     }
     if same(view(n), view("parallel_spawn")) {
         return 44;
@@ -36378,6 +36571,9 @@ fn builtin<a>(c: (&a mut C), id: u64) -> Val {
             o(&mut c, view("atom.spin\n"));
         }
         return val(imm(&mut c, 0), intern(&mut c, 2, 0));
+    }
+    if id == 67 {
+        return parallel_zip_builtin(&mut c);
     }
     if id == 42 {
         // `cnull()`: the null data pointer, for optional C pointer parameters.
@@ -56483,6 +56679,7 @@ pub fn main() -> u64 {
         caddr: u64[],
         interior: u64[],
         box_thunks: u64[],
+        zip_adapters: u64[],
         word_refs: u64[],
         temps: u64[],
         result_dest: 0,
@@ -57496,6 +57693,7 @@ pub fn main() -> u64 {
     jobs::phase(view("closures"));
     emit_fn_thunk(&mut c);
     emit_box_thunks(&mut c);
+    emit_zip_adapters(&mut c);
     emit_drops(&mut c);
     jobs::phase(view("drop-helpers"));
     // A drop helper can be the first thing to ask for a generic `Drop` implementation's

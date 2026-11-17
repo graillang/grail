@@ -486,6 +486,13 @@ fn rt_fail_body(kind: u64, a: u64, b: u64, buf: u64, n: u64) -> u64 {
         at = rt_fail_put(buf, at, view("mutex poisoned: its holder failed"));
     } else if kind == 18 {
         at = rt_fail_put(buf, at, view("a parallel split needs a grain of at least one element"));
+    } else if kind == 19 {
+        // parallel_for_zip: argument `a` (counting from 1) is `b` elements long, the first one is not.
+        at = rt_fail_put(buf, at, view("parallel_for_zip: slice argument "));
+        at = rt_fail_num(buf, at, a);
+        at = rt_fail_put(buf, at, view(" has length "));
+        at = rt_fail_num(buf, at, b);
+        at = rt_fail_put(buf, at, view(", which is not the first slice's"));
     } else {
         at = rt_fail_put(buf, at, view("the program aborted"));
     }
@@ -4745,12 +4752,17 @@ fn rt_job_split(d: u64, lo: u64, hi: u64, kind: u64) -> u64 {
         if kind == 0 {
             return rt_job_map_leaf(d, lo);
         }
+        if kind == 2 {
+            return rt_job_zip_leaf(d, lo);
+        }
         return rt_job_chunk_leaf(d, lo);
     }
     mid := lo + (hi - lo) / 2;
     mut r = 0;
     if kind == 0 {
         r = rt_job_fork(rt_job_split_map, d, mid, hi);
+    } else if kind == 2 {
+        r = rt_job_fork(rt_job_split_zip, d, mid, hi);
     } else {
         r = rt_job_fork(rt_job_split_chunks, d, mid, hi);
     }
@@ -4762,6 +4774,87 @@ fn rt_job_split_map(d: u64, lo: u64, hi: u64) -> u64 {
 }
 fn rt_job_split_chunks(d: u64, lo: u64, hi: u64) -> u64 {
     return rt_job_split(d, lo, hi, 1);
+}
+fn rt_job_split_zip(d: u64, lo: u64, hi: u64) -> u64 {
+    return rt_job_split(d, lo, hi, 2);
+}
+// Zip descriptor (a job record used as storage, docs/design/simd-layout-parallel-loops.md 4.2):
+//   0 adapter   8 callback   16 environment   24 slices {view, width} pairs   40 count   48 grain
+//   56 number of slices
+// Leaf (d, k) covers [k * grain, min(count, k * grain + grain)) of every slice: one fresh view per
+// slice over the same index range, handed to the callback through the compiler's adapter
+// (zip_adapter), which takes one block {callback, environment, view 1 .. view n} and calls the
+// callback with the views as its arguments. The callback owns and frees each view, as a slice
+// parameter always is; the block is freed here.
+fn rt_job_zip_leaf(d: u64, k: u64) -> u64 {
+    n := raw_load(d + 40);
+    grain := raw_load(d + 48);
+    start := k * grain;
+    if n <= start {
+        return 0;
+    }
+    mut stop = start + grain;
+    if n < stop {
+        stop = n;
+    }
+    count := raw_load(d + 56);
+    pairs := raw_load(d + 24);
+    block := rt_alloc((2 + count) * 8);
+    raw_store(block, raw_load(d + 8));
+    raw_store(block + 8, raw_load(d + 16));
+    mut i = 0;
+    while i < count {
+        src := raw_load(pairs + i * 16);
+        width := raw_load(pairs + i * 16 + 8);
+        slot := rt_view_record();
+        raw_store(slot, raw_load(src) + start * width);
+        raw_store(slot + 8, stop - start);
+        raw_store(block + 16 + i * 8, slot);
+        i += 1;
+    }
+    raw_call2(raw_load(d), block, 0);
+    rt_free(block);
+    return stop - start;
+}
+// parallel_for_zip: `count` slices (an array of {view, width} pairs at `pairs`), all the same length
+// - checked here, once - cut into pieces of `grain` elements; piece k is the same index range of
+// every slice. As for rt_parallel_split the split is constructed from (n, grain) alone and the
+// pieces must cover n exactly. The caller holds every slice's loan until this returns.
+fn rt_parallel_zip(pairs: u64, count: u64, grain: u64, adapter: u64, f: u64, env: u64) -> u64 {
+    n := rt_len(raw_load(pairs));
+    mut i = 1;
+    while i < count {
+        m := rt_len(raw_load(pairs + i * 16));
+        if m != n {
+            rt_fail(19, i + 1, m);
+        }
+        i += 1;
+    }
+    if n == 0 {
+        return 0;
+    }
+    if grain == 0 {
+        rt_fail(18, 0, 0);
+    }
+    leaves := (n + grain - 1) / grain;
+    rt_jobs_sched();
+    d := rt_job_new();
+    raw_atomic_store(d + 32, 3);
+    raw_store(d, adapter);
+    raw_store(d + 8, f);
+    raw_store(d + 16, env);
+    raw_store(d + 24, pairs);
+    raw_store(d + 40, n);
+    raw_store(d + 48, grain);
+    raw_store(d + 56, count);
+    rt_region_enter();
+    covered := rt_job_split(d, 0, leaves, 2);
+    rt_region_leave();
+    if covered != n {
+        rt_abort();
+    }
+    rt_job_release(d);
+    return 0;
 }
 // Results land in their input slots, so the order of `out` is the input order whatever order the
 // leaves finish in. Every fork is joined before this returns, so no worker can still write into
