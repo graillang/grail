@@ -706,3 +706,99 @@ system call, and does no write to a shared line unless something was stolen.
 **Order:** 2 (the wake rule; largest, and independent of everyone), 1, 3, 4, 5, then 6 with stage 7.
 Each step is re-measured with `bench/sched.grl`, `bench/frame.grl` and the rivals' tool, and
 reported per row against rayon and TBB.
+
+### Item 1 as built (gaps12-join) and the counters
+
+`parallel_with(first, second, combine)` now hands both results to a plain function, and
+`pool::join` is `parallel_with(first, second, pair_of<A,B>)`: no option, no inner closure, and
+`second` returns its value. Removed: allocations 3, 4 and 5 of the six above.
+
+Instructions per operation (`tools/sched-ic.sh`; callgrind, one worker, (2N - N) / N). Load does not
+move these numbers:
+
+| | Grail before (d58fa04) | Grail item 1 | rayon | oneTBB |
+|---|---:|---:|---:|---:|
+| join on a worker | 4,940 | 3,434 | 153 | 713 |
+| job spawn+wait | 2,663 | 2,663 | 1,740 | 894 |
+| fib(20) by join (88 joins) | 929,606 | 795,167 | 230,743 | 211,106 |
+| ... of which per join | 5,091 | 3,563 | ~1,100 | ~900 |
+| fib(20) serial | 481,618 | | C: 132,146 | |
+
+**The leaf is 3.6x C, and that is not the scheduler.** Grail's serial `fib(20)` takes 481,618
+instructions where C's takes 132,146. Before any join, fib-by-join is therefore about 2x the rivals
+from the leaf alone. That is code generation for a recursive function (frame set-up, checked
+arithmetic) and belongs to the code-generation owners. The scheduler's share is the per-join
+column: 3,563 instructions against rayon's 1,100 and TBB's 900. Most of what is left is the two
+closure environments (`rt_rec`) and the `Pair` (call_abi S6, unboxed 3c), then items 3 and 4.
+
+### Items 3-5 as built (gaps12-join), and where the counters stand
+
+- **Item 3:** a forker that runs its own fork publishes with a release store (no swap), there is
+  one worker lookup per fork, and the scheduler's fast path is one load.
+- **Item 4:** the external slot (scheduler.md, "The external slot"). Join from main went from 6,146
+  to 3,205 instructions, and from about 1.8 us to about 450 ns wall time at load 20-30.
+- **Item 5:** a job handle's closure needs no heap box; the job's frame holds the word the ABI
+  reads. Task records still come from the allocator (the burst row): their lifetime belongs to the
+  scope and the gaps12-sync waiter words, which is the next piece.
+
+| instructions | d58fa04 | gaps12-join now | rayon | oneTBB |
+|---|---:|---:|---:|---:|
+| join on a worker | 4,940 | ~3,100 | 153 | 713 |
+| join from main | 6,146 | 3,205 | (injected) | 719 |
+| job spawn+wait | 2,663 | 1,920 | 1,740 | 894 |
+| fib(20) by join, per join | 5,091 | ~3,250 | ~1,100 | ~900 |
+
+Of the ~3,100 left in a join on a worker, about 1,300 are the three remaining allocations (two
+closure environments and the `Pair`: call_abi S6 and unboxed 3c). Most of the rest is calls between
+small runtime functions that the native backend does not inline (`rt_job_stack`, `rt_list_set`,
+`rt_current`, `rt_worker_self`: 30-50 instructions each, several times per join). Inlining them,
+or the LLVM build doing so (item 6), is what gets the scheduler's own share to rayon's level.
+
+### Item 6 as built: why LLVM was slower, and the fix
+
+A function that reads the thread pointer contains `movq %fs:0` or `movq %fs:rt_tls_record@tpoff`,
+which the lifter did not handle. So every runtime accessor that touches the thread record
+(`rt_current`, `rt_worker_self`, `rt_job_block`, `rt_job_stack` and everything that calls them
+without inlining) stayed native, and each call from lifted code crossed the native-convention
+boundary: a join on a worker cost 5,572 instructions under LLVM against about 3,100 native. The
+lifter now reads `%fs:0` as `load i64, ptr addrspace(257) null`, the record word as an
+initial-exec thread-local (`@rt_tls_record`, defined by the native part), and `sym+offset(%rip)`
+operands as a byte offset from the symbol. The accessors lift, and LLVM inlines them: **a join on a
+worker is 1,807 instructions under LLVM** (native ~3,100). The ordered atomics are already in (stage
+7, merged earlier), so no `fence seq_cst` remains on these paths.
+
+**One form with gaps12-sync.** The read is lifted as thread_alloc's caaf9c6 does it: `call i64 asm
+sideeffect "movq %fs:..., $0"`. A plain `load` from addrspace(257) is not safe, because LLVM may
+merge two reads across a call, and a green task can resume on another thread between them. The
+write of the record word is lifted the same way, `rt_tls_record` is `.globl .hidden` so the LLVM
+object links, and `sym+offset(%rip)` operands become a GEP; that is the same text as caaf9c6, so the
+merge is one implementation. `sched-thread-pointer-read-after-migration` pins the rule: 400 tasks
+each read their worker, sleep, and read again, and at least one has moved. Measured: 1,751
+instructions per join on a worker (1,807 with the load form).
+
+**An LLVM build carries no statement table**, so no failure site can be named in one. That is the
+cause of sched-job-failure-is-contained, sched-join-failure-names-the-user-join and sync's
+mutex-poisoned case failing under LLVM, before and after this change. The two sched cases are
+native-only until the LLVM backend emits a table; that gap belongs to the LLVM backend's owner.
+
+**Item 1 is undone for now (merging main).** Unboxed records landed: a `Pair` is now a two-word
+value returned in two registers, and `rt_parallel_with` calls its combining function with
+`raw_call2`, which keeps only the first. Combining into a `Pair` in the runtime crashed
+(`pool-join-second-fnmut`). `pool::join` writes `second`'s result through a slot again (the
+option, the `Some` and the inner closure are back: allocations 3-5), and the combining function
+returns only `first`'s word. The fix is a two-word return from the runtime - `rt_parallel_with`
+returning both registers, or the builtin calling the combining function itself through the normal
+call path. That needs the unboxed owner's two-register contract, so it is coordinated with them.
+
+### What a join's ~3,500 instructions are, on main (ea22e51)
+
+`tools/sched-ic.sh` MODE 0 (a join of two trivial branches on a worker, one worker), split by
+function (callgrind self cost per join):
+
+| component | instructions | removed by |
+|---|---:|---|
+| three closure environments (`rt_rec`, the per-thread allocator, their frees) | 1,273 | call_abi S6 (frame environments for non-escaping closures) |
+| small runtime accessors, each a call and frame around 2-6 instructions of work (`rt_current` x4, `rt_job_block` x4, `rt_list_set` x4, `rt_job_stack` x3, `rt_job_deque` x2, `rt_list_head` x2, `rt_job_claim_word`, `rt_jobs_sched`, `rt_full_fence`) | 584 | cross-module inlining (/root/xinline); the LLVM build already does it |
+| fork, claim, run, publish, release (deque push/pop, the claim CAS, record recycling, the wake check) | 1,059 | the scheduler's own; with inlining it should fall to a few hundred |
+| the program: `pool::join`'s body, the two closure bodies, the slot, the loop | 633 | code generation (S4/S5, inlining) |
+| **total** | **3,549** | rayon 153, oneTBB 713 |

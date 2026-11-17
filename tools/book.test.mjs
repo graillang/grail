@@ -125,6 +125,8 @@ test('performance charts render from a results file: SVG, direction captions, ra
   expect(html).toContain('0123456789ab (fixture)');
   expect(html).toContain('<text x="0" y="41" class="perf-axis perf-source">Grail 0123456789ab (fixture); measured 2026-11-16, load average 1.00 on 4 CPUs.</text>'); // provenance inside each chart
   expect(html).toContain('bun tools/bench-rivals.mjs --runs 3');
+  expect(html).toContain('world, the slowest release run: <code>f_world_generate</code> 61.5 %'); // abundance-perf's hot spots
+  expect(html).toContain('Did not build or run</dt><dd>asset (current): grail: an interface carries a number wider than 64 bits');
   expect(html).not.toMatch(/<script|https?:\/\/(?!www\.w3\.org\/2000\/svg)/);
   expect(html).not.toContain('\n'); // one line: a raw HTML block markdown leaves alone
   expect(perfBlock('perf-results#release', join(root, 'tools/fixtures'))).toContain('<svg ');
@@ -136,11 +138,12 @@ test('the Performance chapter renders every committed result file', () => {
   const chapter = book.chapters.find(c => c.slug === 'performance');
   expect(chapter).toBeDefined();
   const text = readFileSync(sourcePath(chapter.source), 'utf8');
-  for (const name of ['bench-rivals', 'compile-rivals', 'sched-rivals']) {
+  for (const name of ['bench-rivals', 'engine', 'abundance', 'compile-rivals', 'sched-rivals']) {
     expect(existsSync(join(root, 'bench/results', `${name}.json`))).toBe(true);
     expect(text).toContain(`{{perf:${name}`);
   }
   const html = expand(text, book);
-  for (const id of ['chart-release', 'chart-dev', 'chart-compile', 'chart-scheduler']) expect(html).toContain(`id="${id}"`);
+  for (const id of ['chart-bench-rivals-release', 'chart-bench-rivals-dev', 'chart-engine-release', 'chart-engine-dev', 'chart-compile-rivals-compile', 'chart-sched-rivals-scheduler']) expect(html).toContain(`id="${id}"`);
+  expect(new Set(html.match(/id="chart-[^"]+"/g)).size).toBe(html.match(/id="chart-[^"]+"/g).length); // no id twice
   expect(html).toContain('higher is better');
 });
