@@ -3628,6 +3628,21 @@ fn win_unwind_line<a, b>(u: (&a mut WinUnwind), text: &b [u8], a: u64, e: u64) -
                 frame = u.frames[u.frame_at];
             }
             u.frame_at = u.frame_at + 1;
+            // `subq $.Fn+N,%rsp`: the optimiser folded the callee-saved area into the frame
+            // adjustment (docs/design/call-abi.md S4), so the allocation is N bytes more.
+            mut plus = a;
+            while (plus < e) && (text[plus] != 43) {
+                plus += 1;
+            }
+            if plus < e {
+                mut extra = 0;
+                mut d = plus + 1;
+                while (d < e) && (47 < text[d]) && (text[d] < 58) {
+                    extra = extra * 10 + u64(text[d]) - 48;
+                    d += 1;
+                }
+                frame = frame + extra;
+            }
             push_line(&mut u.out, view(text), a, e);
             put_text(&mut u.out, view(".seh_stackalloc "));
             put_number(&mut u.out, frame);
