@@ -22,6 +22,17 @@ if [ "${1:-}" != --force ] && [ -x "$out" ] && "$out" --version | grep -q '(grai
   "$out" --version | head -1
   exit 0
 fi
+missing=""
+for t in cc make ninja pkg-config python3 curl patch strip xz bison flex; do
+  command -v "$t" > /dev/null 2>&1 || missing="$missing $t"
+done
+command -v pkg-config > /dev/null 2>&1 && ! pkg-config --exists glib-2.0 && missing="$missing glib-2.0"
+if [ -n "$missing" ]; then
+  echo "build.sh: missing:$missing" >&2
+  echo "  Ubuntu/Debian: apt-get install build-essential ninja-build pkg-config libglib2.0-dev libpcre2-dev flex bison python3-venv" >&2
+  echo "  Arch: pacman -S base-devel ninja glib2" >&2
+  exit 1
+fi
 mkdir -p "$work" "$(dirname "$out")"
 cd "$work"
 fetch() {

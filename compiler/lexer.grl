@@ -5,12 +5,15 @@ module lexer;
 // uses its ASCII byte value: (){}[]<>,:;=+-*%&^.!?
 // Multibyte punctuation: 256 ->, 257 =>, 258 ==, 259 !=, 260 ::, 261 :=, 262 +=, 263 -=,
 // 264 *=, 265 /=, 266 %=, 267 **, 268 **=, 269 <=, 270 >=, 273 &&, 274 ||.
-// All spans borrow source, including the empty EOF span at len(source).
-pub struct Token<a> {
+// A token is the byte range [start, end) of the source, the EOF token the empty range at
+// len(source), and where it starts, 1-based (`col` counts bytes). It holds no view of the source:
+// one per token was an allocation per token, and the parser keeps these tokens as they are.
+pub struct Token {
     kind: u64,
-    span: &a [u8],
     start: u64,
-    end: u64
+    end: u64,
+    line: u64,
+    col: u64
 }
 
 fn letter(c: u64) -> bool {
@@ -112,10 +115,14 @@ fn pair_kind(c: u64, d: u64) -> u64 {
 // A literal the scanner cannot finish is a token the compiler reports: 998 an ill-formed character
 // literal, 996 an unclosed string, 995 a string holding a raw control byte. Nothing in here aborts
 // on user input - an assert on source text is a compiler bug, not a refusal (docs/diagnostics.md).
-pub fn tokenize<a>(source: &a [u8]) -> Token<a>[] {
-    mut tokens = Token<a>[];
+pub fn tokenize<a>(source: &a [u8]) -> Token[] {
+    mut tokens = Token[];
     size := source.len();
     mut i = 0;
+    // The line and column of byte `at`, carried forward to each token's start.
+    mut at = 0;
+    mut line = 1;
+    mut col = 1;
     while i < size {
         c := source[i];
         if whitespace(c) {
@@ -408,8 +415,26 @@ pub fn tokenize<a>(source: &a [u8]) -> Token<a>[] {
                 }
             }
         }
-        tokens.push(Token { kind: kind, span: source[start: i], start: start, end: i });
+        while at < start {
+            if source[at] == 10 {
+                line += 1;
+                col = 1;
+            } else {
+                col += 1;
+            }
+            at += 1;
+        }
+        tokens.push(Token { kind: kind, start: start, end: i, line: line, col: col });
     }
-    tokens.push(Token { kind: 0, span: source[size: size], start: size, end: size });
+    while at < size {
+        if source[at] == 10 {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
+        at += 1;
+    }
+    tokens.push(Token { kind: 0, start: size, end: size, line: line, col: col });
     return tokens;
 }
