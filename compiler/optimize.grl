@@ -2381,6 +2381,15 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
     xmm_memops(&mut o, view(s), last);
     index_cse(&mut o, view(s), last);
     dead_defs(&mut o, view(s), first, last);
+    // Slots read only by text emitted outside the lines: a stable sequence's slot (item 6).
+    mut keep = u64[];
+    for k in dslot.len() {
+        if dloop[k] != 0 {
+            keep.push(dslot[k]);
+        }
+    }
+    late_slots(&mut o, view(s), last, &keep);
+    dead_defs(&mut o, view(s), first, last);
     newframe := compact(&mut o, view(s), prologue, ns);
     // Rule 3 (call ABI S4): of the cleared range, only the slots that may be read before written.
     mut zkeep = u64[];
@@ -4985,6 +4994,61 @@ fn index_cse<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
 }
 fn all_regs_mask() -> u64 {
     return 65535;
+}
+// After the late passes (index CSE, array addressing, constant multiplies) some frame slots are
+// written and never read again: `movq %rax,-952(%rbp)` keeping an index nobody reloads. A store
+// followed at once by a load of the same slot is a register move, and a plain store to a slot that
+// no line reads - not as a source, not as the destination of anything but a move, not by `leaq`,
+// not as a word of a two-word value, and not by text emitted outside the lines (`keep`, item 6's
+// loop-entry load) - goes.
+fn late_slots<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64, keep: (&u64[])) {
+    for i in last {
+        if (o.del[i] != 0) || (o.op[i] != 1) || (o.k0[i] != 1) || (o.k1[i] != 2) {
+            continue;
+        }
+        j := next_live(&o, i, last);
+        if (j < last) && (o.op[j] == 1) && (o.k0[j] == 2) && (o.v0[j] == o.v1[i]) && (o.k1[j] == 1) {
+            if o.v1[j] == o.v0[i] {
+                kill(&mut o, j);
+            } else {
+                set_operand(&mut o, j, 0, 1, o.v0[i]);
+            }
+        }
+    }
+    ns := o.maxslot / 8 + 1;
+    mut read = u64[];
+    for n in ns + 1 {
+        read.push(0);
+    }
+    for k in keep.len() {
+        if keep[k] < read.len() {
+            ir::put(&mut read, keep[k], 1);
+        }
+    }
+    for n in o.pair.len() {
+        if (n < read.len()) && (o.pair[n] != 0) {
+            ir::put(&mut read, n, 1);
+        }
+    }
+    for i in last {
+        if o.del[i] != 0 {
+            continue;
+        }
+        if (o.k0[i] == 2) && (o.v0[i] / 8 < read.len()) {
+            ir::put(&mut read, o.v0[i] / 8, 1);
+        }
+        if (o.k1[i] == 2) && (o.v1[i] / 8 < read.len()) && !((o.op[i] == 1) || (o.op[i] == 2)) {
+            ir::put(&mut read, o.v1[i] / 8, 1);
+        }
+        // An instruction the optimiser does not know reaches a slot only by naming it (counted above)
+        // or through an address `leaq` took (a read of that slot, above): the frame clearing's `rep
+        // stosq` writes every slot and reads none.
+    }
+    for i in last {
+        if (o.del[i] == 0) && ((o.op[i] == 1) || (o.op[i] == 2)) && (o.k1[i] == 2) && (o.v1[i] / 8 < read.len()) && (read[o.v1[i] / 8] == 0) {
+            kill(&mut o, i);
+        }
+    }
 }
 fn name_hash<b>(s: &b [u8], a: u64, e: u64) -> u64 {
     mut h = 0;
