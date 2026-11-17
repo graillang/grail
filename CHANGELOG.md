@@ -37,7 +37,8 @@
   build reads no source, the compiler's `--print-inputs` answer is remembered under the stamps of
   what it read (`inputs/`), and a tool's `--version` is asked once per binary (`tool-id/`). A module
   run with in-process assembly is one process, not a `grail unit-build` wrapper and the compiler.
-  `host::read_file` reads straight into its result instead of pushing byte by byte. With the dev
+  `host::read_file` reads straight into its result instead of pushing byte by byte, sized from the
+  file's own size. With the dev
   compiler and GRAIL_JOBS=1, in user-space instructions: hello no-op build 0.235G -> 0.008G, hello
   check 0.310G -> 0.058G, hello build 0.453G -> 0.140G. `grail cache prune` drops `fp/`, `inputs/`
   and `tool-id/` whole.
