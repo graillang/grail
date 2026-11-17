@@ -367,3 +367,23 @@ corpus runs at the same speed.
 
 Refinements on generic `T`, on vector elements (`u64[] where all < 10`), quantifiers, and
 user-defined predicate functions. Each fits the design later.
+
+## Bounds-check facts: working state (prover_wrap, 2026-11-17)
+
+Branch `gaps15-bce` (shared with /root/remove_forwarders; rebase before pushing, never force-push).
+Submitted to the landing service; head at the time of writing `be799a1` plus this note.
+
+Done (index checks in each benchmark's own functions, `tools/checks-native.mjs`):
+- push-loop length (`for i in n { v.push(x) }` from empty gives `v.len == n`): ecs 18 -> 0;
+- interval reading of `t * L + ... + c` against a constant or known length: nbody 24 -> 0;
+- literal equalities and constant loop counts (`n := 256`, `for i in n * n`): matmul 6 -> 0;
+- an inline byte store when the index is proved: sieve 1 -> 0;
+- `*` and `+` proved by the interval reading carry no overflow check (nbody traps 44 -> 2);
+- `--verify-facts` keeps proved checks without counting them as failures (edge kind 16 for a
+  proved accessor, `call_verified_out` for a proved call through the checking wrapper).
+
+Next, in order: sort (the clamp `if hi > n { hi = n }`, `tmp := v.copy()` length equality,
+lengths equal across the v/tmp swap); sieve's `j += i` overflow (a loop-carried bound
+`j <= limit`, `i <= limit`); then `grail build --report checks` (per function, each residual
+check with its location and kind: index, overflow, divide).
+
