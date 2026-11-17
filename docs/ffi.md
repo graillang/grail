@@ -646,40 +646,28 @@ live owner in an unknown state.
 
 ## Blocking foreign calls
 
-**A foreign call blocks the executing task.** A task is a green task on every platform - a
-suspended stack on a scheduler thread, not a thread of its own (see `concurrency-v1.md`) - so a
-call that blocks occupies the scheduler thread that was running the task, and while it blocks, that
-thread runs no other task. With more blocking tasks than scheduler threads (Linux runs one per CPU,
-clamped to 4-64; Windows runs one), the extra tasks wait. Only the runtime's own blocking operations
-hand off to a dedicated thread: `host::read_file`, `host::write_file`, `host::command`,
-`host::read_fd`, `host::write_fd` and `host::sleep_ms`, and only when they run inside a task. On
-Linux `host::read_fd`/`host::write_fd` wait on the readiness reactor and `host::sleep_ms` uses a
-timer, so those suspend; on Windows there is no reactor, so those calls are handed to a helper
-thread and the task parks on it. Either way the task, not the scheduler thread, waits, so the
-observable behaviour is the same on both platforms.
-**A foreign call blocks the executing task thread.** On Linux that thread is a worker of the green
-task pool, so while the call blocks, that worker runs no other task; with more blocking tasks than
-workers, the extra tasks wait. Only the runtime's own blocking operations hand off to a dedicated
-thread: `host::read_file`, `host::write_file`, `host::command` and `host::command_with`, and only
-when they are called from a green task. `host::pipe` reads and writes wait on the readiness
-reactor, and `host::sleep_ms` uses a timer, so those suspend instead of blocking.
+A task is a green task: a stack that a scheduler worker runs. What a foreign call does to that
+worker depends on how the function is declared (x86-64 Linux today; elsewhere every form is a plain
+call that occupies its worker for the call):
 
-- An `extern "C"` call, or a call through a `cfn` value, is not wrapped by the compiler: it runs on
-  the calling task's thread and blocks it for as long as the C function runs. Nothing in the
-  scheduler preempts it or moves the task to another thread.
-- A wrapper that knows its call blocks declares it with the runtime hook
-  `rt_blocking_enter()` (in `unsafe module runtime`), immediately before the call. The runtime then
-  emits one warning per process on stderr naming this contract, the documentation and the way out,
-  so a program cannot quietly lose a worker. Nothing warns for an undeclared call, because the
-  compiler does not wrap call sites.
-- The way out is the documented handoff: `rt_blocking_call(f, a, b)` runs `f(a, b)` on a dedicated
-  OS thread and suspends the task, so the worker stays available. That is exactly what
-  `host::read_file`, `host::write_file` and `host::command` do.
-- The blocking contract above holds on Linux and on Windows alike, because a task is green on
-  both. The one difference is what a blocked task costs: on Linux a scheduler thread, on Windows
-  the single scheduler thread. In the opt-in thread-per-task mode (`GRAIL_TASKS=thread`, see
-  `concurrency-v1.md`) a task is an OS thread, so a blocking foreign call blocks only the task that
-  made it and no handoff is needed - and none of the suspension guarantees above apply.
+| declaration | what a call from a task does | cost per call |
+| --- | --- | --- |
+| `extern "C" blocking fn` | gives the worker to another thread for the call, at once: other tasks and jobs keep running; the caller keeps its task (C's frames and thread-locals stay put) and afterwards becomes a spare thread | a runtime call before and after |
+| `extern "C" fn` (default) | counts itself in and out on its worker; if the call is still running after 10 ms while work is queued, the scheduler's monitor gives the worker away as for `blocking`, and says once on stderr which function it was | about 1.2 ns (10M calls of `labs`) |
+| `extern "C" nonblocking fn` | a bare call, as from C: the promise is that it never blocks (math, an engine API that only records commands). If it blocks anyway, its worker is held for the call - latency, never a safety problem | none: the call is `call sym@plt` |
+
+The attributes travel in interface files, so a call from another module behaves as declared.
+Off a worker - `main`, a `thread::spawn` thread, a callback from C - every form is a plain call: the
+thread is its own. Threads for blocked calls are made on demand and reused; an idle one retires
+after a second once more than the worker count are waiting. At most 10,000 threads may be blocked
+in foreign calls; the next one ends the program with a message instead of exhausting the machine.
+
+The runtime's own blocking operations (`host::read_file`, `host::write_file`, `host::command`) give
+their worker away the same way; `host::read_fd`/`write_fd` park on the readiness reactor and
+`host::sleep_ms` on a timer.
+
+A callback from C into Grail keeps its task on its thread: if it waits (sleeps, locks, joins), the
+thread blocks instead of the task moving to another worker, because C's frames are under it.
 
 ### Task scheduling is the same on both platforms
 

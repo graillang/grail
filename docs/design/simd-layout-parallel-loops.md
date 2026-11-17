@@ -414,6 +414,15 @@ already has a parent link), with a new flag meaning *sibling halves do not confl
 That is the only change to `ownership.grl`: about 20 lines in `conflict`/`access_loan`, no index
 arithmetic. It covers divide-and-conquer (parallel sort, tree builds) and hand-written chunkers.
 
+*As built (2026-11-17, /root/fixed_arrays).* `Loan.group`; `open_group`/`close_group` around the two
+reborrows the statement `left, right := split_at_mut(s, mid)` makes (`split_at_mut_statement`, both
+halves `rt_vslice` views of `s` through `view_bonds`). `split_apart(other, through, extra)` - some
+ancestor-or-self of each is a distinct loan of one group, and `other` is not below `through` - exempts
+a loan in `reborrow`, `access_loan` and (for the second half) `use_loan`'s live-child test. A
+temporary argument (`&mut xs[0: n]`) is bound under a hidden name so its loan lives as long as the
+halves. Cases: `split-at-mut-*`, `reject-split-at-mut-*` (vector used, parent slice used, overlapping
+re-split, overlap inside one half, shared argument), `mid` past the end aborts.
+
 ### 4.4 ECS-style systems
 
 *Static columns* (components are fields of a world record) need nothing more than 4.2 plus one thing
