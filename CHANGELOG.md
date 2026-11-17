@@ -1,12 +1,83 @@
 ## Unreleased
 
+- **Fixed: an LLVM-backend miscompile of a vector grown through its address.** A call handed `&mut v`
+  receives the slot's address, not the header word, so the lifter did not count it as a call that
+  can grow `v`, and the `len`/`data` it had read before the call were used after it: `pad(&mut out,
+  4); out.len()` read the old length (65 / 73 / 0 instead of 72 / 73 / 7). Now any call that is not
+  known to leave headers alone makes the cached fields of every vector whose address the function
+  takes stale, and they are read again. `vector-grown-through-its-address-is-reread` covers the
+  direct call, a loop, a method on a record holding the vector and a record passed by `&mut`.
+
+- Fixed: an error inside a closure made the compiler re-run itself up to 20 times. To report the
+  next error it re-runs with the failing body skipped, and for a closure it skipped the wrong body,
+  met the same error again and chained to the cap: an eight-line program took 14 s to reject
+  (30 s with a second error), now under 2 s with the same diagnostics. Found as two "hangs" of the
+  front-end fuzzer.
+- A `use` naming a module no root holds is an ordinary diagnostic: `error: cannot resolve module
+  ...` with the `use` line's location and the name underlined, instead of a bare `grail:` line.
+- `tools/fuzz-frontend.mjs` names its five slowest cases in the summary and in `report.json`.
+- **The atomics family.** `Atomic<T>` now holds `u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`,
+  `i64` or `bool`. Each width wraps at its own size, and `fetch_min`/`fetch_max` are signed for
+  `i*` types.
+  - Every operation names its ordering:
+    - `load` with `_relaxed` or `_acquire`; `store` with `_relaxed` or `_release`.
+    - `swap` and `fetch_add`, `fetch_sub`, `fetch_and`, `fetch_or`, `fetch_xor`, `fetch_min`,
+      `fetch_max`, each with `_relaxed`, `_acquire`, `_release` or `_acqrel`.
+    - `compare_exchange` (returns the value it saw) and the new `compare_exchange_weak` (returns
+      whether it stored), each with the same suffixes.
+    - The bare name is sequentially consistent, and a pair that makes no sense (`load_release`) is
+      an error that lists the valid names.
+    - `fence()`, `fence_acquire()`, `fence_release()` and `spin_hint()` are new.
+  - The methods compile to instructions at the call site, not runtime calls, so they are allowed in
+    `@no_alloc @no_panic` code. Each ordering is lowered as itself: x86-64 SC loads lose their
+    `mfence`, `fetch_add` is one `lock xadd`, AArch64 uses `ldar`/`stlr` and exclusive pairs, RISC-V
+    uses AMOs, and the LLVM backend emits `load atomic ... acquire` and so on instead of
+    `fence seq_cst`.
+  - Measured on x86-64: an uncontended `load` went from 15.4 ns to 1.4 ns, `fetch_add` from 18.5
+    ns to 1.8 ns, and a Mutex round trip from 42.7 ns to 11.4 ns. The runtime's own atomics
+    (scheduler, jobs, mutex) use the same instructions.
+  - `Atomic<u64>` programs are unchanged.
+  - Interfaces are format 8: an `Atomic<T>` records its element (format 7, from the effects
+    work, added the summary rows of every listed function).
+  - `bun tools/test-atomics-litmus.mjs` runs the litmus suite on every target and both backends.
+    `bun tools/test-optimiser-atomics.mjs` checks that the optimiser moves nothing across an
+    atomic.
 - **`concurrent_map` lookups run side by side.** Its shards are `sync::RwLock`s now, so `contains`
   and `len` on one shard no longer queue behind each other (about 1.6x faster under a read-mostly
   load, `bench/shard_read.grl`). Keys and values must therefore be `Share` as well as `Send` -
   DashMap's rule - and a value also `Owned`, since `insert` and `remove` hand the old one back. A
   map of a type that is transferable but not shareable is refused with
   `type does not satisfy Share`, naming the type.
+- Fixed (statics, after the merge with unboxed records and the prover rework): a static's
+  initialiser is evaluated in its own module's scope whoever asks for it first, so `PAGE - 1` finds
+  `PAGE` when the interface writer asks at the end of the compile; a baked record is laid out as the
+  record layout now has it (a plain record held in a field inline, a vector of plain records flat)
+  and read through the record's address, which is what a record reference now is.
 
+- **A compile-time probe never starts another probe** (comptime-speed R1). Inside a probe a read of
+  a run-tier value calls a value function the probe defines - a static is computed once on first
+  read behind a guard, a module binding at each read - so N values cost N flat compiles instead of
+  a chain N deep (12 values: 7.6 s; before, never finished). A cycle is a compile error naming every
+  value on it and the path (`main::A -> main::B -> main::A`).
+- **Proved calls cost nothing again, on every target and on the LLVM backend.** A function with
+  refined parameters is two ordinary functions: the body, `<symbol>.proved`, with no checks, and
+  `<symbol>`, a wrapper that checks the parameters and calls it. A proved call calls the body
+  directly - the same instructions as a call to a function with no predicate (measured on
+  x86_64, aarch64 and riscv64: identical bodies, identical call sites). An unproved call pays one
+  call/return on top of its checks. The LLVM backend now uses proofs too (it skipped the prover
+  while the second entry was a prologue copy it could not lift).
+
+- A call whose constant arguments break the callee's predicate (`split(v, 0, f)` with
+  `grain: u64 where grain > 0`) is a compile error in every mode; it used to compile and fail at
+  run time. Only constants, and names the facts equate with one, are judged false.
+
+    atomic. Both are gate legs.
+  - The aarch64 tests run under the repository's own qemu-aarch64: `tools/qemu/build.sh` builds
+    QEMU 11.1.3 with `tools/qemu/stlr-rcsc.patch` into `.work/architectures/toolchain`. Stock
+    11.1.3 on an x86 host lets a store-release pass a later load-acquire, which ARMv8 forbids;
+    the store-buffering test saw up to 7,458 forbidden outcomes in 200,000 rounds there, and none
+    under the patched build. The gate builds it and prints its version (`docs/testing.md`, "The
+    aarch64 emulator").
 - **`thread::scope`: threads that borrow.** `thread::scope(|t| { a := t.spawn(|| ..); ..; a.join() })`
   starts OS threads whose closures may borrow from the caller - shared or exclusive - because the
   scope waits for every one of them before it returns. The compiler refuses two threads taking one
@@ -29,9 +100,117 @@
   closure) is re-borrowed instead of moved out of the closure, which was "move of unavailable or
   borrowed value"; the borrow is kept as before.
  Unreleased- Fixed: a small leaf that takes the address of its own local (runtime.grl's `rt_frame`) was
+- **An effect claim no longer makes a program one compiler run.** `@no_alloc` and `@no_panic` are
+  proved per module against per-function *summaries*: every run that emits code records every body,
+  and the facts it solves - whether a function can allocate, can fail, runs an entry check, and the
+  call each fact came through - travel in a `facts` record of every interface (format 7; interfaces
+  of format 6 are refused: re-emit them), in `runtime.facts` beside the interfaces for the runtime,
+  and in function units, which are filed and replayed in claiming programs again. A claiming program
+  builds through the module store like any other, and a refusal names the same chain across modules
+  that the whole-program build names (`loud -> push_one -> grow -> rt_push -> rt_grow`).
+  (`docs/design/effects.md`, *Summaries*.)
+  - **What changes:** dropping a `dyn I` value of a **public** interface is refused under `@no_alloc`
+    and `@no_panic` in every build shape ("the drop of a `dyn I` value, whose implementations this
+    module cannot see"): an implementation in another module may be the one dropped. Claim the
+    implementing types' `Drop` instead, or do the drop where `I` is private.
+  - Methods in `impl` blocks take `@no_alloc` and `@no_panic`.
+  - The standard library claims `@no_alloc` on `hash::write_byte`, `write_num` and `finish`,
+    `u64[].sum` and `[u8].is_char_boundary`, and `@no_alloc @no_panic` on `strings::utf8_width`.
+    Functions that return an option, a tuple or a record allocate it, so `find` and the parsers do
+    not claim.
+  - Fixed: a closure whose result type was inferred by a trial emission left that emission's calls
+    in the effect record.  inlined with that local turned into a scratch register, so split and cached builds of programs
+- `tools/land.sh BRANCH` (`just land`) lands a branch on main through one queue: the branch must already contain main, the fast gate runs on exactly its tree, and green fast-forwards main. Emulated targets run after the landing on the build host.
+- Fixed: the native optimiser took an `f32` constant whose 64-bit immediate it cannot read (2.0 is
+  `$4611686018427387904`, more than 18 digits) for zero, held the variable as binary32 and read 2.0
+  back as 0.0. It changed Abundance's abgeo mesh digests (meshopt's `quadric_error_attr`);
+  `f32-constant-wide-immediate-not-narrowed` pins it.
+
+- Fixed: a small leaf that takes the address of its own local (runtime.grl's `rt_frame`) was
   inlined with that local turned into a scratch register, so split and cached builds of programs
   that reach it emitted `leaq %r8,%rax` and did not assemble. Such a leaf is no longer an inline
   candidate.
+
+- **A failure allocates nothing, on every route.** A failed check inside a parallel job used to build
+  its failure record and texts on the heap where it failed, so every `@no_alloc` function that
+  could index, cast or unwrap was refused once the job-failure path existed. The failing stack now
+  writes numbers only (kind, operands, the statement's site) into a record that is not heap
+  memory. The joiner builds the message and the site text, on a healthy stack. A wake on that path
+  no longer reaches scheduler creation.
+- The book has a chapter, "Performance against other languages": charts of run time (release and
+  development builds), compile speed and the scheduler against C, Rust, Go, Zig, rayon and oneTBB,
+  with the numbers, the machine, the load, the commit and the commands under each, and the named
+  reason wherever Grail is behind. It renders `bench/results/*.json` (inline SVG, offline; no
+  benchmark runs when the book is built); the rivals tools write those files with `--json`, and
+  `just bench-results` refreshes them, as the gate's last legs do.
+
+- The rivals tools (`bench-rivals`, `sched-rivals`, `compile-rivals`) take `--compiler PATH` or
+  `--branch REF` (REF's compiler built from a read-only `git archive` copy) and name the Grail commit
+  they measured in every table. A toolchain that is not installed is skipped with a note. Each fails
+  only when a program's output differs: compile-rivals now runs what it built and compares.
+
+- `bun tools/compile-rivals.mjs`: compile speed against Go, Zig and rustc on the same programs
+  (hello world and the scaling trio at N = 1000 and 4000): check and build, cold and after a
+  one-function edit, CPU seconds by `getrusage`. The table and the reason for every miss are in
+  `docs/design/compile-speed.md`, "Against Go, Zig and rustc".
+
+- `bun tools/sched-rivals.mjs`: the scheduler (`bench/sched.grl`, `bench/frame.grl` from a
+  scheduler tree) against Rust's rayon and C++'s oneTBB twins (`bench/rivals/sched-rayon`,
+  `sched_tbb.cpp`): join, spawn, a burst of spawns, fib(32) by nested join and the frame loop's
+  tail. The table and the reason for each miss are in `docs/design/runtime-parity.md`.
+
+- Fixed: `bun tools/native.mjs build` rebuilt the compiler on every call. It assembled the bootstrap
+  seed each time and keyed the compiler by the bootstrap's mtime, so the key never matched. The
+  assembled seed is now kept under its digest and the key names the bootstrap's content; a second
+  build with nothing changed takes milliseconds (`tools/test-cli.mjs` checks it).
+
+- **A release build says what failed.** On the LLVM backend an inline check (overflow, a negative
+  value to an unsigned type, division by zero, an unwrap, an assertion) used to end the program
+  with status 134 and no message, because only the native backend's site table turned its `call
+  rt_abort` into a report. The front end now writes `rt_trap` with the check's kind itself when
+  there is no site table, and a failed index into a 4-byte vector reports its index and length
+  like an 8-byte one. Locations (`--> file:line`) are still native-only.
+
+- **One integer-overflow mode per build, decided by the root.** `--overflow=checked|wrap` on the
+  command line wins; otherwise the root package's new `[package] overflow = "checked" | "wrap"`
+  key; otherwise the build mode's default - checked, or wrap for `--release`. A dependency's own
+  `overflow` key is not used, and the build prints one note naming it (Cargo's model for profiles):
+  a library that needs modular arithmetic says so with `wrapping_add` and friends. An interface file
+  still records the mode it was written under, but a build of the other mode no longer refuses it:
+  the prover and the effect analysis do not depend on the mode, so the mode only chooses the code.
+
+- **`grail build --release`** (and `grail run --release`, a project's `grail test --release`):
+  every module is compiled by the LLVM backend and its LLVM module optimised by `clang -O2`, per
+  module through the build store as before, and integer overflow wraps unless `--overflow=` says
+  otherwise. A release unit is still one object: the assembled stream and the optimised module are
+  folded together with `ld.lld -r`. Release builds are refused on macOS and Windows and with
+  `--debug` or `--split`, rather than quietly built native. Runtime failures print their message
+  without the `--> file:line` location in a release build (the location table is a native-backend
+  artefact for now). The LLVM backend's `memcpy`/`memset`/`memmove` are weak, so several modules can
+  each carry them, and so are the lifted bodies of `.weak` functions (generic specialisations,
+  drop helpers), which every module that instantiates them defines.
+
+- **LLVM backend: loops over slices vectorise.** A slice's descriptor (`&[T]`, `&mut [T]`) cannot
+  change while the slice lives, so the front end says so (F1 kind 5) and the lifter reads its
+  `data` (as a pointer) and `len` once per function; element addresses are `getelementptr`s on that
+  pointer, which keeps their provenance. `x[i] = x[i] * a + y[i]` over one million elements goes
+  from 7x to 1.2x (`f32`) and from 4x to 1.1x (`f64`) of vectorised `clang -O2`. Under
+  `--verify-facts` every such access re-reads the header and aborts if it moved.
+- **Fixed-size arrays, `[T; N]`** (docs/design/fixed-arrays.md, stage A1). N values back to back in
+  C layout, held in the frame: no heap allocation, no header, the length a constant of the type.
+  Literals `[a, b, c]` and `[x; N]` where an array is expected (count checked while compiling),
+  indexing and element assignment, `&[T; N]` / `&mut [T; N]` parameters, `len()`, `for x in &a`,
+  `==`, printing, `.copy()`. An index proved below N has no check; any other is one compare against
+  the constant, with no length load - on LLVM that compare is folded wherever the loop bounds imply
+  it, and element addresses keep the array's provenance, so elements stay in registers. Arrays of
+  plain data up to four words copy; larger ones move. `bench/nbody.grl` is now the fixed-array twin
+  of `bench/nbody.c`: LLVM backend at parity with clang -O2 (was 4.5x with vectors), native backend
+  0.59 s against Zig Debug's 0.90 s and Go's 0.11 s.
+- **Stack probes.** A function whose frame is larger than a page touches it a page at a time from
+  the top before allocating it (x86-64, AArch64 and RISC-V; `probe-stack` on LLVM), so a large frame
+  can no longer step over a stack's guard page: running out of stack is reported. A frame larger
+  than the 1 MiB task stack is a compile error. On Windows the probe follows the frame line the
+  unwinder describes and touches the frame from the top down, as `__chkstk` does.
 
 - **A failure allocates nothing, on every route.** A failed check inside a parallel job used to build
   its failure record and texts on the heap where it failed, so every `@no_alloc` function that
@@ -48,6 +227,8 @@
   (`bench/rivals/`), release and debug builds of each, CPU time from `getrusage`, one table with
   Grail's two builds as ratios to the best competitor of their bar. The numbers and the named
   reason for every miss are in `docs/design/runtime-parity.md`, "Against other languages".
+
+
 
 - **A foreign call costs what it costs in C (x86-64).** In a program that loaded libc, every
   `extern "C"` call switched the thread pointer to libc's TCB and back, and on x86-64 a write to the
@@ -82,6 +263,11 @@
   per piece of `0..n`, and `pool::reduce(n, grain, zero, leaf, merge)` folds the pieces' results
   in index order. A floating-point reduction therefore prints the same bits with 1, 4 or 24
   workers (`pool-reduce-bit-identical-workers-*`).
+  Every column targets baseline x86-64 (Zig gets `-mcpu=baseline`); a second table builds the
+  rivals for the host CPU, and a third counts instructions. `bench/sieve`, `matmul` and `xform`
+  (all twins) now make every round depend on the one before, so no compiler can drop a round:
+  their printed results changed.
+
 - A method of a generic written-type impl whose bound the receiver does not meet says so: `v.sort()`
   on a `Point[]` is "`sort` needs `T: order::Ord`, and `Point` does not implement it", with a help
   line naming the impl (`impl<T: order::Ord> T[]`, module `vecs`), where it was "`Point[]` has no
@@ -110,6 +296,25 @@
   they are not the method of the same name: `strings::chars(t)` is a lazy `iter::Iter<char>`
   (`t.chars()` is every code point at once, a `char[]`), and `vecs::contains(&v, &x)` takes any
   `hash::Equal` element (the built-in `v.contains(x)` takes integer and bool elements only).
+- Fixed: **a chain of more than eight compile-time values hung the build.** The compile that hit
+  the nesting limit re-ran itself to report its next error, up to 20 times, and inside a probe each
+  re-run repeated every probe beneath it, so the failure multiplied through the chain (12 values
+  had not finished after four minutes). A probe now stops at its first error; the same program
+  fails in half a second.
+
+- **The refinement prover knows statics and constants** (module-values stage 5): an integer static
+  or constant is its value (`small(LIMIT)` with `x < 10` and `LIMIT = 8` calls the proved entry),
+  and a baked string's or table's `.len()` is its length (`get(SQ, 3)` on an 8-element static is
+  proved), at the caller and at the callee's renamed obligation alike. A local that shadows the
+  name hides it; a value that breaks the bound proves nothing and the check stays.
+
+- **Baked statics hold records** (module-values stage 4): `static FLAGS: Flag[] = @flags();` and
+  `static BOX: Box = @make_box();` for plain records whose fields are integers, bools, strings,
+  vectors or such records again, at any depth. The run tier prints the value field by field and
+  the compiler lays it out as read-only objects (one word per field), so a read borrows it. A record
+  holding a thread-affine handle is refused as not shareable; a `NAME := f();` binding that computes
+  a record says to make it a static; enums and generic records are refused as not built yet.
+
 - Fixed (test harness): **`test-native --jobs N` made every stripe build a second compiler** - the
   parent passed its compiler as `GRAIL_COMPILER`, which `buildCompiler()` reads as the base to build
   from - all into one directory at once, and each finished build was renamed over the binary the
@@ -244,6 +449,11 @@
   that is rounded to `f32` at once (`addsd; cvtsd2ss; cvtss2sd`) is the single-precision one
   (`addss`): exact for + - * / and sqrt, since 53 >= 2*24 + 2. Loads that feed anything else are
   widened in place of the copy. `f32-held-as-binary32-in-registers` pins the results.
+- The float arithmetic is SSE text on AArch64 and RISC-V too, translated by machine.grl (xmm0/1 to
+  d0/d1 and ft0/ft1, xmm8..xmm14 to v17..v23 and ft2..ft8, all caller-saved), so floats are kept in
+  registers there as on x86-64; compares and integer conversions stay `fop`. And a call to a
+  runtime exit or a drop helper reads only the argument registers it takes, so a value left in
+  %rcx before one is no longer kept alive for it.
 
 - **Records of plain data are stored inline.** A struct or tuple with no `Drop` whose fields are
   numbers, bools, chars, references or other such records is now stored in place where it is a
@@ -297,6 +507,36 @@
   assembler rejects (`changed binding to STB_GLOBAL`); the thunk now keeps the weak binding. And
   an AArch64 module is compiled with atomics inline (`-mno-outline-atomics`): clang's default
   calls `__aarch64_cas8_acq_rel` in libgcc, which a Grail program does not link.
+- `grail profile --callers` samples each tick's return addresses too (the runtime walks the frame
+  pointers) and adds two views to the report: inclusive samples per function, and for the ten
+  hottest functions who called them and the first caller outside the runtime - so a profile topped
+  by `rt_alloc_unlocked` says which code allocates. Without the flag nothing changes: the request,
+  the sample format and the signal handler's path are the ones before.
+
+- A function taking an `extern "C"` record `byval` no longer breaks an interface or the build store:
+  the interface writer took the record's type for its declaration (an index out of bounds while
+  spelling it), and the reader rebuilt the marker over a declaration where the parser puts the
+  record's type.
+
+- **A module's function bodies are compiled in parallel.** After the declarations, forked copies of
+  the compiler compile slices of the bodies into units and the compile applies them in source
+  order, so the output is byte-identical at any worker count (`GRAIL_JOBS=1` keeps one process). The
+  compiler compiling itself goes from 38.7 s in one process to 18.3 s; a 1000-function program from
+  4.2 s to 2.1 s. A body with an error is reported exactly as before: any worker that does not
+  finish sends the module back to one process. The first body of each module is now a cache unit
+  too. `grail check` is parallel the same way (the compiler's own sources: 13.6 s to 6.0 s).
+
+- **One jobserver per build.** `grail build` runs at most `GRAIL_JOBS` (default: the processor count)
+  compiler processes at once across everything it starts - module runs and their optimiser workers
+  share one GNU-make-style token fifo - where each module run used to fork up to the processor count
+  on its own. Under `make -j`, a build takes its tokens from make's jobserver
+  (`MAKEFLAGS=--jobserver-auth=fifo:PATH`). On the 24-module benchmark with `GRAIL_JOBS=4` the build
+  peaks at 9 processes instead of 49.
+
+- Integer conversions (`u8(x)`, `i32(y)`, `wrapping_u16(z)`, ...) are emitted in line by the native
+  backend: a widening costs nothing, a wrapping conversion is a shift pair, and a checked narrowing
+  is a compare and a branch that calls the runtime only to report a value that does not fit (the
+  report is unchanged). They were a runtime call each, 8 % of the compiler's own run time.
 
 - **An edit to one function recompiles that function.** The per-function layer of the build store
   now replays every other body of the module: a body's assembly no longer depends on the bodies

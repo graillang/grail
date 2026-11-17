@@ -124,6 +124,37 @@ is `concurrency-model.md`, "F1".
 `Mutex` can deadlock only where the sequential program would. When locks are tracked per record a
 waiter that holds one will not help at all.
 
+## Waking: only when nobody is searching
+
+A worker that runs out of work *searches* first - 64 more looks, yielding every sixteenth - and only
+then parks; a fork wakes a parked worker only when one is parked and none is searching
+(`rt_notify`). In a join the forker nearly always takes its own fork back before anyone could, so a
+wake would only start a worker that finds nothing and parks again: the old rule (bump the sequence
+and wake whenever any worker is parked) cost two system calls and a write to one shared line per
+fork, which was most of a join's 2 us and why nested joins did not scale. Measured: 100,000 joins
+on a worker issue 15 wakes, where every one of them used to.
+
+**No wakeup is lost.** Two pairs of accesses, each a store then a load, with a full barrier
+between, on both sides (Dekker):
+
+- the pusher: publish the work (the deque's tail store or the ring's), full barrier
+  (`rt_full_fence`: a locked CAS on a frame word, no shared write), load `parked` (scheduler word 96)
+  and `searching` (jobs word 416);
+- a parking worker: `searching -= 1` (a locked RMW, a full barrier), load the sequence, `parked += 1`
+  (a locked RMW, a full barrier), look at every queue once more, and only then wait on the sequence
+  with the value it loaded.
+
+In the single total order of the barriers either the pusher's load of `parked`/`searching` comes
+after the worker's increment of `parked` - then it sees a parked worker and, unless one is
+searching, bumps the sequence and wakes - or the worker's last look comes after the pusher's
+publication and finds the work. A searching worker the pusher counted is one whose last look comes
+later still, so it finds the work too. A bump between the worker's sequence load and its wait makes
+the wait return at once. And a worker stops counting as searching *before* it runs what it found
+(`rt_worker_run`, worker word 280): counted while running, its own forks would see "someone is
+searching" and wake nobody - which happened, and is what `sched-fork-reaches-a-thief` pins. `sched-wake-not-lost-under-constant-parking` would hang if any of this
+were wrong; it runs on x86-64, AArch64 and RV64 (qemu, which is not a weak machine: real ARM
+hardware is still owed).
+
 ## Stacks
 
 A green task's stack is not created at spawn. `spawn` allocates the record and the queue slot, and

@@ -1,0 +1,30 @@
+// A lost wakeup hangs this program. Workers park constantly: each round forks a burst of joins
+// from a task, then everyone goes idle for a moment (the main thread sleeps), so all 24 workers
+// search, give up and park; the next round's forks must wake them. A fork wakes a parked worker
+// only when no worker is searching (rt_notify), so the order between "publish the work, then look
+// at the parked and searching counts" and "count myself parked, then look at the queues once more"
+// is all that keeps a fork from being stranded with every worker asleep. 1500 rounds; the sums
+// prove every job ran once.
+use host;
+use pool;
+
+fn tree(n: u64) -> u64 {
+    if n < 2 { return 1; }
+    p := pool::join<u64,u64>(|| -> u64 tree(n - 1), || -> u64 tree(n - 2));
+    return p.first + p.second;
+}
+fn round(n: u64, unused: u64) -> u64 {
+    return tree(n);
+}
+fn body<s>(sc: (&s Scope<u64>), rounds: u64) -> u64 {
+    mut total = 0;
+    for i in rounds {
+        t := spawn(sc, 10 + i % 5, round);
+        total += join(t);
+        if i % 3 == 0 { host::sleep_ms(1); }
+    }
+    return total;
+}
+fn main() {
+    println(task_scope(1500, body));
+}

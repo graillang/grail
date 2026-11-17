@@ -30,7 +30,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
-import { buildCompiler, hostTarget, root, targetName } from './native.mjs';
+import { buildCompiler, compilerSources, hostTarget, root, targetName } from './native.mjs';
 
 const flags = process.argv.slice(2);
 const target = targetName(flags.includes('--target') ? flags[flags.indexOf('--target') + 1] : hostTarget);
@@ -821,11 +821,11 @@ function proveIndependentUnits(count) {
   richProject(count);
   const cold = build(['--cache', '-o', output], { measure: true });
   assert.equal(cold.status, 0, `the cold build of the rich module failed\n${cold.output}`);
-  // Every body but the first of the part, which writes the part's marker inside its own bytes and
-  // is not a unit in this pass.
-  const bodies = 2 * count - 1;
+  // Every body is a unit, the first of the part included: its unit's text starts after the part's
+  // marker, which the run writes before applying it.
+  const bodies = 2 * count;
   const coldRich = forModule(unitLines(cold.output), 'rich');
-  assert.deepEqual(coldRich, { hits: 0, filed: bodies, kept: 0 }, `every body of the rich module after its first is a unit - drop helpers and specialisations are replayable registrations:\n${cold.output}`);
+  assert.deepEqual(coldRich, { hits: 0, filed: bodies, kept: 0 }, `every body of the rich module is a unit - drop helpers and specialisations are replayable registrations:\n${cold.output}`);
   // One edit, then: the cached build's account, its assembly and image, and the same tree built
   // with no cache to the same output name.
   const edited = (what, from, to) => {
@@ -903,6 +903,34 @@ function proveRegistrations() {
   return { shared };
 }
 
+// ---- (l) the optimiser's memo under a unit's key ----------------------------------------------
+// A body the front end applied from its unit is found by the optimiser from where the front end
+// noted it and its memo entry is keyed by the unit's key, not by its text. That is sound only if a
+// unit's text is a function of its key: GRAIL_MEMO_VERIFY=1 optimises every such body again and
+// fails if the remembered bytes differ. Run on a warm rebuild of the compiler's own sources, then
+// compared with a compile that has no store at all.
+function proveMemoKeys() {
+  const dir = join(work, 'memo');
+  rmSync(dir, { recursive: true, force: true });
+  mkdirSync(dir, { recursive: true });
+  const sources = compilerSources;
+  const run = (out, extra, env = {}) => {
+    const r = spawnSync(compiler, ['--default-u64', '--typed-refs', ...extra, join(dir, out), ...sources], { cwd: root, encoding: 'utf8', env: { ...process.env, ...env }, maxBuffer: 1 << 26, timeout: 900_000 });
+    assert.equal(r.status, 0, `the compile ${out} failed\n${r.stdout}${r.stderr}`);
+    return `${r.stdout}${r.stderr}`;
+  };
+  const store = ['--fn-cache', join(dir, 'fn'), '--fn-cache-id', 'memo-test'];
+  run('plain.s', [], { GRAIL_JOBS: '1' });
+  run('cold.s', store);
+  const warm = run('warm.s', store, { GRAIL_MEMO_VERIFY: '1' });
+  const plain = readFileSync(join(dir, 'plain.s'));
+  assert.ok(plain.equals(readFileSync(join(dir, 'cold.s'))), 'a cold store changed the assembly');
+  assert.ok(plain.equals(readFileSync(join(dir, 'warm.s'))), 'a warm store changed the assembly');
+  const hits = Number((warm.match(/(\d+) hit/) ?? [0, 0])[1]);
+  assert.ok(hits > 1000, `the warm rebuild must replay the compiler's bodies:\n${warm}`);
+  return { hits };
+}
+
 function reportIndependent(independent, registrations) {
   const t = value => `${value.toFixed(1)}ms`;
   console.log(`(j) one body   ${independent.bodies} bodies with drop helpers and specialisations, all units; after each edit one is emitted and the rest replay, byte-identical`);
@@ -935,6 +963,7 @@ const editCost = proveEditCost(flags.includes('--big') ? 2000 : 400);
 const units = proveUnits(flags.includes('--big') ? 2000 : 400);
 const registrations = proveRegistrations();
 const independent = proveIndependentUnits(flags.includes('--big') ? 1000 : 150);
+const memoKeys = proveMemoKeys();
 const finalStore = proveStore();
 
 const ms = value => `${value.toFixed(1)}ms`;
@@ -967,6 +996,7 @@ for (const item of [
 }
 console.log(`               ${ms(units.clean.ms).padStart(10)}  a clean build of the same tree (no cache at all)`);
 reportIndependent(independent, registrations);
+console.log(`(l) memo keys  a warm rebuild of the compiler: ${memoKeys.hits} bodies replayed, every remembered optimisation checked against a fresh one`);
 console.log(`(f) pruning    --keep 0 after an edit dropped ${pruning.pruned.records} records and ${pruning.pruned.blobs} blobs; next build ${pruning.again.hits} hit, ${pruning.again.misses} miss`);
 console.log('');
 console.log('build cache verified');
