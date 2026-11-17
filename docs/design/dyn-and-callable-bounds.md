@@ -182,3 +182,23 @@ element. The body now sits in both. Same benchmark: native 374 ms (was 432-529),
 72 ms (was 158) against a 17 ms hand loop - 4.2x. Still to do: VecIter as an index walk (needs a
 "move element i out" primitive and a remainder drop; `rt_pop` is a call per element today), and
 S6(A) (the closure held inline).
+
+## 6. S6(A) work in progress (branch gaps12-s6a, not landed)
+
+A closure value whose type names its environment record is held as that record's frame words
+(`closure_record` maps every layout question about a kind-20 type with an environment to the record;
+`container_record` no longer excludes `.closure`; `closure_literal` uses `frame_alloc`). The body
+ABI is unchanged: the slot of a framed record holds the address of its words, so `leaq slot,%rdi`
+is still "the address of a word holding the env address" (agreed with /root/call_abi). Working:
+local closures, generic `F` (b1/b2: direct call, inline env), return to an erased `Fn(..)` result,
+alias, push into a vector of `Fn(..)` (`closure_erase` in `adopt_value`: bounds checked, words boxed
+with `frame_box`, loans moved to the box).
+
+Remaining (34 of 397 selected corpus cases fail, all one class): every other path where a framed
+closure's value meets an erased closure type still stores the frame address, so the erased drop
+later frees a frame word (SIGABRT) or the holder outlives the frame (SIGSEGV). Paths to route
+through `closure_erase`: `widen_to_fnmut_formal` and generic argument inference (`iter::from_fn`,
+`Iter.map`), record field initialisers and field stores, `move_as`, capture of a closure into another
+closure, parallel/thread payloads (`parallel_map`, `thread::spawn`, scopes), `Mutex`/`dyn` cells.
+Then the tail drop and `rt_vec_take` for `VecIter`. `CLOSURES_FRAMED` switches the whole
+representation off for bisecting.

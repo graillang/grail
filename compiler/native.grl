@@ -7051,6 +7051,7 @@ fn drop_name<a>(c: (&a mut C), ty: u64) -> unit {
 // that request is part of naming the helper, made again whenever the helper is named again, so it
 // is not recorded separately.
 fn drop_ref_name<a>(c: (&a mut C), ty: u64) -> u8[] {
+    ty := closure_record(&mut c, ty);
     fn_reg_drop(&mut c, ty);
     c.drop_refs.push(ty);
     rec := exchange(&mut c.fn_rec, 0);
@@ -27932,6 +27933,7 @@ fn rec_store<a>(c: (&a mut C), base: u64, k: u64, value: u64) -> unit {
 // compare, print or drop a field. Enum tags and payloads, closure objects and `dyn` cells are words
 // by position and keep calling rec_load/rec_store directly.
 fn field_word<a>(c: (&a mut C), ty: u64, k: u64) -> u64 {
+    ty := closure_record(&mut c, ty);
     if (layout_bits(&mut c, ty) & 2) == 0 {
         return k;
     }
@@ -27972,6 +27974,7 @@ fn field_layout<a>(c: (&a mut C), alias: u64) -> u64 {
 // Layout is a property of the type alone, never of the module being compiled: the drop helpers are
 // emitted after the last (raw) module, and they must lay a vector out as everyone else does.
 fn plain<a>(c: (&a mut C), alias: u64) -> bool {
+    alias := closure_record(&mut c, alias);
     return (layout_bits(&mut c, alias) & 1) != 0;
 }
 // The bytes a vector element of type `elem` takes when the vector stores its elements inline - a
@@ -28092,6 +28095,22 @@ fn inline_payload<a>(c: (&a mut C), ety: u64, pty: u64) -> bool {
     p := base_type(&mut c, pty);
     return (ty_kind(&mut c, p) == 8) && framed(&mut c, p);
 }
+// S6(A): a closure value whose type is a closure expression's own (it names its environment record)
+// is that record, held like any framed record - words in the frame, copied on a move, dropped in
+// place - so every layout question about it is a question about the environment record. A closure
+// type from a signature (no environment) stays a word (a boxed object).
+fn closure_record<a>(c: (&a mut C), alias: u64) -> u64 {
+    // A specialisation's binding of a closure type is an alias of it (kind 10).
+    ty := base_type(&mut c, alias);
+    if (ty_kind(&mut c, ty) == 20) && (c.raw == 0) && (CLOSURES_FRAMED != 0) {
+        env := ty_env(&mut c, ty);
+        if env != 0 {
+            return env;
+        }
+    }
+    return alias;
+}
+const CLOSURES_FRAMED: u64 = 1;
 fn container_record<a>(c: (&a mut C), ty: u64) -> bool {
     if ty_kind(&mut c, ty) != 8 {
         return false;
@@ -28101,9 +28120,10 @@ fn container_record<a>(c: (&a mut C), ty: u64) -> bool {
     if (d.is_enum != 0) || (d.c_layout != 0) || (d.opaque != 0) {
         return false;
     }
-    return !same(view(d.module), view(".closure"));
+    return true;
 }
 fn layout_bits<a>(c: (&a mut C), alias: u64) -> u64 {
+    alias := closure_record(&mut c, alias);
     ty := base_type(&mut c, alias);
     // An array of plain data is plain: its bytes are stored inline wherever it is held. One that
     // owns its elements is not (until records with drops are inline, unboxed-values.md stage 4).
@@ -28166,6 +28186,7 @@ fn layout_bits<a>(c: (&a mut C), alias: u64) -> u64 {
 }
 // Whether `ty` is held as its own words (layout bit 4): a struct, a tuple or an array.
 fn framable<a>(c: (&a mut C), alias: u64) -> bool {
+    alias := closure_record(&mut c, alias);
     ty := base_type(&mut c, alias);
     if is_array(&mut c, ty) {
         return true;
@@ -28531,6 +28552,7 @@ fn field_reference<a>(c: (&a mut C), base: u64, ty: u64, k: u64) -> u64 {
 }
 // The words a record's own storage takes: a word per field, or an `extern "C"` record's C size.
 fn record_words<a>(c: (&a mut C), ty: u64) -> u64 {
+    ty := closure_record(&mut c, ty);
     if is_array(&mut c, ty) {
         return (array_bytes(&mut c, ty) + 7) / 8;
     }
@@ -28554,6 +28576,7 @@ fn record_words<a>(c: (&a mut C), ty: u64) -> u64 {
 // leaves every word 0, and its in-place drop does nothing - its `drop` included - when the word is 0.
 // A struct without its own `Drop` needs none: its owners' words are 0 when absent.
 fn live_word<a>(c: (&a mut C), alias: u64) -> bool {
+    alias := closure_record(&mut c, alias);
     ty := base_type(&mut c, alias);
     if (ty == 0) || (ty_kind(&mut c, ty) != 8) || (c.raw != 0) {
         return false;
@@ -38164,6 +38187,29 @@ fn is_option_storage<a>(c: (&a mut C), ty: u64) -> bool {
     return same(view(decl.module), view("result")) & same(view(decl.name), view("Option"));
 }
 // A bare literal (including a negated one) takes a sized integer type from its context.
+// S6(A): a closure held as its environment record's frame words, used where an erased closure type
+// (`Fn(..)` from a signature, no environment) is expected, becomes the boxed object that type is:
+// its words copied into a box, its loans moved to the box. The bounds are checked first, while the
+// environment is still known. Returns a value of NO_TYPE when nothing is converted.
+fn closure_erase<a>(c: (&a mut C), v: Val, expected: u64) -> Val {
+    if (closure_record(&mut c, v.ty) == v.ty) || (ty_env(&mut c, base_type(&mut c, expected)) != 0) {
+        return val(0, NO_TYPE);
+    }
+    if !framed(&mut c, v.ty) {
+        return val(0, NO_TYPE);
+    }
+    if (same_type(&mut c, v.ty, expected) == 0) && (closure_converts(&mut c, v.ty, expected) == 0) {
+        return val(0, NO_TYPE);
+    }
+    source := place_of(&mut c, v.t);
+    boxed := frame_box(&mut c, v.t, v.ty);
+    move_out(&mut c, val(v.t, v.ty));
+    own(&mut c, boxed, expected);
+    if source != 0 {
+        transfer_bonds(&mut c, source, place_of(&mut c, boxed));
+    }
+    return val(boxed, expected);
+}
 fn adopt_value<a>(c: (&a mut C), v: Val, start: u64, end: u64, expected: u64) -> Val {
     if (c.raw == 0) & (expected != 0) & (expected != NO_TYPE) {
         if borrowed_object(&mut c, expected) != 0 {
@@ -38178,6 +38224,10 @@ fn adopt_value<a>(c: (&a mut C), v: Val, start: u64, end: u64, expected: u64) ->
             return function_as_closure(&mut c, v, expected);
         }
         if (ty_kind(&mut c, v.ty) == 20) & (ty_kind(&mut c, expected) == 20) {
+            erased := closure_erase(&mut c, val(v.t, v.ty), expected);
+            if erased.ty != NO_TYPE {
+                return erased;
+            }
             if fn_as_fnmut(&mut c, v.ty, expected) != 0 {
                 return move_as(&mut c, v, expected);
             }
@@ -39485,8 +39535,13 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
     envty := intern_args(&mut c, 8, decl, 0, u64[], u64[]);
     fnty := intern_env(&mut c, 20, ret, mode, caps, copy_numbers(&params), envty);
     // Build the object.
-    sz := imm(&mut c, count);
-    obj := invoke(&mut c, view("rt_rec"), one(sz));
+    mut obj = 0;
+    if framed(&mut c, fnty) {
+        obj = frame_alloc(&mut c, count);
+    } else {
+        sz := imm(&mut c, count);
+        obj = invoke(&mut c, view("rt_rec"), one(sz));
+    }
     // The environment's place exists before the captures are stored, so a borrowed capture can
     // record its loan against the field it lands in.
     own(&mut c, obj, fnty);
@@ -50074,6 +50129,7 @@ fn emit_drop_in_place<a, b>(c: (&a mut C), ty: u64, hook: &b [u8]) -> unit {
 }
 // Names the in-place drop of `ty` and asks for it to be emitted (its boxed helper is emitted with it).
 fn drop_in_place_ref<a>(c: (&a mut C), alias: u64) -> u8[] {
+    alias := closure_record(&mut c, alias);
     // An alias (a bound type parameter) names the helper of the type it stands for.
     ty := base_type(&mut c, alias);
     drop_ref_name(&mut c, ty);
