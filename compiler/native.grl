@@ -13258,9 +13258,19 @@ fn emit_vtables<a>(c: (&a mut C)) -> unit {
                 push_bytes(&mut thunks, view(cell));
                 thunks.push(95);
                 decimal(&mut thunks, j);
-                push_bytes(&mut thunks, view(":\npushq %rbp\nmovq %rsp,%rbp\nmovq (%rdi),%rdi\ncall "));
-                push_bytes(&mut thunks, view(target));
-                push_bytes(&mut thunks, view("\nleave\nret\n"));
+                // The receiver is the record the cell's first word holds; the method returns to the
+                // dispatch site itself, so the adapter is a load and a jump (no frame of its own).
+                // On the LLVM backend the method may be in the other object, which a direct `jmp`
+                // cannot reach (`grail asm` relocates calls and RIP-relative operands, not jumps).
+                if (c.backend != 0) && (c.target == 0) {
+                    push_bytes(&mut thunks, view(":\nmovq (%rdi),%rdi\nleaq "));
+                    push_bytes(&mut thunks, view(target));
+                    push_bytes(&mut thunks, view("(%rip),%r11\njmp *%r11\n"));
+                } else {
+                    push_bytes(&mut thunks, view(":\nmovq (%rdi),%rdi\njmp "));
+                    push_bytes(&mut thunks, view(target));
+                    thunks.push(10);
+                }
             }
         }
         if boxed {

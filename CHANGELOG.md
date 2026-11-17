@@ -11,6 +11,10 @@
   the record that contains it and flat in vectors; each type gets an in-place drop, and the boxes
   that remain (enum payloads, closures, `Mutex`, `dyn`, task results) drop in place and free.
   `check syn1000`: record boxes 404 k -> 71 k, peak memory 53 -> 41 MB.
+- A `dyn` call on a record now costs one call: the vtable adapter that loads the record out of
+  its cell was a function with its own frame calling the method; it is a load and a tail jump.
+  dyncall (20 M dispatches): native 1,645 M -> 1,565 M instructions, LLVM 779 M -> 719 M (Rust -O:
+  648 M).
 
 - AArch64 and RV64 native code drops moves that move nothing (call ABI S7): the word machine's
   result register is x9 (t0) and its first argument x0 (a0), and moves go through the scratch x10
