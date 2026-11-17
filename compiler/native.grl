@@ -1811,6 +1811,11 @@ fn debug_type_of<a>(c: (&a mut C), ty: u64, c_layout: u64) -> u64 {
         if (c.debug_types[et].kind == 0) & (c.debug_types[et].size != 8) {
             et = debug_base(&mut c, view("u64"), 7, 8);
         }
+        // A plain record or a C record element is stored inline, its words (or C bytes) one after
+        // another (unboxed-values.md, stage 1b): the element is the record itself, not a pointer.
+        if flat_bytes(&mut c, elem) != 0 {
+            et = c.debug_types[et].pointee;
+        }
         mut name = debug_type_name(&mut c, elem);
         push_bytes(&mut name, view("[]"));
         return debug_header(&mut c, view(name), et);
@@ -1855,14 +1860,21 @@ fn debug_type_of<a>(c: (&a mut C), ty: u64, c_layout: u64) -> u64 {
         name := c.decls[d].name.copy();
         count := c.decls[d].count;
         before := c.debug_types.len();
-        s := debug_type_add(&mut c, DebugType { name: name, kind: 2, enc: 0, size: 8 * count, pointee: 0, members: DebugMember[] });
+        // The record's words as they are laid out: a plain record field is inline, its words where
+        // field_word puts them (unboxed-values.md, stage 1b).
+        words := record_words(&mut c, base_type(&mut c, ty));
+        s := debug_type_add(&mut c, DebugType { name: name, kind: 2, enc: 0, size: 8 * words, pointee: 0, members: DebugMember[] });
         if s < before {
             return debug_pointer(&mut c, s);
         }
         mut members = DebugMember[];
         for i in count {
             fty := field_ty(&mut c, d, i);
-            members.push(DebugMember { name: c.fields[c.decls[d].first + i].name.copy(), ty: debug_type_of(&mut c, fty, 0), offset: 8 * i });
+            mut mt = debug_type_of(&mut c, fty, 0);
+            if inline_field(&mut c, ty, i) {
+                mt = c.debug_types[mt].pointee;
+            }
+            members.push(DebugMember { name: c.fields[c.decls[d].first + i].name.copy(), ty: mt, offset: 8 * field_word(&mut c, ty, i) });
         }
         exchange(&mut c.debug_types[s].members, members);
         return debug_pointer(&mut c, s);
@@ -1904,9 +1916,14 @@ fn debug_type_of<a>(c: (&a mut C), ty: u64, c_layout: u64) -> u64 {
         return debug_type_add(&mut c, DebugType { name: copy_bytes(view("view")), kind: 2, enc: 0, size: 16, pointee: 0, members: members });
     }
     if k == 7 {
-        // A reference is the address of its referent's slot.
+        // A reference is the address of its referent's word - except a reference to a record, which
+        // is the record's own address (`direct`, unboxed-values.md stage 1a), so it is described as
+        // the record value is: a pointer to its fields.
         referent := ty_arg(&mut c, ty);
         inner := debug_type_of(&mut c, referent, 0);
+        if direct(&mut c, referent) {
+            return inner;
+        }
         return debug_pointer(&mut c, inner);
     }
     if (k != 18) & (k != 19) & (k != 21) & (k != 22) {
