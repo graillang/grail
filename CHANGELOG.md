@@ -1,5 +1,46 @@
 ## Unreleased
 
+- **`lib/chan.grl`: a bounded multi-producer multi-consumer channel.** `chan::bounded<T>(n)` with
+  `send` (waits while full; false once closed), `recv` (waits while empty; `None` once closed and
+  empty) and `close`; waits park, as every `sync` wait does. `bench/chan.grl` measures it against
+  crossbeam-channel and Go's chan in `tools/bench-rivals.mjs`.
+
+- Inflate calls its bit refill only when the buffer is short of the bits a symbol or extra field
+  needs (a word refill holds 56 or more), instead of on every symbol: the 4K png Grail-LLVM 4.94G ->
+  4.66G instructions (0.59 -> 0.53 s; stb_image 0.37 s), Grail-native 16.1G -> 15.1G.
+- xxhash reads its eight-byte lanes with one load (`bytes::load_u64`) now that the call inlines,
+  instead of assembling each from eight indexed bytes: the 20 MB zstd archive (whose frames carry
+  an XXH64 checksum) Grail-LLVM 5.88G -> 5.09G instructions, 0.65 -> 0.55 s (libzstd 0.26 s).
+- Small allocations clear their block with two fixed stores instead of the general loop: every
+  request up to 16 bytes (a tree node, a box) is served from the smallest bin, whose blocks hold at
+  least 16. bench/bintrees.grl: Grail-LLVM 4.89G -> 4.15G instructions, Grail-native 14.2G -> 13.7G.
+- `grail build --release --report checks` reports the checks that survived LLVM's optimisation and
+  the thin-LTO link: it reads the linked image (llvm-objdump; `GRAIL_OBJDUMP` overrides it) and
+  counts each branch from a program function to rt_fail, rt_trap, rt_abort (with its `.cold` parts)
+  or rt_refine, per function, grouped by kind where the failure code is a constant (x86-64). A release
+  build has no line tables, so a function is the grain. Only the native report forces an uncached
+  build.
+
+- **An interface method generic over a callable can be called through a bound.**
+  `fn total<I: Seq>(it: I) -> u64 { return it.fold(0, |a, x| a + x); }`, where `fold` is a generic
+  interface method (`fn fold<A, G: FnMut(A, Self::Item) -> A>`), was "generic argument shape
+  mismatch"; it now reaches the implementation's method, default or overriding. This is what lets
+  iterator adapters fold internally.
+- LLVM backend: pushing a 4-byte element (f32, u32, i32) inlines at the call site - `rt_push4`'s
+  growth moved to `rt_push4_slow`, which the lifter keeps out of line, as `rt_push` already did.
+  bench/ecs on LLVM: 941M -> 823M instructions (C -O2: 710M), same checksum.
+
+- **A no-op build right after an edit is a no-op.** The build store records a source by its stamp
+  only when it was read at least 10ms after its last write (one kernel time tick). It used to require
+  the file to be 100ms old when the record was written, so an edited `main.grl`, read the moment the
+  build started, was never recorded: the next build read and scanned all of it again and started a
+  compiler to resolve its modules. A source read too soon is now read once more at the end of the
+  build and recorded if its stamp and bytes are unchanged, and the resolved module set waits for it.
+  Dev compiler, the 104,000-line syn4000: a build right after an edited build 0.340G -> 0.005G
+  instructions, a check after an edited check 0.343G -> 0.008G.
+- Compiling is a little cheaper: the optimiser's liveness tables are allocated at full size once per
+  body instead of grown a push at a time (cold build of a 104k-line program: 93.9G -> 92.1G
+  instructions, output unchanged).
 - **`bench-rivals` no longer charts a build that printed the wrong answer.** It already failed the
   run when a build's output differed from C's, but still wrote that build's figures into the
   results, so a miscompiled program could chart as the fastest. Such a figure is now left out and

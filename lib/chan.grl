@@ -1,0 +1,78 @@
+module chan;
+use sync;
+
+// A bounded multi-producer multi-consumer channel (docs/design/concurrency-model.md, D7: bounded MPMC,
+// no unbounded channel). The ring is allocated once, at creation; `send` waits while it is full and
+// `recv` while it is empty, both by parking (lib/sync.grl), so a waiting task gives its worker away
+// and a waiting thread sleeps. `close` wakes everyone: a send on a closed channel answers false and
+// drops its value, a recv answers None once the ring is empty.
+//
+// It is shared by reference between the threads or tasks that use it - wrap it in an `rc::Arc` to
+// hand it to `thread::spawn`.
+struct Ring<T> {
+    items: T?[],
+    head: u64,
+    len: u64,
+    closed: bool
+}
+pub struct Channel<T> {
+    ring: Mutex<Ring<T>>,
+    not_empty: sync::Condition,
+    not_full: sync::Condition
+}
+
+// A channel holding at most `capacity` values (at least one).
+pub fn bounded<T>(capacity: u64) -> Channel<T> {
+    mut n = capacity;
+    if n == 0 {
+        n = 1;
+    }
+    mut items: T?[] = [];
+    for i in n {
+        items.push(None);
+    }
+    return Channel { ring: Mutex::new(Ring { items: items, head: 0, len: 0, closed: false }), not_empty: sync::condition(), not_full: sync::condition() };
+}
+
+fn shut<a, T>(r: (&a mut Ring<T>), unused: u64) -> u64 {
+    r.closed = true;
+    return 0;
+}
+
+// A value received leaves the ring's lock, so it may hold no borrow.
+impl<T: Owned> Channel<T> {
+    // Wait for room and send `value`; false when the channel is closed (the value is dropped).
+    pub fn send(self: (&Channel<T>), value: T) -> bool {
+        sent := self.not_full.wait_with(&self.ring, value, |r: (&Ring<T>), v: (&T)| -> bool r.closed || (r.len < r.items.len()), |r: (&mut Ring<T>), v: T| -> bool {
+            if r.closed {
+                return false;
+            }
+            at := (r.head + r.len) % r.items.len();
+            r.items[at] = Some(v);
+            r.len += 1;
+            return true;
+        });
+        self.not_empty.notify_one();
+        return sent;
+    }
+    // Wait for a value; None once the channel is closed and empty.
+    pub fn recv(self: (&Channel<T>)) -> T? {
+        got := self.not_empty.wait_with(&self.ring, 0, |r: (&Ring<T>), u: (&u64)| -> bool r.closed || (r.len != 0), |r: (&mut Ring<T>), u: u64| -> T? {
+            if r.len == 0 {
+                return None;
+            }
+            v := exchange(&mut r.items[r.head], None);
+            r.head = (r.head + 1) % r.items.len();
+            r.len -= 1;
+            return v;
+        });
+        self.not_full.notify_one();
+        return got;
+    }
+    // No more values will be sent: waiting senders and receivers wake.
+    pub fn close(self: (&Channel<T>)) -> unit {
+        self.ring.lock_with(0, shut<T>);
+        self.not_empty.notify_all();
+        self.not_full.notify_all();
+    }
+}

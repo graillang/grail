@@ -1,0 +1,95 @@
+// Channel throughput and latency against crossbeam-channel (Rust), Go's chan, a pthread
+// mutex+condvar ring (C) and Zig's Mutex+Condition ring: tools/bench-rivals.mjs runs it with its C,
+// Rust, Go and Zig twins in bench/rivals/ and checks every output against C's. Every channel holds
+// 64 values; all workers are OS threads (goroutines in Go).
+//   1:1   one producer, one consumer, 400000 values
+//   N:1   four producers of 100000 values, one consumer
+//   N:M   four producers of 100000 values, four consumers
+//   ping  two channels of one slot, 100000 round trips (latency)
+// Each case prints the sum of what was received (the ping case its final count). CHAN_CASE=1..4
+// runs one case alone, for a per-case figure.
+use chan;
+use thread;
+use host;
+use rc;
+
+fn spread(producers: u64, consumers: u64, each: u64) -> u64 {
+    c := rc::arc_new(chan::bounded<u64>(64));
+    mut senders: thread::Thread<u64>[] = [];
+    for p in producers {
+        mine := c.clone();
+        senders.push(thread::spawn<u64>(thread::config(), |ctx: (&thread::Ctx)| -> u64 {
+            ch := mine.get();
+            for i in each {
+                ch.send(p * 1000000 + i + 1);
+            }
+            return 0;
+        })!);
+    }
+    mut receivers: thread::Thread<u64>[] = [];
+    for q in consumers {
+        mine := c.clone();
+        receivers.push(thread::spawn<u64>(thread::config(), |ctx: (&thread::Ctx)| -> u64 {
+            ch := mine.get();
+            mut sum = 0;
+            while let Some(v) = ch.recv() {
+                sum += v;
+            }
+            return sum;
+        })!);
+    }
+    while let Some(t) = senders.pop() {
+        thread::join(t);
+    }
+    c.get().close();
+    mut total = 0;
+    while let Some(t) = receivers.pop() {
+        total += thread::join(t);
+    }
+    return total;
+}
+
+fn ping(rounds: u64) -> u64 {
+    there := rc::arc_new(chan::bounded<u64>(1));
+    back := rc::arc_new(chan::bounded<u64>(1));
+    t1 := there.clone();
+    b1 := back.clone();
+    echo := thread::spawn<u64>(thread::config(), |ctx: (&thread::Ctx)| -> u64 {
+        inbox := t1.get();
+        outbox := b1.get();
+        while let Some(v) = inbox.recv() {
+            outbox.send(v + 1);
+        }
+        return 0;
+    })!;
+    out := there.get();
+    reply := back.get();
+    mut v = 0;
+    for i in rounds {
+        out.send(v);
+        v = reply.recv()!;
+    }
+    there.get().close();
+    thread::join(echo);
+    return v;
+}
+
+fn main() {
+    which := host::env(view("CHAN_CASE"));
+    mut only = 0;
+    if which.len() != 0 {
+        only = u64(which[0]) - 48;
+    }
+    if (only == 0) || (only == 1) {
+        println("1:1 {}", spread(1, 1, 400000));
+    }
+    if (only == 0) || (only == 2) {
+        println("N:1 {}", spread(4, 1, 100000));
+    }
+    if (only == 0) || (only == 3) {
+        println("N:M {}", spread(4, 4, 100000));
+    }
+    if (only == 0) || (only == 4) {
+        println("ping {}", ping(100000));
+    }
+}
