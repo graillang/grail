@@ -579,6 +579,9 @@ struct C {
     // Slots holding the address of a field's word in a Grail record: a plain, untagged word address,
     // so a sub-word value there (an f32, a u8) is read and written as the word it is stored as.
     word_refs: u64[],
+    // Slots holding frame words that only one value refers to, fresh from a constructor (a
+    // temporary): moving such a value takes its words over instead of copying them.
+    temps: u64[],
     // The result adapters this object needs (box_result_thunk): closure * 4 + words.
     box_thunks: u64[],
     // Per type id: 0 not yet known, else 1 + (1 if the type is a plain record) + (2 if it is a
@@ -7243,6 +7246,11 @@ fn move_value<a>(c: (&a mut C), v: Val) -> Val {
     if is_array(&mut c, v.ty) {
         // The bytes go into storage of the new holder's own (see array_storage).
         slot = array_fresh_copy(&mut c, v.t, v.ty);
+    } else if framed(&mut c, v.ty) && take_temp(&mut c, v.t) {
+        // A plain temporary (a constructor's fresh words): nothing else refers to them, and the
+        // constructor runs again only once this binding or argument is gone, so they are taken over
+        // - a struct literal bound with `mut s = S { .. }` is built in place.
+        slot = v.t;
     } else if framed(&mut c, v.ty) {
         // The value moves into storage of its own here: a binding, an argument or a field never
         // shares the words of the place it came from, whose site may run again.
@@ -19902,6 +19910,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     exchange(&mut c.interior, u64[]);
     exchange(&mut c.boxed, u64[]);
     exchange(&mut c.word_refs, u64[]);
+    exchange(&mut c.temps, u64[]);
     // A function with refined parameters is two: the body, `<name>.proved`, which a proved call
     // enters and which checks nothing, and `<name>`, a wrapper emitted after it that checks the
     // parameters and calls the body (ref_wrapper). Both are ordinary functions to every later pass.
@@ -28201,6 +28210,15 @@ fn frame_alloc<a>(c: (&a mut C), words: u64) -> u64 {
     o(&mut c, view(",%rax\n"));
     return save(&mut c);
 }
+fn take_temp<a>(c: (&a mut C), slot: u64) -> bool {
+    for i in c.temps.len() {
+        if c.temps[i] == slot {
+            c.temps[i] = 18446744073709551615;
+            return true;
+        }
+    }
+    return false;
+}
 // The words of a framed result just returned in rax (and rdx), stored into fresh frame words.
 fn frame_from_registers<a>(c: (&a mut C), words: u64) -> u64 {
     mut first = 0;
@@ -31347,6 +31365,9 @@ fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
     mut n = 0;
     if framed(&mut c, ty) {
         n = frame_alloc(&mut c, record_words(&mut c, ty));
+        if plain(&mut c, ty) {
+            c.temps.push(n);
+        }
     } else {
         sz := imm(&mut c, record_words(&mut c, ty));
         n = invoke(&mut c, view("rt_rec"), one(sz));
@@ -38838,6 +38859,7 @@ fn isolated_body_type<a, b, d>(c: (&a mut C), start: u64, names: (&b u8[][]), pa
     saved_interior := exchange(&mut c.interior, u64[]);
     saved_boxed := exchange(&mut c.boxed, u64[]);
     saved_word_refs := exchange(&mut c.word_refs, u64[]);
+    saved_temps := exchange(&mut c.temps, u64[]);
     saved_scope := exchange(&mut c.scope_end, end);
     saved_loop_start := exchange(&mut c.loop_start, 0);
     saved_loop_end := exchange(&mut c.loop_end, 0);
@@ -38900,6 +38922,7 @@ fn isolated_body_type<a, b, d>(c: (&a mut C), start: u64, names: (&b u8[][]), pa
     exchange(&mut c.interior, saved_interior);
     exchange(&mut c.boxed, saved_boxed);
     exchange(&mut c.word_refs, saved_word_refs);
+    exchange(&mut c.temps, saved_temps);
     exchange(&mut c.scope_end, saved_scope);
     exchange(&mut c.loop_start, saved_loop_start);
     exchange(&mut c.loop_end, saved_loop_end);
@@ -39703,6 +39726,7 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
         exchange(&mut c.interior, u64[]);
         exchange(&mut c.boxed, u64[]);
         exchange(&mut c.word_refs, u64[]);
+        exchange(&mut c.temps, u64[]);
         // Facts made in the body (a frame record, a DynPair) are about the body's own frame, under
         // the symbol it is emitted as.
         exchange(&mut c.facts_fn, body_label(&c, view(".closure"), view(symbol), view(""), 0));
@@ -41598,17 +41622,31 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
             array_stage_fail(&mut c, view("pop's option (`v.pop()!` takes the last element)"));
         }
         if (insist) & (width != 0) {
-            mut slot = apply(&mut c, view("rt_popw"), two(xt, imm(&mut c, width)));
-            if is_array(&mut c, ty) {
-                slot = array_unbox(&mut c, slot, ty);
+            mut slot = 0;
+            if pop_in_place(&mut c, ty) {
+                // Straight into frame words of this site: no box.
+                dst := frame_alloc(&mut c, record_words(&mut c, base_type(&mut c, ty)));
+                slot = apply(&mut c, view("rt_popw_into"), three(xt, imm(&mut c, width), dst));
             } else {
-                c.boxed.push(slot);
+                slot = apply(&mut c, view("rt_popw"), two(xt, imm(&mut c, width)));
+                if is_array(&mut c, ty) {
+                    slot = array_unbox(&mut c, slot, ty);
+                } else {
+                    c.boxed.push(slot);
+                }
             }
             own(&mut c, slot, ty);
             result := place_of(&mut c, slot);
             return_bonds(&mut c, root, result, 1);
             stored_source(&mut c, slot, ty);
             return val(slot, ty);
+        }
+        if (width != 0) && pop_in_place(&mut c, ty) && inline_option(&mut c, ty) {
+            // The option's payload words are the destination; the tag says whether there was one.
+            out := option_pop_in_place(&mut c, xt, width, ty);
+            result := place_of(&mut c, out.t);
+            return_bonds(&mut c, root, result, 1);
+            return out;
         }
         if width != 0 {
             had := apply(&mut c, view("rt_len"), one(xt));
@@ -41747,7 +41785,12 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
                 return val(element, elem);
             }
             mut slot = 0;
-            if width != 0 {
+            if (width != 0) && pop_in_place(&mut c, elem) {
+                dst := frame_alloc(&mut c, record_words(&mut c, base_type(&mut c, elem)));
+                mut ra = three(xt, i.t, imm(&mut c, width));
+                ra.push(dst);
+                slot = apply(&mut c, view("rt_vec_removew_into"), ra);
+            } else if width != 0 {
                 slot = apply(&mut c, view("rt_vec_removew"), three(xt, i.t, imm(&mut c, width)));
                 if is_array(&mut c, elem) {
                     slot = array_unbox(&mut c, slot, elem);
@@ -42514,6 +42557,39 @@ fn is_vector_type<a>(c: (&a mut C), ty: u64) -> bool {
 // The `T?` a `pop()` answers: `Some(element)` when the collection had one (`had` is its length
 // before the pop), `None` when it was empty. The runtime builds the option, so the generated code
 // has no branch and the element's ownership passes straight into it.
+// An element taken out of an inline vector lands in frame words of the site when it is a framed
+// record (not an array, which has its own unboxing, and not a C record, whose value is a box).
+fn pop_in_place<a>(c: (&a mut C), ty: u64) -> bool {
+    return framed(&mut c, ty) && !is_array(&mut c, ty) && (is_c_record(&mut c, ty) == 0);
+}
+fn option_of<a>(c: (&a mut C), ty: u64) -> u64 {
+    mut oa = u64[];
+    oa.push(ty);
+    return named_type(&mut c, copy_bytes(view("result")), copy_bytes(view("Option")), oa);
+}
+fn inline_option<a>(c: (&a mut C), ty: u64) -> bool {
+    opt := option_of(&mut c, ty);
+    return framed(&mut c, opt) && inline_payload(&mut c, opt, ty);
+}
+fn option_pop_in_place<a>(c: (&a mut C), xt: u64, width: u64, ty: u64) -> Val {
+    opt := option_of(&mut c, ty);
+    d := ty_arg(&mut c, opt);
+    some := success_variant(&mut c, d);
+    slot := frame_alloc(&mut c, enum_words(&mut c, base_type(&mut c, opt)));
+    get(&mut c, slot, view("%rax"));
+    o(&mut c, view("leaq 8(%rax),%rax\n"));
+    at := save(&mut c);
+    had := apply(&mut c, view("rt_popw_quiet_into"), three(xt, imm(&mut c, width), at));
+    // The tag is `some` when there was an element.
+    get(&mut c, had, view("%rax"));
+    if some == 0 {
+        o(&mut c, view("xorq $1,%rax\n"));
+    }
+    get(&mut c, slot, view("%rcx"));
+    o(&mut c, view("movq %rax,(%rcx)\n"));
+    own(&mut c, slot, opt);
+    return val(slot, opt);
+}
 fn pop_option<a>(c: (&a mut C), had: u64, element: u64, ty: u64) -> Val {
     mut oa = u64[];
     oa.push(ty);
@@ -55310,6 +55386,7 @@ pub fn main() -> u64 {
         interior: u64[],
         box_thunks: u64[],
         word_refs: u64[],
+        temps: u64[],
         result_dest: 0,
         layout_memo: u64[],
         layout_offsets: u64[][],
