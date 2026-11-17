@@ -68,7 +68,7 @@ or exposing Future state machines. This does **not** erase scheduling semantics:
   process, so two tasks failing at once print one message, not two. The main thread, an offload
   helper and a thread foreign code created raise SIGABRT on POSIX (the platform's cleanup-free exit
   then follows: `exit_group` on Linux, `TerminateProcess` on Windows, `_exit` on macOS); a scheduler
-  or pool worker exits with status 134 directly, because a signal raised from one of several
+  worker (and any thread inside a parallel region) exits with status 134 directly, because a signal raised from one of several
   threads that may fail together is delivered to whichever thread the kernel picks and can race the
   exit. `exit(2)` and `ExitProcess` are never used on this path because they run atexit handlers,
   C++ destructors or DLL detach. This work does not claim panic isolation or unwinding that the

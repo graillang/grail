@@ -61,6 +61,28 @@ pub fn fact_dyn_result<a>(facts: (&a mut Facts), name: u8[]) -> unit {
     facts.items.push(Fact { kind: 4, fn: name, a: 0, b: 0, callee: u8[], what: 0, width: 0 });
     return ();
 }
+// `slot` is word 0 of an aggregate of `words` words in `name`: a plain record kept in the frame
+// (docs/design/unboxed-values.md, stage 3a). Word i is slot `slot - i`, at `8*i` above word 0, the
+// same shape as a `DynPair`, which is the two-word case; both are one object to every pass.
+pub fn fact_aggregate<a>(facts: (&a mut Facts), name: u8[], slot: u64, words: u64) -> unit {
+    facts.items.push(Fact { kind: 3, fn: name, a: slot, b: 0, callee: u8[], what: 0, width: words });
+    return ();
+}
+// The words of each multi-word frame value of `name`, in the order facts_dyn_pairs gives their slots:
+// 2 for a `DynPair` (its fact leaves the width 0), the declared count for an aggregate.
+pub fn facts_pair_widths<a, b, d>(facts: (&a Facts), name: &b [u8], out: (&d mut u64[])) -> unit {
+    for i in facts.items.len() {
+        f := &facts.items[i];
+        if (f.kind == 3) & eq(view(f.fn), name) {
+            if f.width == 0 {
+                out.push(2);
+            } else {
+                out.push(f.width);
+            }
+        }
+    }
+    return ();
+}
 // The `DynPair` slots of `name` (each the first word's slot), appended to `out`.
 pub fn facts_dyn_pairs<a, b, d>(facts: (&a Facts), name: &b [u8], out: (&d mut u64[])) -> unit {
     for i in facts.items.len() {
@@ -265,6 +287,8 @@ struct L {
     // facts (docs/design/fat-dyn.md), so what the front end built a pair for is not re-derived from
     // the shape of the stream.
     pairs: u64[],
+    // The word count of each entry of `pairs`.
+    pair_widths: u64[],
     // Accepted f32 slot facts of the function being lowered: every slot in here is emitted as
     // `alloca float` and read and written with `load float`/`store float` (docs/design/typed-ir.md).
     fslots: u64[],
@@ -285,15 +309,32 @@ struct L {
     eon: u64[],
     edata: u8[][],
     elen: u8[][],
+    // The same `data` as a `ptr` (loaded as one), so an element address can be a `getelementptr`
+    // with the allocation's provenance rather than an integer sum the optimiser cannot see through.
+    edptr: u8[][],
     // The block a set of fields was established in, and 1 when that block dominates every later
     // one (the entry block and its fall-through continuations, which have a single predecessor
     // each). The hoisted words are reused only where they are known to dominate the use.
     eblk: u64[],
     blk: u64,
+    // The id of the `body` block: the first block of the function's own code, which dominates
+    // every block of it.
+    body_blk: u64,
     // Block names in the order `begin_block` first saw them. A hoisted `data`/`len` is reused only
     // in the block that established it: that is the one placement the lifter can prove, and the
     // cross-block hoist needs the region fact docs/design/typed-ir.md describes.
     dnames: u8[][],
+    // dnames by name, so finding a block's id is one probe rather than a walk of every block so far.
+    dmap: Map,
+    // The F1 call facts of the function being lowered, by `callee#ordinal`: the fact index plus one.
+    hmap: Map,
+    // cnames by name (callee_ordinal).
+    cmap: Map,
+    // The lines of the function being lowered that name each frame slot `-N(%rbp)`: those of slot k
+    // are `sl_lines[sl_start[k] .. sl_start[k + 1]]`, in order, each line once. The per-slot
+    // questions read these instead of searching every line for every slot.
+    sl_start: u64[],
+    sl_lines: u64[],
     // Per storage location (0-13 a register, 14+k frame slot k): `vk` is 0 for an untracked word,
     // 1 for the header pointer of slot `vo` at byte offset `vo2`, 2 for the constant `vo`.
     vk: u64[],
@@ -303,6 +344,10 @@ struct L {
     // argument 0 is a header (0 otherwise) and its `what`.
     hcall: u64[],
     hcallwhat: u64[],
+    // The accepted header slots (parallel to hslots) that are stable for the whole function: a
+    // slice descriptor (`what` 5) written exactly once and never addressed, so the fields read where
+    // that one write happens in the first block are current everywhere after it.
+    hstable: u64[],
     // Sibling mode: 0 normally, else the element width of the typed header parameter this body is
     // being re-emitted with, the `what` of that fact, and the two incoming words for the header
     // fields at `+0` and `+8` in place of the loads.
@@ -381,17 +426,20 @@ fn has<a, b>(a: &a [u8], b: &b [u8]) -> bool {
     if a.len() < b.len() {
         return false;
     }
+    if b.len() == 0 {
+        return true;
+    }
+    first := b[0];
     for i in a.len() - b.len() + 1 {
-        if occurs_at(a, i, b) {
+        if (a[i] == first) && occurs_at(a, i, b) {
             return true;
         }
     }
     return false;
 }
+// The lifter builds its whole output with these, so they copy in bulk rather than a byte at a time.
 fn put<a, b>(out: (&a mut u8[]), s: &b [u8]) -> unit {
-    for i in s.len() {
-        out.push(s[i]);
-    }
+    out.append(s);
     return ();
 }
 fn num<a>(out: (&a mut u8[]), n: u64) -> unit {
@@ -413,7 +461,7 @@ fn inum<a>(out: (&a mut u8[]), n: i64) -> unit {
 }
 fn copy<a>(s: &a [u8]) -> u8[] {
     mut out = u8[];
-    put(&mut out, s);
+    out.append(s);
     return out;
 }
 fn member<a, b>(list: (&a u8[][]), s: &b [u8]) -> bool {
@@ -440,31 +488,46 @@ fn trim<a>(s: &a [u8]) -> u8[] {
         b -= 1;
     }
     mut out = u8[];
-    for i in b - a {
-        out.push(s[a + i]);
+    if a < b {
+        out.append(s[a: b]);
     }
     return out;
 }
 fn sub<a>(s: &a [u8], from: u64, to: u64) -> u8[] {
     mut out = u8[];
-    mut i = from;
-    while (i < to) && (i < s.len()) {
-        out.push(s[i]);
-        i += 1;
+    mut e = to;
+    if s.len() < e {
+        e = s.len();
+    }
+    if from < e {
+        out.append(s[from: e]);
     }
     return out;
 }
+// The lines of `s`, each trimmed as `trim` does, copied once.
 fn split_lines<a>(s: &a [u8]) -> u8[][] {
     mut out = u8[][];
     mut start: u64 = 0;
-    for i in s.len() {
-        if s[i] == 10 {
-            out.push(trim(view(sub(s, start, i))));
+    for i in s.len() + 1 {
+        if (i == s.len()) || (s[i] == 10) {
+            if (i == s.len()) && (start >= s.len()) {
+                break;
+            }
+            mut a = start;
+            mut b = i;
+            while a < b && (s[a] == 32 || s[a] == 9) {
+                a += 1;
+            }
+            while b > a && (s[b - 1] == 32 || s[b - 1] == 9 || s[b - 1] == 13) {
+                b -= 1;
+            }
+            mut line = u8[];
+            if a < b {
+                line.append(s[a: b]);
+            }
+            out.push(line);
             start = i + 1;
         }
-    }
-    if start < s.len() {
-        out.push(trim(view(sub(s, start, s.len()))));
     }
     return out;
 }
@@ -871,7 +934,7 @@ fn address<a, b>(l: (&a mut L), op: &b [u8]) -> u8[] {
             mut off = within;
             if pair_second(&l, k) != 0 {
                 at = u64(pair_base(&l, k)) - 1;
-                off = within + 8;
+                off = within + i64(8 * (at - k));
             }
             mut slot = copy(view("%s."));
             num(&mut slot, at);
@@ -1096,13 +1159,94 @@ fn slot_operand<a, b>(l: (&a L), op: &b [u8]) -> u64 {
 // `movq` read, write or compare, with an immediate write only of zero (a float zero is all-zero
 // bytes). Anything else -- an address taken, a four-byte alias, an integer operation -- makes the
 // slot stay an untyped word, which is always correct.
-fn slot_body_ok<a, b>(instrs: (&a u8[][]), k: u64) -> bool {
-    needle := slot_needle(k);
+// Builds l.sl_start/l.sl_lines for `instrs` and `slots` frame slots. A line names slot k when it
+// contains `-8(k+1)(%rbp)` with the `-` right before the digits, which is exactly when the
+// `has(line, slot_needle(k))` test the per-slot checks used to make is true.
+fn index_slot_lines(l: (&mut L), instrs: (&u8[][]), slots: u64) -> unit {
+    mut count = u64[];
+    for k in slots + 1 {
+        count.push(0);
+    }
+    mut pk = u64[];
+    mut pm = u64[];
     for m in instrs.len() {
         line := view(instrs[m]);
-        if !has(line, view(needle)) {
+        mut last = slots;
+        mut i = 0;
+        while i + 1 < line.len() {
+            if (line[i] == 45) && (line[i + 1] >= 48) && (line[i + 1] <= 57) {
+                mut j = i + 1;
+                mut n: u64 = 0;
+                while (j < line.len()) && (line[j] >= 48) && (line[j] <= 57) && (n < 1099511627776) {
+                    n = n * 10 + u64(line[j] - 48);
+                    j += 1;
+                }
+                if occurs_at_safe(line, j, view("(%rbp)")) && (n >= 8) && (n % 8 == 0) {
+                    k := n / 8 - 1;
+                    if (k < slots) && (k != last) {
+                        pk.push(k);
+                        pm.push(m);
+                        count[k] = count[k] + 1;
+                        last = k;
+                    }
+                }
+                i = j;
+                continue;
+            }
+            i += 1;
+        }
+    }
+    mut start = u64[];
+    mut at: u64 = 0;
+    for k in slots + 1 {
+        start.push(at);
+        at += count[k];
+    }
+    mut fill = start.copy();
+    mut lines = u64[];
+    for q in at {
+        lines.push(0);
+    }
+    // A line naming one slot twice must count once: pairs are in line order, so a repeat of the
+    // same (k, m) is adjacent only within one line's scan, which `last` covers for consecutive
+    // occurrences; an interleaved repeat (k, other, k) is caught here.
+    for q in pk.len() {
+        k := pk[q];
+        if (fill[k] > start[k]) && (lines[fill[k] - 1] == pm[q]) {
             continue;
         }
+        lines[fill[k]] = pm[q];
+        fill[k] = fill[k] + 1;
+    }
+    // Close the gaps the skipped repeats left: each slot's range ends where its fill stopped.
+    mut packed = u64[];
+    mut pstart = u64[];
+    for k in slots {
+        pstart.push(packed.len());
+        mut q = start[k];
+        while q < fill[k] {
+            packed.push(lines[q]);
+            q += 1;
+        }
+    }
+    pstart.push(packed.len());
+    exchange(&mut l.sl_start, pstart);
+    exchange(&mut l.sl_lines, packed);
+    return ();
+}
+fn occurs_at_safe<a, b>(a: &a [u8], at: u64, b: &b [u8]) -> bool {
+    if at + b.len() > a.len() {
+        return false;
+    }
+    return occurs_at(a, at, b);
+}
+fn slot_body_ok<a, b>(l: (&a L), instrs: (&b u8[][]), k: u64) -> bool {
+    needle := slot_needle(k);
+    if k + 1 >= l.sl_start.len() {
+        return true;
+    }
+    for q in l.sl_start[k + 1] - l.sl_start[k] {
+        line := view(instrs[l.sl_lines[l.sl_start[k] + q]]);
         if !starts(line, view("movq ")) && !starts(line, view("cmpq ")) {
             return false;
         }
@@ -1149,7 +1293,7 @@ fn accept_slots<a, b, c, d>(l: (&a mut L), instrs: (&b u8[][]), facts: (&c Facts
                 rejected = 1;
             }
         }
-        if (rejected == 0) & (k < slots) & slot_body_ok(&instrs, k) {
+        if (rejected == 0) & (k < slots) & slot_body_ok(&l, &instrs, k) {
             l.fslots.push(k);
         }
     }
@@ -1185,11 +1329,48 @@ fn arg_reg(i: u64) -> u8[] {
     return copy(view("rdi"));
 }
 // 0..13 for a machine register, 14 for anything else.
+// The index of a 64-bit register name in rax, rbx, rcx, rdx, rsi, rdi, r8..r15 order, or 14. Read
+// from the bytes: this is asked for nearly every operand the lifter sees.
 fn reg_index(name: &[u8]) -> u64 {
-    names := u8[][copy(view("rax")), copy(view("rbx")), copy(view("rcx")), copy(view("rdx")), copy(view("rsi")), copy(view("rdi")), copy(view("r8")), copy(view("r9")), copy(view("r10")), copy(view("r11")), copy(view("r12")), copy(view("r13")), copy(view("r14")), copy(view("r15"))];
-    for i in names.len() {
-        if eq(view(names[i]), name) {
-            return i;
+    n := name.len();
+    if (n < 2) || (n > 3) || (name[0] != 114) {
+        return 14;
+    }
+    if n == 2 {
+        if name[1] == 56 {
+            return 6;
+        }
+        if name[1] == 57 {
+            return 7;
+        }
+        return 14;
+    }
+    a := name[1];
+    b := name[2];
+    if (a == 49) && (b >= 48) && (b <= 53) {
+        return 8 + u64(b - 48);
+    }
+    if b == 120 {
+        if a == 97 {
+            return 0;
+        }
+        if a == 98 {
+            return 1;
+        }
+        if a == 99 {
+            return 2;
+        }
+        if a == 100 {
+            return 3;
+        }
+        return 14;
+    }
+    if b == 105 {
+        if a == 115 {
+            return 4;
+        }
+        if a == 100 {
+            return 5;
         }
     }
     return 14;
@@ -1422,13 +1603,12 @@ fn header_operand(l: (&L), op: &[u8]) -> u64 {
 // read or write, a `cmpq`, or a `leaq` of the slot (`&v`, a borrow). A constant written into the
 // slot, a four-byte alias or any integer operation makes the slot stay an untyped word, which is
 // always correct.
-fn header_body_ok(instrs: (&u8[][]), k: u64) -> bool {
-    needle := slot_needle(k);
-    for m in instrs.len() {
-        line := view(instrs[m]);
-        if !has(line, view(needle)) {
-            continue;
-        }
+fn header_body_ok(l: (&L), instrs: (&u8[][]), k: u64) -> bool {
+    if k + 1 >= l.sl_start.len() {
+        return true;
+    }
+    for q in l.sl_start[k + 1] - l.sl_start[k] {
+        line := view(instrs[l.sl_lines[l.sl_start[k] + q]]);
         if starts(line, view("leaq ")) || starts(line, view("cmpq ")) {
             continue;
         }
@@ -1446,6 +1626,7 @@ fn accept_headers(l: (&mut L), instrs: (&u8[][]), facts: (&Facts), fname: (&[u8]
     exchange(&mut l.hslots, u64[]);
     exchange(&mut l.hwhat, u64[]);
     exchange(&mut l.hwidth, u64[]);
+    exchange(&mut l.hstable, u64[]);
     mut cand = u64[];
     mut cwhat = u64[];
     mut cwidth = u64[];
@@ -1466,8 +1647,9 @@ fn accept_headers(l: (&mut L), instrs: (&u8[][]), facts: (&Facts), fname: (&[u8]
             cwhat.push(f.what);
             cwidth.push(f.width);
         }
-        // Every fact naming the slot has to agree, and a header is `what` 2/3/4 only.
-        if (f.what < 2) || (f.what > 4) {
+        // Every fact naming the slot has to agree, and a header is `what` 2/3/4 (a vector) or 5 (a
+        // slice's descriptor).
+        if (f.what < 2) || (f.what > 5) {
             bad.push(f.a);
         } else {
             for j in cand.len() {
@@ -1485,40 +1667,73 @@ fn accept_headers(l: (&mut L), instrs: (&u8[][]), facts: (&Facts), fname: (&[u8]
                 rejected = 1;
             }
         }
-        if (rejected == 0) & (k < slots) & (cwhat[i] >= 2) & (cwhat[i] <= 4) & header_body_ok(&instrs, k) {
+        if (rejected == 0) & (k < slots) & (cwhat[i] >= 2) & (cwhat[i] <= 5) & header_body_ok(&l, &instrs, k) {
             l.hslots.push(k);
             l.hwhat.push(cwhat[i]);
             l.hwidth.push(cwidth[i]);
+            l.hstable.push(u64((cwhat[i] == 5) && written_once(&instrs, k)));
         }
     }
     return ();
 }
-// The F1 fact on the `ordinal`-th call to `callee` in `fname`: its argument 0 is a header.
-fn call_header(facts: (&Facts), fname: (&[u8]), callee: (&[u8]), ordinal: u64) -> HFact {
+// The key of the F1 fact on the `ordinal`-th call to `callee`: its argument 0 is a header.
+fn call_key(callee: (&[u8]), ordinal: u64) -> u8[] {
+    mut key = copy(callee);
+    key.push(35);
+    num(&mut key, ordinal);
+    return key;
+}
+// Indexes the function's F1 call facts once (lower_function), so a call site finds its fact in one
+// probe; the first fact recorded for a key wins, as the scan in `call_header` would find it.
+fn index_call_headers(l: (&mut L), facts: (&Facts), fname: (&[u8])) -> unit {
+    mut n = 0;
+    for i in facts.items.len() {
+        if facts.items[i].kind == 1 {
+            n += 1;
+        }
+    }
+    exchange(&mut l.hmap, map_new(n + 1));
     for i in facts.items.len() {
         f := &facts.items[i];
-        if (f.kind != 1) || (f.a != ordinal) || (f.what < 2) || (f.what > 4) {
+        if (f.kind != 1) || (f.what < 2) || (f.what > 5) || !eq(view(f.fn), view(fname)) {
             continue;
         }
-        if !eq(view(f.fn), view(fname)) || !eq(view(f.callee), view(callee)) {
-            continue;
+        key := call_key(view(f.callee), f.a);
+        if map_get(&l.hmap, view(key)) == 0 {
+            map_put(&mut l.hmap, view(key), i);
         }
-        return HFact { what: f.what, width: f.width };
     }
-    return no_hfact();
+    return ();
+}
+fn call_header_at(l: (&L), facts: (&Facts), callee: (&[u8]), ordinal: u64) -> HFact {
+    hit := map_get(&l.hmap, view(call_key(callee, ordinal)));
+    if hit == 0 {
+        return no_hfact();
+    }
+    f := &facts.items[hit - 1];
+    return HFact { what: f.what, width: f.width };
 }
 // The `ordinal`-th call to `callee` in the function being lowered, counting the calls this lifter
 // has already seen in emission order (the key an F1 call fact carries).
 fn callee_ordinal(l: (&mut L), callee: (&[u8])) -> u64 {
-    for i in l.cnames.len() {
-        if eq(view(l.cnames[i]), callee) {
-            n := l.ccount[i];
-            l.ccount[i] = n + 1;
-            return n;
-        }
+    hit := map_get(&l.cmap, callee);
+    if hit != 0 {
+        n := l.ccount[hit - 1];
+        l.ccount[hit - 1] = n + 1;
+        return n;
     }
     l.cnames.push(copy(callee));
     l.ccount.push(1);
+    id := l.cnames.len() - 1;
+    if (id + 1) * 2 >= l.cmap.used.len() {
+        mut bigger = map_new(l.cmap.used.len());
+        for i in l.cnames.len() {
+            map_put(&mut bigger, view(l.cnames[i]), i);
+        }
+        exchange(&mut l.cmap, bigger);
+    } else {
+        map_put(&mut l.cmap, callee, id);
+    }
     return 0;
 }
 // Absolute, machine-aligned loads of the two header fields a fact makes readable this way: `+0` is
@@ -1599,12 +1814,15 @@ fn establish(l: (&mut L), k: u64, w: (&[u8])) -> unit {
         l.eon.push(0);
         l.edata.push(u8[]);
         l.elen.push(u8[]);
+        l.edptr.push(u8[]);
         l.eblk.push(0);
     }
     what := header_slot_kind(&l, k);
     h := def(&mut l, view("inttoptr i64 {} to ptr"), &u8[][copy(w)]);
-    d := header_load(&mut l, view(h), 0);
+    dp := def(&mut l, view("load ptr, ptr {}, align 8"), &u8[][copy(view(h))]);
+    d := def(&mut l, view("ptrtoint ptr {} to i64"), &u8[][copy(view(dp))]);
     ln := header_load(&mut l, view(h), 8);
+    exchange(&mut l.edptr[k], dp);
     if l.verify != 0 {
         verify_header(&mut l, w, view(h), what, view(ln));
     }
@@ -1623,6 +1841,12 @@ fn stale(l: (&mut L), k: u64) -> unit {
         l.eon.push(0);
         l.edata.push(u8[]);
         l.elen.push(u8[]);
+        l.edptr.push(u8[]);
+    }
+    // A slice's descriptor (`what` 5) is never written while the slice lives (SEQ-STABLE): no call
+    // can grow, move or truncate what it describes, so its fields stay current.
+    if header_slot_kind(&l, k) == 5 {
+        return ();
     }
     if l.eon[k] == 1 {
         l.eon[k] = 2;
@@ -1636,6 +1860,7 @@ fn unestablish(l: (&mut L), k: u64) -> unit {
         l.eon.push(0);
         l.edata.push(u8[]);
         l.elen.push(u8[]);
+        l.edptr.push(u8[]);
     }
     l.eon[k] = 0;
     return ();
@@ -1668,7 +1893,54 @@ fn reachable(l: (&L), k: u64) -> bool {
     if k >= l.eblk.len() {
         return false;
     }
-    return l.eblk[k] == l.blk;
+    if l.eblk[k] == l.blk {
+        return true;
+    }
+    // SEQ-STABLE: a slice descriptor whose one write is in the function's first block. That block
+    // dominates every other, and nothing writes the descriptor while the slice lives, so the fields
+    // read there are the fields everywhere (docs/design/release-builds-and-parity.md).
+    return (l.eblk[k] == l.body_blk) && header_stable(&l, k);
+}
+fn header_stable(l: (&L), k: u64) -> bool {
+    for i in l.hslots.len() {
+        if (l.hslots[i] == k) && (i < l.hstable.len()) {
+            return l.hstable[i] != 0;
+        }
+    }
+    return false;
+}
+// Whether slot k is written by exactly one instruction of the body and never has its address taken:
+// the destination operand is the slot itself, matched whole (`-8(%rbp)` is not `-48(%rbp)`).
+fn written_once(instrs: (&u8[][]), k: u64) -> bool {
+    needle := slot_needle(k);
+    mut writes = 0;
+    for m in instrs.len() {
+        line := view(instrs[m]);
+        if !has(line, view(needle)) {
+            continue;
+        }
+        mut comma = line.len();
+        for j in line.len() {
+            if line[j] == 44 {
+                comma = j;
+            }
+        }
+        if comma == line.len() {
+            continue;
+        }
+        dst := sub(line, comma + 1, line.len());
+        if starts(line, view("leaq ")) {
+            src := sub(line, 5, comma);
+            if eq(view(src), view(needle)) {
+                return false;
+            }
+            continue;
+        }
+        if eq(view(dst), view(needle)) {
+            writes += 1;
+        }
+    }
+    return writes == 1;
 }
 // Whether a call writes the header it is given. Everything outside this set that receives a header
 // word may grow, fill, truncate, pop, insert or clear it, and invalidates the established fields.
@@ -1726,13 +1998,23 @@ fn refresh(l: (&mut L)) -> unit {
 }
 // The id of a block name, assigned on first appearance so the two lowering passes agree.
 fn block_id<a, b>(l: (&a mut L), name: &b [u8]) -> u64 {
-    for i in l.dnames.len() {
-        if eq(view(l.dnames[i]), view(name)) {
-            return i;
-        }
+    hit := map_get(&l.dmap, name);
+    if hit != 0 {
+        return hit - 1;
     }
     l.dnames.push(copy(view(name)));
-    return l.dnames.len() - 1;
+    id := l.dnames.len() - 1;
+    // A full table probes forever: grow it before it is half used.
+    if (id + 1) * 2 >= l.dmap.used.len() {
+        mut bigger = map_new(l.dmap.used.len());
+        for i in l.dnames.len() {
+            map_put(&mut bigger, view(l.dnames[i]), i);
+        }
+        exchange(&mut l.dmap, bigger);
+    } else {
+        map_put(&mut l.dmap, name, id);
+    }
+    return id;
 }
 // The sibling a fact-carrying call targets: the same word-machine body emitted with argument 0 as
 // a `ptr` carrying `dereferenceable(24) align 8`, and with `data`/`len` passed in instead of read.
@@ -1914,6 +2196,105 @@ fn call_args<a>(l: (&a mut L)) -> u8[] {
     }
     return out;
 }
+// The runtime entries that end the process or abandon the calling stack, so nothing after a call to
+// one is reached: the check failures compiled code calls (`rt_fail`, `rt_trap`, `rt_refine`,
+// `rt_task_fail`), the reporters behind them, and the exits those end in. `rt_abort` is the same
+// kind and has its own cold stub in `lower_call`.
+fn never_returns<a>(target: &a [u8]) -> bool {
+    return eq(target, view("rt_fail")) || eq(target, view("rt_trap")) || eq(target, view("rt_refine"))
+        || eq(target, view("rt_task_fail")) || eq(target, view("rt_fail_text")) || eq(target, view("rt_report_die"))
+        || eq(target, view("rt_abort_final")) || eq(target, view("rt_abort_park")) || eq(target, view("rt_hard_exit"))
+        || eq(target, view("rt_stack_overflow")) || eq(target, view("rt_stack_overflow_at"));
+}
+// The accessors that return an element's address: `rt_slot` and `rt_slot4` check the index against
+// `len` first, the `u` forms were handed a proven index.
+fn address_accessor(name: (&[u8])) -> bool {
+    return eq(name, view("rt_slot")) || eq(name, view("rt_slotu")) || eq(name, view("rt_slot4")) || eq(name, view("rt_slot4u"));
+}
+// An element address from the fields an F1 fact hoisted: the bounds check against the hoisted `len`
+// (failing exactly as the accessor would - `rt_slot` reports the index, `rt_slot4` aborts), then a
+// `getelementptr` on the hoisted `data` pointer. The address keeps the allocation's provenance, so
+// LLVM can reason about it: the loop that does no more than this is one it can vectorise.
+fn element_address(l: (&mut L), target: (&[u8]), k: u64, width: u64) -> unit {
+    i := get_reg(&mut l, view("rsi"));
+    if l.verify != 0 {
+        // --verify-facts: the header this call was handed still holds the `data` and `len` the
+        // fact hoisted. A SEQ-STABLE claim about a descriptor that did change - or a vector fact
+        // whose staleness was missed - aborts here, on the first access after the change.
+        h := def(&mut l, view("inttoptr i64 {} to ptr"), &u8[][copy(view(get_reg(&mut l, view("rdi"))))]);
+        d := header_load(&mut l, view(h), 0);
+        ln := header_load(&mut l, view(h), 8);
+        sd := def(&mut l, view("icmp eq i64 {}, {}"), &u8[][d, copy(view(l.edata[k]))]);
+        sl := def(&mut l, view("icmp eq i64 {}, {}"), &u8[][ln, copy(view(l.elen[k]))]);
+        same := def(&mut l, view("and i1 {}, {}"), &u8[][sd, sl]);
+        good := fresh_block(&mut l);
+        wrong := fresh_block(&mut l);
+        emit(&mut l, view("br i1 {}, label %{}, label %{}"), &u8[][same, copy(view(good)), copy(view(wrong))]);
+        begin_block(&mut l, view(wrong));
+        emit(&mut l, view("call void @\"rt_abort.cold\"() #0"), &u8[][]);
+        emit(&mut l, view("unreachable"), &u8[][]);
+        begin_block(&mut l, view(good));
+    }
+    if eq(target, view("rt_slot")) || eq(target, view("rt_slot4")) {
+        ok := def(&mut l, view("icmp ult i64 {}, {}"), &u8[][copy(view(i)), copy(view(l.elen[k]))]);
+        good := fresh_block(&mut l);
+        wrong := fresh_block(&mut l);
+        emit(&mut l, view("br i1 {}, label %{}, label %{}"), &u8[][ok, copy(view(good)), copy(view(wrong))]);
+        begin_block(&mut l, view(wrong));
+        // Both widths report the index and the length, as the native backend's inline check does.
+        if eq(target, view("rt_slot")) || eq(target, view("rt_slot4")) {
+            l.calls.push(copy(view("rt_fail")));
+            emit(
+                &mut l,
+                view("call {i64, i64} @\"rt_fail\"(i64 1, i64 {}, i64 {}, i64 0, i64 0, i64 0)"),
+                &u8[][copy(view(i)), copy(view(l.elen[k]))]
+            );
+        } else {
+            emit(&mut l, view("call void @\"rt_abort.cold\"() #0"), &u8[][]);
+        }
+        emit(&mut l, view("unreachable"), &u8[][]);
+        begin_block(&mut l, view(good));
+    }
+    off := def(&mut l, view("mul i64 {}, {}"), &u8[][copy(view(i)), copy_width(width)]);
+    p := def(&mut l, view("getelementptr i8, ptr {}, i64 {}"), &u8[][copy(view(l.edptr[k])), off]);
+    r := def(&mut l, view("ptrtoint ptr {} to i64"), &u8[][p]);
+    set_reg(&mut l, view("rax"), view(r));
+    set_chain(&mut l, reg_index(view("rax")) + 1, 0, 0, 0);
+    set_chain(&mut l, reg_index(view("rdx")) + 1, 0, 0, 0);
+    clear_args(&mut l);
+    return ();
+}
+// The address of element `rsi` of a fixed-size array at `rdi` (docs/design/fixed-arrays.md):
+// `rt_aslot` first compares the index with the constant length in `rdx` and fails as the accessor
+// would; the address is a `getelementptr` on the array's own pointer, so it keeps the provenance
+// of the frame aggregate or record the array lives in and LLVM can keep elements in registers.
+fn array_element<a, b>(l: (&a mut L), target: &b [u8]) -> unit {
+    base := get_reg(&mut l, view("rdi"));
+    i := get_reg(&mut l, view("rsi"));
+    mut w = get_reg(&mut l, view("rdx"));
+    if eq(target, view("rt_aslot")) {
+        n := get_reg(&mut l, view("rdx"));
+        w = get_reg(&mut l, view("rcx"));
+        ok := def(&mut l, view("icmp ult i64 {}, {}"), &u8[][copy(view(i)), copy(view(n))]);
+        good := fresh_block(&mut l);
+        wrong := fresh_block(&mut l);
+        emit(&mut l, view("br i1 {}, label %{}, label %{}"), &u8[][ok, copy(view(good)), copy(view(wrong))]);
+        begin_block(&mut l, view(wrong));
+        l.calls.push(copy(view("rt_fail")));
+        emit(&mut l, view("call {i64, i64} @\"rt_fail\"(i64 1, i64 {}, i64 {}, i64 0, i64 0, i64 0)"), &u8[][copy(view(i)), copy(view(n))]);
+        emit(&mut l, view("unreachable"), &u8[][]);
+        begin_block(&mut l, view(good));
+    }
+    p := def(&mut l, view("inttoptr i64 {} to ptr"), &u8[][base]);
+    off := def(&mut l, view("mul i64 {}, {}"), &u8[][i, w]);
+    e := def(&mut l, view("getelementptr inbounds i8, ptr {}, i64 {}"), &u8[][p, off]);
+    r := def(&mut l, view("ptrtoint ptr {} to i64"), &u8[][e]);
+    set_reg(&mut l, view("rax"), view(r));
+    set_chain(&mut l, reg_index(view("rax")) + 1, 0, 0, 0);
+    set_chain(&mut l, reg_index(view("rdx")) + 1, 0, 0, 0);
+    clear_args(&mut l);
+    return ();
+}
 fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> unit {
     if (target.len() == 0) || (target[0] == 42) {
         bad(&mut l);
@@ -1924,6 +2305,10 @@ fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> uni
         emit(&mut l, view("call void @\"rt_abort.cold\"() #0"), &u8[][]);
         emit(&mut l, view("unreachable"), &u8[][]);
         ends_terminator(&mut l);
+        return ();
+    }
+    if eq(target, view("rt_aslot")) || eq(target, view("rt_aslotu")) {
+        array_element(&mut l, target);
         return ();
     }
     if eq(target, view("rt_f32_round")) {
@@ -1987,7 +2372,7 @@ fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> uni
             }
         }
     }
-    hf := call_header(&facts, view(l.fname), view(target), ord);
+    hf := call_header_at(&l, &facts, view(target), ord);
     if hf.width != 0 {
         kid := reg_index(view("rdi")) + 1;
         k := chain_slot(&l, kid);
@@ -2003,6 +2388,10 @@ fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> uni
         // and a sibling call whose `data`/`len` had to be re-read here would be a longer instruction
         // sequence doing the same loads as the body it replaced.
         if (have != 0) & (chain_kind(&l, kid) == 1) & (k < l.hslots.len() + 4096) & reachable(&l, k) {
+            if address_accessor(target) {
+                element_address(&mut l, view(target), k, hf.width);
+                return ();
+            }
             a0 := get_reg(&mut l, view("rdi"));
             p := def(&mut l, view("inttoptr i64 {} to ptr"), &u8[][a0]);
             mut c = u8[];
@@ -2040,6 +2429,15 @@ fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> uni
     put(&mut c, target);
     put(&mut c, view("\"({})"));
     pair := def(&mut l, view(c), &u8[][args]);
+    if never_returns(target) {
+        // A failed check reports and never comes back: it ends the process, or abandons this
+        // stack for the scheduler's (rt_contain_tail). Saying so keeps the failure arm out of the
+        // loop it guards - a returning call there clobbers every register the loop holds, which
+        // is what kept spills and a merge in the body of every checked 8-byte element access.
+        emit(&mut l, view("unreachable"), &u8[][]);
+        ends_terminator(&mut l);
+        return ();
+    }
     r0 := def(&mut l, view("extractvalue {i64, i64} {}, 0"), &u8[][copy(view(pair))]);
     r1 := def(&mut l, view("extractvalue {i64, i64} {}, 1"), &u8[][pair]);
     set_reg(&mut l, view("rax"), view(r0));
@@ -2528,6 +2926,85 @@ fn set_add<a, b>(s: (&a mut Set), key: &b [u8]) -> unit {
     s.count += 1;
     return ();
 }
+// A string-keyed table of numbers, open addressing like Set: what turns the lifter's "find the
+// entry named X" scans into one probe.
+struct Map {
+    keys: u8[][],
+    vals: u64[],
+    used: u64[]
+}
+fn map_new(capacity: u64) -> Map {
+    mut size: u64 = 64;
+    while size < capacity * 2 {
+        size = size * 2;
+    }
+    mut keys = u8[][];
+    mut vals = u64[];
+    mut used = u64[];
+    for i in size {
+        keys.push(u8[]);
+        vals.push(0);
+        used.push(0);
+    }
+    return Map { keys: keys, vals: vals, used: used };
+}
+// The value stored under `key` plus one, or 0 when there is none.
+fn map_get<a, b>(m: (&a Map), key: &b [u8]) -> u64 {
+    mask := m.used.len() - 1;
+    mut i = fnv(key) & mask;
+    while m.used[i] != 0 {
+        if eq(view(m.keys[i]), key) {
+            return m.vals[i] + 1;
+        }
+        i = (i + 1) & mask;
+    }
+    return 0;
+}
+fn map_put<a, b>(m: (&a mut Map), key: &b [u8], value: u64) -> unit {
+    mask := m.used.len() - 1;
+    mut i = fnv(key) & mask;
+    while m.used[i] != 0 {
+        if eq(view(m.keys[i]), key) {
+            m.vals[i] = value;
+            return ();
+        }
+        i = (i + 1) & mask;
+    }
+    m.keys[i] = copy(key);
+    m.vals[i] = value;
+    m.used[i] = 1;
+    return ();
+}
+// The facts about one function, as a table of their own. Every per-function question the lowering
+// asks walks its facts; asked of the whole module's table it costs the size of the module per
+// function, which is what made a large unit's lift quadratic. `heads`/`next` chain each function's
+// facts (built once per module), and with `--range-facts` the shared-parameter facts of every
+// function come too, because that pass reads its callees'.
+fn facts_of<a, b, d>(facts: (&a Facts), heads: (&b Map), next: (&d u64[]), name: &a [u8], ranges: u64) -> Facts {
+    mut out = Facts { items: Fact[] };
+    mut chain = u64[];
+    mut at = map_get(&heads, name);
+    while at != 0 {
+        chain.push(at - 1);
+        at = next[at - 1];
+    }
+    // The chain runs newest first; the lowering counts ordinals in emission order.
+    mut q = chain.len();
+    while q > 0 {
+        q -= 1;
+        f := &facts.items[chain[q]];
+        out.items.push(Fact { kind: f.kind, fn: copy(view(f.fn)), a: f.a, b: f.b, callee: copy(view(f.callee)), what: f.what, width: f.width });
+    }
+    if ranges != 0 {
+        for i in facts.items.len() {
+            f := &facts.items[i];
+            if (f.kind == 2) && !eq(view(f.fn), name) {
+                out.items.push(Fact { kind: f.kind, fn: copy(view(f.fn)), a: f.a, b: f.b, callee: copy(view(f.callee)), what: f.what, width: f.width });
+            }
+        }
+    }
+    return out;
+}
 fn ident_char(ch: u64) -> bool {
     return ((ch >= 97) && (ch <= 122))
         || ((ch >= 65) && (ch <= 90))
@@ -2619,7 +3096,9 @@ fn body_lines<a, b>(lines: (&a u8[][]), f: (&b Func)) -> u8[][] {
 // above it, lowered as one `[2 x i64]` alloca so the two words stay one addressable value.
 fn function_pairs<a, b, d>(l: (&a mut L), facts: (&b Facts), name: &d [u8]) -> unit {
     exchange(&mut l.pairs, u64[]);
+    exchange(&mut l.pair_widths, u64[]);
     facts_dyn_pairs(facts, name, &mut l.pairs);
+    facts_pair_widths(facts, name, &mut l.pair_widths);
     return ();
 }
 // The two-word value slot k belongs to, +1: its first word's slot, or 0 when k is a plain slot.
@@ -2627,11 +3106,20 @@ fn function_pairs<a, b, d>(l: (&a mut L), facts: (&b Facts), name: &d [u8]) -> u
 fn pair_base<a>(l: (&a L), k: u64) -> u64 {
     for i in l.pairs.len() {
         b := l.pairs[i];
-        if (b == k) | (b == k + 1) {
+        if (k <= b) & (b < k + l.pair_widths[i]) {
             return b + 1;
         }
     }
     return 0;
+}
+// The word count of the multi-word value whose base (counted from one) is `base`.
+fn pair_words<a>(l: (&a L), base: u64) -> u64 {
+    for i in l.pairs.len() {
+        if l.pairs[i] + 1 == base {
+            return l.pair_widths[i];
+        }
+    }
+    return 1;
 }
 // Whether slot k is the second word of a two-word value (the slot above its base).
 fn pair_second<a>(l: (&a L), k: u64) -> u64 {
@@ -2639,8 +3127,8 @@ fn pair_second<a>(l: (&a L), k: u64) -> u64 {
     if b == 0 {
         return 0;
     }
-    // `pair_base` counts the base slot from one, so the second word's slot is two below it.
-    if b == k + 2 {
+    // `pair_base` counts the base slot from one: any word below the base is a later word.
+    if b != k + 1 {
         return 1;
     }
     return 0;
@@ -2697,14 +3185,18 @@ fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), fact
     exchange(&mut l.eon, u64[]);
     exchange(&mut l.edata, u8[][]);
     exchange(&mut l.elen, u8[][]);
+    exchange(&mut l.edptr, u8[][]);
     exchange(&mut l.eblk, u64[]);
     l.blk = 0;
     exchange(&mut l.dnames, u8[][]);
+    exchange(&mut l.dmap, map_new(16));
+    index_call_headers(&mut l, &facts, view(f.name));
     exchange(&mut l.vk, u64[]);
     exchange(&mut l.vo, u64[]);
     exchange(&mut l.vo2, i64[]);
     exchange(&mut l.cnames, u8[][]);
     exchange(&mut l.ccount, u64[]);
+    exchange(&mut l.cmap, map_new(16));
     exchange(&mut l.proof, u64[]);
     l.rline = 0;
     for i in facts.items.len() {
@@ -2835,6 +3327,7 @@ fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), fact
     if l.split != 0 {
         // One alloca per slot; the prologue's zeroing covers the slots below the parameters.
         slots := size / 8;
+        index_slot_lines(&mut l, &instrs, slots);
         accept_slots(&mut l, &instrs, &facts, view(f.name), slots);
         accept_headers(&mut l, &instrs, &facts, view(f.name), slots);
         mut count = slots;
@@ -2861,16 +3354,23 @@ fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), fact
             if b != 0 {
                 // One object of two slots, so a write to either word is a write to an object whose
                 // address escapes: neither word can be dropped as dead.
-                emit(&mut l, view("{} = alloca [2 x i64], align 8"), &u8[][copy(view(sn))]);
+                words := pair_words(&l, b);
+                mut count_text = u8[];
+                num(&mut count_text, words);
+                emit(&mut l, view("{} = alloca [{} x i64], align 8"), &u8[][copy(view(sn)), count_text]);
                 if (zero >= 0) && (k >= u64(zero)) && (k < slots) {
                     emit(&mut l, view("store i64 0, ptr {}"), &u8[][copy(view(sn))]);
                 }
-                if (zero >= 0) && (k >= 1) {
-                    // The second word is only cleared when the first one is (a pair starts above
-                    // the parameters, so both words share the zeroing decision).
-                    if (k - 1 >= u64(zero)) && (k - 1 < slots) {
-                        wt := def(&mut l, view("getelementptr i8, ptr {}, i64 8"), &u8[][copy(view(sn))]);
-                        emit(&mut l, view("store i64 0, ptr {}"), &u8[][wt]);
+                // A later word is cleared when its own slot is in the cleared range (a value starts
+                // above the parameters, so all its words share the zeroing decision).
+                for j in 1..words {
+                    if (zero >= 0) && (k >= j) {
+                        if (k - j >= u64(zero)) && (k - j < slots) {
+                            mut at = u8[];
+                            num(&mut at, 8 * j);
+                            wt := def(&mut l, view("getelementptr i8, ptr {}, i64 {}"), &u8[][copy(view(sn)), at]);
+                            emit(&mut l, view("store i64 0, ptr {}"), &u8[][wt]);
+                        }
                     }
                 }
                 continue;
@@ -2919,6 +3419,7 @@ fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), fact
     }
     emit(&mut l, view("br label %body"), &u8[][]);
     begin_block(&mut l, view("body"));
+    l.body_blk = l.blk;
     if l.verify != 0 {
         // The range facts this function used, as comments, so a test can read them off the module.
         for i in l.proof.len() {
@@ -3608,7 +4109,7 @@ fn rg_width_of(op: (&[u8])) -> u64 {
 // 1 when a call is one of the read-only accessors: it reads the sequence it is given and writes
 // neither the sequence's header nor any storage the caller owns.
 fn rg_readonly(name: (&[u8])) -> bool {
-    if starts(name, view("rt_slot")) || starts(name, view("rt_at")) {
+    if starts(name, view("rt_slot")) || starts(name, view("rt_at")) || starts(name, view("rt_aslot")) {
         return true;
     }
     if eq(name, view("rt_len")) || eq(name, view("rt_view")) || eq(name, view("rt_write")) {
@@ -5366,9 +5867,9 @@ fn header<a>(out: (&a mut u8[])) -> unit {
     put(&mut out, view("declare double @llvm.sqrt.f64(double)\n"));
     put(&mut out, view("define internal void @\"rt_abort.cold\"() noreturn cold noinline nounwind {\n  call {i64, i64} @\"rt_abort\"(i64 0, i64 0, i64 0, i64 0, i64 0, i64 0)\n  unreachable\n}\n"));
     // LLVM may turn copy and fill loops into these calls; Grail programs have no libc.
-    put(&mut out, view("define ptr @memset(ptr %d, i32 %c, i64 %n) #1 {\nentry:\n  %b = trunc i32 %c to i8\n  br label %loop\nloop:\n  %i = phi i64 [0, %entry], [%i1, %body]\n  %done = icmp eq i64 %i, %n\n  br i1 %done, label %exit, label %body\nbody:\n  %p = getelementptr i8, ptr %d, i64 %i\n  store i8 %b, ptr %p\n  %i1 = add i64 %i, 1\n  br label %loop\nexit:\n  ret ptr %d\n}\n"));
-    put(&mut out, view("define ptr @memcpy(ptr %d, ptr %s, i64 %n) #1 {\nentry:\n  br label %loop\nloop:\n  %i = phi i64 [0, %entry], [%i1, %body]\n  %done = icmp eq i64 %i, %n\n  br i1 %done, label %exit, label %body\nbody:\n  %q = getelementptr i8, ptr %s, i64 %i\n  %v = load i8, ptr %q\n  %p = getelementptr i8, ptr %d, i64 %i\n  store i8 %v, ptr %p\n  %i1 = add i64 %i, 1\n  br label %loop\nexit:\n  ret ptr %d\n}\n"));
-    put(&mut out, view("define ptr @memmove(ptr %d, ptr %s, i64 %n) #1 {\nentry:\n  %fwd = icmp ult ptr %d, %s\n  br i1 %fwd, label %f, label %b\nf:\n  %i = phi i64 [0, %entry], [%i1, %fb]\n  %fdone = icmp eq i64 %i, %n\n  br i1 %fdone, label %exit, label %fb\nfb:\n  %fq = getelementptr i8, ptr %s, i64 %i\n  %fv = load i8, ptr %fq\n  %fp = getelementptr i8, ptr %d, i64 %i\n  store i8 %fv, ptr %fp\n  %i1 = add i64 %i, 1\n  br label %f\nb:\n  %j = phi i64 [%n, %entry], [%j1, %bb]\n  %bdone = icmp eq i64 %j, 0\n  br i1 %bdone, label %exit, label %bb\nbb:\n  %j1 = sub i64 %j, 1\n  %bq = getelementptr i8, ptr %s, i64 %j1\n  %bv = load i8, ptr %bq\n  %bp = getelementptr i8, ptr %d, i64 %j1\n  store i8 %bv, ptr %bp\n  br label %b\nexit:\n  ret ptr %d\n}\n"));
+    put(&mut out, view("define weak ptr @memset(ptr %d, i32 %c, i64 %n) #1 {\nentry:\n  %b = trunc i32 %c to i8\n  br label %loop\nloop:\n  %i = phi i64 [0, %entry], [%i1, %body]\n  %done = icmp eq i64 %i, %n\n  br i1 %done, label %exit, label %body\nbody:\n  %p = getelementptr i8, ptr %d, i64 %i\n  store i8 %b, ptr %p\n  %i1 = add i64 %i, 1\n  br label %loop\nexit:\n  ret ptr %d\n}\n"));
+    put(&mut out, view("define weak ptr @memcpy(ptr %d, ptr %s, i64 %n) #1 {\nentry:\n  br label %loop\nloop:\n  %i = phi i64 [0, %entry], [%i1, %body]\n  %done = icmp eq i64 %i, %n\n  br i1 %done, label %exit, label %body\nbody:\n  %q = getelementptr i8, ptr %s, i64 %i\n  %v = load i8, ptr %q\n  %p = getelementptr i8, ptr %d, i64 %i\n  store i8 %v, ptr %p\n  %i1 = add i64 %i, 1\n  br label %loop\nexit:\n  ret ptr %d\n}\n"));
+    put(&mut out, view("define weak ptr @memmove(ptr %d, ptr %s, i64 %n) #1 {\nentry:\n  %fwd = icmp ult ptr %d, %s\n  br i1 %fwd, label %f, label %b\nf:\n  %i = phi i64 [0, %entry], [%i1, %fb]\n  %fdone = icmp eq i64 %i, %n\n  br i1 %fdone, label %exit, label %fb\nfb:\n  %fq = getelementptr i8, ptr %s, i64 %i\n  %fv = load i8, ptr %fq\n  %fp = getelementptr i8, ptr %d, i64 %i\n  store i8 %fv, ptr %fp\n  %i1 = add i64 %i, 1\n  br label %f\nb:\n  %j = phi i64 [%n, %entry], [%j1, %bb]\n  %bdone = icmp eq i64 %j, 0\n  br i1 %bdone, label %exit, label %bb\nbb:\n  %j1 = sub i64 %j, 1\n  %bq = getelementptr i8, ptr %s, i64 %j1\n  %bv = load i8, ptr %bq\n  %bp = getelementptr i8, ptr %d, i64 %j1\n  store i8 %bv, ptr %bp\n  br label %b\nexit:\n  ret ptr %d\n}\n"));
     return ();
 }
 fn pool_name<a>(label: &a [u8]) -> u8[] {
@@ -5390,8 +5891,14 @@ fn target_triple(target: u64) -> u8[] {
 // convention returns in x0:x1 (a0:a1); arguments already agree (x0..x5 / a0..a5). IR functions
 // are therefore defined as NAME.ll, native code reaches them through a thunk named NAME, and IR
 // reaches native functions through NAME.c.
-fn thunk_into_ir<a>(out: (&a mut u8[]), name: &a [u8], target: u64) -> unit {
-    put(&mut out, view(".text\n.globl "));
+fn thunk_into_ir<a>(out: (&a mut u8[]), name: &a [u8], target: u64, weak: bool) -> unit {
+    // A name the stream declared `.weak` keeps that binding: a second `.globl` is an assembler
+    // error (`changed binding to STB_GLOBAL`).
+    if weak {
+        put(&mut out, view(".text\n.weak "));
+    } else {
+        put(&mut out, view(".text\n.globl "));
+    }
     put(&mut out, name);
     put(&mut out, view("\n.hidden "));
     put(&mut out, name);
@@ -5489,10 +5996,23 @@ fn lower_target<a, b, c>(stream: &a [u8], triple: &b [u8], target: u64, facts: (
             set_add(&mut weak, view(sub(wl, 6, wl.len())));
         }
     }
-    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, pairs: u64[], fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, dnames: u8[][], proof: u64[], rline: 0, ranges: ranges };
+    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, pairs: u64[], pair_widths: u64[], fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], edptr: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], hstable: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, body_blk: 0, dnames: u8[][], dmap: map_new(16), hmap: map_new(16), cmap: map_new(16), sl_start: u64[], sl_lines: u64[], proof: u64[], rline: 0, ranges: ranges };
     mut funcs = Func[];
     mut data = u8[][];
     split(&lines, &mut funcs, &mut data);
+    // Each function's facts, chained by name, and each function by name.
+    mut fheads = map_new(funcs.len() + 64);
+    mut fnext = u64[];
+    for i in facts.items.len() {
+        f := &facts.items[i];
+        fnext.push(map_get(&fheads, view(f.fn)));
+        map_put(&mut fheads, view(f.fn), i);
+    }
+    mut fnames = map_new(funcs.len() + 64);
+    for fi in funcs.len() {
+        map_put(&mut fnames, view(funcs[fi].name), fi);
+    }
+    mut sibseen = set_new(64);
     // Labels named from data (jump tables) keep the functions that define them native.
     mut data_tokens = set_new(data.len() * 4 + 64);
     for i in data.len() {
@@ -5510,32 +6030,23 @@ fn lower_target<a, b, c>(stream: &a [u8], triple: &b [u8], target: u64, facts: (
             continue;
         }
         sn := sibling_name(view(f.callee), f.what, f.width);
-        mut seen = 0;
-        for j in l.sibnames.len() {
-            if eq(view(l.sibnames[j]), view(sn)) {
-                seen = 1;
-            }
-        }
-        if seen != 0 {
+        if set_has(&sibseen, view(sn)) {
             continue;
         }
-        mut found = 0;
-        mut at: u64 = 0;
-        for fi in funcs.len() {
-            if eq(view(funcs[fi].name), view(f.callee)) {
-                found = 1;
-                at = fi;
-            }
-        }
-        if found == 0 {
+        // Tried once per sibling, built or not: a sibling whose lowering failed fails again.
+        set_add(&mut sibseen, view(sn));
+        hit := map_get(&fnames, view(f.callee));
+        if hit == 0 {
             continue;
         }
+        at := hit - 1;
         l.sibwidth = f.width;
         l.sibwhat = f.what;
         exchange(&mut l.sd, copy(view("%d")));
         exchange(&mut l.sl, copy(view("%l")));
         cf := &funcs[at];
-        lower_function(&mut l, &lines, &cf, &facts);
+        cfacts := facts_of(&facts, &fheads, &fnext, view(cf.name), ranges);
+        lower_function(&mut l, &lines, &cf, &cfacts);
         if l.fail == 0 {
             l.sibnames.push(copy(view(sn)));
             l.sibbodies.push(copy(view(l.body)));
@@ -5562,12 +6073,14 @@ fn lower_target<a, b, c>(stream: &a [u8], triple: &b [u8], target: u64, facts: (
         saved_refs := l.refs.len();
         saved_addrs := l.addrs.len();
         if pinned == 0 {
-            lower_function(&mut l, &lines, &f, facts);
+            ffacts := facts_of(&facts, &fheads, &fnext, view(f.name), ranges);
+            lower_function(&mut l, &lines, &f, &ffacts);
         }
         if (pinned == 0) & (l.fail == 0) {
             put(&mut functions, view("define {i64, i64} @\""));
             put(&mut functions, view(f.name));
-            put(&mut functions, view("\"(i64 %a0, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5) {\n"));
+            // A frame over a page is probed as the native backend's is (optimize::probe_frames).
+            put(&mut functions, view("\"(i64 %a0, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5) \"probe-stack\"=\"inline-asm\" {\n"));
             put(&mut functions, view(l.body));
             put(&mut functions, view("}\n"));
             l.lifted.push(copy(view(f.name)));
@@ -5735,7 +6248,26 @@ fn lower_target<a, b, c>(stream: &a [u8], triple: &b [u8], target: u64, facts: (
                 e += 1;
             }
             fname := sub(line, 20, e - 3);
-            thunk_into_ir(&mut thunks, view(fname), target);
+            thunk_into_ir(&mut thunks, view(fname), target, set_has(&weak, view(fname)));
+        }
+        if starts(line, view("define {i64, i64} @\"")) {
+            // A body the stream declared `.weak` (a generic specialisation, a content-addressed
+            // drop helper) may be defined by every module that instantiates it, so its lifted body
+            // is weak too, or a release build of two such modules fails to link.
+            mut e = 20;
+            while (e < line.len()) && (line[e] != 34) {
+                e += 1;
+            }
+            mut base = sub(line, 20, e);
+            if ends(view(base), view(".ll")) {
+                base = sub(view(base), 0, base.len() - 3);
+            }
+            if set_has(&weak, view(base)) {
+                put(&mut ir, view("define weak "));
+                put(&mut ir, view(rename_line(view(sub(line, 7, line.len())), &exported)));
+                ir.push(10);
+                continue;
+            }
         }
         put(&mut ir, view(rename_line(line, &exported)));
         ir.push(10);

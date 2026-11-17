@@ -1,0 +1,78 @@
+// `*r = value` through a reference to a record: the old value is dropped once, then and there, and
+// the place holds the new one - for a 2-word record, a 6-word one, and an `extern "C"` record whose
+// size is not a whole number of words.
+struct Small {
+    n: u64,
+    tag: string
+}
+struct Wide {
+    a: u64,
+    b: u64,
+    c: u64,
+    d: u64,
+    e: u64,
+    tag: string
+}
+extern "C" record Odd {
+    x: u32,
+    y: u32,
+    z: u32
+}
+struct Box3 {
+    first: Small,
+    second: Small
+}
+impl Drop for Small {
+    fn drop(self: &mut Small) {
+        println("drop small {} {}", self.n, self.tag);
+    }
+}
+impl Drop for Wide {
+    fn drop(self: &mut Wide) {
+        println("drop wide {} {}", self.e, self.tag);
+    }
+}
+fn small(n: u64) -> Small {
+    return Small { n: n, tag: "s" };
+}
+fn wide(n: u64) -> Wide {
+    return Wide { a: n, b: n + 1, c: n + 2, d: n + 3, e: n + 4, tag: "w" };
+}
+fn put_small<a>(r: (&a mut Small), n: u64) {
+    *r = small(n);
+}
+fn put_wide<a>(r: (&a mut Wide), n: u64) {
+    *r = wide(n);
+}
+fn swap_wide<a>(r: (&a mut Wide), n: u64) -> Wide {
+    return exchange(r, wide(n));
+}
+fn put_odd<a>(r: (&a mut Odd), n: u32) {
+    *r = Odd { x: n, y: n + 1, z: n + 2 };
+}
+fn swap_odd<a>(r: (&a mut Odd), n: u32) -> Odd {
+    return exchange(r, Odd { x: n, y: n, z: n });
+}
+fn main() -> u64 {
+    mut s = small(1);
+    put_small(&mut s, 2);
+    println("s {}", s.n);
+    mut b = Box3 { first: small(3), second: small(4) };
+    put_small(&mut b.second, 5);
+    println("b {} {}", b.first.n, b.second.n);
+    mut v = Small[small(6), small(7)];
+    put_small(&mut v[0], 8);
+    println("v {} {}", v[0].n, v[1].n);
+
+    mut w = wide(10);
+    put_wide(&mut w, 20);
+    old := swap_wide(&mut w, 30);
+    println("w {} {} {} {} {} / {} {}", w.a, w.b, w.c, w.d, w.e, old.a, old.e);
+
+    mut o = Odd { x: 1, y: 2, z: 3 };
+    put_odd(&mut o, 10);
+    was := swap_odd(&mut o, 7);
+    println("o {} {} {} / {} {} {}", o.x, o.y, o.z, was.x, was.y, was.z);
+    println("end");
+    return 0;
+}

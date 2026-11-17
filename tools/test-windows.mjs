@@ -341,7 +341,8 @@ export async function check(compiler) {
       source = join(directory, 'input.grl');
       writeFileSync(source, test.source);
     }
-    const elf = compileElf(compiler, [source], directory, { target: elfTarget, name: test.name });
+    // The library modules the case names go with it, as they do for the Windows build above.
+    const elf = compileElf(compiler, [source, ...(test.libs ?? []).map(library => join(root, library))], directory, { target: elfTarget, name: test.name });
     const run = execute(elf, test.args ?? [], elfTarget, { cwd: directory, env: { ...process.env, ...(test.env ?? {}) } });
     assert.equal(run.status, test.status ?? 0, `${test.name}: linux exit ${run.status}: ${run.stderr}`);
     assert.equal(run.stdout.toString(), test.stdout, `${test.name}: linux stdout`);

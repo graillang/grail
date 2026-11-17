@@ -1,0 +1,29 @@
+// A floating-point reduction gives the same bits on any number of workers. Float addition is not
+// associative, so a sum's bits depend on how the terms are grouped: with pieces that depended on the
+// worker count (`parallel_map` used to make four leaves per worker) the same program printed
+// different sums on different machines. `pool::reduce` cuts [0, n) by the grain alone and folds the
+// piece results in index order, so the grouping - and the bits - are fixed by the program. The case
+// runs at GRAIL_WORKERS 1, 4 and 24 and must print the same line each time. `pool::map` is checked
+// the same way, through an ordered fold of its results.
+use pool;
+
+fn term(i: u64) -> f64 {
+    x := f64(i % 1000) + 0.1;
+    return 1.0 / (x * x) + x * 0.000001;
+}
+fn piece(lo: u64, hi: u64) -> f64 {
+    mut s = 0.0;
+    mut i = lo;
+    while i < hi { s = s + term(i); i += 1; }
+    return s;
+}
+fn main() {
+    n := 1000003;
+    total := pool::reduce<f64>(n, 4093, 0.0, piece, |a: f64, b: f64| -> f64 a + b);
+    mut items = u64[];
+    for i in 3001 { items.push(i * 333); }
+    mapped := pool::map<u64,f64>(items, |i: u64| -> f64 piece(i, i + 333));
+    mut folded = 0.0;
+    for i in mapped.len() { folded = folded + mapped[i]; }
+    println("{} {}", total, folded);
+}

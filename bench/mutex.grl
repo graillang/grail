@@ -1,0 +1,62 @@
+// Mutex rows: W tasks each take one lock 20000 times with a short hold; prints wall ms and
+// process CPU ms per W. Build and run it directly (no C twin); see docs/design/parking.md.
+use host;
+struct Shared { m: Mutex<u64> }
+fn cpu_ms() -> u64 {
+    text := host::read_file("/proc/self/stat");
+    mut i = 0;
+    while text[i] != 41 {
+        i += 1;
+    }
+    mut field = 2;
+    mut total = 0;
+    mut n = 0;
+    while i < text.len() {
+        c := text[i];
+        if c == 32 {
+            if (field == 14) || (field == 15) {
+                total += n;
+            }
+            field += 1;
+            n = 0;
+        } else if (c >= 48) && (c <= 57) {
+            n = n * 10 + u64(c - 48);
+        }
+        i += 1;
+    }
+    return total * 10;
+}
+fn hold<a>(v: (&a mut u64), n: u64) -> u64 {
+    for j in 50 {
+        *v += n;
+    }
+    return *v;
+}
+fn count<a>(v: (&a mut u64), n: u64) -> u64 {
+    return *v;
+}
+fn hammer(n: u64, s: (&Shared)) -> u64 {
+    for i in 20000 {
+        s.m.lock_with(1, hold);
+    }
+    return 0;
+}
+fn body<sc>(scope: (&sc Scope<(&Shared)>), s: (&Shared)) -> u64 {
+    mut many = Task<u64>[];
+    for i in s.m.lock_with(0, count) {
+        many.push(spawn(scope, i, hammer));
+    }
+    while let Some(t) = many.pop() {
+        join(t);
+    }
+    return 0;
+}
+fn main() {
+    for w in u64[1, 2, 8, 24] {
+        s := Shared { m: Mutex::new(w) };
+        c0 := cpu_ms();
+        t0 := host::now_ms();
+        task_scope(&s, body);
+        println("{} contenders: {} ms wall, {} ms cpu", w, host::now_ms() - t0, cpu_ms() - c0);
+    }
+}

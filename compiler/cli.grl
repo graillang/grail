@@ -5,6 +5,7 @@ use fmt;
 use explain;
 use bindgen;
 use pkg;
+use jobs;
 use xxhash;
 
 // The `grail` command-line tool. The same binary is the compiler: subcommands drive it by
@@ -280,68 +281,6 @@ fn collect<a, b>(dir: &a [u8], out: (&b mut u8[][])) {
             }
         }
     }
-}
-// Whether a source of the build claims a checked effect (docs/design/effects.md).
-fn effects_claimed<a>(command: (&a u8[][]), at: u64) -> bool {
-    mut k = at;
-    while k < command.len() {
-        file := item(command, k);
-        k += 1;
-        if !ends_with_grl(view(file)) {
-            continue;
-        }
-        text := host::read_file(view(file));
-        if claims_effect(view(text)) {
-            return true;
-        }
-    }
-    return false;
-}
-// Whether a source text carries `@no_alloc` or `@no_panic` as an attribute: outside a comment and
-// outside a string, and not as the start of a longer word. Searching the bytes found the attribute's
-// name in a comment of the runtime, and since the runtime is a source of every build, every build
-// silently became a whole-program one.
-fn claims_effect<a>(text: &a [u8]) -> bool {
-    n := text.len();
-    mut i = 0;
-    while i < n {
-        ch := text[i];
-        if (ch == 47) && (i + 1 < n) && (text[i + 1] == 47) {
-            while (i < n) && (text[i] != 10) {
-                i += 1;
-            }
-            continue;
-        }
-        if ch == 34 {
-            i += 1;
-            while (i < n) && (text[i] != 34) {
-                if text[i] == 92 {
-                    i += 1;
-                }
-                i += 1;
-            }
-            i += 1;
-            continue;
-        }
-        if ch == 39 {
-            // A character literal: `'"'` must not open a string.
-            if (i + 2 < n) && (text[i + 1] == 92) {
-                i += 4;
-                continue;
-            }
-            if (i + 2 < n) && (text[i + 2] == 39) {
-                i += 3;
-                continue;
-            }
-        }
-        if ch == 64 {
-            if effect_word(text, i + 1, view("no_alloc")) || effect_word(text, i + 1, view("no_panic")) {
-                return true;
-            }
-        }
-        i += 1;
-    }
-    return false;
 }
 fn effect_word<a, b>(text: &a [u8], at: u64, word: &b [u8]) -> bool {
     if text.len() < at + word.len() {
@@ -889,7 +828,11 @@ fn build_argv<a, b, d, e, g, k>(
     verify_facts := (flags / 512) % 2;
     strict := (flags / 1024) % 2;
     emit_ir := (flags / 2048) % 2;
+    release := (flags / 8192) % 2;
     mut command = u8[][host::exe_path(), copy(view("--target")), copy(view(target))];
+    if release != 0 {
+        command.push(copy(view("--backend=llvm")));
+    }
     if strict != 0 {
         command.push(copy(view("--strict-refinements")));
     }
@@ -1008,6 +951,38 @@ fn sources_embed<a, b>(entry: &a [u8], modules: (&b u8[][])) -> bool {
     return false;
 }
 // check_only: type-check and generate code, but do not assemble or link.
+// The two commands that finish a release unit after its stream is assembled into `object`: `clang
+// -O2` on the LLVM module the compiler wrote beside the assembly (`ASM.ll`), and a relocatable link
+// that folds that object into `object`, so a release unit is still one object to the store and the
+// link. `assemble` is the assembler command without its input and output; in a release build the
+// stream is assembled into `release_part(object)` and the merge writes `object`.
+fn release_part<a>(object: &a [u8]) -> u8[] {
+    return cat(view(object), view(".s.o"));
+}
+fn release_optimise<a, b>(assemble: (&a u8[][]), asm: &b [u8], object: &b [u8], emulation: &b [u8]) -> u8[][][] {
+    lifted := cat(view(asm), view(".ll"));
+    optimised := cat(view(object), view(".ll.o"));
+    native_part := release_part(view(object));
+    mut clang = u8[][];
+    for i in assemble.len() {
+        clang.push(item(&assemble, i));
+    }
+    clang.push(copy(view("-O2")));
+    clang.push(lifted.copy());
+    clang.push(copy(view("-o")));
+    clang.push(optimised.copy());
+    merge := u8[][
+        tool(view("GRAIL_LINKER"), view("ld.lld")),
+        copy(view("-m")),
+        copy(view(emulation)),
+        copy(view("-r")),
+        native_part.copy(),
+        optimised.copy(),
+        copy(view("-o")),
+        copy(view(object))
+    ];
+    return u8[][][clang, merge];
+}
 fn compile_mode<a, b, d, e, g, k>(
     h: (&a Home),
     entry: &b [u8],
@@ -1030,6 +1005,24 @@ fn compile_mode<a, b, d, e, g, k>(
     checked := (flags / 32) % 2;
     mut cache = (flags / 64) % 2;
     whole := (flags / 128) % 2;
+    release := (flags / 8192) % 2;
+    if release != 0 {
+        // The LLVM backend lifts the Linux streams; a release build of another platform, or one
+        // that asks for what the lifter cannot carry, is refused rather than built native.
+        linux := eq(view(target), view("x86_64")) || eq(view(target), view("aarch64")) || eq(view(target), view("riscv64"));
+        if !linux {
+            say(view("grail: --release builds with the LLVM backend, which is implemented for Linux x86_64, aarch64 and riscv64"));
+            return 1;
+        }
+        if debug != 0 {
+            say(view("grail: --release and --debug cannot be combined yet: the LLVM backend writes no line tables"));
+            return 1;
+        }
+        if split != 0 {
+            say(view("grail: --release and --split cannot be combined"));
+            return 1;
+        }
+    }
     if (cache != 0) && sources_embed(view(entry), &modules) {
         // `@embed` reads a file the cache does not key on, so its result cannot be reused safely.
         say(
@@ -1130,11 +1123,6 @@ fn compile_mode<a, b, d, e, g, k>(
         if (cache != 0) || (program_modules(&groups) > 1) {
             per_module = 1;
         }
-        // `@no_alloc` and `@no_panic` are proved over every body the program can reach, the runtime's
-        // included, so a program that claims them is compiled in one run.
-        if effects_claimed(&command, at) {
-            per_module = 0;
-        }
         if per_module != 0 {
             // One run per module, so every module the program has needs a group, and the module set is
             // the compiler's: it resolves `use` through the roots and names what it will compile.
@@ -1188,7 +1176,22 @@ fn compile_mode<a, b, d, e, g, k>(
         }
     }
     if per_module != 0 {
-        return per_module_build(
+        // One jobserver for every process of this build (compiler/jobs.grl): the module runs, their
+        // optimiser workers and their body workers all take their tokens from it. A build started
+        // inside one (`make -j`, or another `grail`) uses that one; otherwise this process makes
+        // it, beside the output, and the processes it starts find it in their environment.
+        mut js = jobs::open();
+        mut env = host::environment();
+        mut made = u8[];
+        if js.rfd == 0 {
+            path := cat(view(output), view(".jobs"));
+            js = jobs::create(view(path), jobs::count());
+            if js.rfd != 0 {
+                env.push(cat(view("GRAIL_JOBSERVER="), view(path)));
+                made = path;
+            }
+        }
+        built := per_module_build(
             &command,
             at,
             &mut groups,
@@ -1199,8 +1202,16 @@ fn compile_mode<a, b, d, e, g, k>(
             &mut store,
             &id,
             view(program),
-            cache
+            cache,
+            &mut js,
+            &env
         );
+        jobs::give_all(&mut js);
+        if made.len() != 0 {
+            host::close(js.rfd);
+            host::remove(view(made), 0);
+        }
+        return built;
     }
     if host::command(command) != 0 {
         return 1;
@@ -1234,12 +1245,29 @@ fn compile_mode<a, b, d, e, g, k>(
             &assemble
         );
     }
+    optimise := release_optimise(&assemble, view(asm), view(object), view(emulation));
     assemble.push(copy(view(asm)));
     assemble.push(copy(view("-o")));
-    assemble.push(copy(view(object)));
+    if release != 0 {
+        assemble.push(release_part(view(object)));
+    } else {
+        assemble.push(copy(view(object)));
+    }
     if host::command(assemble) != 0 {
         say(view("grail: assembling failed (needs clang)"));
         return 1;
+    }
+    if release != 0 {
+        for k in optimise.len() {
+            mut step = u8[][];
+            for w in optimise[k].len() {
+                step.push(item(&optimise[k], w));
+            }
+            if host::command(step) != 0 {
+                say(view("grail: optimising the LLVM module failed (needs clang and ld.lld)"));
+                return 1;
+            }
+        }
     }
     if pe != 0 {
         return windows_link(view(asm), view(output), view(object), view(entry), debug);
@@ -1615,6 +1643,19 @@ fn unit_key<a, b, d, e, g, k, r>(
             names.push(file);
         }
     }
+    // The effect summary of a module with no interface (the runtime's `runtime.facts`): what this
+    // run's own summaries are computed from, so a change in it is a change in this run's input.
+    for i in reads.len() {
+        facts := cat(view(reads[i]), view(".facts"));
+        fpath := path_join(view(ifaces), view(facts));
+        if host::exists(view(fpath)) != 0 {
+            push_bytes(&mut buf, view("facts "));
+            push_bytes(&mut buf, view(cache_digest_file(&mut store, view(fpath))));
+            buf.push(32);
+            push_bytes(&mut buf, view(facts));
+            buf.push(10);
+        }
+    }
     for i in names.len() {
         n := item(&names, i);
         // An interface's surface: every byte before the trailer, which carries only the source
@@ -1650,6 +1691,7 @@ fn unit_restore<a, b, d, e, g>(
     mut links_blob = u8[];
     mut obj_blob = u8[];
     mut iface_blob = u8[];
+    mut facts_blob = u8[];
     for i in rows.len() {
         w := words(view(item(&rows, i)));
         if (2 <= w.len()) & eq(view(item(&w, 0)), view("links")) {
@@ -1661,6 +1703,9 @@ fn unit_restore<a, b, d, e, g>(
         if (2 <= w.len()) & eq(view(item(&w, 0)), view("iface")) {
             iface_blob = item(&w, 1);
         }
+        if (2 <= w.len()) & eq(view(item(&w, 0)), view("facts")) {
+            facts_blob = item(&w, 1);
+        }
     }
     if (links_blob.len() == 0) || (obj_blob.len() == 0) {
         return false;
@@ -1669,6 +1714,9 @@ fn unit_restore<a, b, d, e, g>(
         return false;
     }
     if (iface_blob.len() != 0) && !cache_blob_ok(&mut store, view(iface_blob)) {
+        return false;
+    }
+    if (facts_blob.len() != 0) && !cache_blob_ok(&mut store, view(facts_blob)) {
         return false;
     }
     if cache_blob_restore(&mut store, view(links_blob), view(unit_links_path(view(stem))), 0) != 0 {
@@ -1680,6 +1728,12 @@ fn unit_restore<a, b, d, e, g>(
     if iface_blob.len() != 0 {
         dest := path_join(view(ifaces), view(cat(view(name), view(".iface"))));
         if cache_blob_restore(&mut store, view(iface_blob), view(dest), 0) != 0 {
+            return false;
+        }
+    }
+    if facts_blob.len() != 0 {
+        dest := path_join(view(ifaces), view(cat(view(name), view(".facts"))));
+        if cache_blob_restore(&mut store, view(facts_blob), view(dest), 0) != 0 {
             return false;
         }
     }
@@ -1739,6 +1793,18 @@ fn unit_file<a, b, d, e, g>(
             return ();
         }
         push_bytes(&mut record, view("iface "));
+        push_bytes(&mut record, view(b));
+        record.push(10);
+    }
+    // The runtime's effect summary: the one output a run writes beside the interfaces that is not an
+    // interface (docs/design/effects.md).
+    facts := path_join(view(ifaces), view(cat(view(name), view(".facts"))));
+    if host::exists(view(facts)) != 0 {
+        b := cache_blob_put(&mut store, view(facts));
+        if b.len() != 64 {
+            return ();
+        }
+        push_bytes(&mut record, view("facts "));
         push_bytes(&mut record, view(b));
         record.push(10);
     }
@@ -1824,19 +1890,33 @@ fn unit_build_command<a>(args: (&a u8[][])) -> u64 {
     if host::command(compile) != 0 {
         return 1;
     }
-    mut assemble = u8[][];
+    // Then the steps that turn the stream into the unit's object, each a count and its words: the
+    // assembler, and for a release unit `clang -O2` on the LLVM module and the merge of the two.
     mut i = 1 + count;
+    mut step = 0;
     while i < args.len() {
-        assemble.push(item(&args, i));
-        i += 1;
-    }
-    if host::command(assemble) != 0 {
-        say(view("grail: assembling failed (needs clang)"));
-        return 1;
+        n := number_of(view(item(&args, i)));
+        if args.len() < i + 1 + n {
+            return 1;
+        }
+        mut command = u8[][];
+        for k in n {
+            command.push(item(&args, i + 1 + k));
+        }
+        if host::command(command) != 0 {
+            if step == 0 {
+                say(view("grail: assembling failed (needs clang)"));
+            } else {
+                say(view("grail: optimising the LLVM module failed (needs clang and ld.lld)"));
+            }
+            return 1;
+        }
+        i += 1 + n;
+        step += 1;
     }
     return 0;
 }
-fn per_module_build<a, d, e, g, k, m, n, x, y>(
+fn per_module_build<a, d, e, g, k, m, n, x, y, jb, ev>(
     command: (&a u8[][]),
     at: u64,
     groups: (&x mut ModuleGroup[]),
@@ -1847,7 +1927,9 @@ fn per_module_build<a, d, e, g, k, m, n, x, y>(
     store: (&m mut Cache),
     id: (&n BuildId),
     program: &y [u8],
-    cache: u64
+    cache: u64,
+    js: (&jb mut jobs::Jobs),
+    env: (&ev u8[][])
 ) -> u64 {
     compiler := item(&command, 0);
     mut flags = u8[][];
@@ -1873,6 +1955,13 @@ fn per_module_build<a, d, e, g, k, m, n, x, y>(
     }
     entry_name := groups[0].name.copy();
     base := u8[][copy(view("runtime"))];
+    // A release unit is compiled by the LLVM backend: the compile command carries the word.
+    mut release = 0;
+    for f in flags.len() {
+        if eq(view(item(&flags, f)), view("--backend=llvm")) {
+            release = 1;
+        }
+    }
     dir := cat(view(output), view(".modules"));
     host::mkdir(view(dir));
     ifaces := path_join(view(dir), view("interfaces"));
@@ -1907,11 +1996,13 @@ fn per_module_build<a, d, e, g, k, m, n, x, y>(
         statuses.push(0);
     }
     mut running = 0;
-    limit := host::cpus();
+    // A module run is started on this process's own token when nothing is running, and on a token
+    // from the jobserver otherwise; each is given back when a run is waited for (`running -= 1`
+    // below gives one back whenever this process holds one).
     while built < groups.len() {
         // Start every module whose dependencies are finished.
         for g in groups.len() {
-            if (groups[g].done != 0) || (state[g] != 0) || (limit <= running) {
+            if (groups[g].done != 0) || (state[g] != 0) {
                 continue;
             }
             if !unit_ready(&groups, &base, g) {
@@ -1929,6 +2020,9 @@ fn per_module_build<a, d, e, g, k, m, n, x, y>(
                     state[g] = 2;
                     continue;
                 }
+            }
+            if (running != 0) && !jobs::take(&mut js) {
+                continue;
             }
             // One process, two steps: this module's code alone, global so the link can bind it,
             // read against the interfaces of the modules it uses; then the assembler.
@@ -1953,7 +2047,10 @@ fn per_module_build<a, d, e, g, k, m, n, x, y>(
             compile.push(copy(view("--emit-interface")));
             compile.push(ifaces.copy());
             compile.push(copy(view("--separate")));
-            if cache != 0 {
+            // `GRAIL_FN_CACHE=0` turns the per-function layer off and leaves the module store on: every
+            // body of a module run that misses is compiled, as a build with no unit store compiles
+            // it. It is the reference `tools/cache-test.mjs` compares a replayed module against.
+            if (cache != 0) && (release == 0) && !eq(view(host::env(view("GRAIL_FN_CACHE"))), view("0")) {
                 // The per-function codegen cache: a module run that misses can still replay the
                 // functions whose inputs did not move (docs/design/incremental-compilation.md).
                 // It is one directory inside this build's store, so a prune drops it with the rest.
@@ -1978,14 +2075,31 @@ fn per_module_build<a, d, e, g, k, m, n, x, y>(
             for k in compile.len() {
                 run.push(compile[k].copy());
             }
+            unit_object := cat(view(stem), view(".o"));
+            run.push(decimal(prefix.len() + 3));
             for k in prefix.len() {
                 run.push(item(&prefix, k));
             }
             run.push(cat(view(stem), view(".s")));
             run.push(copy(view("-o")));
-            run.push(cat(view(stem), view(".o")));
+            if release != 0 {
+                run.push(release_part(view(unit_object)));
+                steps := release_optimise(&prefix, view(cat(view(stem), view(".s"))), view(unit_object), view(emulation));
+                for q in steps.len() {
+                    run.push(decimal(steps[q].len()));
+                    for w in steps[q].len() {
+                        run.push(item(&steps[q], w));
+                    }
+                }
+            } else {
+                run.push(unit_object.copy());
+            }
             pair := host::pipe();
-            pid := host::spawn(run, host::environment(), pair[1], pair[1]);
+            mut child_env = u8[][];
+            for k in env.len() {
+                child_env.push(item(&env, k));
+            }
+            pid := host::spawn(run, child_env, pair[1], pair[1]);
             host::close(pair[1]);
             if 9223372036854775807 < pid {
                 host::close(pair[0]);
@@ -2040,6 +2154,7 @@ fn per_module_build<a, d, e, g, k, m, n, x, y>(
             exchange(&mut outputs[oldest], early);
             state[oldest] = 3;
             running -= 1;
+            jobs::give(&mut js);
             continue;
         }
         name := groups[pick].name.copy();
@@ -2066,6 +2181,7 @@ fn per_module_build<a, d, e, g, k, m, n, x, y>(
                 host::close(pipes[pick]);
                 status = host::wait(pids[pick]);
                 running -= 1;
+                jobs::give(&mut js);
                 state[pick] = 3;
             }
             if said.len() != 0 {
@@ -3213,6 +3329,9 @@ struct Options {
     cache_quiet: u64,
     // `--emit-ir`: the compiler writes the typed IR of the optimized stream beside the assembly.
     emit_ir: u64,
+    // `--release`: the LLVM backend and `clang -O2` for every unit, and overflow wraps unless
+    // `--overflow=` says otherwise (docs/design/release-builds-and-parity.md).
+    release: u64,
     // Module interfaces (B1 stage 2): `--interface DIR` reads them, `grail check` writes them, and
     // `--verify` compares the two instead of trusting either.
     iface: u8[],
@@ -3268,7 +3387,12 @@ fn flag_bits<a>(o: (&a Options), check_only: bool = false) -> u64 {
         + o.emit_ir
         * 2048
         + o.cache_quiet
-        * 4096;
+        * 4096
+        + o.release
+        * 8192
+        // A release build wraps by default; `--overflow=` on the command line still decides.
+        + u64((o.release != 0) && (o.overflow == 0))
+        * 16;
 }
 // ---- The driver's own flags, as a table ----------------------------------------------------------
 // One row per word the driver reads: `word` is what the command line says, `kind` says what follows
@@ -3319,6 +3443,7 @@ const F_INPUTS: u64 = 25;
 const F_ROOTS: u64 = 30;
 const F_INTERVAL: u64 = 40;
 const F_DEBOUNCE: u64 = 41;
+const F_RELEASE: u64 = 18;
 // The flag table: every word the driver reads. `--` and a positional path are not rows - the first
 // ends the driver's words and the second is an input - so `options` handles both around the lookup.
 fn flag_table() -> Flag[] {
@@ -3331,6 +3456,7 @@ fn flag_table() -> Flag[] {
         Flag { word: copy(view("--print-inputs")), kind: FLAG_TEXT, field: F_INPUTS },
         Flag { word: copy(view("--check")), kind: FLAG_SWITCH, field: F_CHECK },
         Flag { word: copy(view("--debug")), kind: FLAG_SWITCH, field: F_DEBUG },
+        Flag { word: copy(view("--release")), kind: FLAG_SWITCH, field: F_RELEASE },
         Flag { word: copy(view("--deny-ambient-host")), kind: FLAG_SWITCH, field: F_DENY },
         Flag { word: copy(view("--split")), kind: FLAG_SWITCH, field: F_SPLIT },
         Flag { word: copy(view("--per-module")), kind: FLAG_IGNORED, field: 0 },
@@ -3375,7 +3501,10 @@ fn unknown_flag<a, b>(table: (&a Flag[]), word: &b [u8]) {
     push_bytes(&mut text, view("`"));
     say(view(text));
     if eq(word, view("--backend=llvm")) || eq(word, view("--range-facts")) || eq(word, view("--export")) || eq(word, view("--typed-refs")) {
-        say(view("  it is an option of the compiler proper (`grail [options] OUT.s ENTRY.grl ...`): the driver assembles and links the native stream only"));
+        say(view("  it is an option of the compiler proper (`grail [options] OUT.s ENTRY.grl ...`)"));
+        if eq(word, view("--backend=llvm")) {
+            say(view("  `--release` builds every module through the LLVM backend and clang -O2"));
+        }
     } else {
         mut best = table.len();
         mut best_cost = 4;
@@ -3429,6 +3558,8 @@ fn switch_on<a>(o: (&a mut Options), field: u64) {
         o.check = 1;
     } else if field == F_DEBUG {
         o.debug = 1;
+    } else if field == F_RELEASE {
+        o.release = 1;
     } else if field == F_DENY {
         o.deny = 1;
     } else if field == F_SPLIT {
@@ -3520,6 +3651,7 @@ fn options<a>(args: (&a u8[][])) -> Options {
         verify_facts: 0,
         strict: 0,
         emit_ir: 0,
+        release: 0,
         no_cache: 0,
         cache_quiet: 0,
         watch: 0,
@@ -3677,6 +3809,7 @@ fn build_pass<a, b, c>(h: (&a Home), o: (&b mut Options), diag: &c [u8]) -> u64 
         name := copy(view(p.name));
         o.output = path_join(view("target"), view(name));
     }
+    project_overflow(&mut o, &p);
     return compile(
         h: &h,
         entry: view(p.entry),
@@ -3691,6 +3824,30 @@ fn build_pass<a, b, c>(h: (&a Home), o: (&b mut Options), diag: &c [u8]) -> u64 
         no_entry: o.no_entry != 0,
         inputs: view(o.inputs)
     );
+}
+// One overflow mode per build, decided by the root (docs/design/release-builds-and-parity.md):
+// `--overflow=` on the command line, else the root package's `overflow` key, else the build mode's
+// default (checked, or wrap for `--release`). A dependency's own key is not used, and the build says
+// so once, naming it.
+fn project_overflow<a, b>(o: (&a mut Options), p: (&b pkg::Plan)) -> unit {
+    if (o.overflow == 0) && eq(view(p.overflow), view("wrap")) {
+        o.overflow = 1;
+    }
+    if (o.overflow == 0) && eq(view(p.overflow), view("checked")) {
+        o.overflow = 2;
+    }
+    if p.ignored_overflow.len() != 0 {
+        mut note = copy(view("grail: note: the `overflow` key of "));
+        for i in p.ignored_overflow.len() {
+            if i != 0 {
+                push_bytes(&mut note, view(", "));
+            }
+            push_bytes(&mut note, view(item(&p.ignored_overflow, i)));
+        }
+        push_bytes(&mut note, view(" is not used: a build has one overflow mode, the root package's"));
+        say(view(note));
+    }
+    return ();
 }
 fn check_command<a>(args: (&a u8[][])) -> u64 {
     mut o = options(&args);
@@ -4240,6 +4397,8 @@ struct TestOptions {
     deny: u64,
     overflow: u64,
     no_sites: u64,
+    // `--release`: the tests are built the way `grail build --release` builds.
+    release: u64,
     // Set when an argument cannot be understood: `grail test` then prints its usage.
     bad: u64
 }
@@ -4315,6 +4474,7 @@ fn test_options<a>(args: (&a u8[][])) -> TestOptions {
         deny: 0,
         overflow: 0,
         no_sites: 0,
+        release: 0,
         bad: 0
     };
     mut i: u64 = 0;
@@ -4355,6 +4515,8 @@ fn test_options<a>(args: (&a u8[][])) -> TestOptions {
             o.target = item(&args, i);
         } else if eq(view(a), view("--debug")) {
             o.debug = 1;
+        } else if eq(view(a), view("--release")) {
+            o.release = 1;
         } else if eq(view(a), view("--deny-ambient-host")) {
             o.deny = 1;
         } else if eq(view(a), view("--no-error-sites")) {
@@ -4375,7 +4537,8 @@ fn test_options<a>(args: (&a u8[][])) -> TestOptions {
 // The code-generation bits a test binary is built with: the same flags `grail build` takes, so a
 // test can pin debug-info, overflow or authority behaviour.
 fn test_bits<a>(o: (&a TestOptions)) -> u64 {
-    return o.debug * 2 + o.deny * 4 + o.overflow * 16 + o.no_sites * 256;
+    return o.debug * 2 + o.deny * 4 + o.overflow * 16 + o.no_sites * 256 + o.release * 8192
+        + u64((o.release != 0) && (o.overflow == 0)) * 16;
 }
 // The flags a `--jobs` child needs to build the same binary its parent would have built.
 fn test_build_flags<a>(o: (&a TestOptions)) -> u8[][] {
@@ -4384,6 +4547,9 @@ fn test_build_flags<a>(o: (&a TestOptions)) -> u8[][] {
     flags.push(copy(view(o.target)));
     if o.debug != 0 {
         flags.push(copy(view("--debug")));
+    }
+    if o.release != 0 {
+        flags.push(copy(view("--release")));
     }
     if o.deny != 0 {
         flags.push(copy(view("--deny-ambient-host")));
@@ -5113,6 +5279,10 @@ fn profile_scratch() -> u8[] {
 }
 fn profile_command<a>(args: (&a u8[][])) -> u64 {
     mut rate: u64 = 200;
+    // `--callers`: each sample also carries up to seven return addresses (the runtime walks the frame
+    // pointers), and the report adds inclusive time and who calls the hottest functions. Without it
+    // the request, the samples and the runtime's handler are exactly what they were.
+    mut callers = false;
     mut out_path = u8[];
     mut i: u64 = 0;
     while i < args.len() {
@@ -5127,6 +5297,8 @@ fn profile_command<a>(args: (&a u8[][])) -> u64 {
         } else if eq(view(a), view("--out")) && (i + 1 < args.len()) {
             i += 1;
             out_path = item(&args, i);
+        } else if eq(view(a), view("--callers")) {
+            callers = true;
         } else {
             break;
         }
@@ -5138,7 +5310,7 @@ fn profile_command<a>(args: (&a u8[][])) -> u64 {
         i += 1;
     }
     if rest.len() == 0 {
-        say(view("usage: grail profile [--rate N] [--out FILE] -- PROGRAM [ARGS]"));
+        say(view("usage: grail profile [--rate N] [--callers] [--out FILE] -- PROGRAM [ARGS]"));
         return 2;
     }
     if (rate == 0) || (1000000 < rate) {
@@ -5165,6 +5337,9 @@ fn profile_command<a>(args: (&a u8[][])) -> u64 {
     }
     samples := path_join(view(dir), view("samples"));
     mut text = decimal(1);
+    if callers {
+        text = decimal(2);
+    }
     text.push(32);
     text = cat(view(text), view(decimal(rate)));
     text.push(32);
@@ -5203,7 +5378,7 @@ fn profile_command<a>(args: (&a u8[][])) -> u64 {
         say(view("grail profile: truncated sample file"));
         return 1;
     }
-    if (data[0] != 71) || (data[6] != 50) {
+    if (data[0] != 71) || ((data[6] != 50) && (data[6] != 51)) {
         say(
             view("grail profile: unsupported sample format; rebuild the program with this compiler")
         );
@@ -5214,7 +5389,11 @@ fn profile_command<a>(args: (&a u8[][])) -> u64 {
     count := le64(view(data), 24);
     dropped := le64(view(data), 32);
     cpu_ns := le64(view(data), 40);
-    if data.len() < 48 + count * 8 {
+    mut each: u64 = 1;
+    if data[6] == 51 {
+        each = 8;
+    }
+    if data.len() < 48 + count * 8 * each {
         say(view("grail profile: truncated sample file"));
         return 1;
     }
@@ -5286,7 +5465,7 @@ fn profile_command<a>(args: (&a u8[][])) -> u64 {
     if elf && (kind != 3) {
         mut k: u64 = 0;
         while k < count {
-            slot := symbol_at(&symbols, &order, le64(view(data), 48 + k * 8));
+            slot := symbol_at(&symbols, &order, le64(view(data), 48 + k * 8 * each));
             counts[slot] = counts[slot] + 1;
             k += 1;
         }
@@ -5334,6 +5513,9 @@ fn profile_command<a>(args: (&a u8[][])) -> u64 {
     total = cat(view(total), view(pad_left(view(share_text(count, count)), 6)));
     total = cat(view(total), view("  total"));
     push_line(&mut out, view(total));
+    if (each != 1) && elf && (kind != 3) {
+        profile_callers(&mut out, view(data), count, each, &symbols, &order, &counts, &rows, width);
+    }
     host::print(view(out));
     if out_path.len() != 0 {
         if host::write_file(view(out_path), out) != 0 {
@@ -5343,6 +5525,137 @@ fn profile_command<a>(args: (&a u8[][])) -> u64 {
         }
     }
     return status;
+}
+
+// The caller view of a `--callers` profile: for every function, the samples in which it is anywhere
+// on the stack (inclusive, each sample counted once per function); then, for the ten hottest leaf
+// functions, which function called them and which was the first caller outside the runtime - the
+// view that says *which* code allocates when `rt_alloc_unlocked` tops the table. A return address
+// is attributed to the function containing the call (the address before it). A leaf caught before
+// its frame is set up reports its caller's caller as its caller.
+fn profile_callers<a, b, d, e, g>(out: (&a mut u8[]), data: &b [u8], count: u64, each: u64, symbols: (&d Symbol[]), order: (&e u64[]), leaf: (&g u64[]), rows: (&g u64[]), width: u64) -> unit {
+    unknown := symbols.len();
+    mut inclusive = u64[];
+    for n in symbols.len() + 1 {
+        inclusive.push(0);
+    }
+    mut seen = u64[];
+    for n in symbols.len() + 1 {
+        seen.push(0);
+    }
+    // frame(k, j): the function of the j-th address of sample k.
+    for k in count {
+        for j in each {
+            pc := le64(view(data), 48 + (k * each + j) * 8);
+            if (j != 0) && (pc == 0) {
+                break;
+            }
+            mut at = pc;
+            if (j != 0) && (0 < at) {
+                at -= 1;
+            }
+            f := symbol_at(symbols, order, at);
+            if seen[f] != k + 1 {
+                seen[f] = k + 1;
+                inclusive[f] = inclusive[f] + 1;
+            }
+        }
+    }
+    push_line(&mut out, view(""));
+    push_line(&mut out, view("  inclusive: samples with the function anywhere on the stack"));
+    by := by_count(&inclusive, order);
+    mut shown = 0;
+    for n in by.len() {
+        if (25 <= shown) || (inclusive[by[n]] == 0) {
+            break;
+        }
+        line := profile_row(inclusive[by[n]], count, view(symbols[by[n]].function), view(symbols[by[n]].module), width);
+        push_line(&mut out, view(line));
+        shown += 1;
+    }
+    push_line(&mut out, view(""));
+    push_line(&mut out, view("  callers of the hottest functions: the caller, and the first caller outside the runtime"));
+    mut top = 0;
+    for r in rows.len() {
+        hot := rows[r];
+        if (10 <= top) || (leaf[hot] == 0) {
+            break;
+        }
+        top += 1;
+        mut direct = u64[];
+        mut outside = u64[];
+        for n in symbols.len() + 1 {
+            direct.push(0);
+            outside.push(0);
+        }
+        for k in count {
+            pc := le64(view(data), 48 + k * each * 8);
+            if symbol_at(symbols, order, pc) != hot {
+                continue;
+            }
+            mut first = unknown;
+            mut away = unknown;
+            for j in each {
+                if j == 0 {
+                    continue;
+                }
+                ret := le64(view(data), 48 + (k * each + j) * 8);
+                if ret == 0 {
+                    break;
+                }
+                f := symbol_at(symbols, order, ret - 1);
+                if first == unknown {
+                    first = f;
+                }
+                if (away == unknown) && (f != unknown) && !eq(view(symbols[f].module), view("runtime")) {
+                    away = f;
+                    break;
+                }
+            }
+            direct[first] = direct[first] + 1;
+            outside[away] = outside[away] + 1;
+        }
+        mut head = copy(view("    "));
+        head = cat(view(head), view(symbols[hot].function));
+        head = cat(view(head), view(" ("));
+        head = cat(view(head), view(decimal(leaf[hot])));
+        head = cat(view(head), view(" samples)"));
+        push_line(&mut out, view(head));
+        for pass in 2 {
+            mut list = direct.copy();
+            mut label = copy(view("      called by"));
+            if pass == 1 {
+                list = outside.copy();
+                label = copy(view("      from"));
+            }
+            push_line(&mut out, view(label));
+            order_by := by_count(&list, order);
+            mut listed = 0;
+            for n in order_by.len() {
+                if (6 <= listed) || (list[order_by[n]] == 0) {
+                    break;
+                }
+                line := profile_row(list[order_by[n]], leaf[hot], view(symbols[order_by[n]].function), view(symbols[order_by[n]].module), width);
+                push_line(&mut out, view(cat(view("    "), view(line))));
+                listed += 1;
+            }
+            if list[unknown] != 0 {
+                line := profile_row(list[unknown], leaf[hot], view("[unknown]"), view("-"), width);
+                push_line(&mut out, view(cat(view("    "), view(line))));
+            }
+        }
+    }
+    return ();
+}
+fn profile_row<a, b>(n: u64, total: u64, function: &a [u8], module: &b [u8], width: u64) -> u8[] {
+    mut line = copy(view("  "));
+    line = cat(view(line), view(pad_left(view(decimal(n)), 7)));
+    line = cat(view(line), view(" "));
+    line = cat(view(line), view(pad_left(view(share_text(n, total)), 6)));
+    line = cat(view(line), view("  "));
+    line = cat(view(line), view(padded(function, width + 2)));
+    line = cat(view(line), module);
+    return line;
 }
 
 // `grail doc [--out DIR] [FILES or DIRS]`: the reference documentation of a source tree, as one HTML
@@ -5408,7 +5721,7 @@ fn help() {
     say(view("usage:"));
     say(
         view(
-            "  grail build [FILE.grl] [-o OUT] [--target x86_64|aarch64|riscv64|macos-x86_64|macos-aarch64] [--split] [--cache] [--overflow=wrap|checked] [--interface DIR [--verify]]"
+            "  grail build [FILE.grl] [-o OUT] [--target x86_64|aarch64|riscv64|macos-x86_64|macos-aarch64] [--release] [--split] [--cache] [--overflow=wrap|checked] [--interface DIR [--verify]]"
         )
     );
     say(view("  grail check [FILE.grl]            type-check without building"));

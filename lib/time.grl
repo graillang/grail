@@ -26,6 +26,14 @@ impl Instant {
     pub fn elapsed_ns(self: (&Instant)) -> u64 {
         return host::now_ms() * 1000000 - self.nanos;
     }
+    // This instant on the monotonic clock's own scale, in whole milliseconds (`host::now_ms`).
+    pub fn millis(self: (&Instant)) -> u64 {
+        return self.nanos / 1000000;
+    }
+    // This instant moved `milliseconds` later: a deadline for `thread::sleep_until`.
+    pub fn after_ms(self: (&Instant), milliseconds: u64) -> Instant {
+        return Instant { nanos: self.nanos + milliseconds * 1000000 };
+    }
     // Whole milliseconds since this instant was taken; the usual choice for a report.
     pub fn elapsed_ms(self: (&Instant)) -> u64 {
         return self.elapsed_ns() / 1000000;
@@ -45,8 +53,33 @@ pub fn unix_seconds() -> u64 {
     return host::wall_ms() / 1000;
 }
 // Suspends this task for at least `milliseconds` (the runtime's clock granularity may round up).
+// A task whose scope is cancelled while it sleeps ends there, with a failure of kind Cancelled
+// (try_join reports it; a cancelled scope does not re-raise it); `try_sleep_ms` answers instead.
+// A thread is not cancellable and sleeps the whole time.
 pub fn sleep_ms(milliseconds: u64) {
     host::sleep_ms(milliseconds);
+}
+
+// Why a wait that has a deadline or can be cancelled ended without what it waited for. Every
+// `_until` and `try_` wait of `sync` and `thread` answers with it.
+pub enum WaitError { Cancelled, TimedOut }
+
+// The sleep that a cancellation interrupts by answering, not by ending the task.
+pub fn try_sleep_ms(milliseconds: u64) -> unit |? WaitError {
+    if host::try_sleep_ms(milliseconds) == 4 {
+        return WaitError::Cancelled;
+    }
+    return ();
+}
+// The answer of a runtime wait (0 done, 3 timed out, 4 cancelled), for the waits in `sync`.
+pub fn wait_answer(code: u64) -> unit |? WaitError {
+    if code == 3 {
+        return WaitError::TimedOut;
+    }
+    if code == 4 {
+        return WaitError::Cancelled;
+    }
+    return ();
 }
 
 // ---- wall-clock timestamps ---------------------------------------------------------------------

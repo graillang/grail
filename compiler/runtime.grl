@@ -25,7 +25,7 @@ fn rt_abort_begin() -> u64 {
     return raw_atomic_cas(rt_abort_claim(), 0, 1) == 0;
 }
 // Never returns: nothing wakes this word, and the reporter's exit_group/TerminateProcess ends the
-// process. Parking instead of spinning keeps a failing pool's other workers off the CPU.
+// process. Parking instead of spinning keeps the other workers of a failing program off the CPU.
 fn rt_abort_park() -> u64 {
     while true {
         rt_syscall(202, rt_abort_claim(), 128, 1);
@@ -40,12 +40,13 @@ fn rt_abort_final() -> u64 {
     rt_hard_exit(134);
     return 0;
 }
-// Whether this failure is reported as SIGABRT. A thread the runtime created to run tasks or pool
+// Whether this failure is reported as SIGABRT. A thread the runtime created to run tasks and
 // jobs opens the possibility of two such threads failing at once, and a process-wide signal from
 // one of them may be delivered to a parked sibling before the hard exit runs, turning the promised
 // status 134 into death by SIGABRT. Those threads therefore exit directly; the main thread, an
 // offload thread and a thread foreign code created keep the signal (record word 24 is non-zero only
-// on a runtime worker, see rt_thread_start).
+// on a runtime worker, see rt_thread_start, and on any other thread while it is inside a parallel
+// region, where it runs leaves beside the workers: rt_region_step).
 fn rt_abort_signals() -> u64 {
     w := raw_tp_get();
     if w == 0 {
@@ -124,6 +125,10 @@ fn rt_stack_overflow_at(site: u64) -> u64 {
 //    The claim is taken before any text is built, so a second failing thread cannot garble the
 //    report.
 fn rt_fail(kind: u64, a: u64, b: u64) -> u64 {
+    j := rt_job_failing();
+    if j != 0 {
+        return rt_job_fail_here(j, kind, a, b, 0);
+    }
     t := rt_containable();
     if t != 0 {
         return rt_contain_site(t, kind, a, b, rt_site_here(t + 200), 0);
@@ -165,9 +170,22 @@ fn rt_trap(a: u64, b: u64, kind: u64) -> u64 {
 fn rt_containable() -> u64 {
     t := rt_current();
     if t == 0 {
-        return 0;
+        // A dedicated thread (lib/thread.grl) is not a task, but its closure runs on a stack the
+        // runtime entered by a switch, and its record has a task record's failure words: the
+        // failure is contained the same way (rt_uthread_main).
+        tp := raw_tp_get();
+        if tp == 0 {
+            return 0;
+        }
+        return raw_load(tp + 80);
     }
     if rt_task_threads() != 0 {
+        return 0;
+    }
+    // Inside a parallel region (word 152, the stack list, is not empty) a failure is not contained
+    // here: it goes through rt_job_fail first, which drains the stack's forks - a stolen child may be
+    // borrowing its frames - and empties the list before it contains the task.
+    if raw_load(t + 152) != 0 {
         return 0;
     }
     return t;
@@ -336,6 +354,12 @@ fn rt_sites_fill(out: u64) -> u64 {
 // the count the helper answered. A captured entry is static data: it stays valid long after the
 // task's stack is gone, which is what lets the join format the site later.
 fn rt_site_here(scratch: u64) -> u64 {
+    return rt_site_above(scratch, 0, 1);
+}
+// The innermost program statement on this stack among the frames above `above` (a stack address;
+// 0 for all of them), skipping standard-library statements (site flag bit 62) unless `std` is set.
+// A statement-table entry, or 0. It writes only the five scratch words it is given.
+fn rt_site_above(scratch: u64, above: u64, std: u64) -> u64 {
     have := rt_sites_fill(scratch);
     if have < 3 {
         return 0;
@@ -371,7 +395,7 @@ fn rt_site_here(scratch: u64) -> u64 {
             flags := raw_load(hit + 16);
             // A place is named only when the entry has a file; the runtime's own statements carry a
             // zero, so the walk always answers with a program location.
-            if (name != 0) & ((flags >> 63) == 0) {
+            if (name != 0) & ((flags >> 63) == 0) & (above < frame) & ((std != 0) | (((flags >> 62) & 1) == 0)) {
                 return hit;
             }
         }
@@ -435,6 +459,12 @@ fn rt_fail_body(kind: u64, a: u64, b: u64, buf: u64, n: u64) -> u64 {
         at = rt_fail_num(buf, at, a);
         at = rt_fail_put(buf, at, view(" does not fit in "));
         at = rt_fail_type(buf, at, b);
+    } else if kind == 16 {
+        at = rt_fail_put(buf, at, view("the wait was cancelled"));
+    } else if kind == 17 {
+        at = rt_fail_put(buf, at, view("mutex poisoned: its holder failed"));
+    } else if kind == 18 {
+        at = rt_fail_put(buf, at, view("a parallel split needs a grain of at least one element"));
     } else {
         at = rt_fail_put(buf, at, view("the program aborted"));
     }
@@ -464,7 +494,16 @@ fn rt_report_die(msg: u64, site: u64) -> u64 {
 // the worker's stack. The frames of this stack are dead from here on; the scheduler takes its
 // ordinary "this task is done" path, so the mapping is recycled and the task is published to its
 // joiner. Nothing in between is resumed or cleaned up.
+// (No function on the failure path takes more than six parameters: a seventh is passed in an
+// allocated record, and this path allocates nothing.)
 fn rt_contain_site(t: u64, kind: u64, a: u64, b: u64, site: u64, msg: u64) -> u64 {
+    raw_store(t + 232, 0);
+    return rt_contain_joined(t, kind, a, b, site, msg);
+}
+// The same, keeping the statement where the failed job was joined, which the caller has stored in
+// task word 232 (0: none). That is the last of the site walk's scratch words, free once the failure
+// is recorded; the joiner renders both lines from it (rt_task_site).
+fn rt_contain_joined(t: u64, kind: u64, a: u64, b: u64, site: u64, msg: u64) -> u64 {
     raw_store(t + 160, kind);
     raw_store(t + 168, a);
     raw_store(t + 176, b);
@@ -476,6 +515,7 @@ fn rt_contain_site(t: u64, kind: u64, a: u64, b: u64, site: u64, msg: u64) -> u6
 // The same, for a failure that already has its texts (a `join` inside a task re-raising a task's
 // recorded failure): the words are handed over, not rebuilt.
 fn rt_contain_text(t: u64, kind: u64, msg: u64, site: u64) -> u64 {
+    raw_store(t + 232, 0);
     raw_store(t + 160, kind);
     raw_store(t + 168, 0);
     raw_store(t + 176, 0);
@@ -487,6 +527,15 @@ fn rt_contain_text(t: u64, kind: u64, msg: u64, site: u64) -> u64 {
 fn rt_contain_tail(t: u64) -> u64 {
     rt_contained_note();
     raw_store(t + 144, 1);
+    // What this stack held is released now, poisoned: no frame of it will run again (rt_held_settle).
+    held := rt_waiter_peek();
+    if held != 0 {
+        mut site = raw_load(t + 184);
+        if (site & 1) == 1 {
+            site = 0; // a re-raised failure carries a text, not a statement
+        }
+        rt_held_settle(held, site);
+    }
     rt_os_ctx_leave(t);
     return 0;
 }
@@ -499,6 +548,11 @@ fn rt_contained_word() -> u64 {
 fn rt_contained_note() -> u64 {
     raw_store(rt_contained_word(), raw_load(rt_contained_word()) + 1);
     return 0;
+}
+// How many stacks a contained failure discarded beyond the one it happened on (it was raised again
+// at a join), for the same note: process-state word 3448.
+fn rt_discarded_word() -> u64 {
+    return raw_state() + 3448;
 }
 fn rt_contained() -> u64 {
     return raw_load(rt_contained_word());
@@ -658,7 +712,8 @@ fn rt_fail_line(buf: u64, n: u64, e: u64, mark: string) -> u64 {
     raw_putbyte(buf + at, 58);
     at = rt_fail_num(buf, at + 1, flags & 4294967295);
     raw_putbyte(buf + at, 58);
-    at = rt_fail_num(buf, at + 1, (flags >> 32) & 2147483647);
+    // Bits 32..61 are the column; 62 marks a standard-library statement, 63 the runtime's.
+    at = rt_fail_num(buf, at + 1, (flags >> 32) & 1073741823);
     raw_putbyte(buf + at, 10);
     return at + 1;
 }
@@ -787,7 +842,7 @@ fn rt_stack_report_line(site: u64) -> u64 {
     raw_putbyte(buf + at, 58);
     at = rt_stack_report_num(buf, at + 1, cap, flags & 4294967295);
     raw_putbyte(buf + at, 58);
-    at = rt_stack_report_num(buf, at + 1, cap, (flags >> 32) & 2147483647);
+    at = rt_stack_report_num(buf, at + 1, cap, (flags >> 32) & 1073741823);
     raw_putbyte(buf + at, 10);
     return at + 1;
 }
@@ -863,7 +918,8 @@ fn rt_bt_line(buf: u64, n: u64, name: u64, site: u64) -> u64 {
     raw_putbyte(buf + at, 58);
     at = rt_fail_num(buf, at + 1, flags & 4294967295);
     raw_putbyte(buf + at, 58);
-    at = rt_fail_num(buf, at + 1, (flags >> 32) & 2147483647);
+    // Bits 32..61 are the column; 62 marks a standard-library statement, 63 the runtime's.
+    at = rt_fail_num(buf, at + 1, (flags >> 32) & 1073741823);
     raw_putbyte(buf + at, 41);
     raw_putbyte(buf + at + 1, 10);
     return at + 2;
@@ -947,7 +1003,9 @@ fn rt_div(n: u64, d: u64) -> u64 {
     }
     return q;
 }
-// The allocator state is shared by workers; every mutation is serialized.
+// The allocator's shared state - the class lists, the arenas, the cache registry - is changed only
+// under this lock. A thread's own cache (rt_alloc_shared, docs/design/allocator.md) is not shared
+// and needs none, so the lock is taken to move a batch of blocks, not for each one.
 // This lock uses reserved process-state storage, never allocates or suspends while held.
 // Until the process starts its second thread (rt_thread_start sets word 3416 first) nothing can
 // contend for the lock, so it is not taken: an uncontended atomic exchange and release around every
@@ -972,6 +1030,57 @@ fn rt_allocator_unlock() -> u64 {
 fn rt_alloc(n: u64) -> u64 {
     if raw_load(raw_state() + 3416) == 0 {
         return rt_alloc_unlocked(n);
+    }
+    return rt_alloc_shared(n);
+}
+// rt_alloc in a process with more than one thread. It is a function of its own so that the
+// one-thread path above stays as small as it was: the compiler measures it.
+fn rt_alloc_shared(n: u64) -> u64 {
+    if n < 262129 {
+        tp := raw_tp_get();
+        if tp != 0 {
+            // The thread's own cache (docs/design/allocator.md): no lock and no atomic from here
+            // to the return unless the bin is empty.
+            mut c = raw_load(tp + 64);
+            if c == 0 {
+                c = rt_cache_make(tp);
+            }
+            mut size = 32;
+            mut bin = 0;
+            while size < n + 16 {
+                size = size * 2;
+                bin = bin + 1;
+            }
+            slot := c + 64 + bin * 48;
+            while true {
+                block := raw_load(slot);
+                if block != 0 {
+                    // A freed block: its state word is the list link. Clear what was asked for.
+                    raw_store(slot, raw_load(block + 8));
+                    raw_store(slot + 8, raw_load(slot + 8) - 1);
+                    raw_store(block + 8, 1);
+                    mut i = 0;
+                    while i < n {
+                        raw_store(block + 16 + i, 0);
+                        i = i + 8;
+                    }
+                    raw_store(c + 8, wrapping_add(raw_load(c + 8), 1));
+                    return block + 16;
+                }
+                left := raw_load(slot + 24);
+                if left != 0 {
+                    // A block of the thread's reserved run: never used, so already zero.
+                    fresh := raw_load(slot + 16);
+                    raw_store(slot + 16, fresh + size);
+                    raw_store(slot + 24, left - 1);
+                    raw_store(fresh, size);
+                    raw_store(fresh + 8, 1);
+                    raw_store(c + 8, wrapping_add(raw_load(c + 8), 1));
+                    return fresh + 16;
+                }
+                rt_cache_refill(slot, bin, size);
+            }
+        }
     }
     rt_allocator_lock();
     p := rt_alloc_unlocked(n);
@@ -1002,9 +1111,294 @@ fn rt_free(at: u64) -> u64 {
         rt_free_unlocked(p);
         return 0;
     }
+    return rt_free_shared(p);
+}
+// rt_free in a process with more than one thread; `p` is the payload address of a block.
+fn rt_free_shared(p: u64) -> u64 {
+    if p == 0 {
+        return 0;
+    }
+    block := p - 16;
+    if raw_load(block + 8) == 2 {
+        return 0;
+    }
+    // A block on any free list carries a link here (0 or an aligned address), so a second free of
+    // it stops the program exactly as it does on the shared path.
+    if raw_load(block + 8) != 1 {
+        rt_abort();
+    }
+    size := raw_load(block);
+    if size < 262145 {
+        tp := raw_tp_get();
+        if tp != 0 {
+            mut c = raw_load(tp + 64);
+            if c == 0 {
+                c = rt_cache_for_free(tp);
+            }
+            if c != 0 {
+                // Whichever thread allocated the block, it joins the cache of the thread freeing it.
+                mut k = 32;
+                mut bin = 0;
+                while k < size {
+                    k = k * 2;
+                    bin = bin + 1;
+                }
+                slot := c + 64 + bin * 48;
+                raw_store(block + 8, raw_load(slot));
+                raw_store(slot, block);
+                count := raw_load(slot + 8) + 1;
+                raw_store(slot + 8, count);
+                raw_store(c + 8, wrapping_sub(raw_load(c + 8), 1));
+                if raw_load(slot + 40) < count {
+                    rt_cache_spill(slot, bin);
+                }
+                return 0;
+            }
+        }
+    }
     rt_allocator_lock();
     rt_free_unlocked(p);
     rt_allocator_unlock();
+    return 0;
+}
+// ---- per-thread block caches (docs/design/allocator.md) ---------------------------------------
+// Once the process has a second thread, every OS thread allocates from and frees into a cache of
+// its own for the classes up to 256 KiB, and takes the allocator lock only to move a batch of blocks
+// between the cache and the shared lists. The cache belongs to the OS thread - it hangs off the
+// thread record, which the thread pointer names - and never to a green task, which may resume on
+// another worker; a task leaves its worker only at a park point and the allocator is not one, so
+// nothing else runs on the thread while a cache is being changed. No signal handler allocates.
+//
+// Cache page (raw_map, one per thread, made by the thread's first allocation):
+//   0 next cache in the registry (state word 40)   8 live blocks: allocations minus frees made by
+//   this thread, a wrapping count that is negative on a thread that frees what others allocated
+//   64 + bin * 48, for the bins 0..13:
+//     0 free list head   8 blocks on it   16 next block of the reserved run   24 blocks left in it
+//     32 how many blocks the next refill asks for   40 the most the list may hold
+// The list holds at most 256 blocks and at most 128 KiB, and never less than one block (the 128 KiB
+// and 256 KiB classes); one block over, half of it leaves as a chain. A refill asks for 4 blocks the first time and twice as many each time after, up to
+// half the bound, so a thread that lives for one call does not reserve what it will hand back.
+fn rt_cache_make(tp: u64) -> u64 {
+    c := raw_map(4096);
+    if rt_error(c) {
+        rt_abort();
+    }
+    mut size = 32;
+    mut bin = 0;
+    while bin < 14 {
+        mut bound = 256;
+        while 131072 < bound * size {
+            bound = bound / 2;
+        }
+        // The two largest cached classes are over the byte bound alone: one block of each is kept.
+        if bound == 0 {
+            bound = 1;
+        }
+        mut batch = 4;
+        if bound < 8 {
+            batch = bound / 2;
+        }
+        if batch == 0 {
+            batch = 1;
+        }
+        raw_store(c + 64 + bin * 48 + 32, batch);
+        raw_store(c + 64 + bin * 48 + 40, bound);
+        size = size * 2;
+        bin = bin + 1;
+    }
+    state := raw_state();
+    rt_allocator_lock();
+    raw_store(c, raw_load(state + 40));
+    raw_store(state + 40, c);
+    rt_allocator_unlock();
+    raw_store(tp + 64, c);
+    return c;
+}
+// A thread that has allocated nothing has no cache, and one stray free does not make it one: the
+// block goes to the shared list under the lock. The eighth such free does, because a thread that
+// only ever frees (the consuming end of a queue) would otherwise take the lock every time. The
+// count is thread-record word 72.
+fn rt_cache_for_free(tp: u64) -> u64 {
+    seen := raw_load(tp + 72) + 1;
+    raw_store(tp + 72, seen);
+    if seen < 8 {
+        return 0;
+    }
+    return rt_cache_make(tp);
+}
+// An empty bin: take a chain another cache gave up, or blocks from the shared list (freed before
+// the process had threads, or by a thread with no cache), or failing both reserve a run of unused
+// ones.
+fn rt_cache_refill(slot: u64, bin: u64, size: u64) -> u64 {
+    state := raw_state();
+    want := raw_load(slot + 32);
+    if want * 2 < raw_load(slot + 40) + 1 {
+        raw_store(slot + 32, want * 2);
+    }
+    head := state + 256 + bin * 8;
+    chains := state + 1792 + bin * 8;
+    rt_allocator_lock();
+    chain := raw_load(chains);
+    if chain != 0 {
+        // What another cache spilled or left behind, taken whole: nothing is walked under the lock.
+        raw_store(chains, raw_load(chain + 16));
+        rt_allocator_unlock();
+        raw_store(slot, chain);
+        raw_store(slot + 8, raw_load(chain + 24));
+        return 0;
+    }
+    first := raw_load(head);
+    if first != 0 {
+        mut last = first;
+        mut taken = 1;
+        while (taken < want) & (raw_load(last + 8) != 0) {
+            last = raw_load(last + 8);
+            taken = taken + 1;
+        }
+        raw_store(head, raw_load(last + 8));
+        raw_store(last + 8, 0);
+        raw_store(slot, first);
+        raw_store(slot + 8, taken);
+    } else {
+        bump := state + 768 + bin * 8;
+        left := state + 1280 + bin * 8;
+        if raw_load(left) == 0 {
+            rt_arena_new(bump, left, size);
+        }
+        mut take = raw_load(left);
+        if want < take {
+            take = want;
+        }
+        raw_store(slot + 16, raw_load(bump));
+        raw_store(slot + 24, take);
+        raw_store(bump, raw_load(bump) + take * size);
+        raw_store(left, raw_load(left) - take);
+    }
+    rt_allocator_unlock();
+    return 0;
+}
+// A full bin: the newer half of its list becomes a chain.
+fn rt_cache_spill(slot: u64, bin: u64) -> u64 {
+    // Not rt_div: a free must reach nothing that can fail, or the no-allocation effect cannot be
+    // proved of a drop. (The attribute is not spelled here: the build driver takes its text
+    // anywhere in a source file, this one included, as a claim and compiles the program in one run.)
+    mut moved = raw_load(slot + 8) / 2;
+    if moved == 0 {
+        moved = 1;
+    }
+    first := raw_load(slot);
+    mut last = first;
+    mut i = 1;
+    while i < moved {
+        last = raw_load(last + 8);
+        i = i + 1;
+    }
+    raw_store(slot, raw_load(last + 8));
+    raw_store(slot + 8, raw_load(slot + 8) - moved);
+    raw_store(last + 8, 0);
+    rt_chain_give(first, moved, bin);
+    return 0;
+}
+// Blocks leave a cache as a chain: a list linked through the state words and ending in 0, whose
+// first block also carries, in its two payload words, the next chain of the class (state words
+// 1792 + bin * 8) and the chain's length. A refill takes one whole, so the lock is held for a few
+// stores however many blocks move. The smallest class has exactly those two payload words.
+fn rt_chain_give(first: u64, count: u64, bin: u64) -> u64 {
+    chains := raw_state() + 1792 + bin * 8;
+    raw_store(first + 24, count);
+    rt_allocator_lock();
+    raw_store(first + 16, raw_load(chains));
+    raw_store(chains, first);
+    rt_allocator_unlock();
+    return 0;
+}
+// The thread whose record this is has finished (rt_thread_main, rt_release_record): everything its
+// cache holds goes back to the shared lists, its live count joins the process's, and the page is
+// unmapped. The record is an argument because an adopted record is released on C's thread pointer.
+fn rt_cache_retire(record: u64) -> u64 {
+    raw_store(record + 72, 0);
+    c := raw_load(record + 64);
+    if c == 0 {
+        return 0;
+    }
+    raw_store(record + 64, 0);
+    state := raw_state();
+    mut size = 32;
+    mut bin = 0;
+    while bin < 14 {
+        slot := c + 64 + bin * 48;
+        if raw_load(slot) != 0 {
+            rt_chain_give(raw_load(slot), raw_load(slot + 8), bin);
+        }
+        size = size * 2;
+        bin = bin + 1;
+    }
+    rt_allocator_lock();
+    size = 32;
+    bin = 0;
+    while bin < 14 {
+        slot := c + 64 + bin * 48;
+        head := state + 256 + bin * 8;
+        // The unused rest of a run becomes ordinary free blocks: each needs its size word.
+        mut block = raw_load(slot + 16);
+        mut left = raw_load(slot + 24);
+        while left != 0 {
+            raw_store(block, size);
+            raw_store(block + 8, raw_load(head));
+            raw_store(head, block);
+            block = block + size;
+            left = left - 1;
+        }
+        size = size * 2;
+        bin = bin + 1;
+    }
+    raw_store(state + 24, wrapping_add(raw_load(state + 24), raw_load(c + 8)));
+    mut link = state + 40;
+    while raw_load(link) != c {
+        link = raw_load(link);
+        if link == 0 {
+            rt_abort();
+        }
+    }
+    raw_store(link, raw_load(c));
+    rt_allocator_unlock();
+    rt_syscall(11, c, 4096, 0);
+    return 0;
+}
+// Where an arena's first block starts. An arena is a page-aligned mapping whose first two words
+// are {next arena, mapped bytes}, and every block after the first is a multiple of the class size
+// further on, so this one offset decides the alignment of every payload of the class, for good:
+// no list, run or chain computes an address. A class of 1024 bytes or more - where a request of
+// 512 bytes or more lands - starts at 48, which puts each payload (16 past its block) on a 64-byte
+// boundary; that is a promise (docs/design/allocator.md). A smaller class starts right after the
+// arena's words and its payloads are 16-byte aligned.
+fn rt_arena_first(size: u64) -> u64 {
+    if size < 1024 {
+        return 16;
+    }
+    return 48;
+}
+// The arena of a block that has a mapping to itself (a class of 512 KiB or more), from its payload.
+fn rt_own_arena(ptr: u64) -> u64 {
+    return ptr - 16 - rt_arena_first(raw_load(ptr - 16));
+}
+// A fresh arena for one class: `bump` and `left` are the class's two shared words. Lock held.
+fn rt_arena_new(bump: u64, left: u64, size: u64) -> u64 {
+    state := raw_state();
+    first := rt_arena_first(size);
+    mut mapsize = 1048576;
+    if mapsize < size + first {
+        mapsize = size + first;
+    }
+    arena := raw_map(mapsize);
+    if rt_error(arena) {
+        rt_abort();
+    }
+    raw_store(arena, raw_load(state + 32));
+    raw_store(arena + 8, mapsize);
+    raw_store(state + 32, arena);
+    raw_store(bump, arena + first);
+    raw_store(left, rt_div(mapsize - first, size));
     return 0;
 }
 fn rt_alloc_unlocked(n: u64) -> u64 {
@@ -1028,19 +1422,7 @@ fn rt_alloc_unlocked(n: u64) -> u64 {
         bump := state + 768 + bin * 8;
         left := state + 1280 + bin * 8;
         if raw_load(left) == 0 {
-            mut mapsize = 1048576;
-            if mapsize < size + 16 {
-                mapsize = size + 16;
-            }
-            arena := raw_map(mapsize);
-            if rt_error(arena) {
-                rt_abort();
-            }
-            raw_store(arena, raw_load(state + 32));
-            raw_store(arena + 8, mapsize);
-            raw_store(state + 32, arena);
-            raw_store(bump, arena + 16);
-            raw_store(left, rt_div(mapsize - 16, size));
+            rt_arena_new(bump, left, size);
         }
         block = raw_load(bump);
         raw_store(bump, block + size);
@@ -1049,15 +1431,17 @@ fn rt_alloc_unlocked(n: u64) -> u64 {
     }
     raw_store(block + 8, 1);
     ptr := block + 16;
-    // Bump allocations come from freshly mapped (already zero) memory; only reuse is cleared.
+    // Bump allocations come from freshly mapped (already zero) memory; only reuse is cleared, and
+    // only as far as was asked for: no caller reads past its request (a vector's capacity is the
+    // request, never the class).
     if reused {
         mut i = 0;
-        while i < size - 16 {
+        while i < n {
             raw_store(ptr + i, 0);
             i = i + 8;
         }
     }
-    raw_store(state + 24, raw_load(state + 24) + 1);
+    raw_store(state + 24, wrapping_add(raw_load(state + 24), 1));
     return ptr;
 }
 fn rt_free_unlocked(ptr: u64) -> u64 {
@@ -1077,7 +1461,7 @@ fn rt_free_unlocked(ptr: u64) -> u64 {
     // Classes of at least 512 KiB occupy their own arena. Return those mappings to the OS
     // immediately; smaller freed objects remain reusable in the segregated slab caches.
     if (size < 524288) == 0 {
-        arena := ptr - 32;
+        arena := rt_own_arena(ptr);
         mut link = state + 32;
         while raw_load(link) != arena {
             next := raw_load(link);
@@ -1088,7 +1472,7 @@ fn rt_free_unlocked(ptr: u64) -> u64 {
         }
         length := raw_load(arena + 8);
         raw_store(link, raw_load(arena));
-        raw_store(state + 24, raw_load(state + 24) - 1);
+        raw_store(state + 24, wrapping_sub(raw_load(state + 24), 1));
         err := rt_syscall(11, arena, length, 0);
         if rt_error(err) {
             rt_abort();
@@ -1104,7 +1488,7 @@ fn rt_free_unlocked(ptr: u64) -> u64 {
     head := state + 256 + bin * 8;
     raw_store(block + 8, raw_load(head));
     raw_store(head, block);
-    raw_store(state + 24, raw_load(state + 24) - 1);
+    raw_store(state + 24, wrapping_sub(raw_load(state + 24), 1));
     return 0;
 }
 // Resizes an allocation to hold at least `need` bytes, keeping the first `used`. A block in its own
@@ -1124,7 +1508,8 @@ fn rt_grow(ptr: u64, used: u64, need: u64) -> u64 {
         }
         rt_allocator_lock();
         state := raw_state();
-        arena := ptr - 32;
+        first := rt_arena_first(size);
+        arena := rt_own_arena(ptr);
         mut link = state + 32;
         while raw_load(link) != arena {
             next := raw_load(link);
@@ -1133,24 +1518,34 @@ fn rt_grow(ptr: u64, used: u64, need: u64) -> u64 {
             }
             link = next;
         }
-        moved := rt_syscall4(25, arena, raw_load(arena + 8), newsize + 16, 1);
+        moved := rt_syscall4(25, arena, raw_load(arena + 8), newsize + first, 1);
         if rt_error(moved) {
             rt_abort();
         }
         raw_store(link, moved);
-        raw_store(moved + 8, newsize + 16);
-        raw_store(moved + 16, newsize);
+        raw_store(moved + 8, newsize + first);
+        raw_store(moved + first, newsize);
         rt_allocator_unlock();
-        return moved + 32;
+        return moved + first + 16;
     }
     fresh := rt_alloc(need);
     rt_copy_bytes(fresh, ptr, used);
     rt_free(ptr);
     return fresh;
 }
+// How many allocations are live: the shared count plus every thread cache's own. The walk holds the
+// lock, so no cache joins or leaves the registry under it and the total is never torn; the counts
+// of threads that are allocating at this moment are read as they pass, so the answer is exact when
+// the other threads are idle or gone (the end of main, after every join) and approximate otherwise.
 fn rt_live() -> u64 {
+    state := raw_state();
     rt_allocator_lock();
-    n := raw_load(raw_state() + 24);
+    mut n = raw_load(state + 24);
+    mut c = raw_load(state + 40);
+    while c != 0 {
+        n = wrapping_add(n, raw_load(c + 8));
+        c = raw_load(c);
+    }
     rt_allocator_unlock();
     return n;
 }
@@ -1161,6 +1556,14 @@ fn rt_live() -> u64 {
 // the number it sees on fd 2 and lets the program exit normally. It never reports nothing: an
 // unexplained balance is either aborted on or printed.
 fn rt_leak_exit() -> u64 {
+    // The main thread's locals (thread::Local) are dropped as any thread's are when it ends.
+    tp := raw_tp_get();
+    if tp != 0 {
+        rt_locals_drop(tp);
+    }
+    if raw_atomic_load(rt_detached_word()) != 0 {
+        return 0;
+    }
     live := rt_live();
     if live == 0 {
         return 0;
@@ -1170,20 +1573,32 @@ fn rt_leak_exit() -> u64 {
         rt_abort();
     }
     s := rt_new();
-    rt_reserveb(s, 160);
+    rt_reserveb(s, 220);
     buf := raw_load(s);
     mut n = rt_fail_put(buf, 0, view("note: "));
     n = rt_fail_num(buf, n, live);
     n = rt_fail_put(buf, n, view(" allocation(s) still live after "));
     n = rt_fail_num(buf, n, failures);
-    n = rt_fail_put(buf, n, view(" contained task failure(s); the owners of a discarded stack are not released\n"));
+    n = rt_fail_put(buf, n, view(" contained task failure(s)"));
+    extra := raw_load(rt_discarded_word());
+    if extra != 0 {
+        n = rt_fail_put(buf, n, view(" ("));
+        n = rt_fail_num(buf, n, failures + extra);
+        n = rt_fail_put(buf, n, view(" stacks discarded)"));
+    }
+    n = rt_fail_put(buf, n, view("; the owners of a discarded stack are not released\n"));
     raw_store(s + 8, n);
     rt_write_text(2, s);
     return 0;
 }
 fn rt_shutdown() -> u64 {
+    rt_sched_stats();
     rt_prof_dump();
     state := raw_state();
+    if raw_atomic_load(rt_detached_word()) != 0 {
+        // A detached thread is still running on these arenas; the exit that follows reclaims them.
+        return 0;
+    }
     mut arena = raw_load(state + 32);
     while arena != 0 {
         next := raw_load(arena);
@@ -1491,9 +1906,8 @@ fn rt_carray_load(src: u64, n: u64, size: u64, signed: u64, kind: u64, words: u6
         } else if kind == 3 {
             rt_pushb(out, raw_byte(a));
         } else if kind == 2 {
-            r := rt_rec(words);
-            rt_copy_bytes(r, a, size);
-            rt_push(out, r);
+            // A vector of extern records stores them inline, as the C array does.
+            rt_pushw(out, rt_flat_box(a, size), size);
         } else {
             if kind == 1 {
                 rt_push(out, rt_f32_from_bits(rt_load_sized(a, 4, 0)));
@@ -1526,17 +1940,18 @@ fn rt_carray_store(dst: u64, v: u64, n: u64, size: u64, kind: u64) -> u64 {
             i = i + 1;
             continue;
         }
-        x := rt_at(v, i);
         if kind == 2 {
-            rt_copy_bytes(a, x, size);
+            rt_copy_bytes(a, rt_slotw(v, i, size), size);
+            i = i + 1;
+            continue;
+        }
+        x := rt_at(v, i);
+        if kind == 1 {
+            rt_store_sized(a, rt_f32_bits(x), 4);
+        } else if size == 8 {
+            raw_store(a, x);
         } else {
-            if kind == 1 {
-                rt_store_sized(a, rt_f32_bits(x), 4);
-            } else if size == 8 {
-                raw_store(a, x);
-            } else {
-                rt_store_sized(a, x, size);
-            }
+            rt_store_sized(a, x, size);
         }
         i = i + 1;
     }
@@ -1689,6 +2104,25 @@ fn rt_enum_retag(old: u64, tag: u64) -> u64 {
     payload := raw_load(old + 8);
     rt_free(old);
     return rt_enum(tag, payload);
+}
+// Exchanges the `n` bytes at `a` and at `b`: what `exchange` and assignment through a reference to
+// a record do, since the reference is the record's address. Whole words, then the tail bytes of an
+// `extern "C"` record whose size is not a multiple of eight.
+fn rt_swap(a: u64, b: u64, n: u64) -> u64 {
+    mut i = 0;
+    while i + 8 <= n {
+        word := raw_load(a + i);
+        raw_store(a + i, raw_load(b + i));
+        raw_store(b + i, word);
+        i = i + 8;
+    }
+    while i < n {
+        byte := raw_byte(a + i);
+        raw_putbyte(a + i, raw_byte(b + i));
+        raw_putbyte(b + i, byte);
+        i = i + 1;
+    }
+    return 0;
 }
 fn rt_xchg(p: u64, v: u64) -> u64 {
     old := raw_load(p);
@@ -2298,18 +2732,1075 @@ fn rt_atomic_swap(p: u64, value: u64) -> u64 {
     return 0;
 }
 
-// Mutex word: 0 unlocked, 1 locked, 2 locked with possible waiters (Drepper's futex mutex).
-// Waiting sleeps in the kernel; no busy spinning. Payload word follows at offset 8.
+// ---- parking: one way to wait (docs/design/parking.md) ------------------------------------------
+// Everything that waits - a task, a job in its runner task, a thread - waits the same way: its
+// WAITER BLOCK is linked on the queue of the thing it waits for, and it sleeps until a waker sets the
+// block's state. One execution waits for one thing at a time, so the block is part of the waiter's
+// own record and nothing is allocated to wait: a task's is the tail of its record (rt_task_record_
+// size), a thread's hangs off thread-record word 96 (the main thread's is in process state, rt_main_waiter).
+//
+// Waiter block, 7 words:
+//   0 next in the queue   8 state (0 waiting, 1 woken, 2 granted what it waited for)
+//   16 what it asked for (a primitive's own use)   24 the queue's last block (kept in the head)
+//   32 HELD LIST: the locks this execution holds, newest first (rt_held_settle)
+//   40 the task record this block belongs to, 0 for a thread   48 unused
+//
+// A queue is one word in the primitive: the low four bits are the primitive's flags - bit 1 is the
+// queue's own lock - and the rest is the first waiter block (blocks are 16-byte aligned).
+//
+// The protocol, and why each step is there:
+//   wait:  take the queue lock; LOOK AGAIN at the condition (the release may have happened while
+//          this execution was deciding to wait); link the block; drop the lock; sleep until the
+//          state is not 0. A task sleeps in rt_suspend, which does not lose a wake that came first;
+//          a thread sleeps on the state word with the kernel checking that it is still 0.
+//   wake:  under the queue lock: unlink the block, set its state, wake its owner (rt_wake for a
+//          task, a futex wake for a thread).
+//   after: the waiter takes and drops the queue lock once more before it returns. The waker did
+//          its wake under that lock, so from here on no waker can still be touching this block or
+//          this task's record - a task that returned could finish and be freed, and an idle runner
+//          must never be woken. Then the waiter clears a wake that is still pending on its task,
+//          so its next sleep does not return early.
+// A task that waits may resume on another worker: the block names the task record, never a thread.
+// The main thread's waiter block. Process state is only 8-byte aligned and a queue word keeps
+// flags in the low four bits of a block's address, so the block is rounded up to 16 inside the
+// words reserved for it (1920..1984).
+fn rt_main_waiter() -> u64 {
+    return (raw_state() + 1935) & 18446744073709551600;
+}
+fn rt_task_record_size() -> u64 {
+    // 240 bytes of task record and the waiter block, a multiple of 16.
+    return 304;
+}
+// The current execution's waiter block, or 0 for a thread that has none yet. Never allocates.
+fn rt_waiter_peek() -> u64 {
+    t := rt_current();
+    if t != 0 {
+        return t + 240;
+    }
+    tp := raw_tp_get();
+    if tp == 0 {
+        return rt_main_waiter();
+    }
+    return raw_load(tp + 96);
+}
+fn rt_waiter() -> u64 {
+    t := rt_current();
+    if t != 0 {
+        raw_store(t + 280, t);
+        return t + 240;
+    }
+    tp := raw_tp_get();
+    if tp == 0 {
+        return rt_main_waiter();
+    }
+    mut b = raw_load(tp + 96);
+    if b == 0 {
+        if tp == raw_state() + 128 {
+            b = rt_main_waiter();
+        } else {
+            b = rt_alloc(56);
+        }
+        raw_store(tp + 96, b);
+    }
+    return b;
+}
+// A thread that ends gives its block back (rt_thread_main); the main thread's is static.
+fn rt_waiter_free(record: u64) -> u64 {
+    b := raw_load(record + 96);
+    if (b != 0) & (b != rt_main_waiter()) {
+        raw_store(record + 96, 0);
+        rt_free(b);
+    }
+    return 0;
+}
+// The queue lock is a spin lock, and the thread that holds it can be preempted by the OS: nobody
+// may spin on it without bound. A short spin, then the OS thread is yielded each time round.
+fn rt_q_lock(q: u64) -> u64 {
+    mut spins = 0;
+    while true {
+        s := raw_atomic_load(q);
+        if (s & 2) == 0 {
+            if raw_atomic_cas(q, s, s | 2) == s {
+                return 0;
+            }
+        }
+        spins = spins + 1;
+        if 64 < spins {
+            rt_syscall(24, 0, 0, 0);
+        }
+    }
+    return 0;
+}
+// Change the flag bits of a queue word: clear `off`, then set `on`. The flags move under compare-
+// and-swap because a primitive's fast path changes its own bits without the queue lock.
+fn rt_q_flags(q: u64, off: u64, on: u64) -> u64 {
+    while true {
+        s := raw_atomic_load(q);
+        if raw_atomic_cas(q, s, (s & (18446744073709551615 - off)) | on) == s {
+            return s;
+        }
+    }
+    return 0;
+}
+fn rt_q_unlock(q: u64) -> u64 {
+    return rt_q_flags(q, 2, 0);
+}
+fn rt_q_head(q: u64) -> u64 {
+    return raw_atomic_load(q) & 18446744073709551600;
+}
+fn rt_q_set_head(q: u64, b: u64) -> u64 {
+    while true {
+        s := raw_atomic_load(q);
+        if raw_atomic_cas(q, s, (s & 15) | b) == s {
+            return 0;
+        }
+    }
+    return 0;
+}
+// Queue lock held for the four below.
+fn rt_q_push(q: u64, b: u64) -> u64 {
+    raw_store(b, 0);
+    h := rt_q_head(q);
+    if h == 0 {
+        raw_store(b + 24, b);
+        return rt_q_set_head(q, b);
+    }
+    raw_store(raw_load(h + 24), b);
+    raw_store(h + 24, b);
+    return 0;
+}
+fn rt_q_push_front(q: u64, b: u64) -> u64 {
+    h := rt_q_head(q);
+    raw_store(b, h);
+    if h == 0 {
+        raw_store(b + 24, b);
+    } else {
+        raw_store(b + 24, raw_load(h + 24));
+    }
+    return rt_q_set_head(q, b);
+}
+fn rt_q_pop(q: u64) -> u64 {
+    h := rt_q_head(q);
+    if h == 0 {
+        return 0;
+    }
+    next := raw_load(h);
+    if next != 0 {
+        raw_store(next + 24, raw_load(h + 24));
+    }
+    rt_q_set_head(q, next);
+    return h;
+}
+// Take `b` out of the queue wherever it is; 1 when it was there. A waiter that gives up (a
+// deadline, a cancellation) withdraws itself with this - and if a waker got to it first, it is not
+// there and the wake stands.
+fn rt_q_remove(q: u64, b: u64) -> u64 {
+    h := rt_q_head(q);
+    if h == 0 {
+        return 0;
+    }
+    if h == b {
+        rt_q_pop(q);
+        return 1;
+    }
+    mut prev = h;
+    while raw_load(prev) != 0 {
+        at := raw_load(prev);
+        if at == b {
+            raw_store(prev, raw_load(b));
+            if raw_load(h + 24) == b {
+                raw_store(h + 24, prev);
+            }
+            return 1;
+        }
+        prev = at;
+    }
+    return 0;
+}
+// Sleep until a waker sets this block's state; the answer is that state (1 woken, 2 granted), or
+// 3 when the deadline passed and 4 when the task's scope was cancelled - in those two cases the
+// block has been taken off the queue again, under the queue lock, so no waker can still grant it;
+// a waker that got there first wins and its answer stands. The block was linked, with state 0,
+// under the queue lock.
+//   until  the monotonic clock (host::now_ms) at which to give up; 0 waits for good
+//   flags  1: a task's wait ends when its scope is cancelled (lock waits do not ask for this - a
+//          lock wait is bounded by its holder's progress, and cancelling a task that holds lock A
+//          while it waits for B would poison A; lock_until is the cancellable form)
+// A task's deadline is the scheduler's own timer (the one host::sleep_ms parks on); a thread's is
+// the kernel wait's timeout. Where no timer can be armed (Windows) a task with a deadline yields
+// and looks at the clock instead of sleeping.
+fn rt_park(b: u64, q: u64) -> u64 {
+    return rt_park_until(b, q, 0, 0);
+}
+fn rt_park_until(b: u64, q: u64, until: u64, flags: u64) -> u64 {
+    owner := raw_load(b + 40);
+    // Inside a parallel region (task word 152) a wait is a job's, and a job does not observe its
+    // scope's cancellation by waking: it asks (pool::cancelled). A job runs inline on its forker's
+    // stack or stolen on a runner whose token never fires, and the two must behave alike; and a
+    // failing stack's drain must not be cut short.
+    mut cancellable = 0;
+    if ((flags & 1) != 0) & (owner != 0) {
+        cancellable = raw_load(owner + 152) == 0;
+    }
+    mut token = 0;
+    if cancellable {
+        token = raw_load(owner + 72);
+        // Set before the token is read: rt_cancel stores the token first and then wakes every task
+        // that has this word set, so one of the two sees the other.
+        raw_atomic_store(owner + 128, 1);
+    }
+    mut poll = 0;
+    if (until != 0) & (owner != 0) & ((rt_task_threads() != 0) | (rt_os_reactor() == 0)) {
+        poll = 1;
+    }
+    mut code = 0;
+    while raw_atomic_load(b + 8) == 0 {
+        mut give_up = 0;
+        if cancellable {
+            if raw_atomic_load(token) != 0 {
+                give_up = 4;
+            }
+        }
+        if (give_up == 0) & (until != 0) {
+            if until <= f_host_now_ms() {
+                give_up = 3;
+            }
+        }
+        if give_up != 0 {
+            rt_q_lock(q);
+            if rt_q_remove(q, b) {
+                rt_q_unlock(q);
+                code = give_up;
+                break;
+            }
+            // Already granted: the waker is setting the state now.
+            rt_q_unlock(q);
+            continue;
+        }
+        if owner != 0 {
+            if poll {
+                rt_yield();
+            } else {
+                if until != 0 {
+                    // A timer for what is left of the deadline, armed per pass (see rt_sleep_for).
+                    now := f_host_now_ms();
+                    mut armed = 0;
+                    if now < until {
+                        armed = rt_os_timer(rt_sched(), owner, until - now) == 0;
+                    }
+                    if armed {
+                        rt_suspend(owner);
+                        rt_os_timer_done(rt_sched(), owner);
+                    } else {
+                        rt_yield();
+                    }
+                } else {
+                    rt_suspend(owner);
+                }
+            }
+        } else {
+            if until != 0 {
+                rt_os_wait_ms(b + 8, 0, until - f_host_now_ms());
+            } else {
+                rt_syscall(202, b + 8, 128, 0);
+            }
+        }
+    }
+    if cancellable {
+        raw_atomic_store(owner + 128, 0);
+    }
+    // The waker finished under this lock: nothing of this wait is in flight after it.
+    rt_q_lock(q);
+    rt_q_unlock(q);
+    if owner != 0 {
+        raw_atomic_cas(owner + 24, 3, 0);
+    }
+    if code != 0 {
+        return code;
+    }
+    return raw_load(b + 8);
+}
+// A plain wait that was cancelled ends its task: a failure of kind 16, contained like any other,
+// which try_join reports as a TaskFailure and join re-raises (docs/design/parking.md).
+fn rt_wait_cancelled() -> u64 {
+    return rt_fail_message(16, rt_lit_text("the wait was cancelled"));
+}
+fn rt_lit_text(text: string) -> u64 {
+    v := view(text);
+    s := rt_new();
+    rt_reserveb(s, v.len());
+    mut i = 0;
+    while i < v.len() {
+        raw_putbyte(raw_load(s) + i, u64(v[i]));
+        i = i + 1;
+    }
+    raw_store(s + 8, v.len());
+    return s;
+}
+// Wake an unlinked waiter with `state` (1 woken, 2 granted). Queue lock held, and held until this
+// returns: see rt_park.
+fn rt_unpark(b: u64, state: u64) -> u64 {
+    owner := raw_load(b + 40);
+    raw_atomic_store(b + 8, state);
+    if owner != 0 {
+        return rt_wake(owner);
+    }
+    rt_syscall(202, b + 8, 129, 1);
+    return 0;
+}
+
+// ---- Mutex<T> ------------------------------------------------------------------------------------
+// Block: 0 the word (bit 0 locked, bit 1 queue lock, bit 2 poisoned, bit 3 a waiter is owed the
+// lock, the rest the queue), 8 the payload, 16 the next lock its holder holds (held list), 24 the
+// statement that failed while holding it (a site-table entry; 0 when not poisoned or not known),
+// 32 the held-list kind (1).
+//
+// An uncontended lock or unlock is one compare-and-swap. A lock that is held is tried a few dozen
+// times more - most holds are shorter than a sleep - and then the caller parks: no yield loop, so
+// waiters cost nothing while they wait.
+//
+// Unlock is BARGING WITH A BOUND. It clears the lock and wakes the first waiter, which then
+// competes with whoever arrives; handing the lock straight to the waiter would leave it idle from
+// the unlock until that waiter is actually running, on every contended acquisition. A waiter that
+// is woken and loses asks for the lock by name (bit 3, and it queues at the front): the next unlock
+// passes ownership to it directly and new arrivals queue behind. So a waiter loses at most once.
 fn rt_mutex_new(value: u64) -> u64 {
-    p := rt_alloc(16);
-    raw_atomic_store(p, 0);
+    p := rt_alloc(48);
     raw_store(p + 8, value);
+    raw_store(p + 32, 1); // a held-list entry of kind 1 (rt_held_settle)
     return p;
 }
+fn rt_mutex_try(p: u64) -> u64 {
+    s := raw_atomic_load(p);
+    if (s & 9) != 0 {
+        return 0;
+    }
+    return raw_atomic_cas(p, s, s | 1) == s;
+}
+fn rt_mutex_acquire(p: u64) -> u64 {
+    return rt_mutex_acquire_until(p, 0, 0);
+}
+// 0 with the lock held, or rt_park_until's 3 (deadline) or 4 (cancelled).
+fn rt_mutex_acquire_until(p: u64, until: u64, flags: u64) -> u64 {
+    if rt_mutex_try(p) {
+        return 0;
+    }
+    mut i = 0;
+    while i < 40 {
+        if rt_mutex_try(p) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    b := rt_waiter();
+    mut lost = 0;
+    while true {
+        rt_q_lock(p);
+        // Look again, under the queue lock: an unlock that found no waiter has already gone.
+        mut got = 0;
+        while true {
+            s := raw_atomic_load(p);
+            if (s & 9) != 0 {
+                break;
+            }
+            if raw_atomic_cas(p, s, s | 1) == s {
+                got = 1;
+                break;
+            }
+        }
+        if got {
+            rt_q_unlock(p);
+            return 0;
+        }
+        raw_atomic_store(b + 8, 0);
+        if lost {
+            rt_q_flags(p, 0, 8);
+            rt_q_push_front(p, b);
+        } else {
+            rt_q_push(p, b);
+        }
+        rt_q_unlock(p);
+        r := rt_park_until(b, p, until, flags);
+        if r == 2 {
+            return 0;
+        }
+        if 2 < r {
+            return r;
+        }
+        if rt_mutex_try(p) {
+            return 0;
+        }
+        lost = 1;
+    }
+    return 0;
+}
+fn rt_mutex_release(p: u64) -> u64 {
+    while true {
+        s := raw_atomic_load(p);
+        if (s & 18446744073709551610) != 0 {
+            break;
+        }
+        // No waiter, no queue lock held, nobody owed the lock.
+        if raw_atomic_cas(p, s, s & 4) == s {
+            return 0;
+        }
+    }
+    rt_q_lock(p);
+    b := rt_q_pop(p);
+    if b == 0 {
+        rt_q_flags(p, 9, 0);
+    } else {
+        if (raw_atomic_load(p) & 8) != 0 {
+            // Owed: the lock stays locked and changes hands.
+            rt_q_flags(p, 8, 0);
+            rt_unpark(b, 2);
+        } else {
+            rt_q_flags(p, 1, 0);
+            rt_unpark(b, 1);
+        }
+    }
+    rt_q_unlock(p);
+    return 0;
+}
+// ---- what an execution holds, and what happens to it when the execution fails ------------------
+// A failed check discards its stack whole: no frame runs its unlock. So every execution keeps a
+// list of the locks it holds (waiter block word 32; a mutex's link is word 16 of its own block,
+// since it has one holder), and the one place a failing stack is left - rt_contain_tail - settles
+// the list before it switches away: each mutex is POISONED with the failing statement's site and
+// released. A later lock_with fails its caller with a message that names that statement
+// (rt_mutex_lock); sync::recover_with gives access anyway and clears the poison. The walk is a
+// function of its own so that a failure contained somewhere else (a job's, when that is contained)
+// can call it.
+// Held-list entries are linked through word 16 and say what they are in word 32: a mutex block is
+// its own entry (kind 1); everything else is a 48-byte node {0 the object, 8 a count, 16 next,
+// 32 kind}: 2 semaphore permits, 3 a read lock, 4 a write lock, 5 a Once being initialised.
+fn rt_held_push(p: u64) -> u64 {
+    b := rt_waiter();
+    raw_store(p + 16, raw_load(b + 32));
+    raw_store(b + 32, p);
+    return 0;
+}
+fn rt_held_node(object: u64, count: u64, kind: u64) -> u64 {
+    n := rt_alloc(48);
+    raw_store(n, object);
+    raw_store(n + 8, count);
+    raw_store(n + 32, kind);
+    rt_held_push(n);
+    return n;
+}
+// Take entry `e` off the current execution's list.
+fn rt_held_pop(e: u64) -> u64 {
+    b := rt_waiter_peek();
+    if b == 0 {
+        rt_abort();
+    }
+    if raw_load(b + 32) == e {
+        raw_store(b + 32, raw_load(e + 16));
+        return 0;
+    }
+    mut at = raw_load(b + 32);
+    while at != 0 {
+        if raw_load(at + 16) == e {
+            raw_store(at + 16, raw_load(e + 16));
+            return 0;
+        }
+        at = raw_load(at + 16);
+    }
+    rt_abort();
+    return 0;
+}
+// The newest node of `kind` on `object`, taken off the list and freed; its count is the answer.
+fn rt_held_drop(object: u64, kind: u64) -> u64 {
+    b := rt_waiter_peek();
+    mut at = raw_load(b + 32);
+    while at != 0 {
+        if (raw_load(at + 32) == kind) & (raw_load(at) == object) {
+            n := raw_load(at + 8);
+            rt_held_pop(at);
+            rt_free(at);
+            return n;
+        }
+        at = raw_load(at + 16);
+    }
+    rt_abort();
+    return 0;
+}
+// Whether the current execution holds any lock. The scheduler asks before it lets a waiting
+// execution help with other jobs: one that holds a lock parks instead, because a job it helped
+// with might want that lock. Never allocates.
+fn rt_holds_any() -> u64 {
+    b := rt_waiter_peek();
+    if b == 0 {
+        return 0;
+    }
+    return raw_load(b + 32) != 0;
+}
+// `site` is the failing statement's site-table entry, or 0. It never allocates and never parks; it
+// frees the nodes it settles, and each release takes a queue lock (a bounded spin) and wakes.
+fn rt_held_settle(b: u64, site: u64) -> u64 {
+    while raw_load(b + 32) != 0 {
+        e := raw_load(b + 32);
+        raw_store(b + 32, raw_load(e + 16));
+        kind := raw_load(e + 32);
+        if kind == 1 {
+            if (raw_atomic_load(e) & 4) == 0 {
+                raw_store(e + 24, site);
+            }
+            rt_q_flags(e, 0, 4);
+            rt_mutex_release(e);
+        } else {
+            object := raw_load(e);
+            if kind == 2 {
+                rt_sem_release(object, raw_load(e + 8));
+            }
+            if kind == 3 {
+                rt_rw_unlock_read(object);
+            }
+            if kind == 4 {
+                if (raw_atomic_load(object) & 4) == 0 {
+                    raw_store(object + 24, site);
+                }
+                rt_q_flags(object, 0, 4);
+                rt_rw_unlock_write(object);
+            }
+            if kind == 5 {
+                rt_once_reset(object);
+            }
+            rt_free(e);
+        }
+    }
+    return 0;
+}
+// A failure with a message the runtime wrote: contained by a task or a dedicated thread, fatal
+// anywhere else - the rules of rt_task_fail, which is this with the program's own text.
+fn rt_fail_message(kind: u64, msg: u64) -> u64 {
+    j := rt_job_failing();
+    if j != 0 {
+        return rt_job_fail_here(j, kind, 0, 0, msg);
+    }
+    t := rt_containable();
+    if t != 0 {
+        return rt_contain_site(t, kind, 0, 0, rt_site_here(t + 200), msg);
+    }
+    if rt_abort_begin() == 0 {
+        rt_abort_park();
+    }
+    return rt_report_die(msg, rt_fail_site_full());
+}
+fn rt_mutex_poisoned(p: u64) -> u64 {
+    s := rt_new();
+    rt_reserveb(s, 600);
+    buf := raw_load(s);
+    mut n = rt_fail_put(buf, 0, view("mutex poisoned: its holder failed"));
+    site := raw_load(p + 24);
+    if site != 0 {
+        n = rt_fail_line(buf, n, site, " at ");
+        // The location line ends in a newline; the message is one line.
+        if (n != 0) & (raw_byte(buf + n - 1) == 10) {
+            n = n - 1;
+        }
+    }
+    raw_store(s + 8, n);
+    return rt_fail_message(17, s);
+}
+fn rt_mutex_lock(p: u64) -> u64 {
+    rt_mutex_acquire(p);
+    if (raw_atomic_load(p) & 4) != 0 {
+        rt_mutex_release(p);
+        return rt_mutex_poisoned(p);
+    }
+    return rt_held_push(p);
+}
 fn rt_mutex_unlock(p: u64) -> u64 {
-    if rt_atomic_fetch_sub(p, 1) != 1 {
-        raw_atomic_store(p, 0);
-        rt_syscall(202, p, 129, 1);
+    rt_held_pop(p);
+    return rt_mutex_release(p);
+}
+// sync::try_lock_with: 1 with the lock held, 0 when it is held by someone else. A poisoned mutex
+// fails the caller here too - "not available" would hide it.
+fn f_host_mutex_try_lock(p: u64) -> u64 {
+    if rt_mutex_try(p) == 0 {
+        return 0;
+    }
+    if (raw_atomic_load(p) & 4) != 0 {
+        rt_mutex_release(p);
+        return rt_mutex_poisoned(p);
+    }
+    rt_held_push(p);
+    return 1;
+}
+fn f_host_mutex_unlock(p: u64) -> u64 {
+    return rt_mutex_unlock(p);
+}
+// sync::recover_with: the lock, poisoned or not; its unlock clears the poison.
+fn f_host_mutex_lock_recover(p: u64) -> u64 {
+    rt_mutex_acquire(p);
+    return rt_held_push(p);
+}
+fn f_host_mutex_unlock_recover(p: u64) -> u64 {
+    rt_q_flags(p, 4, 0);
+    raw_store(p + 24, 0);
+    return rt_mutex_unlock(p);
+}
+fn f_host_mutex_poisoned(p: u64) -> u64 {
+    return (raw_atomic_load(p) & 4) != 0;
+}
+
+// sync::lock_until: 0 with the lock held, 3 when the deadline passed, 4 when cancelled.
+fn f_host_mutex_lock_until(p: u64, until: u64) -> u64 {
+    r := rt_mutex_acquire_until(p, until, 1);
+    if r != 0 {
+        return r;
+    }
+    if (raw_atomic_load(p) & 4) != 0 {
+        rt_mutex_release(p);
+        return rt_mutex_poisoned(p);
+    }
+    rt_held_push(p);
+    return 0;
+}
+// The answer of a wait that has a deadline or a cancellable form: 0 done, 3 timed out, 4 cancelled.
+// `plain` (flags bit 2) turns a cancellation into the task's failure instead.
+fn rt_wait_answer(r: u64, flags: u64) -> u64 {
+    if (r == 4) & ((flags & 2) != 0) {
+        return rt_wait_cancelled();
+    }
+    if 2 < r {
+        return r;
+    }
+    return 0;
+}
+
+// ---- RwLock<T> (lib/sync.grl) -----------------------------------------------------------------
+// Block: 0 queue word (bit 2 poisoned, bit 3 a writer holds it), 8 readers holding it, 16 writers
+// waiting, 24 the poisoning statement, 32 the payload. Writer-preferring: a reader that arrives
+// while a writer waits queues behind it, so a frame's writer is not starved by a stream of
+// readers. A queued block's request word is 1 for a reader, 2 for a writer.
+fn rt_rw_dispatch(l: u64) -> u64 {
+    if (raw_atomic_load(l) & 8) != 0 {
+        return 0;
+    }
+    while true {
+        h := rt_q_head(l);
+        if h == 0 {
+            return 0;
+        }
+        if raw_load(h + 16) == 2 {
+            if raw_load(l + 8) != 0 {
+                return 0;
+            }
+            rt_q_pop(l);
+            rt_q_flags(l, 0, 8);
+            raw_store(l + 16, raw_load(l + 16) - 1);
+            rt_unpark(h, 2);
+            return 0;
+        }
+        rt_q_pop(l);
+        raw_store(l + 8, raw_load(l + 8) + 1);
+        rt_unpark(h, 2);
+    }
+    return 0;
+}
+fn rt_rw_poisoned(l: u64) -> u64 {
+    s := rt_new();
+    rt_reserveb(s, 600);
+    buf := raw_load(s);
+    mut n = rt_fail_put(buf, 0, view("rwlock poisoned: a writer failed"));
+    site := raw_load(l + 24);
+    if site != 0 {
+        n = rt_fail_line(buf, n, site, " at ");
+        if (n != 0) & (raw_byte(buf + n - 1) == 10) {
+            n = n - 1;
+        }
+    }
+    raw_store(s + 8, n);
+    return rt_fail_message(17, s);
+}
+// mode 1 read, 2 write; flags as rt_park_until's, plus 4: ignore poison (recover_write).
+fn f_host_rw_lock(l: u64, mode: u64, until: u64, flags: u64) -> u64 {
+    rt_q_lock(l);
+    w := raw_atomic_load(l);
+    mut free = 0;
+    if mode == 1 {
+        free = ((w & 8) == 0) & (raw_load(l + 16) == 0);
+        if free {
+            raw_store(l + 8, raw_load(l + 8) + 1);
+        }
+    } else {
+        free = ((w & 8) == 0) & (raw_load(l + 8) == 0);
+        if free {
+            rt_q_flags(l, 0, 8);
+        }
+    }
+    if free == 0 {
+        b := rt_waiter();
+        raw_atomic_store(b + 8, 0);
+        raw_store(b + 16, mode);
+        if mode == 2 {
+            raw_store(l + 16, raw_load(l + 16) + 1);
+        }
+        rt_q_push(l, b);
+        rt_q_unlock(l);
+        r := rt_park_until(b, l, until, flags & 1);
+        if r != 2 {
+            if mode == 2 {
+                rt_q_lock(l);
+                raw_store(l + 16, raw_load(l + 16) - 1);
+                // Readers queued behind this writer may go now.
+                rt_rw_dispatch(l);
+                rt_q_unlock(l);
+            }
+            return rt_wait_answer(r, flags);
+        }
+    } else {
+        rt_q_unlock(l);
+    }
+    if ((raw_atomic_load(l) & 4) != 0) & ((flags & 4) == 0) & (mode == 2) {
+        rt_rw_unlock_write(l);
+        return rt_rw_poisoned(l);
+    }
+    if ((raw_atomic_load(l) & 4) != 0) & (mode == 1) {
+        rt_rw_unlock_read(l);
+        return rt_rw_poisoned(l);
+    }
+    rt_held_node(l, 1, mode + 2);
+    return 0;
+}
+fn f_host_rw_try(l: u64, mode: u64) -> u64 {
+    rt_q_lock(l);
+    w := raw_atomic_load(l);
+    mut free = 0;
+    if mode == 1 {
+        free = ((w & 8) == 0) & (raw_load(l + 16) == 0);
+        if free {
+            raw_store(l + 8, raw_load(l + 8) + 1);
+        }
+    } else {
+        free = ((w & 8) == 0) & (raw_load(l + 8) == 0);
+        if free {
+            rt_q_flags(l, 0, 8);
+        }
+    }
+    rt_q_unlock(l);
+    if free == 0 {
+        return 0;
+    }
+    if (raw_atomic_load(l) & 4) != 0 {
+        if mode == 1 {
+            rt_rw_unlock_read(l);
+        } else {
+            rt_rw_unlock_write(l);
+        }
+        return rt_rw_poisoned(l);
+    }
+    rt_held_node(l, 1, mode + 2);
+    return 1;
+}
+fn rt_rw_unlock_read(l: u64) -> u64 {
+    rt_q_lock(l);
+    raw_store(l + 8, raw_load(l + 8) - 1);
+    rt_rw_dispatch(l);
+    rt_q_unlock(l);
+    return 0;
+}
+fn rt_rw_unlock_write(l: u64) -> u64 {
+    rt_q_lock(l);
+    rt_q_flags(l, 8, 0);
+    rt_rw_dispatch(l);
+    rt_q_unlock(l);
+    return 0;
+}
+// mode 1 read, 2 write, 3 write that recovers (clears the poison).
+fn f_host_rw_unlock(l: u64, mode: u64) -> u64 {
+    if mode == 1 {
+        rt_held_drop(l, 3);
+        return rt_rw_unlock_read(l);
+    }
+    rt_held_drop(l, 4);
+    if mode == 3 {
+        rt_q_flags(l, 4, 0);
+        raw_store(l + 24, 0);
+    }
+    return rt_rw_unlock_write(l);
+}
+fn f_host_rw_poisoned(l: u64) -> u64 {
+    return (raw_atomic_load(l) & 4) != 0;
+}
+
+// ---- Semaphore (lib/sync.grl) -------------------------------------------------------------------
+// Block: 0 queue word, 8 permits available. FIFO: a request that fits is still refused while
+// others queue, so a large request is not starved. Permits are returned when their holder fails.
+fn rt_sem_release(m: u64, n: u64) -> u64 {
+    rt_q_lock(m);
+    raw_store(m + 8, raw_load(m + 8) + n);
+    while true {
+        h := rt_q_head(m);
+        if h == 0 {
+            break;
+        }
+        want := raw_load(h + 16);
+        if raw_load(m + 8) < want {
+            break;
+        }
+        rt_q_pop(m);
+        raw_store(m + 8, raw_load(m + 8) - want);
+        rt_unpark(h, 2);
+    }
+    rt_q_unlock(m);
+    return 0;
+}
+// 0 with `n` permits held (the answer's node is on the held list: rt_sem_node), 3, 4.
+fn f_host_sem_acquire(m: u64, n: u64, until: u64, flags: u64) -> u64 {
+    rt_q_lock(m);
+    if (rt_q_head(m) == 0) & ((raw_load(m + 8) < n) == 0) {
+        raw_store(m + 8, raw_load(m + 8) - n);
+        rt_q_unlock(m);
+    } else {
+        b := rt_waiter();
+        raw_atomic_store(b + 8, 0);
+        raw_store(b + 16, n);
+        rt_q_push(m, b);
+        rt_q_unlock(m);
+        r := rt_park_until(b, m, until, flags & 1);
+        if r != 2 {
+            // A withdrawn head may have been what held the others back.
+            rt_sem_release(m, 0);
+            return rt_wait_answer(r, flags);
+        }
+    }
+    rt_held_node(m, n, 2);
+    return 0;
+}
+// The node of the permits the last acquire on this execution took (a Permit keeps it).
+fn f_host_sem_node(m: u64) -> u64 {
+    b := rt_waiter_peek();
+    mut at = raw_load(b + 32);
+    while at != 0 {
+        if (raw_load(at + 32) == 2) & (raw_load(at) == m) {
+            return at;
+        }
+        at = raw_load(at + 16);
+    }
+    return 0;
+}
+fn f_host_sem_try(m: u64, n: u64) -> u64 {
+    rt_q_lock(m);
+    if (rt_q_head(m) == 0) & ((raw_load(m + 8) < n) == 0) {
+        raw_store(m + 8, raw_load(m + 8) - n);
+        rt_q_unlock(m);
+        return rt_held_node(m, n, 2);
+    }
+    rt_q_unlock(m);
+    return 0;
+}
+// Give back the permits of node `e` (a Permit's drop, or the end of acquire_with).
+fn f_host_sem_give(e: u64) -> u64 {
+    m := raw_load(e);
+    n := raw_load(e + 8);
+    rt_held_pop(e);
+    rt_free(e);
+    return rt_sem_release(m, n);
+}
+
+// ---- Condition, Latch, Barrier (lib/sync.grl) ----------------------------------------------------
+// Each is a queue word and counters. A Condition wait links its block before it releases the
+// mutex, and a notify takes the same queue lock, so a notify made under the mutex after the
+// predicate changed always finds the waiter.
+fn f_host_cond_wait(c: u64, p: u64, until: u64, flags: u64) -> u64 {
+    b := rt_waiter();
+    rt_q_lock(c);
+    raw_atomic_store(b + 8, 0);
+    rt_q_push(c, b);
+    rt_q_unlock(c);
+    rt_mutex_unlock(p);
+    r := rt_park_until(b, c, until, flags & 1);
+    // The mutex comes back whatever happened, so the caller's unlock is always right.
+    rt_mutex_lock(p);
+    return rt_wait_answer(r, flags);
+}
+fn f_host_cond_notify(c: u64, all: u64) -> u64 {
+    rt_q_lock(c);
+    while true {
+        h := rt_q_pop(c);
+        if h == 0 {
+            break;
+        }
+        rt_unpark(h, 1);
+        if all == 0 {
+            break;
+        }
+    }
+    rt_q_unlock(c);
+    return 0;
+}
+// Latch block: 0 queue word, 8 count.
+fn f_host_latch_down(l: u64) -> u64 {
+    rt_q_lock(l);
+    n := raw_load(l + 8);
+    if n != 0 {
+        raw_store(l + 8, n - 1);
+        if n == 1 {
+            while true {
+                h := rt_q_pop(l);
+                if h == 0 {
+                    break;
+                }
+                rt_unpark(h, 1);
+            }
+        }
+    }
+    rt_q_unlock(l);
+    return 0;
+}
+fn f_host_latch_wait(l: u64, until: u64, flags: u64) -> u64 {
+    rt_q_lock(l);
+    if raw_load(l + 8) == 0 {
+        rt_q_unlock(l);
+        return 0;
+    }
+    b := rt_waiter();
+    raw_atomic_store(b + 8, 0);
+    rt_q_push(l, b);
+    rt_q_unlock(l);
+    return rt_wait_answer(rt_park_until(b, l, until, flags & 1), flags);
+}
+// Barrier block: 0 queue word, 8 still to arrive in this round, 16 parties, 24 round.
+// The answer is 1 for the one arrival that completes a round (the leader), 0 for the others.
+fn f_host_barrier_wait(br: u64, until: u64, flags: u64) -> u64 {
+    rt_q_lock(br);
+    left := raw_load(br + 8) - 1;
+    if left == 0 {
+        raw_store(br + 8, raw_load(br + 16));
+        raw_store(br + 24, raw_load(br + 24) + 1);
+        while true {
+            h := rt_q_pop(br);
+            if h == 0 {
+                break;
+            }
+            rt_unpark(h, 1);
+        }
+        rt_q_unlock(br);
+        return 1;
+    }
+    raw_store(br + 8, left);
+    round := raw_load(br + 24);
+    b := rt_waiter();
+    raw_atomic_store(b + 8, 0);
+    rt_q_push(br, b);
+    rt_q_unlock(br);
+    r := rt_park_until(b, br, until, flags & 1);
+    if 2 < r {
+        // Withdrawn before the round completed: this arrival does not count.
+        rt_q_lock(br);
+        if raw_load(br + 24) == round {
+            raw_store(br + 8, raw_load(br + 8) + 1);
+        }
+        rt_q_unlock(br);
+    }
+    return rt_wait_answer(r, flags);
+}
+
+// ---- Once<T> (lib/sync.grl) ---------------------------------------------------------------------
+// Block: 0 queue word, 8 state (0 empty, 1 being initialised, 2 done), 16 the value. The caller that
+// finds it empty initialises it and holds it (held-list kind 5) while it does: if it fails, the Once
+// goes back to empty and the callers waiting for it are woken - the next of them runs its own
+// initialiser. A Once has no half-built state to protect, so it is not poisoned.
+// The answer: 1 run your initialiser, 2 the value is there.
+fn f_host_once_begin(o: u64) -> u64 {
+    while true {
+        rt_q_lock(o);
+        st := raw_load(o + 8);
+        if st == 2 {
+            rt_q_unlock(o);
+            return 2;
+        }
+        if st == 0 {
+            raw_store(o + 8, 1);
+            rt_q_unlock(o);
+            rt_held_node(o, 0, 5);
+            return 1;
+        }
+        b := rt_waiter();
+        raw_atomic_store(b + 8, 0);
+        rt_q_push(o, b);
+        rt_q_unlock(o);
+        r := rt_park_until(b, o, 0, 1);
+        if r == 4 {
+            return rt_wait_cancelled();
+        }
+    }
+    return 0;
+}
+fn rt_once_finish(o: u64, state: u64) -> u64 {
+    rt_q_lock(o);
+    raw_store(o + 8, state);
+    while true {
+        h := rt_q_pop(o);
+        if h == 0 {
+            break;
+        }
+        rt_unpark(h, 1);
+    }
+    rt_q_unlock(o);
+    return 0;
+}
+fn rt_once_reset(o: u64) -> u64 {
+    return rt_once_finish(o, 0);
+}
+fn f_host_once_done(o: u64) -> u64 {
+    rt_held_drop(o, 5);
+    return rt_once_finish(o, 2);
+}
+
+// ---- cancellable sleep ---------------------------------------------------------------------------
+// time::sleep_ms in a task whose scope is cancelled while it sleeps fails the task with Cancelled;
+// time::try_sleep_ms answers 4 instead. A thread is not cancellable and simply sleeps.
+fn f_host_try_sleep_ms(ms: u64) -> u64 {
+    return rt_sleep_for(ms, 1);
+}
+fn rt_sleep_for(ms: u64, flags: u64) -> u64 {
+    t := rt_current();
+    if (t == 0) | rt_task_threads() | (rt_os_reactor() == 0) {
+        rt_sleep_plain(ms);
+        return 0;
+    }
+    if raw_load(t + 152) != 0 {
+        // A job's sleep: not cancellable (rt_park_until), but still parked on the timer.
+        return rt_sleep_job(t, ms);
+    }
+    token := raw_load(t + 72);
+    raw_atomic_store(t + 128, 1);
+    if raw_atomic_load(token) != 0 {
+        raw_atomic_store(t + 128, 0);
+        return rt_wait_answer(4, flags);
+    }
+    s := rt_sched();
+    until := f_host_now_ms() + ms;
+    mut left = ms;
+    while left != 0 {
+        // A timer per pass, for what is left: a wake that came early (another wake, or a clock
+        // that reads a millisecond short when the timer fires) re-arms instead of sleeping for
+        // good on a timer that has already fired.
+        if rt_os_timer(s, t, left) != 0 {
+            raw_atomic_store(t + 128, 0);
+            rt_sleep_plain(left);
+            return 0;
+        }
+        rt_suspend(t);
+        rt_os_timer_done(s, t);
+        if raw_atomic_load(token) != 0 {
+            break;
+        }
+        now := f_host_now_ms();
+        if now < until {
+            left = until - now;
+        } else {
+            left = 0;
+        }
+    }
+    raw_atomic_store(t + 128, 0);
+    raw_atomic_cas(t + 24, 3, 0);
+    if raw_atomic_load(token) != 0 {
+        return rt_wait_answer(4, flags);
     }
     return 0;
 }
@@ -2348,10 +3839,14 @@ fn rt_thread_spawn_detached(entry: u64, arg: u64) -> u64 {
     rt_thread_start(entry, arg, 0);
     return 0;
 }
-// One OS thread running entry(arg) on its own worker record. The record is the top 64 bytes of a
+// One OS thread running entry(arg) on its own worker record. The record is the top 128 bytes of a
 // mapped region: {0 self, 8 scheduler sp, 16 current task, 24 entry then the runtime-worker marker,
-// 32 arg, 40 TID word of a persistent thread, 48 Windows wait value, 56 host TLS base}. Word 24 is
-// the entry only until rt_thread_main has read it; a scheduler or pool worker then stores a non-zero
+// 32 arg, 40 TID word of a persistent thread, 48 Windows wait value, 56 host TLS base, 64 the
+// thread's allocator cache (rt_cache_make; 0 until it allocates), 72 frees made with no cache
+// (rt_cache_for_free), 80 the record of the dedicated thread whose closure this thread is running
+// (rt_uthread_main; 0 on every other thread), 88 the thread's locals (rt_locals), 96 the thread's
+// waiter block (rt_waiter; 0 until it waits or holds a lock), 104..120 unused}. Word 24 is
+// the entry only until rt_thread_main has read it; a scheduler worker then stores a non-zero
 // marker there so rt_abort_signals can tell a runtime worker from any other thread. Word 56 is this thread's libc TCB,
 // which every foreign call made on the thread switches to (0: there is none, the call runs on the
 // record). The two words under the record are the start block {rt_thread_main, record}.
@@ -2384,11 +3879,11 @@ fn rt_thread_start(entry: u64, arg: u64, handle: u64) -> u64 {
         } // guard page below the stack
     }
     top := region + size;
-    record := top - 64;
+    record := top - 128;
     raw_store(record + 24, entry);
     raw_store(record + 32, arg);
-    raw_store(top - 80, rt_thread_main);
-    raw_store(top - 72, record);
+    raw_store(record - 16, rt_thread_main);
+    raw_store(record - 8, record);
     mut tid_word = record + 40;
     if handle != 0 {
         raw_store(handle + 8, region);
@@ -2396,13 +3891,13 @@ fn rt_thread_start(entry: u64, arg: u64, handle: u64) -> u64 {
         tid_word = handle;
     }
     if bridge != 0 {
-        if rt_error(raw_call2(bridge, top - 80, tid_word)) {
+        if rt_error(raw_call2(bridge, record - 16, tid_word)) {
             rt_abort();
         }
         return 0;
     }
     // VM|FS|FILES|SIGHAND|THREAD|SYSVSEM|PARENT_SETTID|CHILD_CLEARTID
-    tid := raw_thread_clone(3477248, top - 80, tid_word);
+    tid := raw_thread_clone(3477248, record - 16, tid_word);
     if rt_error(tid) {
         rt_abort();
     }
@@ -2421,8 +3916,8 @@ fn rt_thread_no_libc_threads() -> u64 {
 // Callback adoption (native.grl tls_enter_callback): a callback entered on a thread C created finds
 // no Grail record in `rt_tls_record`. The entry calls rt_adopt_record while still on C's TCB: it maps
 // a zeroed record for this thread, word 0 pointing to itself (the thread-pointer ABI) and word 56 the
-// thread's own TCB, so foreign calls made inside the callback run on it. The record has no task,
-// scheduler or pool state, like the main thread's before it spawns anything. tls_leave_callback
+// thread's own TCB, so foreign calls made inside the callback run on it. The record has no task
+// or scheduler state, like the main thread's before it spawns anything. tls_leave_callback
 // clears `rt_tls_record` and calls rt_release_record once the outermost callback returns.
 // Cost: one mmap and one munmap per outermost callback on such a thread.
 fn rt_adopt_record() -> u64 {
@@ -2435,6 +3930,7 @@ fn rt_adopt_record() -> u64 {
     return record;
 }
 fn rt_release_record(record: u64) -> u64 {
+    rt_cache_retire(record);
     rt_syscall(11, record, 4096, 0);
     return 0;
 }
@@ -2442,6 +3938,330 @@ fn rt_thread_main(record: u64) -> u64 {
     raw_store(record, record);
     raw_tp_set(record);
     raw_call2(raw_load(record + 24), raw_load(record + 32), 0);
+    rt_waiter_free(record);
+    rt_cache_retire(record);
+    return 0;
+}
+// ---- dedicated threads (lib/thread.grl; docs/design/threads.md) --------------------------------
+// A dedicated thread is an OS thread that runs one closure and is nothing else: not a scheduler
+// worker, not a task (rt_current() is 0 on it, so a wait blocks it in the kernel and nothing is
+// stolen onto it). The closure does not run on the OS stack. rt_uthread_main maps a guard-paged
+// stack of the size the program asked for and switches onto it, exactly as a worker enters a task,
+// which gives three things at once: the stack size is honoured whether or not glibc made the
+// thread; running off its end is the task-stack overflow report; and a failed check is contained
+// the way a task's is - the failure is written into the record, the stack is left by a switch and
+// discarded whole, and the thread then ends normally on its own stack (its allocator cache is
+// retired, glibc tears its TCB down, the joiner is woken).
+//
+// Thread record (rt_alloc, 408 bytes; the words containment touches are where a task record has
+// them, so rt_contain_site, rt_task_message and rt_task_site serve both):
+//   0 saved stack pointer / fiber   8 stack base   16 stack bytes (in: the request, 0 = 1 MiB)
+//   24 OS thread handle (rt_thread_spawn)   40 closure code   48 closure box
+//   80 result word (written by the library's wrapper, which knows its type)
+//   96 finished (futex word)
+//   104 ownership: 0 running and joinable, 1 detached, 2 finished, 3 result kept for a joiner
+//   112 start latch (futex word: 0 starting, 1 running, 2 refused)   120 why it was refused
+//   128 affinity words in use (0: unpinned)   136 the joiners' queue (rt_q_*)   144 completed   152 priority (0 normal, 1 background,
+//   2 high, 3 + p realtime p)   160..192 failure   200..239 site scratch
+//   256..383 affinity mask, 16 words   384..399 name, NUL-terminated (15 bytes shown by Linux)
+// A refusal is attribute * 65536 + errno: attribute 1 stack, 2 affinity, 3 priority, 4 no threads
+// on this platform.
+fn rt_uthread_new(f: u64, box: u64) -> u64 {
+    rec := rt_alloc(408);
+    raw_store(rec + 40, f);
+    raw_store(rec + 48, box);
+    return rec;
+}
+// The closure goes with a thread that never ran it.
+fn rt_uthread_drop_closure(rec: u64) -> u64 {
+    box := raw_load(rec + 48);
+    if box != 0 {
+        obj := raw_load(box);
+        raw_call2(raw_load(obj + 8), obj, 0);
+        rt_free(box);
+        raw_store(rec + 48, 0);
+    }
+    return 0;
+}
+fn f_host_thread_start(rec: u64) -> u64 {
+    if rt_os_threads() == 0 {
+        rt_uthread_drop_closure(rec);
+        rt_free(rec);
+        return 4 * 65536 + 38;
+    }
+    raw_store(rec + 24, rt_thread_spawn(rt_uthread_main, rec));
+    while raw_atomic_load(rec + 112) == 0 {
+        rt_syscall(202, rec + 112, 128, 0);
+    }
+    if raw_atomic_load(rec + 112) == 2 {
+        why := raw_load(rec + 120);
+        rt_thread_join(raw_load(rec + 24));
+        rt_uthread_drop_closure(rec);
+        rt_free(rec);
+        return why;
+    }
+    return 0;
+}
+fn rt_uthread_refuse(rec: u64, why: u64) -> u64 {
+    raw_store(rec + 120, why);
+    raw_atomic_store(rec + 112, 2);
+    rt_syscall(202, rec + 112, 129, 2147483647);
+    return 0;
+}
+// The thread itself, on its OS stack. Everything the program asked of the OS is applied here, by
+// the thread, before the closure runs; a refusal is reported to the spawner and the closure does
+// not run.
+fn rt_uthread_main(rec: u64) -> u64 {
+    tp := raw_tp_get();
+    // Not a runtime worker (rt_abort_signals, f_host_thread_plain): the entry word is spent.
+    raw_store(tp + 24, 0);
+    why := rt_os_thread_attr(rec);
+    if why != 0 {
+        return rt_uthread_refuse(rec, why);
+    }
+    mut size = raw_load(rec + 16);
+    if size == 0 {
+        size = 1048576;
+    }
+    if size < 16384 {
+        size = 16384;
+    }
+    if 1099511627776 < size {
+        return rt_uthread_refuse(rec, 65536 + 12);
+    }
+    // Whole pages, and one more below them for the guard.
+    size = (rt_div(size + 4095, 4096) + 1) * 4096;
+    if rt_os_body_new(rec, size) != 0 {
+        return rt_uthread_refuse(rec, 65536 + 12);
+    }
+    alt := rt_os_thread_guard();
+    raw_store(tp + 80, rec);
+    raw_atomic_store(rec + 112, 1);
+    rt_syscall(202, rec + 112, 129, 2147483647);
+    rt_os_ctx_enter(rec);
+    // Back on the OS stack: the closure returned, or a failure left its stack where it stood.
+    raw_store(tp + 80, 0);
+    rt_os_body_free(rec);
+    rt_os_thread_unguard(alt);
+    rt_locals_drop(tp);
+    if raw_atomic_cas(rec + 104, 0, 2) == 1 {
+        // Detached: nobody will ask. A failure's text goes with the record.
+        msg := raw_load(rec + 192);
+        if msg != 0 {
+            rt_drop_seq(msg);
+        }
+        if (raw_load(rec + 184) & 1) == 1 {
+            rt_drop_seq(raw_load(rec + 184) & 18446744073709551614);
+        }
+        rt_free(rec);
+        // Its cache is retired by rt_thread_main after this returns, so the count the leak check
+        // reads is whole whether or not this thread has gone.
+        rt_cache_retire(tp);
+        rt_atomic_fetch_sub(rt_detached_word(), 1);
+        return 0;
+    }
+    // Finished is published under the joiners' queue lock, and each joiner is woken under it: a
+    // joiner frees this record only after its own pass through that lock (rt_park).
+    rt_q_lock(rec + 136);
+    raw_atomic_store(rec + 96, 1);
+    while true {
+        joiner := rt_q_pop(rec + 136);
+        if joiner == 0 {
+            break;
+        }
+        rt_unpark(joiner, 1);
+    }
+    rt_q_unlock(rec + 136);
+    return 0;
+}
+// The closure, on the thread's mapped stack. The library's wrapper stores the result itself
+// (f_host_thread_keep), so what comes back here is nothing.
+fn rt_uthread_run(rec: u64) -> u64 {
+    box := raw_load(rec + 48);
+    raw_call2(raw_load(rec + 40), box, 0);
+    if box != 0 {
+        obj := raw_load(box);
+        raw_call2(raw_load(obj + 8), obj, 0);
+        rt_free(box);
+        raw_store(rec + 48, 0);
+    }
+    raw_store(rec + 144, 1);
+    return 0;
+}
+fn rt_uthread_enter() -> u64 {
+    rec := raw_load(raw_tp_get() + 80);
+    rt_uthread_run(rec);
+    rt_os_ctx_leave(rec);
+    rt_abort();
+    return 0;
+}
+// The record of the dedicated thread that is running, for the wrapper; 0 anywhere else.
+fn f_host_thread_self() -> u64 {
+    tp := raw_tp_get();
+    if tp == 0 {
+        return 0;
+    }
+    return raw_load(tp + 80);
+}
+// The wrapper has a result: 1 says a joiner may still come for it, so the wrapper writes it into
+// word 80; 0 says the thread was detached, and the wrapper drops it where it stands. The claim and
+// a detach are one compare-and-swap each, so exactly one of them wins.
+fn f_host_thread_keep(rec: u64) -> u64 {
+    return raw_atomic_cas(rec + 104, 0, 3) == 0;
+}
+// 1: detached, the thread frees its own record when it ends. 0: it had already finished (or kept a
+// result), so the caller still owns the handle and joins it.
+fn f_host_thread_detach(rec: u64) -> u64 {
+    // Counted before the claim, so the thread's own decrement can never come first.
+    rt_atomic_fetch_add(rt_detached_word(), 1);
+    if raw_atomic_cas(rec + 104, 0, 1) == 0 {
+        return 1;
+    }
+    rt_atomic_fetch_sub(rt_detached_word(), 1);
+    return 0;
+}
+// How many detached threads are still running (process-state word 56). While there is one, the end
+// of main neither checks for leaks nor unmaps the arenas: that thread's allocations are its own,
+// and it is still using them when the process exits without waiting for it.
+fn rt_detached_word() -> u64 {
+    return raw_state() + 56;
+}
+// Wait for the thread's closure to end; the answer is the failure kind, 0 when it returned. The
+// caller parks on the thread record's queue (word 136): a task's worker keeps running other tasks,
+// a thread sleeps in the kernel, and no helper thread is involved.
+fn f_host_thread_wait(rec: u64) -> u64 {
+    b := rt_waiter();
+    while raw_atomic_load(rec + 96) == 0 {
+        rt_q_lock(rec + 136);
+        if raw_atomic_load(rec + 96) != 0 {
+            rt_q_unlock(rec + 136);
+            break;
+        }
+        raw_atomic_store(b + 8, 0);
+        rt_q_push(rec + 136, b);
+        rt_q_unlock(rec + 136);
+        rt_park(b, rec + 136);
+    }
+    return raw_load(rec + 160);
+}
+// After the wait: reap the OS thread and free the record. Whatever the record held - a result, a
+// failure's texts - has been taken by the caller.
+fn f_host_thread_release(rec: u64) -> u64 {
+    rt_thread_join(raw_load(rec + 24));
+    rt_free(rec);
+    return 0;
+}
+// A failed thread's `{kind, message, site}`, the record a failed task's try_join carries.
+fn f_host_thread_failure(rec: u64) -> u64 {
+    kind := raw_load(rec + 160);
+    msg := rt_task_message(rec);
+    site := rt_task_site(rec);
+    out := rt_alloc(24);
+    raw_store(out, kind);
+    raw_store(out + 8, msg);
+    raw_store(out + 16, site);
+    return out;
+}
+// A failed scoped thread's failure, raised here; the record stays for its scope to release.
+fn f_host_thread_reraise(rec: u64) -> u64 {
+    kind := raw_load(rec + 160);
+    msg := rt_task_message(rec);
+    site := rt_task_site(rec);
+    return rt_fail_text(kind, msg, site);
+}
+// A failed thread's two failure texts, dropped (a sibling of the failure a scope re-raises).
+fn f_host_thread_forget_failure(rec: u64) -> u64 {
+    rt_drop_seq(rt_task_message(rec));
+    rt_drop_seq(rt_task_site(rec));
+    return 0;
+}
+// `join` of a failed thread: release it and report its failure here, by the rules of any failure
+// that already has its texts - contained by an enclosing task or thread, fatal on the main thread.
+fn f_host_thread_refail(rec: u64) -> u64 {
+    kind := raw_load(rec + 160);
+    msg := rt_task_message(rec);
+    site := rt_task_site(rec);
+    f_host_thread_release(rec);
+    return rt_fail_text(kind, msg, site);
+}
+// Whether the caller is a thread in the sense of lib/thread.grl - the main thread or a dedicated
+// one - and not a task or a runtime worker, which may not hold a thread::Ctx.
+fn f_host_thread_plain() -> u64 {
+    tp := raw_tp_get();
+    if tp == 0 {
+        return 1;
+    }
+    return (raw_load(tp + 16) == 0) & (raw_load(tp + 24) == 0);
+}
+// Sleep until the monotonic clock (host::now_ms) reads `deadline_ms`. A task parks on the ordinary
+// sleep path for what is left; a thread sleeps to the absolute time in the kernel, so a frame loop
+// does not drift by the time it spent working.
+fn f_host_sleep_until_ms(deadline_ms: u64) -> u64 {
+    if (rt_current() != 0) & (rt_task_threads() == 0) {
+        now := f_host_now_ms();
+        if now < deadline_ms {
+            f_host_sleep_ms(deadline_ms - now);
+        }
+        return 0;
+    }
+    return rt_os_sleep_until(deadline_ms);
+}
+// thread::Local: a key is a small number handed out once per Local, and a thread's table holds one
+// {value, dropper} pair per key it has touched. The answer is the address of the pair for `key` on
+// this thread, zeroed the first time: lib/thread.grl stores the boxed value and the function that
+// drops it there. The main thread's table hangs off its own record like any other.
+fn f_host_thread_local_key() -> u64 {
+    return rt_atomic_fetch_add(raw_state() + 48, 1);
+}
+fn f_host_thread_local(key: u64) -> u64 {
+    tp := raw_tp_get();
+    if tp == 0 {
+        rt_abort();
+    }
+    mut table = raw_load(tp + 88);
+    mut have = 0;
+    if table != 0 {
+        have = raw_load(table);
+    }
+    if (key < have) == 0 {
+        mut want = have * 2;
+        if want < key + 1 {
+            want = key + 1;
+        }
+        if want < 8 {
+            want = 8;
+        }
+        fresh := rt_alloc(8 + want * 16);
+        if table != 0 {
+            rt_copy_bytes(fresh + 8, table + 8, have * 16);
+            rt_free(table);
+        }
+        raw_store(fresh, want);
+        raw_store(tp + 88, fresh);
+        table = fresh;
+    }
+    return table + 8 + key * 16;
+}
+// A thread's locals: thread-record word 88 holds a block of {count, then per key: value word,
+// dropper} that lib/thread.grl fills in (f_host_thread_local). Dropped on the thread, before its
+// cache is retired; the main thread's at the end of main, before the leak check.
+fn rt_locals_drop(tp: u64) -> u64 {
+    table := raw_load(tp + 88);
+    if table == 0 {
+        return 0;
+    }
+    raw_store(tp + 88, 0);
+    n := raw_load(table);
+    mut i = 0;
+    while i < n {
+        value := raw_load(table + 8 + i * 16);
+        drop := raw_load(table + 16 + i * 16);
+        if drop != 0 {
+            raw_call2(drop, value, 0);
+        }
+        i = i + 1;
+    }
+    rt_free(table);
     return 0;
 }
 fn rt_thread_join(handle: u64) -> u64 {
@@ -2458,25 +4278,11 @@ fn rt_thread_join(handle: u64) -> u64 {
     rt_free(handle);
     return 0;
 }
-// ---- job pool: bounded, work-stealing, one owned result per job -------------------------------
-// The process has one pool, created by the first parallel call and never destroyed: its workers are
-// the runtime's own persistent OS threads (rt_thread_spawn_detached, the same primitive the green
-// scheduler and the blocking offload path use), so later jobs pay no thread-creation cost. A job
-// owns everything it touches - its callback, one environment word, one argument word and the single
-// word it returns - so no reference is reachable from two workers, and every allocation is released
-// by exactly one thread: the job's own worker builds the result, the thread that waits for the job
-// releases it. That ownership rule is what makes stage 1 (docs/design/parallelism.md) sound with no
-// new type property; the closure environment is the part the type checker does not classify yet.
-//
-// Pool block (raw_map: infrastructure, not counted as user allocation, like the scheduler block):
-//   0 futex mutex   8 worker count   16 wake sequence (futex word)   24 idle workers
-//   32 worker array  40 injection ring  48 injection head  56 injection tail
-//   64 injection capacity  72 steal cursor  80 jobs submitted  128 injection ring storage
-// Worker block (raw_map, one page per worker):
-//   0 ring  8 head  16 tail  24 deque lock  32 pool  40 index  48 capacity
-//   56 the kernel thread record that is running this worker  128 ring storage
-// Job block (rt_alloc, freed by the thread that waits for the job):
-//   0 callback  8 environment word  16 argument word  24 result word  32 state (futex word)
+// ---- jobs: run-to-completion work on the scheduler's own workers -----------------------------
+// There is one set of worker threads (rt_sched). A job is a record, not a thread and not a stack:
+// `parallel_map`, `parallel_split`, `parallel_with` (pool::join) and a `Job<R>` handle all
+// fork records that any worker may run, and the code is with the scheduler below ("jobs on the
+// scheduler"). docs/design/concurrency-model.md, stage 1.
 //
 // ---- process-state word map: one table, one owner per word -------------------------------
 // rt_state is 4096 bytes shared by every long-lived subsystem. A claim on a word means adding a row
@@ -2491,18 +4297,22 @@ fn rt_thread_join(handle: u64) -> u64 {
 //   0, 8, 16     argc / argv / envp           platform startup           --
 //   24           allocator live count         rt_live                    --
 //   32           allocator arena list         rt_shutdown                --
+//   40           thread-cache registry        rt_cache_make              thread-alloc
+//   48           next thread::Local key       f_host_thread_local_key    threads
+//   56           detached threads running     rt_detached_word           threads
 //   64           allocator lock word          rt_allocator_lock          --
 //   72           green scheduler block        rt_sched                   --
 //   80           green scheduler create CAS   rt_sched                   --
 //   88           task-mode cache              rt_task_mode               win-green-tasks
-//   128..192     main thread's own record     rt_thread_init             --
+//   128..256     main thread's own record     rt_thread_init             thread-alloc (192: its cache)
 //   184          main thread's host TLS base  _start (tls_capture)       ffi-threads
 //   256..320     allocator bin heads          rt_alloc_unlocked          --
 //   768..832     allocator bin bump           rt_grow                    --
 //   1280..1344   allocator bin remaining      rt_grow                    --
+//   1792..1896   thread-cache chains, per bin rt_chain_give              thread-alloc
+//   1920..1984   main thread's waiter block   rt_main_waiter             parking
 //   2048..2672   sampling profiler block      rt_prof_words              --
-//   3200         job pool pointer             rt_state_pool              job-pool
-//   3208         job pool creation CAS        rt_state_pool_cas          job-pool
+//   3200         jobs block (ring, records)   rt_state_jobs              one-scheduler
 //   3216         glibc thread bridge          rt_state_host_thread       ffi-threads
 //   3224         compile-time probe mode      os-linux: rt_comptime_on   comptime-c3
 //   3232..3384   compile-time refusal text    os-linux: rt_comptime_check comptime-c3
@@ -2510,6 +4320,8 @@ fn rt_thread_join(handle: u64) -> u64 {
 //   3400         call-site table helper       _start; rt_sites_fill      runtime-errors
 //   3408         site descriptor capacity     rt_state_sites_offer       rth-sites
 //   3416         a second thread was started  rt_allocator_lock          compile-speed
+//   3424         scheduler config block       rt_sched_config            sched-start
+//   3448         stacks discarded by re-raise rt_discarded_word          job-failure
 //   3456         abort report claim           rt_abort                   abort-once
 //   3464..3576   task-stack fault handler     rt_state_stack_guard       stack-guard
 //   3584         contained task failures      rt_contained              task-fail-containment
@@ -2521,8 +4333,8 @@ fn rt_thread_join(handle: u64) -> u64 {
 //   8152..8192   failure report descriptor    rt_report_sites            statics-no-alloc
 //
 // Not a claim: thread-record word 48 (raw_state() + 176 for the main thread). os-windows keeps the
-// per-thread WaitOnAddress expected value there, so nothing else may use it. The pool did, which was
-// the same disease as the 88 collision: an unowned word in a shared structure.
+// per-thread WaitOnAddress expected value there, so nothing else may use it. The job pool once did, which
+// was the same disease as the 88 collision: an unowned word in a shared structure.
 // The task-stack fault handler's state: 0 restorer code page (x86-64), 8 install state
 // (0 none, 1 installing, 2 ready), 16 a 32-byte message scratch, 48 the sigaction the handler is
 // installed with, 80 the zeroed SIG_DFL action the handler swaps in for a fault that is not a task
@@ -2543,7 +4355,7 @@ fn rt_stack_report_words() -> u64 {
 fn rt_state_stack_alt_main() -> u64 {
     return raw_state() + 3592;
 }
-fn rt_state_pool() -> u64 {
+fn rt_state_jobs() -> u64 {
     return raw_state() + 3200;
 }
 // The capacity the site descriptor is asked for, once decided (rt_sites_offer): 0 not asked, 1 the
@@ -2556,346 +4368,22 @@ fn rt_state_sites_offer() -> u64 {
 fn rt_state_host_thread() -> u64 {
     return raw_state() + 3216;
 }
-fn rt_state_pool_cas() -> u64 {
-    return raw_state() + 3208;
-}
-fn rt_pool() -> u64 {
-    slot := rt_state_pool();
-    p := raw_atomic_load(slot);
-    if p != 0 {
-        return p;
-    }
-    if raw_atomic_cas(rt_state_pool_cas(), 0, 1) != 0 {
-        while raw_atomic_load(slot) == 0 {
-            rt_syscall(24, 0, 0, 0);
-        }
-        return raw_atomic_load(slot);
-    }
-    made := rt_pool_create();
-    raw_atomic_store_release(slot, made);
-    return made;
-}
-// Which worker block is this thread running, or 0 for a thread that is not a pool worker (the main
-// thread, a green scheduler thread, an offload thread). The answer is a scan of the worker array by
-// the thread record each worker published at startup; it costs a handful of loads and is only asked
-// on submit and wait, never inside a job's loop.
-fn rt_pool_self() -> u64 {
-    p := raw_atomic_load(rt_state_pool());
-    if p == 0 {
-        return 0;
-    }
-    tp := raw_tp_get();
-    if tp == 0 {
-        return 0;
-    }
-    array := raw_load(p + 32);
-    workers := raw_load(p + 8);
-    mut i = 0;
-    while i < workers {
-        w := raw_load(array + i * 8);
-        if raw_load(w + 56) == tp {
-            return w;
-        }
-        i += 1;
-    }
-    return 0;
-}
-fn rt_pool_create() -> u64 {
-    p := raw_map(4096);
-    if rt_error(p) {
-        rt_abort();
-    }
-    raw_store(p + 40, p + 128);
-    raw_store(p + 64, 496);
-    workers := rt_pool_count();
-    raw_store(p + 8, workers);
-    array := raw_map(workers * 8);
-    if rt_error(array) {
-        rt_abort();
-    }
-    raw_store(p + 32, array);
-    mut i = 0;
-    while i < workers {
-        raw_store(array + i * 8, rt_pool_worker_new(p, i));
-        i += 1;
-    }
-    // Workers start only once the array they are reachable through is complete.
-    i = 0;
-    while i < workers {
-        rt_thread_spawn_detached(rt_pool_worker_main, raw_load(array + i * 8));
-        i += 1;
-    }
-    return p;
-}
-// Default: at least four workers, so the runtime's own four-way barrier fixture stays satisfiable
-// as it was with the previous threaded map, and at most 64. An explicit override is honoured as
-// given (1..64), which is how a nested-parallel test proves the helping scheduler cannot deadlock.
-fn rt_pool_count() -> u64 {
-    override := rt_pool_env_count();
-    if override != 0 {
-        if 64 < override {
-            return 64;
-        }
-        return override;
-    }
-    mut n = rt_cpus();
-    if n < 4 {
-        n = 4;
-    }
-    if 64 < n {
-        n = 64;
-    }
-    return n;
-}
-fn rt_pool_env_count() -> u64 {
-    name := view("GRAIL_POOL_WORKERS=");
-    width := rt_len(name);
-    mut ep = raw_load(raw_state() + 16);
-    mut value = 0;
-    while raw_load(ep) != 0 {
-        entry := raw_load(ep);
-        if rt_pool_prefix(entry, raw_load(name), width) != 0 {
-            mut i = 0;
-            mut more = 1;
-            while more != 0 {
-                b := raw_byte(entry + width + i);
-                if (48 <= b) & (b <= 57) {
-                    value = value * 10 + (b - 48);
-                    i += 1;
-                } else {
-                    more = 0;
-                }
-            }
-            return value;
-        }
-        ep = ep + 8;
-    }
-    return 0;
-}
-fn rt_pool_prefix(at: u64, base: u64, width: u64) -> u64 {
-    mut i = 0;
-    while i < width {
-        if raw_byte(at + i) != raw_byte(base + i) {
-            return 0;
-        }
-        i += 1;
-    }
-    return 1;
-}
-fn rt_pool_worker_new(p: u64, index: u64) -> u64 {
-    w := raw_map(8192);
-    if rt_error(w) {
-        rt_abort();
-    }
-    raw_store(w, w + 128);
-    raw_store(w + 32, p);
-    raw_store(w + 40, index);
-    raw_store(w + 48, 1008);
-    return w;
-}
-// Idle workers sleep in the kernel on the pool's wake sequence. The loop reads the sequence before
-// it looks for work, so a submit that lands after that read bumps the sequence and either the scan
-// or the failed futex wait sees it: no wakeup can be lost, and no worker spins for work.
-fn rt_pool_worker_main(w: u64) -> u64 {
-    // Publish this thread's record so rt_pool_self can find `w` from the thread itself. It is
-    // written before the worker takes any work, and no other thread reads it until it does.
-    raw_store(w + 56, raw_tp_get());
-    raw_store(raw_tp_get() + 24, w); // runtime-worker marker for rt_abort_signals
-    p := raw_load(w + 32);
-    while true {
-        mut j = rt_pool_take(w);
-        if j != 0 {
-            rt_pool_run(j);
-        } else {
-            seq := raw_atomic_load(p + 16);
-            j = rt_pool_take(w);
-            if j != 0 {
-                rt_pool_run(j);
-            } else {
-                rt_atomic_fetch_add(p + 24, 1);
-                rt_syscall(202, p + 16, 128, seq);
-                rt_atomic_fetch_sub(p + 24, 1);
-            }
-        }
-    }
-    return 0;
-}
-// Own deque first (locality), then the injection ring (other threads), then one steal pass whose
-// start rotates so idle workers do not all pounce on the same victim.
-fn rt_pool_take(w: u64) -> u64 {
-    mut j = rt_pool_pop(w);
-    if j != 0 {
-        return j;
-    }
-    p := raw_load(w + 32);
-    j = rt_pool_inject_pop(p);
-    if j != 0 {
-        return j;
-    }
-    workers := raw_load(p + 8);
-    first := rt_atomic_fetch_add(p + 72, 1);
-    mut k = 0;
-    while k < workers {
-        victim := (first + k) % workers;
-        if victim != raw_load(w + 40) {
-            j = rt_pool_steal(raw_load(raw_load(p + 32) + victim * 8));
-            if j != 0 {
-                return j;
-            }
-        }
-        k += 1;
-    }
-    return 0;
-}
-fn rt_pool_push(w: u64, j: u64) -> u64 {
-    rt_spin_lock(w + 24);
-    head := raw_load(w + 8);
-    tail := raw_load(w + 16);
-    cap := raw_load(w + 48);
-    if tail - head == cap {
-        rt_spin_unlock(w + 24);
-        return 0;
-    }
-    raw_store(raw_load(w) + (tail % cap) * 8, j);
-    raw_store(w + 16, tail + 1);
-    rt_spin_unlock(w + 24);
-    return 1;
-}
-fn rt_pool_pop(w: u64) -> u64 {
-    rt_spin_lock(w + 24);
-    head := raw_load(w + 8);
-    tail := raw_load(w + 16);
-    if head == tail {
-        rt_spin_unlock(w + 24);
-        return 0;
-    }
-    cap := raw_load(w + 48);
-    last := tail - 1;
-    j := raw_load(raw_load(w) + (last % cap) * 8);
-    raw_store(w + 16, last);
-    rt_spin_unlock(w + 24);
-    return j;
-}
-fn rt_pool_steal(v: u64) -> u64 {
-    rt_spin_lock(v + 24);
-    head := raw_load(v + 8);
-    tail := raw_load(v + 16);
-    if head == tail {
-        rt_spin_unlock(v + 24);
-        return 0;
-    }
-    cap := raw_load(v + 48);
-    j := raw_load(raw_load(v) + (head % cap) * 8);
-    raw_store(v + 8, head + 1);
-    rt_spin_unlock(v + 24);
-    return j;
-}
-fn rt_pool_inject_push(p: u64, j: u64) -> u64 {
-    rt_mutex_lock(p);
-    head := raw_load(p + 48);
-    tail := raw_load(p + 56);
-    cap := raw_load(p + 64);
-    if tail - head == cap {
-        rt_mutex_unlock(p);
-        return 0;
-    }
-    raw_store(raw_load(p + 40) + (tail % cap) * 8, j);
-    raw_store(p + 56, tail + 1);
-    rt_mutex_unlock(p);
-    return 1;
-}
-fn rt_pool_inject_pop(p: u64) -> u64 {
-    rt_mutex_lock(p);
-    head := raw_load(p + 48);
-    tail := raw_load(p + 56);
-    if head == tail {
-        rt_mutex_unlock(p);
-        return 0;
-    }
-    cap := raw_load(p + 64);
-    j := raw_load(raw_load(p + 40) + (head % cap) * 8);
-    raw_store(p + 48, head + 1);
-    rt_mutex_unlock(p);
-    return j;
-}
-// The worker builds the job's result and publishes it with a release store before waking waiters;
-// nothing touches the job afterwards except this wake, which is why the waiter can free it.
-fn rt_pool_run(j: u64) -> u64 {
-    r := raw_call2(raw_load(j), raw_load(j + 8), raw_load(j + 16));
-    raw_store(j + 24, r);
-    raw_atomic_store_release(j + 32, 1);
-    rt_syscall(202, j + 32, 129, 2147483647);
-    return 0;
-}
-// Submission is legal from any thread. From a pool worker (a nested submit) the job goes on that
-// worker's own deque, so the parent helps run its children instead of sleeping; from anywhere else
-// it goes on the injection ring. A full queue runs the job here rather than growing the queue.
-fn rt_pool_submit(f: u64, env: u64, arg: u64) -> u64 {
-    p := rt_pool();
-    j := rt_alloc(48);
-    raw_store(j, f);
-    raw_store(j + 8, env);
-    raw_store(j + 16, arg);
-    raw_store(j + 24, 0);
-    raw_store(j + 32, 0);
-    w := rt_pool_self();
-    mut placed = 0;
-    if w != 0 {
-        placed = rt_pool_push(w, j);
-    }
-    if placed == 0 {
-        placed = rt_pool_inject_push(p, j);
-    }
-    if placed == 0 {
-        rt_pool_run(j);
-    } else {
-        rt_atomic_fetch_add(p + 80, 1);
-        rt_atomic_fetch_add(p + 16, 1);
-        rt_syscall(202, p + 16, 129, 2147483647);
-    }
-    return j;
-}
-// Waiting is where the pool cannot deadlock: a worker waiting on a job it queued runs queued jobs
-// itself, so a pool whose every worker is waiting still makes progress. A thread that is not a
-// worker only sleeps, because helping from a non-worker could run an unrelated long job in front of
-// the one it is waiting for. The record is freed here: the waiter owns it, the worker never touches
-// it after publishing the result.
-fn rt_pool_wait(j: u64) -> u64 {
-    w := rt_pool_self();
-    // A sequentially consistent read (a CAS loop, like the map counter this replaces), not a plain
-    // load: the runner's release store publishes the result word, and a plain load would only order
-    // that pair on x86. `raw_atomic_load_acquire` is not lowered on AArch64/RV64, so the CAS form is
-    // what keeps this correct on every target.
-    while rt_atomic_fetch_add(j + 32, 0) == 0 {
-        mut helped = 0;
-        if w != 0 {
-            k := rt_pool_take(w);
-            if k != 0 {
-                rt_pool_run(k);
-                helped = 1;
-            }
-        }
-        if helped == 0 {
-            rt_syscall(202, j + 32, 128, 0);
-        }
-    }
-    r := raw_load(j + 24);
-    rt_free(j);
-    return r;
-}
-// Map descriptor: 0 callback, 8 environment, 16 context, 24 items base, 32 result base, 40 count,
-// 48 items per job. One job per contiguous range: contiguous writes, no per-item atomic.
-fn rt_pool_map_chunk(d: u64, start: u64) -> u64 {
+// ---- structured parallel calls ----------------------------------------------------------------
+// Map descriptor (a job record used as storage, state word 32 left DONE so a stale queue entry can
+// never claim it): 0 callback, 8 environment, 16 context, 24 items base, 40 result base, 48 count,
+// 56 items per leaf. Leaf k covers one contiguous range: contiguous writes, no per-item atomic.
+fn rt_job_map_leaf(d: u64, k: u64) -> u64 {
     f := raw_load(d);
     env := raw_load(d + 8);
     context := raw_load(d + 16);
     items := raw_load(d + 24);
-    out := raw_load(d + 32);
-    n := raw_load(d + 40);
+    out := raw_load(d + 40);
+    n := raw_load(d + 48);
+    start := k * raw_load(d + 56);
     if n <= start {
         return 0;
     }
-    mut stop = start + raw_load(d + 48);
+    mut stop = start + raw_load(d + 56);
     if n < stop {
         stop = n;
     }
@@ -2912,9 +4400,36 @@ fn rt_pool_map_chunk(d: u64, start: u64) -> u64 {
     }
     return stop - start;
 }
+// Leaves [lo, hi) of a descriptor, by halving: the upper half is forked as one job any worker may
+// take, the lower half runs here, and the fork is joined before this returns - by running it here
+// if nobody took it. The split depends on the leaf count alone, never on who runs what, and the
+// value is the number of elements the leaves covered.
+fn rt_job_split(d: u64, lo: u64, hi: u64, kind: u64) -> u64 {
+    if hi - lo < 2 {
+        if kind == 0 {
+            return rt_job_map_leaf(d, lo);
+        }
+        return rt_job_chunk_leaf(d, lo);
+    }
+    mid := lo + (hi - lo) / 2;
+    mut r = 0;
+    if kind == 0 {
+        r = rt_job_fork(rt_job_split_map, d, mid, hi);
+    } else {
+        r = rt_job_fork(rt_job_split_chunks, d, mid, hi);
+    }
+    left := rt_job_split(d, lo, mid, kind);
+    return left + rt_job_join(r);
+}
+fn rt_job_split_map(d: u64, lo: u64, hi: u64) -> u64 {
+    return rt_job_split(d, lo, hi, 0);
+}
+fn rt_job_split_chunks(d: u64, lo: u64, hi: u64) -> u64 {
+    return rt_job_split(d, lo, hi, 1);
+}
 // Results land in their input slots, so the order of `out` is the input order whatever order the
-// jobs finish in. The caller waits for every job it submitted, so no worker can still write into
-// `out` (or read `items`) when this returns; that is the whole structured-join contract.
+// leaves finish in. Every fork is joined before this returns, so no worker can still write into
+// `out` (or read `items`) afterwards; that is the whole structured-join contract.
 fn rt_parallel_map(items: u64, context: u64, f: u64, env: u64) -> u64 {
     n := rt_len(items);
     out := rt_new();
@@ -2927,48 +4442,38 @@ fn rt_parallel_map(items: u64, context: u64, f: u64, env: u64) -> u64 {
         rt_drop_seq(items);
         return out;
     }
-    // A few jobs per worker keeps every worker busy and lets stealing even out uneven items.
-    p := rt_pool();
-    mut tasks = raw_load(p + 8) * 4;
-    if n < tasks {
-        tasks = n;
+    // At most 256 leaves, a function of n alone: the same items land in the same leaves on any
+    // machine, so a reduction over the results is the same on 4 cores and on 64.
+    rt_jobs_sched();
+    mut leaves = 256;
+    if n < leaves {
+        leaves = n;
     }
-    chunk := (n + tasks - 1) / tasks;
-    d := rt_alloc(56);
+    chunk := (n + leaves - 1) / leaves;
+    d := rt_job_new();
+    raw_atomic_store(d + 32, 3);
     raw_store(d, f);
     raw_store(d + 8, env);
     raw_store(d + 16, context);
     raw_store(d + 24, raw_load(items));
-    raw_store(d + 32, raw_load(out));
-    raw_store(d + 40, n);
-    raw_store(d + 48, chunk);
-    jobs := rt_alloc(tasks * 8);
-    mut k = 0;
-    mut start = 0;
-    while k < tasks {
-        raw_store(jobs + k * 8, rt_pool_submit(rt_pool_map_chunk, d, start));
-        start += chunk;
-        k += 1;
-    }
-    mut written = 0;
-    k = 0;
-    while k < tasks {
-        written += rt_pool_wait(raw_load(jobs + k * 8));
-        k += 1;
-    }
-    // Every item is written exactly once: a chunk that wrote none, or wrote one twice, is a bug.
+    raw_store(d + 40, raw_load(out));
+    raw_store(d + 48, n);
+    raw_store(d + 56, chunk);
+    rt_region_enter();
+    written := rt_job_split(d, 0, leaves, 0);
+    rt_region_leave();
+    // Every item is written exactly once: a leaf that wrote none, or wrote one twice, is a bug.
     if written != n {
         rt_abort();
     }
-    rt_free(jobs);
-    rt_free(d);
+    rt_job_release(d);
     rt_drop_seq(items);
     return out;
 }
-// Chunk split descriptor (rt_alloc, freed by the submitting thread after every job is joined):
-//   0 callback   8 environment   16 data base   24 element width   32 element count
-//   40 chunk length
-// Job (d, k) covers elements [k * chunk, min(count, k * chunk + chunk)) of the caller's data. The
+// Chunk split descriptor (a job record used as storage, like the map's):
+//   0 callback   8 environment   16 data base   24 element width   40 element count
+//   48 chunk length
+// Leaf (d, k) covers elements [k * chunk, min(count, k * chunk + chunk)) of the caller's data. The
 // slice it hands the callback addresses the caller's memory directly, so no element is copied: this
 // is what the owned-chunk split cannot do, because it moves every element twice.
 //
@@ -2976,9 +4481,9 @@ fn rt_parallel_map(items: u64, context: u64, f: u64, env: u64) -> u64 {
 // because a slice parameter is owned by the callee: the callback's own cleanup frees the descriptor
 // when its statement ends. Handing out slots of one array instead would have the first callback free
 // the whole array under its siblings (and corrupt the allocator, which checks its block marks).
-fn rt_pool_chunk_job(d: u64, k: u64) -> u64 {
-    n := raw_load(d + 32);
-    chunk := raw_load(d + 40);
+fn rt_job_chunk_leaf(d: u64, k: u64) -> u64 {
+    n := raw_load(d + 40);
+    chunk := raw_load(d + 48);
     start := k * chunk;
     if n <= start {
         return 0;
@@ -3002,70 +4507,64 @@ fn rt_pool_chunk_job(d: u64, k: u64) -> u64 {
     }
     return stop - start;
 }
-// Split an exclusive slice into `chunks` disjoint exclusive slices and run one job per chunk. The
-// split is constructed, never checked: chunk k is a function of n alone, so the regions cannot
-// overlap and their lengths sum to n - the invariant rt_parallel_map asserts, asserted here too.
+// Split an exclusive slice into pieces of `grain` elements (the last may be shorter) and run one leaf
+// per piece. The split is constructed, never checked: piece k is [k*grain, min(n, (k+1)*grain)), a
+// function of n and grain alone - never of how many workers there are - so the regions cannot overlap
+// and their lengths sum to n, the invariant asserted below. A zero grain is a caller's error (the
+// library states `grain > 0`; the builtin checks it).
 // The caller holds the loan on the data until this returns, so no job can outlive the slice and no
 // other code in the frame can address it while the jobs run.
-fn rt_parallel_for_chunks(s: u64, chunks: u64, f: u64, env: u64, width: u64) -> u64 {
+fn rt_parallel_split(s: u64, grain: u64, f: u64, env: u64, width: u64) -> u64 {
     n := rt_len(s);
     if n == 0 {
         return 0;
     }
-    mut count = chunks;
-    if count == 0 {
-        count = 1;
+    if grain == 0 {
+        rt_fail(18, 0, 0);
     }
-    size := (n + count - 1) / count;
-    tasks := (n + size - 1) / size;
-    d := rt_alloc(56);
+    size := grain;
+    leaves := (n + size - 1) / size;
+    rt_jobs_sched();
+    d := rt_job_new();
+    raw_atomic_store(d + 32, 3);
     raw_store(d, f);
     raw_store(d + 8, env);
     raw_store(d + 16, raw_load(s));
     raw_store(d + 24, width);
-    raw_store(d + 32, n);
-    raw_store(d + 40, size);
-    jobs := rt_alloc(tasks * 8);
-    mut k = 0;
-    while k < tasks {
-        raw_store(jobs + k * 8, rt_pool_submit(rt_pool_chunk_job, d, k));
-        k += 1;
-    }
-    mut covered = 0;
-    k = 0;
-    while k < tasks {
-        covered += rt_pool_wait(raw_load(jobs + k * 8));
-        k += 1;
-    }
+    raw_store(d + 40, n);
+    raw_store(d + 48, size);
+    rt_region_enter();
+    covered := rt_job_split(d, 0, leaves, 1);
+    rt_region_leave();
     if covered != n {
         rt_abort();
     }
-    rt_free(jobs);
-    rt_free(d);
+    rt_job_release(d);
     return 0;
 }
-// A job handle (type kind 29) wraps one pool job record. The submitter owns the record and the
-// thread that waits takes the result word and frees it, exactly as rt_parallel_map does one job at
-// a time; the difference is only that the handle can be passed around before the wait happens.
+// A job handle (type kind 29) is one job record. The handle's owner is the record's forker: the
+// thread that waits takes the result word and releases the record, and if no worker has claimed the
+// job by then the waiter runs it itself.
 //
 // The closure object cannot stay in the caller's frame, because the handle may outlive a statement
 // and the calling thread keeps running while the job does: `box` is a one-word heap slot holding the
 // object pointer, which is exactly the slot the closure ABI reads (the callee's first argument is
 // the address of a word holding the object). The job owns the object and drops it - calling the
 // environment record's own drop, the same call the frame would have made - before it publishes the
-// result. Nothing else frees either allocation except rt_pool_wait, which frees the job record.
+// result.
 fn rt_parallel_spawn(f: u64, box: u64) -> u64 {
-    return rt_pool_submit(rt_pool_job_run, box, f);
+    rt_jobs_sched();
+    return rt_job_make(rt_job_boxed, box, f, 0, 0);
 }
-// The one-word heap slot the closure ABI reads: rt_pool_job_run passes its address as the callee's
+// The one-word heap slot the closure ABI reads: rt_job_boxed passes its address as the callee's
 // first argument, and the callee loads the object from it. Made and freed here, so the box belongs
-// to the job record's lifetime and no frame owns it.
+// to the job's lifetime and no frame owns it.
 fn rt_job_box(object: u64) -> u64 {
     box := rt_alloc(8);
     raw_store(box, object);
     return box;
 }
-fn rt_pool_job_run(box: u64, f: u64) -> u64 {
+fn rt_job_boxed(box: u64, f: u64, unused: u64) -> u64 {
     if box == 0 {
         return raw_call2(f, 0, 0);
     }
@@ -3075,8 +4574,40 @@ fn rt_pool_job_run(box: u64, f: u64) -> u64 {
     rt_free(box);
     return r;
 }
+// `parallel_join(handle)` and a handle's drop: the result word, and the record goes back.
+fn rt_job_wait(j: u64) -> u64 {
+    rt_region_enter();
+    rt_job_await(j);
+    rt_region_leave();
+    r := raw_load(j + 40);
+    f := raw_load(j + 80);
+    rt_job_release(j);
+    if f != 0 {
+        rt_job_reraise(f);
+    }
+    return r;
+}
+// `parallel_with(first, second)`, which is pool::join: `first` is forked as a job and `second` runs
+// here, now, on the caller's stack; then the fork is joined - run here if no worker took it. Both
+// callbacks take no argument; `env` is 0 for a plain function and the closure ABI's slot address
+// otherwise. The value is `first`'s result word.
+fn rt_parallel_with(f1: u64, env1: u64, f2: u64, env2: u64) -> u64 {
+    rt_jobs_sched();
+    r := rt_job_fork(rt_job_call0, f1, env1, 0);
+    rt_region_enter();
+    rt_job_call0(f2, env2, 0);
+    res := rt_job_join(r);
+    rt_region_leave();
+    return res;
+}
+fn rt_job_call0(f: u64, env: u64, unused: u64) -> u64 {
+    if env == 0 {
+        return raw_call2(f, 0, 0);
+    }
+    return raw_call2(f, env, 0);
+}
 
-// ---- colourless tasks: stackful green threads on a worker pool with an epoll reactor ----
+// ---- colourless tasks: stackful green threads on the scheduler's workers, with a reactor ----
 // Every OS thread has a worker record reachable through the thread pointer:
 // 0 self, 8 scheduler stack pointer, 16 current green task (0 = plain OS thread).
 fn rt_thread_init() -> u64 {
@@ -3187,6 +4718,13 @@ fn rt_env_is(name: u64, value: u64) -> u64 {
 //  32 scheduler  40 index  48 thread record  56 free-stack list head  64 free-stack count
 //  72 steal random state  80 deque capacity
 //  88 fault-handler alternate stack  96..112 its sigaltstack record (sp, flags, size)
+// 128..208 the job deque, laid out as the task deque is from word 0 (buffer, head, tail, mask, and
+//     the capacity at +80), so the same three deque functions serve both
+// 224 this worker's runner (0 none)  232 the job handed to the runner  240 free job records
+// 248 their count  264 help-depth high-water mark  272 steps taken (the fairness tick)
+// 280 1 while this worker is counted as searching (rt_worker_loop, rt_worker_run)
+// 512..592 the Frame job deque, 640..720 the Background job deque (the Normal one is at 128)
+// 896..1024 the CPU mask a pinned worker hands the kernel
 //
 // The deque is a Chase-Lev deque with a fixed capacity (rt_deque_capacity, 131072 entries): the
 // owner pushes and pops at the bottom, a thief steals at the top with a CAS on the head. A fixed
@@ -3195,8 +4733,11 @@ fn rt_env_is(name: u64, value: u64) -> u64 {
 // the shared injection ring, which is also where a spawn from a thread that is not a worker (the
 // main thread, the reactor, an offload helper) and a wake from one of those goes.
 //
-// Green mode creates rt_os_workers() scheduler threads and, only on a platform that has one, a
-// reactor beside them. Thread-per-task mode creates neither: each task brings its own thread.
+// Green mode creates the scheduler threads and, only on a platform that has one, a reactor beside
+// them. Thread-per-task mode starts neither here: each task brings its own thread, and the workers
+// are started by the first job (rt_jobs_sched), because jobs are all they run in that mode.
+// `GRAIL_WORKERS=n` (1..64) is the worker count, honoured as given; otherwise it is the platform's
+// (one per CPU).
 fn rt_sched() -> u64 {
     state := raw_state();
     s := raw_atomic_load(state + 72);
@@ -3208,17 +4749,22 @@ fn rt_sched() -> u64 {
         if rt_error(made) {
             rt_abort();
         }
-        if rt_task_threads() {
-            // No reactor and no worker pool: this block only carries the blocking-call warning flag.
-            raw_atomic_store(state + 72, made);
-            return made;
-        }
-        if rt_os_reactor() != 0 {
+        threads := rt_task_threads();
+        if (threads == 0) & (rt_os_reactor() != 0) {
             // A platform whose reactor cannot be created is not fatal: tasks still run, and the
             // operations that wanted it fall back to the offload path (rt_os_timer/rt_os_ready).
             raw_store(made + 40, rt_os_reactor_open(made));
         }
-        workers := rt_os_workers();
+        mut workers = rt_env_number(view("GRAIL_WORKERS="));
+        if workers == 0 {
+            workers = rt_sched_setting(8);
+        }
+        if workers == 0 {
+            workers = rt_os_workers();
+        }
+        if 64 < workers {
+            workers = 64;
+        }
         raw_store(made + 32, workers);
         raw_store(made + 80, raw_map(65536));
         raw_store(made + 88, 8192);
@@ -3232,16 +4778,12 @@ fn rt_sched() -> u64 {
             raw_store(array + i * 8, rt_sched_worker_new(made, i));
             i += 1;
         }
-        // Workers start only once the array and the injection ring they are reachable through are
-        // complete, and the block is published first: rt_sched's other callers spin on word 72.
+        rt_jobs_create(workers);
+        // Workers start only once the array and the rings they are reachable through are complete,
+        // and the block is published first: rt_sched's other callers spin on word 72.
         raw_atomic_store(state + 72, made);
-        i = 0;
-        while i < workers {
-            rt_thread_spawn_detached(rt_worker_loop, raw_load(array + i * 8));
-            i += 1;
-        }
-        if raw_load(made + 40) != 0 {
-            rt_thread_spawn_detached(rt_reactor, made);
+        if threads == 0 {
+            rt_sched_start(made);
         }
         return made;
     }
@@ -3249,6 +4791,52 @@ fn rt_sched() -> u64 {
         rt_syscall(24, 0, 0, 0);
     }
     return raw_atomic_load(state + 72);
+}
+fn rt_sched_start(s: u64) -> u64 {
+    array := raw_load(s + 72);
+    workers := raw_load(s + 32);
+    mut i = 0;
+    while i < workers {
+        rt_thread_spawn_detached(rt_worker_loop, raw_load(array + i * 8));
+        i += 1;
+    }
+    if raw_load(s + 40) != 0 {
+        rt_thread_spawn_detached(rt_reactor, s);
+    }
+    return 0;
+}
+// The decimal value of the environment entry that starts with `name` (which ends in `=`), or 0.
+// Allocation-free, like rt_env_is: it is read while the scheduler is being made.
+fn rt_env_number(name: u64) -> u64 {
+    width := rt_len(name);
+    mut ep = raw_load(raw_state() + 16);
+    while raw_load(ep) != 0 {
+        entry := raw_load(ep);
+        mut same = 1;
+        mut i = 0;
+        while i < width {
+            if raw_byte(entry + i) != rt_atb(name, i) {
+                same = 0;
+                break;
+            }
+            i += 1;
+        }
+        if same != 0 {
+            mut value = 0;
+            mut at = width;
+            while true {
+                b := raw_byte(entry + at);
+                if (b < 48) | (57 < b) {
+                    break;
+                }
+                value = value * 10 + (b - 48);
+                at += 1;
+            }
+            return value;
+        }
+        ep = ep + 8;
+    }
+    return 0;
 }
 fn rt_deque_capacity() -> u64 {
     return 131072;
@@ -3268,13 +4856,40 @@ fn rt_sched_worker_new(s: u64, index: u64) -> u64 {
     raw_store(w + 32, s);
     raw_store(w + 40, index);
     raw_store(w + 80, cap);
+    seed := rt_sched_setting(40);
+    if seed != 0 {
+        // A fixed seed fixes every worker's victim order (sched::Config.seed).
+        raw_store(w + 72, wrapping_add(wrapping_mul(seed, index + 1), 2654435761) | 1);
+    }
+    jobs := raw_map(rt_job_deque_capacity() * 8);
+    if rt_error(jobs) {
+        rt_abort();
+    }
+    raw_store(w + 128, jobs);
+    raw_store(w + 152, rt_job_deque_capacity() - 1);
+    raw_store(w + 208, rt_job_deque_capacity());
+    // The Frame and Background deques, laid out like the Normal one.
+    mut c = 0;
+    while c < 3 {
+        if c != 1 {
+            d := rt_job_deque(w, c);
+            buf := raw_map(rt_job_deque_capacity() * 8);
+            if rt_error(buf) {
+                rt_abort();
+            }
+            raw_store(d, buf);
+            raw_store(d + 24, rt_job_deque_capacity() - 1);
+            raw_store(d + 80, rt_job_deque_capacity());
+        }
+        c += 1;
+    }
     return w;
 }
 // The worker block of the calling thread, or 0 for every other thread (the main thread, the
-// reactor, an offload helper, a pool worker). Words 24 and 32 of the thread record are the
+// reactor, an offload helper). Words 24 and 32 of the thread record are the
 // scheduler worker's to claim - rt_thread_main has already consumed the entry/argument words - and
-// the marker in word 24 says which kind of runtime thread this is: 2 is a scheduler worker with a
-// deque, 1 is a pool worker (whose argument word holds a pool block, not a deque).
+// the marker in word 24 is 2 on a scheduler worker. Any other thread counts its parallel regions
+// there in steps of 16 (rt_region_step), which never reads as 2.
 fn rt_worker_self() -> u64 {
     tp := raw_tp_get();
     if tp == 0 {
@@ -3288,11 +4903,21 @@ fn rt_worker_self() -> u64 {
 // Bump the sequence unconditionally and wake a parked worker when there may be one: a worker that
 // read the sequence before looking for work either finds the new work or its wait fails with the
 // changed value, so no wake can be lost even when the parked count read is stale.
+// New work is queued. Wake a parked worker only when there is one and no worker is searching: a
+// searching worker will find the work, and in a join the forker usually takes its own fork back
+// before anyone could. The fence orders the push before the reads, as the parking worker orders its
+// count before its last look (rt_worker_loop), so one of the two always sees the other.
 fn rt_notify(s: u64) -> u64 {
-    rt_atomic_fetch_add(s + 24, 1);
-    if raw_atomic_load(s + 96) != 0 {
-        rt_syscall(202, s + 24, 129, 1);
+    rt_full_fence();
+    if raw_atomic_load(s + 96) == 0 {
+        return 0;
     }
+    if raw_atomic_load(raw_load(rt_state_jobs()) + 416) != 0 {
+        return 0;
+    }
+    rt_atomic_fetch_add(s + 24, 1);
+    rt_atomic_fetch_add(raw_load(rt_state_jobs()) + 424, 1);
+    rt_syscall(202, s + 24, 129, 1);
     return 0;
 }
 // ---- Chase-Lev deques ---------------------------------------------------------------------
@@ -3370,6 +4995,11 @@ fn rt_inject_push(s: u64, t: u64) -> u64 {
     return 0;
 }
 fn rt_inject_pop(s: u64) -> u64 {
+    // An unlocked look first: idle and helping workers ask often and the ring is usually empty. A
+    // push that this look misses bumps the park sequence afterwards, so no worker sleeps on it.
+    if raw_atomic_load(s + 8) == raw_atomic_load(s + 16) {
+        return 0;
+    }
     rt_spin_lock(s);
     head := raw_load(s + 8);
     tail := raw_load(s + 16);
@@ -3395,19 +5025,6 @@ fn rt_worker_random(w: u64) -> u64 {
     raw_store(w + 72, x);
     return x;
 }
-// Own deque first (locality and LIFO for fork-join), then the injection ring, then one steal pass
-// over the other workers starting at a random victim.
-fn rt_worker_take(s: u64, w: u64) -> u64 {
-    mut t = rt_deque_pop(w);
-    if t != 0 {
-        return t;
-    }
-    t = rt_inject_pop(s);
-    if t != 0 {
-        return t;
-    }
-    return rt_worker_steal(s, w);
-}
 fn rt_worker_steal(s: u64, w: u64) -> u64 {
     workers := raw_load(s + 32);
     if 1 < workers {
@@ -3428,7 +5045,11 @@ fn rt_worker_steal(s: u64, w: u64) -> u64 {
     return 0;
 }
 fn rt_enqueue(t: u64) -> u64 {
-    s := rt_sched();
+    return rt_enqueue_in(rt_sched(), t);
+}
+// A wake: the task was parked, so the scheduler exists, and this neither makes it nor reaches
+// anything that could (a wake is on the failure path, which allocates nothing).
+fn rt_enqueue_in(s: u64, t: u64) -> u64 {
     w := rt_worker_self();
     mut placed = 0;
     if w != 0 {
@@ -3438,15 +5059,6 @@ fn rt_enqueue(t: u64) -> u64 {
         rt_inject_push(s, t);
     }
     rt_notify(s);
-    return 0;
-}
-// Park until the sequence changes. The caller has already looked for work; a push after that look
-// bumps the sequence, so the wait either finds work on the next pass or returns immediately.
-fn rt_worker_park(s: u64) -> u64 {
-    seq := raw_atomic_load(s + 24);
-    rt_atomic_fetch_add(s + 96, 1);
-    rt_syscall(202, s + 24, 128, seq);
-    rt_atomic_fetch_sub(s + 96, 1);
     return 0;
 }
 // Task words: 0 saved sp (Windows: the fiber handle), 8 stack base, 16 stack size,
@@ -3465,17 +5077,123 @@ fn rt_worker_loop(worker: u64) -> u64 {
     // Give this scheduler thread whatever it needs to switch onto a task's stack (nothing on a
     // platform whose switch is a stack swap, a fiber conversion on Windows).
     rt_os_sched_prepare();
+    if rt_sched_setting(24) != 0 {
+        // Worker i on CPU i; more workers than CPUs get EINVAL and stay unpinned.
+        rt_os_pin(raw_load(worker + 40), worker + 896);
+    }
+    rt_os_stack_warm(rt_sched_setting(32));
+    spin := rt_sched_setting(48);
+    searching := raw_load(rt_state_jobs()) + 416;
     while true {
-        t := rt_worker_take(s, worker);
-        if t == 0 {
-            rt_worker_park(s);
-        } else {
-            rt_worker_run(s, worker, t);
+        if rt_worker_step(s, worker) != 0 {
+            continue;
         }
+        // Out of work. SEARCH before sleeping: a worker that is still looking is one a fork does
+        // not have to wake (rt_notify), which is what spares a join its system calls - in a join
+        // the forker nearly always takes its own fork back, and a woken worker would find nothing.
+        // Counted as searching until it runs something (rt_worker_run clears it, before the work
+        // runs: work that forks must not see its own worker as the one that will find the fork).
+        raw_store(worker + 280, 1);
+        rt_atomic_fetch_add(searching, 1);
+        mut found = 0;
+        mut round = 0;
+        while (found == 0) & (round < rt_worker_search_rounds()) {
+            found = rt_worker_step(s, worker);
+            round += 1;
+            if (found == 0) & (round % 16 == 0) {
+                rt_syscall(24, 0, 0, 0);
+            }
+        }
+        if (found == 0) & (spin != 0) {
+            // sched::Config.idle_spin_us: keep looking for that long before sleeping.
+            until := rt_now_us() + spin;
+            while (found == 0) & (rt_now_us() < until) {
+                found = rt_worker_step(s, worker);
+            }
+        }
+        if raw_load(worker + 280) != 0 {
+            raw_store(worker + 280, 0);
+            rt_atomic_fetch_sub(searching, 1);
+        }
+        if found != 0 {
+            continue;
+        }
+        // PARK, without losing a wake: count this worker parked BEFORE the last look (a pusher
+        // reads the count after its push, both with full barriers - rt_notify), and read the
+        // sequence before it, so a wake that lands between the look and the wait changes the word
+        // the wait compares.
+        seq := raw_atomic_load(s + 24);
+        rt_atomic_fetch_add(s + 96, 1);
+        if rt_worker_step(s, worker) == 0 {
+            rt_syscall(202, s + 24, 128, seq);
+        }
+        rt_atomic_fetch_sub(s + 96, 1);
     }
     return 0;
 }
+// A full barrier with no shared write: a locked compare-and-swap on a word of this frame (x86-64
+// `lock cmpxchg`; AArch64 and RV64 lower the CAS with full barriers on both sides).
+fn rt_full_fence() -> u64 {
+    mut word = 0;
+    at := &mut word;
+    raw_atomic_cas(at, 0, 0);
+    return 0;
+}
+// How many empty looks a worker takes, yielding the CPU every sixteenth, before it parks.
+fn rt_worker_search_rounds() -> u64 {
+    return 64;
+}
+// One unit of work, or 0 when there is none. The order: this worker's jobs (LIFO - they are what a
+// join on some stack is waiting for), its tasks, injected jobs, injected tasks, then a steal pass
+// for jobs and one for tasks, each starting at a random victim. A job is not run on the scheduler
+// stack: it is handed to the worker's runner (rt_runner_main).
+fn rt_worker_step(s: u64, w: u64) -> u64 {
+    // Every 61st step looks at the task ring first, so a worker that keeps finding its own work
+    // cannot leave injected tasks (wakes from the reactor, spawns from other threads) waiting.
+    tick := raw_load(w + 272) + 1;
+    raw_store(w + 272, tick);
+    if tick % 61 == 0 {
+        t := rt_inject_pop(s);
+        if t != 0 {
+            rt_worker_run(s, w, t);
+            return 1;
+        }
+    }
+    mut j = rt_job_take(s, w, 0);
+    if j == 0 {
+        j = rt_job_take(s, w, 1);
+    }
+    if j == 0 {
+        mut t = rt_deque_pop(w);
+        if t == 0 {
+            t = rt_inject_pop(s);
+        }
+        if t == 0 {
+            t = rt_worker_steal(s, w);
+        }
+        if t != 0 {
+            rt_worker_run(s, w, t);
+            return 1;
+        }
+        j = rt_job_take_background(s, w);
+    }
+    if j == 0 {
+        return 0;
+    }
+    mut r = raw_load(w + 224);
+    if r == 0 {
+        r = rt_runner_new();
+        raw_store(w + 224, r);
+    }
+    raw_store(w + 232, j);
+    rt_worker_run(s, w, r);
+    return 1;
+}
 fn rt_worker_run(s: u64, w: u64, t: u64) -> u64 {
+    if raw_load(w + 280) != 0 {
+        raw_store(w + 280, 0);
+        rt_atomic_fetch_sub(raw_load(rt_state_jobs()) + 416, 1);
+    }
     tp := raw_tp_get();
     raw_store(tp + 16, t);
     if raw_load(t) == 0 {
@@ -3484,6 +5202,7 @@ fn rt_worker_run(s: u64, w: u64, t: u64) -> u64 {
     rt_os_ctx_enter(t);
     raw_store(tp + 16, 0);
     if raw_load(t + 144) {
+        runner := raw_load(t + 104) == 3;
         // Now off the task's stack: release it, then publish completion (the joiner may free t).
         rt_os_ctx_release(t);
         raw_atomic_store(t + 96, 1);
@@ -3492,7 +5211,24 @@ fn rt_worker_run(s: u64, w: u64, t: u64) -> u64 {
         if 1 < joiner {
             rt_wake(joiner);
         }
+        if runner {
+            if raw_load(w + 224) == t {
+                raw_store(w + 224, 0); // this worker's own runner, ended by a contained failure
+            }
+            // A runner that had parked inside a job, was resumed as a task and has now finished
+            // that job: nothing joins it, so its record goes back here.
+            rt_runner_free(t);
+        }
+    } else if raw_atomic_load(t + 24) == 4 {
+        // This worker's runner, idle: it keeps its stack and waits in word 224 for the next job.
     } else {
+        if raw_load(w + 224) == t {
+            // The runner left because the job it is running waits (or yielded): from here on it is
+            // an ordinary parked task that any worker may resume, and this worker takes a fresh
+            // runner for its next job. Forgotten before the park is published, because after that
+            // another worker may already be running it.
+            raw_store(w + 224, 0);
+        }
         if raw_load(t + 136) {
             raw_store(t + 136, 0);
             rt_enqueue(t);
@@ -3505,9 +5241,1131 @@ fn rt_worker_run(s: u64, w: u64, t: u64) -> u64 {
     }
     // Work still queued here means a stopped sibling can help: this is what spreads a spawn burst
     // across every worker instead of one push, one wake.
-    if raw_load(w + 16) != raw_load(w + 8) {
+    if (raw_load(w + 16) != raw_load(w + 8)) | (raw_load(w + 144) != raw_load(w + 136)) {
         rt_notify(s);
     }
+    return 0;
+}
+
+// ---- jobs on the scheduler ------------------------------------------------------------------
+// Job record, 128 bytes: 0 function, 8/16/24 its three arguments, 32 state, 40 result,
+// 48 free-list link, 56 acknowledgement of a task waiter's wake, 64 link in its forker's stack list,
+// 72 link in its runner's stack list, 80 its failure (0: none; else a five-word record, below),
+// 88 1 while it holds one of the Background cap's slots, 104 when it was queued (Background only,
+// microseconds), 112 its class (0 Frame, 1 Normal, 2 Background), 120 parent (the job that was running when this one was
+// forked, 0 at a root).
+// State: 0 free, 1 pending, 3 done, 4 claimed with an OS thread asleep on this word, 2 claimed by a
+// thread that is not a worker, 8 * (i + 1) claimed by worker i (so a waiter knows whose deque the
+// job's own forks land on), any value from 4096 up claimed with that task waiting.
+//
+// THE STACK LIST. Every green task (a runner is one) keeps in word 152 the head of a list of what
+// its stack is in the middle of, newest first: the jobs it forked and has not joined (linked
+// through record word 64) and the jobs it is running (linked through word 72, the head pointer
+// tagged with bit 0). Forks and joins nest, so it is a stack. It gives a fork its parent in one
+// load - the job at the head, or the parent of the fork at the head - and it is non-empty exactly
+// while the stack is inside a parallel region. The top 16 bits of the word count nested helps.
+// A thread that is not a green task keeps no list; its forks are roots.
+//
+// WHERE A RECORD LIVES. Records are carved from mapped pages that are never unmapped and are
+// recycled through free lists, so a record's address always holds *a* job record. That is what
+// makes a queue entry a hint rather than an obligation:
+//
+//   - The only way to run a job is to win `CAS(state, pending -> claimed)` on its record. A deque
+//     entry, a ring entry and the forker's own pointer are three ways to find the record; whoever
+//     wins the CAS runs it, exactly once, and everyone else moves on.
+//   - So the forker can always take its own job back by pointer (rt_job_await), wherever the entry
+//     went: still in its deque, in another worker's deque because the forker's task migrated, or in
+//     the injection ring because the forker is not a worker. That claim by pointer is also the
+//     whole of "a thread that is not a worker helps with its own scope only": it never takes an
+//     entry from a queue, so it can never pick up a job it did not fork.
+//   - An entry that outlives its job - the forker claimed by pointer and the entry stayed queued -
+//     is stale. Whoever finds it later reads a record that is free (the CAS fails), a descriptor
+//     (state held at done: the CAS fails), running or done (fails), or pending again as a *later*
+//     job. In the last case the CAS succeeds and the finder runs that later job: its fields were
+//     complete before its state became pending, its forker is waiting for exactly this, and its
+//     own entry will fail the CAS in turn. A job still runs exactly once; only which queue led to
+//     it changed. (Stage 5: a stale entry in one class's deque can then name a job of another
+//     class; that is the case to revisit there.)
+//   - The runner of a job touches the record for the last time in the swap that publishes `done`,
+//     except to acknowledge a task waiter that had registered in the state word - and that waiter
+//     does not release the record until it has seen the acknowledgement.
+//
+// WHO FREES. A record is released only by its forker, after it has seen `done` (rt_job_release
+// checks). It goes on the free list of the worker the forker is running on at that moment, so each
+// list is touched by one thread at a time and needs no lock; a forker that is not on a worker uses
+// the locked list in the jobs block.
+//
+// Jobs block (raw_state()+3200, raw_map): 0 ring lock, 8 ring head, 16 ring tail, 80 ring, 88 ring
+// capacity (the layout rt_inject_pop reads); 24 lock of the lists below, 32 free job records,
+// 40 carve pointer, 48 carve bytes left, 56 free runner records, 64 a word that stays zero (a
+// runner's cancel token), 72 free failure records (rt_job_failure_release), 104 workers started (thread-per-task mode); the Frame ring at 128 and the
+// Background ring at 256, laid out like the Normal one at 0; 400 Background jobs running, 408 the
+// cap on them (background_cap), 416 workers searching for work (rt_worker_loop, rt_notify), 424
+// wakes issued (a futex wake each; GRAIL_SCHED_STATS prints it).
+//
+// CLASSES. A job is Frame (0), Normal (1) or Background (2), in record word 112. Each worker has a
+// deque per class and there is a ring per class. A worker takes Frame work, then Normal work, then
+// tasks, then Background work - strictly - and starts a Background job only while fewer than the cap
+// are running. A job takes its parent's class (the job running on the stack that forked it); a root
+// fork takes the class the stack was given by pool::with_class (parallel_class), else Normal. A
+// queue entry is a hint (above), so an entry found in class X's queue whose record now says another
+// class is a stale entry naming a later job: it is skipped, never claimed, which keeps every job at
+// its own priority - its live entry is in its own class's queue, or its forker takes it back.
+fn rt_job_deque_capacity() -> u64 {
+    return 8192;
+}
+fn rt_jobs_create(workers: u64) -> u64 {
+    j := raw_map(4096);
+    if rt_error(j) {
+        rt_abort();
+    }
+    mut c = 0;
+    while c < 3 {
+        ring := rt_job_ring_at(j, c);
+        raw_store(ring + 80, raw_map(65536));
+        raw_store(ring + 88, 8192);
+        c += 1;
+    }
+    mut cap = rt_sched_setting(16);
+    if cap == 0 {
+        cap = workers / 4;
+    }
+    if cap == 0 {
+        cap = 1;
+    }
+    raw_store(j + 408, cap);
+    raw_atomic_store(rt_state_jobs(), j);
+    return j;
+}
+// The scheduler, with its workers running: what every parallel call asks for first. In
+// thread-per-task mode this is where the workers start, the first time a job is forked.
+fn rt_jobs_sched() -> u64 {
+    s := rt_sched();
+    if rt_task_threads() {
+        j := raw_load(rt_state_jobs());
+        if raw_atomic_cas(j + 104, 0, 1) == 0 {
+            rt_sched_start(s);
+        }
+    }
+    return s;
+}
+// `size` bytes of record storage, zeroed, from a free list or the carve block. The caller holds
+// the lists' lock.
+fn rt_job_carve(j: u64, list: u64, size: u64) -> u64 {
+    r := raw_load(j + list);
+    if r != 0 {
+        raw_store(j + list, raw_load(r + 48));
+        return r;
+    }
+    if raw_load(j + 48) < size {
+        block := raw_map(65536);
+        if rt_error(block) {
+            rt_abort();
+        }
+        raw_store(j + 40, block);
+        raw_store(j + 48, 65536);
+    }
+    made := raw_load(j + 40);
+    raw_store(j + 40, made + size);
+    raw_store(j + 48, raw_load(j + 48) - size);
+    return made;
+}
+fn rt_job_new() -> u64 {
+    w := rt_worker_self();
+    mut r = 0;
+    if w != 0 {
+        r = raw_load(w + 240);
+        if r != 0 {
+            raw_store(w + 240, raw_load(r + 48));
+            raw_store(w + 248, raw_load(w + 248) - 1);
+        }
+    }
+    if r == 0 {
+        j := raw_load(rt_state_jobs());
+        rt_spin_lock(j + 24);
+        r = rt_job_carve(j, 32, 128);
+        rt_spin_unlock(j + 24);
+    }
+    raw_store(r + 56, 0);
+    raw_store(r + 80, 0);
+    raw_store(r + 88, 0);
+    return r;
+}
+// Only the forker releases, and only a finished job (or a descriptor, whose state is held at done).
+fn rt_job_release(r: u64) -> u64 {
+    if raw_atomic_load(r + 32) != 3 {
+        rt_abort();
+    }
+    raw_atomic_store(r + 32, 0);
+    w := rt_worker_self();
+    if (w != 0) && (raw_load(w + 248) < 1024) {
+        raw_store(r + 48, raw_load(w + 240));
+        raw_store(w + 240, r);
+        raw_store(w + 248, raw_load(w + 248) + 1);
+        return 0;
+    }
+    j := raw_load(rt_state_jobs());
+    rt_spin_lock(j + 24);
+    raw_store(r + 48, raw_load(j + 32));
+    raw_store(j + 32, r);
+    rt_spin_unlock(j + 24);
+    return 0;
+}
+// The task whose stack list this code is on, or 0: a green task or a runner. A thread-per-task
+// task keeps its thread handle in word 152 and is not containable anyway.
+fn rt_job_stack() -> u64 {
+    t := rt_current();
+    if t == 0 {
+        return 0;
+    }
+    if rt_task_threads() && (raw_load(t + 104) != 3) {
+        return 0;
+    }
+    return t;
+}
+fn rt_list_head(t: u64) -> u64 {
+    return raw_load(t + 152) & 281474976710655;
+}
+fn rt_list_set(t: u64, head: u64) -> u64 {
+    raw_store(t + 152, (raw_load(t + 152) & 18446462598732840960) | head);
+    return 0;
+}
+// The claim word a caller writes: which worker's deque the job's own forks will land on.
+fn rt_job_claim_word() -> u64 {
+    w := rt_worker_self();
+    if w == 0 {
+        return 2;
+    }
+    return (raw_load(w + 40) + 1) * 8;
+}
+// A new pending job fn(a, b, c), queued where a worker can find it: on this worker's job deque, or
+// in the injection ring from any other thread. When neither has room the job is simply not queued;
+// it stays pending and its forker runs it at the join. `listed` forks are the structured ones - the
+// forker joins them before its frame returns - and go on the forker's stack list; a job handle is
+// not listed, because it owns its captures and may be joined by anyone.
+fn rt_job_fork(f: u64, a: u64, b: u64, c: u64) -> u64 {
+    return rt_job_make(f, a, b, c, 1);
+}
+fn rt_job_make(f: u64, a: u64, b: u64, c: u64, listed: u64) -> u64 {
+    return rt_job_make_class(f, a, b, c, listed, 3);
+}
+// `class` 3: inherit (the parent's class, else the stack's, else Normal).
+fn rt_job_make_class(f: u64, a: u64, b: u64, c: u64, listed: u64, class: u64) -> u64 {
+    r := rt_job_new();
+    raw_store(r, f);
+    raw_store(r + 8, a);
+    raw_store(r + 16, b);
+    raw_store(r + 24, c);
+    mut parent = 0;
+    t := rt_job_stack();
+    if t != 0 {
+        head := rt_list_head(t);
+        if (head & 1) != 0 {
+            parent = head - 1;
+        } else if head != 0 {
+            parent = raw_load(head + 120);
+        }
+        if listed != 0 {
+            raw_store(r + 64, head);
+            rt_list_set(t, r);
+        }
+    }
+    raw_store(r + 120, parent);
+    mut k = class;
+    if k == 3 {
+        if parent != 0 {
+            k = raw_load(parent + 112);
+        } else if t == 0 {
+            // A thread that keeps no stack list: its with_class setting is in its thread record,
+            // word 112, as the class plus one (0: none).
+            tp := raw_tp_get();
+            k = 1;
+            if (tp != 0) && (raw_load(tp + 112) != 0) {
+                k = raw_load(tp + 112) - 1;
+            }
+        } else {
+            k = 1;
+        }
+    }
+    raw_store(r + 112, k);
+    if k == 2 {
+        raw_store(r + 104, rt_now_us());
+    }
+    raw_atomic_store(r + 32, 1);
+    w := rt_worker_self();
+    mut placed = 0;
+    if w != 0 {
+        placed = rt_deque_push(rt_job_deque(w, k), r);
+    }
+    if placed == 0 {
+        placed = rt_job_inject_push(r);
+    }
+    if placed != 0 {
+        rt_notify(raw_atomic_load(raw_state() + 72));
+    }
+    return r;
+}
+fn rt_job_deque(w: u64, class: u64) -> u64 {
+    if class == 0 {
+        return w + 512;
+    }
+    if class == 2 {
+        return w + 640;
+    }
+    return w + 128;
+}
+fn rt_job_ring_at(j: u64, class: u64) -> u64 {
+    if class == 0 {
+        return j + 128;
+    }
+    if class == 2 {
+        return j + 256;
+    }
+    return j;
+}
+fn rt_job_inject_push(r: u64) -> u64 {
+    ring := rt_job_ring_at(raw_load(rt_state_jobs()), raw_load(r + 112));
+    rt_spin_lock(ring);
+    head := raw_load(ring + 8);
+    tail := raw_load(ring + 16);
+    if tail - head == raw_load(ring + 88) {
+        rt_spin_unlock(ring);
+        return 0;
+    }
+    raw_store(raw_load(ring + 80) + (tail % raw_load(ring + 88)) * 8, r);
+    raw_atomic_store_release(ring + 16, tail + 1);
+    rt_spin_unlock(ring);
+    return 1;
+}
+// The next entry of class `class` from this worker's own deque, the class's ring, or a steal - in
+// that order - skipping stale entries whose record is now another class.
+fn rt_job_take(s: u64, w: u64, class: u64) -> u64 {
+    while true {
+        r := rt_deque_pop(rt_job_deque(w, class));
+        if r == 0 {
+            break;
+        }
+        if raw_load(r + 112) == class {
+            return r;
+        }
+    }
+    ring := rt_job_ring_at(raw_load(rt_state_jobs()), class);
+    while true {
+        r := rt_inject_pop(ring);
+        if r == 0 {
+            break;
+        }
+        if raw_load(r + 112) == class {
+            return r;
+        }
+    }
+    return rt_job_steal(s, w, class);
+}
+// Background work, if fewer than the cap are running.
+// A worker reserves one of the cap's slots before it takes a Background job (a CAS, so two workers
+// cannot both take the last one) and the job gives the slot back when it finishes: record word 88
+// says it holds one. Work a Background job's own stack runs while it waits - its forks, run inline
+// or helped - is not counted again: the stack already holds the slot.
+fn rt_job_take_background(s: u64, w: u64) -> u64 {
+    if rt_job_reserve_background() == 0 {
+        return 0;
+    }
+    r := rt_job_take(s, w, 2);
+    if r == 0 {
+        rt_atomic_fetch_sub(raw_load(rt_state_jobs()) + 400, 1);
+        return 0;
+    }
+    raw_store(r + 88, 1);
+    return r;
+}
+fn rt_job_reserve_background() -> u64 {
+    j := raw_load(rt_state_jobs());
+    while true {
+        running := raw_atomic_load(j + 400);
+        if raw_load(j + 408) <= running {
+            return 0;
+        }
+        if raw_atomic_cas(j + 400, running, running + 1) == running {
+            return 1;
+        }
+    }
+    return 0;
+}
+fn rt_now_us() -> u64 {
+    return f_host_now_us();
+}
+fn rt_job_steal(s: u64, w: u64, class: u64) -> u64 {
+    workers := raw_load(s + 32);
+    if 1 < workers {
+        array := raw_load(s + 72);
+        start := rt_worker_random(w) % workers;
+        mut i = 0;
+        while i < workers {
+            victim := (start + i) % workers;
+            if victim != raw_load(w + 40) {
+                r := rt_deque_steal(rt_job_deque(raw_load(array + victim * 8), class));
+                if (r != 0) && (raw_load(r + 112) == class) {
+                    return r;
+                }
+            }
+            i += 1;
+        }
+    }
+    return 0;
+}
+// Run a job this caller has claimed, and publish it. While it runs it is at the head of this
+// stack's list, so its forks know their parent. The swap is the last touch of the record unless a
+// task had registered as the waiter: that task is woken and then told so, because it must not carry
+// a wake that arrives after it has moved on.
+fn rt_job_exec(r: u64) -> u64 {
+    // An address in this frame (word 96): frames above it are the job's forker's, when the forker
+    // ran the job itself; a failure's join site is looked for there (rt_job_fail).
+    mut mark = 0;
+    here := &mut mark;
+    raw_store(r + 96, here);
+    background := raw_load(r + 88) == 1;
+    t := rt_job_stack();
+    if t != 0 {
+        raw_store(r + 72, rt_list_head(t));
+        rt_list_set(t, r + 1);
+    }
+    res := raw_call3(raw_load(r), raw_load(r + 8), raw_load(r + 16), raw_load(r + 24));
+    raw_store(r + 40, res);
+    if t != 0 {
+        rt_list_set(t, raw_load(r + 72));
+    }
+    if background {
+        raw_store(r + 88, 0);
+        rt_atomic_fetch_sub(raw_load(rt_state_jobs()) + 400, 1);
+    }
+    return rt_job_publish(r);
+}
+fn rt_job_publish(r: u64) -> u64 {
+    old := rt_atomic_swap(r + 32, 3);
+    if old == 4 {
+        rt_syscall(202, r + 32, 129, 2147483647);
+    } else if 4095 < old {
+        rt_wake(old);
+        raw_atomic_store(r + 56, 1);
+    }
+    return 0;
+}
+// A job run on top of a waiter's frames. The depth of that nesting is counted in the top 16 bits
+// of the running task's word 152 and its high-water mark kept per worker (word 264);
+// GRAIL_SCHED_STATS=1 prints it at exit.
+fn rt_job_help(w: u64, r: u64) -> u64 {
+    t := rt_current();
+    raw_store(t + 152, raw_load(t + 152) + 281474976710656);
+    depth := raw_load(t + 152) / 281474976710656;
+    if raw_load(w + 264) < depth {
+        raw_store(w + 264, depth);
+    }
+    rt_job_exec(r);
+    raw_store(t + 152, raw_load(t + 152) - 281474976710656);
+    return 0;
+}
+// An address inside the calling frame, which is where the stack is now.
+fn rt_frame() -> u64 {
+    mut here = 0;
+    p := &mut here;
+    return p;
+}
+// May this waiter run another job on top of its own frames? This is the one place that decides.
+//   - Only on a worker: a thread that is not one takes back its own forks and nothing else.
+//   - Only with room: at least an eighth of the stack left above the guard page. The job that would
+//     be run is one this stack would have run anyway (rt_job_leap), so the room is a safety net
+//     for the runtime's own frames, not the bound. Where the stack's bounds are not known (a
+//     Windows fiber) the bound below is all there is.
+//   - Not while this stack holds a lock (rt_holds_any).
+fn rt_job_may_help(w: u64) -> u64 {
+    if w == 0 {
+        return 0;
+    }
+    t := rt_current();
+    if t == 0 {
+        return 0;
+    }
+    base := raw_load(t + 8);
+    if base != 0 {
+        if rt_frame() < base + 4096 + raw_load(t + 16) / 8 {
+            return 0;
+        }
+    }
+    // A waiter that holds a lock does not help: a job it ran might want that lock. It parks, and
+    // is promoted like any waiting job.
+    if rt_holds_any() != 0 {
+        return 0;
+    }
+    return 1;
+}
+// Is job `k` a descendant of job `r`? Parents are followed a bounded number of steps; the walk
+// reads records that may be recycled under it, which is safe (records are never unmapped) and is
+// checked again after the claim, when `k`'s ancestors can no longer change: each of them is inside
+// a join waiting for the next.
+fn rt_job_descends(k: u64, r: u64) -> u64 {
+    mut at = k;
+    mut steps = 0;
+    while (at != 0) & (steps < 64) {
+        if at == r {
+            return 1;
+        }
+        at = raw_load(at + 120);
+        steps += 1;
+    }
+    return 0;
+}
+// Leapfrogging: the only work a waiter takes while its job `r` runs elsewhere is a job forked by
+// `r` or by one of `r`'s descendants - work this stack would have run inside `r` had `r` not been
+// stolen. So nothing is ever stacked on a waiter that a sequential run would not have stacked
+// there: a program whose joins fit its stack one after another fits it in parallel, however many
+// workers steal. (Taking any job - the first version - let unrelated work pile up on one stack: a
+// help depth of 29 on a recursion 21 deep, and no bound but the guard page.)
+// `claimed` is the state word seen: it names the worker that took `r`, whose deque is where
+// `r`'s forks are. Only the oldest entry there is looked at; anything else is left for its owner.
+fn rt_job_leap(s: u64, r: u64, claimed: u64) -> u64 {
+    if (claimed < 8) | (4095 < claimed) {
+        return 0;
+    }
+    index := claimed / 8 - 1;
+    if raw_load(s + 32) <= index {
+        return 0;
+    }
+    // r's descendants are r's class, so they are in that class's deque.
+    v := rt_job_deque(raw_load(raw_load(s + 72) + index * 8), raw_load(r + 112));
+    head := raw_atomic_load(v + 8);
+    tail := raw_atomic_load(v + 16);
+    if tail <= head {
+        return 0;
+    }
+    k := raw_load(raw_load(v) + (head & raw_load(v + 24)) * 8);
+    if (k == 0) | (k == r) {
+        return 0;
+    }
+    if rt_job_descends(k, r) == 0 {
+        return 0;
+    }
+    if raw_atomic_cas(v + 8, head, head + 1) != head {
+        return 0;
+    }
+    return k;
+}
+// Return when job `r`, forked by the caller, is done.
+//
+// Still pending: claim it by pointer and run it here; its queue entry, usually the newest in this
+// worker's deque, is taken out (an entry that is not it goes back). Claimed by someone else: on a
+// worker with room, leapfrog; otherwise, and when there is nothing to leapfrog, wait.
+fn rt_job_await(r: u64) -> u64 {
+    s := raw_atomic_load(raw_state() + 72);
+    mut idle = 0;
+    while true {
+        st := raw_atomic_load(r + 32);
+        if st == 3 {
+            return 0;
+        }
+        w := rt_worker_self();
+        if st == 1 {
+            if raw_atomic_cas(r + 32, 1, rt_job_claim_word()) == 1 {
+                if w != 0 {
+                    k := rt_deque_pop(rt_job_deque(w, raw_load(r + 112)));
+                    if (k != 0) & (k != r) {
+                        rt_deque_push(rt_job_deque(w, raw_load(r + 112)), k);
+                    }
+                }
+                rt_job_exec(r);
+                return 0;
+            }
+        } else {
+            mut k = 0;
+            if rt_job_may_help(w) != 0 {
+                k = rt_job_leap(s, r, st);
+            }
+            if k != 0 {
+                idle = 0;
+                if raw_atomic_cas(k + 32, 1, rt_job_claim_word()) == 1 {
+                    if rt_job_descends(k, r) != 0 {
+                        rt_job_help(w, k);
+                    } else {
+                        // The record was recycled between the look and the claim: this is some
+                        // other job. Give it back, where a worker will find it.
+                        raw_atomic_store(k + 32, 1);
+                        if rt_deque_push(rt_job_deque(w, raw_load(k + 112)), k) == 0 {
+                            rt_job_inject_push(k);
+                        }
+                        rt_notify(s);
+                    }
+                }
+            } else {
+                // A stolen join usually finishes within microseconds: look a few more times before
+                // paying for a park and a wake.
+                idle += 1;
+                if 64 < idle {
+                    rt_job_park(r);
+                    idle = 0;
+                }
+            }
+        }
+    }
+    return 0;
+}
+// Wait for a job somebody else is running. A task registers itself in the state word and parks;
+// the finisher wakes it and acknowledges, and the task leaves only after the acknowledgement, with
+// no wake left pending. A plain OS thread sleeps on the state word itself.
+fn rt_job_park(r: u64) -> u64 {
+    st := raw_atomic_load(r + 32);
+    if (st == 1) | (st == 3) {
+        return 0;
+    }
+    me := rt_current();
+    if me != 0 {
+        if 4095 < st {
+            return 0;
+        }
+        if raw_atomic_cas(r + 32, st, me) == st {
+            while raw_atomic_load(r + 32) != 3 {
+                rt_suspend(me);
+            }
+            while raw_atomic_load(r + 56) == 0 {
+                rt_syscall(24, 0, 0, 0);
+            }
+            raw_atomic_cas(me + 24, 3, 0);
+        }
+        return 0;
+    }
+    if st != 4 {
+        if raw_atomic_cas(r + 32, st, 4) != st {
+            return 0;
+        }
+    }
+    rt_syscall(202, r + 32, 128, 4);
+    return 0;
+}
+// Join a listed fork: it is the newest entry of this stack's list, and leaves it here.
+fn rt_job_join(r: u64) -> u64 {
+    rt_job_await(r);
+    t := rt_job_stack();
+    if t != 0 {
+        rt_list_set(t, raw_load(r + 64));
+    }
+    res := raw_load(r + 40);
+    f := raw_load(r + 80);
+    rt_job_release(r);
+    if f != 0 {
+        rt_job_reraise(f);
+    }
+    return res;
+}
+
+// ---- a failure inside a parallel region (F1) -----------------------------------------------------
+// The stack whose failure is handled here, or 0: a green task or runner that is inside a parallel
+// region (its stack list is not empty). Anything else fails as it always has.
+fn rt_job_failing() -> u64 {
+    t := rt_job_stack();
+    if t == 0 {
+        return 0;
+    }
+    if rt_list_head(t) == 0 {
+        return 0;
+    }
+    return t;
+}
+// The stack `t` failed (kind, a, b; `site` a statement-table entry, or an owned text with bit 0
+// set; `msg` an owned text or 0). Nothing unwinds. In order, on this same stack:
+//   0. Locks: release and poison every lock this stack holds, before it waits for anything - a
+//      stolen child may be waiting for one of them (rt_held_settle; docs/design/parking.md).
+//   1. Drain: every fork this stack has not joined is either taken back unrun (still pending) or
+//      waited for (running elsewhere: it may be borrowing these frames). Nothing else is run - no
+//      help, no claim of anything else - and the wait is not cancellable (rt_job_settle).
+//   2. Every job this stack was running gets the failure and is published as done; their forkers
+//      re-raise it at their joins (rt_job_reraise), and their own stacks then do the same.
+//   3. The stack is discarded: a runner ends; a task is contained as any failed task is.
+// A stack overflow does not come here: the drain needs stack, so it stays fatal.
+// A failure raised on this stack by the statement that is running: its site is found here (the walk
+// uses the record's scratch words, the last of which then says "no join site known yet").
+fn rt_job_fail_here(t: u64, kind: u64, a: u64, b: u64, msg: u64) -> u64 {
+    site := rt_site_here(t + 200) & 18446744073709551614;
+    raw_store(t + 232, 0);
+    return rt_job_fail(t, kind, a, b, site, msg);
+}
+// The statement where the failed job was joined, when the caller knows it (a joiner re-raising), is
+// in the stack's word 232 (rt_job_fail_joined); 0 there means "find it here".
+fn rt_job_fail(t: u64, kind: u64, a: u64, b: u64, site: u64, msg: u64) -> u64 {
+    joined := raw_load(t + 232);
+    raw_store(t + 232, 0);
+    // 0. Locks first (rt_held_settle takes the record's waiter block; a site that is an owned text
+    // names no statement, so the poison records none).
+    mut poison_site = site;
+    if (poison_site & 1) == 1 {
+        poison_site = 0;
+    }
+    rt_held_settle(t + 240, poison_site);
+    // The failure record is not a heap allocation: a failure may be raised where the allocator lock
+    // is held, and inside `@no_alloc` code, so nothing on this path touches the allocator. It comes
+    // from the jobs block's free list (rt_job_failure_record), and word 40 counts the jobs it is
+    // published to: each joiner gives one back after it has built the texts (rt_job_reraise), and
+    // the last returns the record to the list, so a program that contains a failure every frame
+    // runs in bounded memory.
+    f := rt_job_failure_record();
+    // Where the failed job was joined, as a statement entry: given by a joiner that re-raises it, or
+    // - for a job this stack's own forker ran here - the first program statement above the job's
+    // frame. A job a worker stole has no forker frames here; its joiner fills it in.
+    mut join_at = joined;
+    if join_at == 0 {
+        newest := rt_list_head(t);
+        mut walk0 = newest;
+        while walk0 != 0 {
+            if (walk0 & 1) != 0 {
+                break;
+            }
+            walk0 = raw_load(walk0 + 64);
+        }
+        if walk0 != 0 {
+            join_at = rt_site_above(t + 200, raw_load(walk0 - 1 + 96), 0);
+        }
+    }
+    raw_store(f + 56, join_at);
+    mut users = 0;
+    mut walk = rt_list_head(t);
+    while walk != 0 {
+        if (walk & 1) != 0 {
+            users += 1;
+            walk = raw_load(walk - 1 + 72);
+        } else {
+            walk = raw_load(walk + 64);
+        }
+    }
+    raw_store(f + 40, users);
+    raw_store(f, kind);
+    raw_store(f + 8, a);
+    raw_store(f + 16, b);
+    raw_store(f + 24, site);
+    raw_store(f + 32, msg);
+    // 1 and 2 in one walk of the stack list, newest entry first. A fork is settled before any job
+    // older than it is published: the forks a job made (newer than it) may be borrowing that job's
+    // frames and, through its captures, its forker's - which publishing lets the forker free. A
+    // fork older than a job is settled after that job is published, because it may be waiting for
+    // it: a job this stack helped with is a descendant of the fork it was waiting for. A fork this
+    // stack took back and ran itself is published as the job (its newer, tagged entry) before its
+    // fork entry is reached.
+    mut e = rt_list_head(t);
+    while e != 0 {
+        if (e & 1) != 0 {
+            r := e - 1;
+            e = raw_load(r + 72);
+            raw_store(r + 80, f);
+            if raw_load(r + 88) == 1 {
+                raw_store(r + 88, 0);
+                rt_atomic_fetch_sub(raw_load(rt_state_jobs()) + 400, 1);
+            }
+            rt_job_publish(r);
+        } else {
+            r := e;
+            e = raw_load(r + 64);
+            // A published job's record is its forker's from then on, so links are read before.
+            // A fork this stack took back and ran is already published (its job entry is newer), so
+            // this finds it done and does not wait for itself.
+            rt_job_settle(r);
+            // This stack forked it, so this stack releases it - unless it ran it itself, in which
+            // case the record carries the failure and stays (a leak, like the stack's own frames).
+            if raw_load(r + 80) != f {
+                rt_job_release(r);
+            }
+        }
+    }
+    raw_store(t + 152, 0);
+    if users == 0 {
+        rt_job_failure_release(f);
+    }
+    // 3. Discard the stack. A task keeps the failure as numbers (or as the texts a joiner already
+    // built, when it was raised again at a join), and its own joiner formats it: this path builds
+    // no text.
+    if raw_load(t + 104) == 3 {
+        return rt_contain_tail(t);
+    }
+    if (site & 1) != 0 {
+        return rt_contain_text(t, kind, msg, site & 18446744073709551614);
+    }
+    raw_store(t + 232, join_at);
+    return rt_contain_joined(t, kind, a, b, site, msg);
+}
+// A failure record - kind, two operands, site, message, users, join site (words 0..40, 56) - from the jobs block's
+// free list or its pages (rt_job_carve), never the heap.
+fn rt_job_failure_record() -> u64 {
+    j := raw_load(rt_state_jobs());
+    rt_spin_lock(j + 24);
+    f := rt_job_carve(j, 72, 64);
+    rt_spin_unlock(j + 24);
+    return f;
+}
+// The free-list link is word 48, as for every record rt_job_carve hands out.
+fn rt_job_failure_release(f: u64) -> u64 {
+    j := raw_load(rt_state_jobs());
+    rt_spin_lock(j + 24);
+    raw_store(f + 48, raw_load(j + 72));
+    raw_store(j + 72, f);
+    rt_spin_unlock(j + 24);
+    return 0;
+}
+// Bring a fork this failing stack has not joined to done without running anything: take it back
+// if nobody has it, else wait - parked, not cancellable, re-testing after every wake.
+fn rt_job_settle(r: u64) -> u64 {
+    while true {
+        st := raw_atomic_load(r + 32);
+        if st == 3 {
+            return 0;
+        }
+        if st == 1 {
+            if raw_atomic_cas(r + 32, 1, 2) == 1 {
+                raw_atomic_store(r + 32, 3);
+                return 0;
+            }
+        } else {
+            rt_job_park(r);
+        }
+    }
+    return 0;
+}
+// A failure's message text, copied for the joiner (the record is shared by every job it was
+// published to), or 0 when the message is dictated by the kind.
+fn rt_job_message(f: u64) -> u64 {
+    msg := raw_load(f + 32);
+    if msg == 0 {
+        return 0;
+    }
+    out := rt_new();
+    rt_append(out, msg);
+    return out;
+}
+// The forker's side: the joined job failed, so this stack fails with the same failure. Inside a
+// parallel region it is handed on as it is (the statement entry, not yet a text); where it leaves
+// the parallel region - contained by a task, or ending the process - its site is the original
+// statement plus one line naming where the job was joined, which is the caller's statement.
+fn rt_job_reraise(f: u64) -> u64 {
+    // The failure was counted where it happened; the stack it is raised on now is one more stack
+    // discarded, not one more failure (rt_contained_note counts it again when it is contained).
+    raw_store(rt_contained_word(), raw_load(rt_contained_word()) - 1);
+    raw_store(rt_discarded_word(), raw_load(rt_discarded_word()) + 1);
+    // Numbers, as at the failure: the kind, the operands, the failing statement and - the first
+    // time the failure crosses a join - this joiner's own statement. Whoever reports it renders
+    // both lines from them; only a message text is copied (the record is shared).
+    kind := raw_load(f);
+    a := raw_load(f + 8);
+    b := raw_load(f + 16);
+    site := raw_load(f + 24);
+    msg := rt_job_message(f);
+    mut joined = raw_load(f + 56);
+    if rt_atomic_fetch_sub(f + 40, 1) == 1 {
+        rt_job_failure_release(f);
+    }
+    me := rt_current();
+    if (joined == 0) & ((site & 1) == 0) {
+        if me != 0 {
+            joined = rt_site_above(me + 200, 0, 0);
+        }
+    }
+    j := rt_job_failing();
+    if j != 0 {
+        raw_store(j + 232, joined);
+        return rt_job_fail(j, kind, a, b, site, msg);
+    }
+    t := rt_containable();
+    if t != 0 {
+        if (site & 1) != 0 {
+            return rt_contain_text(t, kind, msg, site & 18446744073709551614);
+        }
+        raw_store(t + 232, joined);
+        return rt_contain_joined(t, kind, a, b, site, msg);
+    }
+    // Ends the process: one report, the failing statement first, then the join.
+    if rt_abort_begin() == 0 {
+        rt_abort_park();
+    }
+    buf := rt_report_buf();
+    if (joined == 0) & ((site & 1) == 0) {
+        joined = rt_site_above(rt_report_sites(), 0, 0);
+    }
+    mut n = rt_fail_put(buf, 0, view("error: "));
+    if msg != 0 {
+        rt_copy_bytes(buf + n, raw_load(msg), raw_load(msg + 8));
+        n += raw_load(msg + 8);
+    } else {
+        n = rt_fail_body(kind, a, b, buf, n);
+    }
+    raw_putbyte(buf + n, 10);
+    n += 1;
+    if (site & 1) != 0 {
+        text := site & 18446744073709551614;
+        rt_copy_bytes(buf + n, raw_load(text), raw_load(text + 8));
+        n += raw_load(text + 8);
+    } else if site != 0 {
+        n = rt_fail_line(buf, n, site, view(" --> "));
+    }
+    if joined != 0 {
+        n = rt_fail_line(buf, n, joined, view(" = in a job joined at "));
+    }
+    rt_write_all(2, buf, n);
+    return rt_abort_final();
+}
+// A thread that is not running a task counts its parallel regions in thread-record word 24, in
+// steps of 16 so the word never reads as a worker marker: inside a region it may fail at the same
+// moment as a worker running a sibling leaf, so it reports as a runtime thread does
+// (rt_abort_signals) - status 134, not a signal that can race the exit. A task needs no count: its
+// stack list is non-empty exactly while it is inside one.
+fn rt_region_enter() -> u64 {
+    return rt_region_step(16);
+}
+fn rt_region_leave() -> u64 {
+    return rt_region_step(wrapping_sub(0, 16));
+}
+fn rt_region_step(by: u64) -> u64 {
+    if rt_current() != 0 {
+        return 0;
+    }
+    tp := raw_tp_get();
+    if tp != 0 {
+        raw_store(tp + 24, wrapping_add(raw_load(tp + 24), by));
+    }
+    return 0;
+}
+// ---- runners --------------------------------------------------------------------------------
+// A worker does not run a job on its scheduler stack: it enters its runner, a green task whose
+// body is the loop below. Inside a job rt_current() is therefore always a task, so a job that
+// waits - a sleep, a descriptor, a join, an offloaded call - parks the runner exactly as any task
+// parks, with no code of its own: rt_worker_run sees the runner leave without being idle, forgets
+// it, and the worker makes a fresh runner for its next job. The parked runner is resumed by
+// whichever worker takes it from a task deque, finishes its job, finds it is nobody's runner and
+// ends. A job that never waits costs no switch of its own: the runner drains the worker's job
+// deque before it goes idle. The runner's stack is a task stack, so a job that overflows it gets
+// the task's report.
+//
+// A runner is a task record (256 bytes from the jobs block, not the allocator: it is
+// infrastructure and must not count as a live allocation at exit): callback rt_runner_main, handle
+// word 104 = 3 marks it, word 152 is its stack list like any task's, and its
+// cancel token is a word that stays zero.
+fn rt_runner_new() -> u64 {
+    j := raw_load(rt_state_jobs());
+    rt_spin_lock(j + 24);
+    t := rt_job_carve(j, 56, rt_task_record_size());
+    rt_spin_unlock(j + 24);
+    mut i = 0;
+    while i < rt_task_record_size() {
+        raw_store(t + i, 0);
+        i += 8;
+    }
+    raw_store(t + 40, rt_runner_main);
+    raw_store(t + 48, t);
+    raw_store(t + 64, 2);
+    raw_store(t + 72, j + 64);
+    raw_store(t + 104, 3);
+    return t;
+}
+fn rt_runner_free(t: u64) -> u64 {
+    j := raw_load(rt_state_jobs());
+    rt_spin_lock(j + 24);
+    raw_store(t + 48, raw_load(j + 56));
+    raw_store(j + 56, t);
+    rt_spin_unlock(j + 24);
+    return 0;
+}
+fn rt_runner_main(t: u64, unused: u64) -> u64 {
+    while true {
+        w := rt_worker_self();
+        if w == 0 {
+            break;
+        }
+        if raw_load(w + 224) != t {
+            break; // resumed as a task after a wait: the job is finished and so is this runner
+        }
+        mut j = raw_load(w + 232);
+        raw_store(w + 232, 0);
+        if j == 0 {
+            j = rt_job_take_own(w);
+        }
+        if j == 0 {
+            raw_atomic_store(t + 24, 4);
+            rt_os_ctx_leave(t);
+            raw_atomic_store(t + 24, 0);
+        } else {
+            if raw_atomic_cas(j + 32, 1, rt_job_claim_word()) == 1 {
+                rt_job_exec(j);
+            }
+        }
+    }
+    return 0;
+}
+// The next job from this worker's own deques, by class (the runner's drain): Frame, Normal, then
+// Background under the cap. Stale entries are skipped as in rt_job_take.
+fn rt_job_take_own(w: u64) -> u64 {
+    mut c = 0;
+    while c < 2 {
+        while true {
+            r := rt_deque_pop(rt_job_deque(w, c));
+            if r == 0 {
+                break;
+            }
+            if raw_load(r + 112) == c {
+                return r;
+            }
+        }
+        c += 1;
+    }
+    if rt_job_reserve_background() == 0 {
+        return 0;
+    }
+    while true {
+        r := rt_deque_pop(rt_job_deque(w, 2));
+        if r == 0 {
+            break;
+        }
+        if raw_load(r + 112) == 2 {
+            raw_store(r + 88, 1);
+            return r;
+        }
+    }
+    rt_atomic_fetch_sub(raw_load(rt_state_jobs()) + 400, 1);
+    return 0;
+}
+// How long the oldest queued Background job has waited, in microseconds (0: none queued). Entries
+// are read without locks: records never go away, a stale entry is filtered by state and class, and
+// the answer is a statistic, not a decision.
+fn rt_background_wait_us() -> u64 {
+    s := raw_atomic_load(raw_state() + 72);
+    if s == 0 {
+        return 0;
+    }
+    j := raw_load(rt_state_jobs());
+    now := rt_now_us();
+    mut oldest = 0;
+    workers := raw_load(s + 32);
+    mut i = 0;
+    while i <= workers {
+        mut d = 0;
+        if i < workers {
+            d = rt_job_deque(raw_load(raw_load(s + 72) + i * 8), 2);
+        } else {
+            d = rt_job_ring_at(j, 2);
+        }
+        head := raw_atomic_load(d + 8);
+        tail := raw_atomic_load(d + 16);
+        mut at = head;
+        while (at < tail) & (at < head + 4096) {
+            mut slot = 0;
+            if i < workers {
+                slot = raw_load(d) + (at & raw_load(d + 24)) * 8;
+            } else {
+                slot = raw_load(d + 80) + (at % raw_load(d + 88)) * 8;
+            }
+            r := raw_load(slot);
+            if (r != 0) && (raw_atomic_load(r + 32) == 1) && (raw_load(r + 112) == 2) {
+                stamp := raw_load(r + 104);
+                if (stamp < now) && (oldest < now - stamp) {
+                    oldest = now - stamp;
+                }
+            }
+            at += 1;
+        }
+        i += 1;
+    }
+    return oldest;
+}
+fn f_host_background_wait_us() -> u64 {
+    return rt_background_wait_us();
+}
+// `parallel_class(class, f)`, which is pool::with_class: run f with forks of class `class`. On a
+// green stack f is forked as a job of that class and joined at once, which the forker does by
+// running it here (claim by pointer) unless a worker took it first; everything it forks inherits
+// the class from it. A plain thread keeps the class in its thread record for the duration.
+fn rt_parallel_class(class: u64, f: u64, env: u64) -> u64 {
+    rt_jobs_sched();
+    if rt_job_stack() != 0 {
+        r := rt_job_make_class(rt_job_call0, f, env, 0, 1, class);
+        return rt_job_join(r);
+    }
+    tp := raw_tp_get();
+    old := raw_load(tp + 112);
+    raw_store(tp + 112, class + 1);
+    res := rt_job_call0(f, env, 0);
+    raw_store(tp + 112, old);
+    return res;
+}
+// sched::start(Config): the settings the scheduler is made with, applied only before it exists.
+// Block (raw_map, process-state word 3424): 8 workers, 16 background cap, 24 pin workers,
+// 32 stacks warmed per worker, 40 steal seed, 48 idle spin in microseconds; 0 everywhere means the
+// default. 0 when it was applied, 1 when the scheduler already existed or a config was already set:
+// the caller gets an answer, never an abort.
+fn f_host_sched_start(workers: u64, cap: u64, pin: u64, warm: u64, seed: u64, spin: u64) -> u64 {
+    if raw_atomic_load(raw_state() + 80) != 0 {
+        return 1;
+    }
+    block := raw_map(4096);
+    if rt_error(block) {
+        rt_abort();
+    }
+    mut w = workers;
+    if 64 < w {
+        w = 64;
+    }
+    raw_store(block + 8, w);
+    raw_store(block + 16, cap);
+    raw_store(block + 24, pin);
+    raw_store(block + 32, warm);
+    raw_store(block + 40, seed);
+    raw_store(block + 48, spin);
+    if raw_atomic_cas(rt_sched_config(), 0, block) != 0 {
+        rt_syscall(11, block, 4096, 0);
+        return 1;
+    }
+    // The scheduler may have been made between the first test and the publication: then the
+    // settings came too late, and saying so is the honest answer.
+    if raw_atomic_load(raw_state() + 80) != 0 {
+        return 1;
+    }
+    return 0;
+}
+fn rt_sched_config() -> u64 {
+    return raw_state() + 3424;
+}
+fn rt_sched_setting(offset: u64) -> u64 {
+    block := raw_atomic_load(rt_sched_config());
+    if block == 0 {
+        return 0;
+    }
+    return raw_load(block + offset);
+}
+// GRAIL_SCHED_STATS=1: one line on stderr at exit.
+fn rt_sched_stats() -> u64 {
+    s := raw_atomic_load(raw_state() + 72);
+    if s == 0 {
+        return 0;
+    }
+    if rt_env_is(view("GRAIL_SCHED_STATS"), view("1")) == 0 {
+        return 0;
+    }
+    array := raw_load(s + 72);
+    workers := raw_load(s + 32);
+    mut high = 0;
+    mut i = 0;
+    while i < workers {
+        seen := raw_load(raw_load(array + i * 8) + 264);
+        if high < seen {
+            high = seen;
+        }
+        i += 1;
+    }
+    text := rt_new();
+    rt_reserveb(text, 160);
+    buf := raw_load(text);
+    mut n = rt_fail_put(buf, 0, view("grail: sched: workers "));
+    n = rt_fail_num(buf, n, workers);
+    n = rt_fail_put(buf, n, view(", help depth high-water "));
+    n = rt_fail_num(buf, n, high);
+    n = rt_fail_put(buf, n, view(", wakes "));
+    n = rt_fail_num(buf, n, raw_load(raw_load(rt_state_jobs()) + 424));
+    n = rt_fail_put(buf, n, view(", oldest background wait "));
+    n = rt_fail_num(buf, n, rt_background_wait_us());
+    n = rt_fail_put(buf, n, view(" us"));
+    n = rt_fail_put(buf, n, view("\n"));
+    raw_store(text + 8, n);
+    rt_write_text(2, text);
     return 0;
 }
 // The task's own call: arity 3 carries the scope's cancel token.
@@ -3580,7 +6438,7 @@ fn rt_wake(t: u64) -> u64 {
             }
         } else if s == 2 {
             if raw_atomic_cas(t + 24, 2, 0) == 2 {
-                rt_enqueue(t);
+                rt_enqueue_in(raw_atomic_load(raw_state() + 72), t);
                 return 0;
             }
         } else {
@@ -3605,29 +6463,6 @@ fn rt_yield() -> u64 {
     rt_os_ctx_leave(t);
     return 0;
 }
-// Mutex acquisition from a green task yields instead of blocking its worker, so a holder that
-// suspended (for I/O) can always resume on some worker.
-fn rt_mutex_lock(p: u64) -> u64 {
-    if (rt_current() != 0) & (rt_task_threads() == 0) {
-        while raw_atomic_cas(p, 0, 1) != 0 {
-            rt_yield();
-        }
-        return 0;
-    }
-    mut state = raw_atomic_cas(p, 0, 1);
-    if state == 0 {
-        return 0;
-    }
-    if state != 2 {
-        state = rt_atomic_swap(p, 2);
-    }
-    while state != 0 {
-        rt_syscall(202, p, 128, 2);
-        state = rt_atomic_swap(p, 2);
-    }
-    return 0;
-}
-
 // ---- structured task scopes ----
 // Scope words: 0 self (a scope reference points here), 8 cancel flag, 16 context, 24 tasks.
 fn rt_scope_begin(context: u64) -> u64 {
@@ -3672,7 +6507,7 @@ fn rt_cancel(s: u64) -> u64 {
 // A failed task has no result: word 80 is never written and its dropper is never called.
 fn rt_task_spawn(s: u64, f: u64, item: u64, arity: u64, dropper: u64) -> u64 {
     // Word 152 holds the task's OS thread handle in thread-per-task mode (0 in green mode).
-    t := rt_alloc(240);
+    t := rt_alloc(rt_task_record_size());
     raw_store(t + 40, f);
     raw_store(t + 48, item);
     raw_store(t + 56, raw_load(s + 16));
@@ -3742,6 +6577,11 @@ fn rt_task_join(t: u64) -> u64 {
 // Report a failure that already has its texts: contained by an enclosing task if there is one
 // (task-record words 184/192 then carry the two texts), fatal from the top of the program.
 fn rt_fail_text(kind: u64, msg: u64, site: u64) -> u64 {
+    j := rt_job_failing();
+    if j != 0 {
+        raw_store(j + 232, 0);
+        return rt_job_fail(j, kind, 0, 0, site | 1, msg);
+    }
     t := rt_containable();
     if t != 0 {
         return rt_contain_text(t, kind, msg, site);
@@ -3792,12 +6632,25 @@ fn rt_task_site(t: u64) -> u64 {
         // A re-raised failure already carries its site text; bit 0 says so.
         return site & 18446744073709551614;
     }
-    return rt_site_text(site);
+    out := rt_site_text(site);
+    joined := raw_load(t + 232);
+    if joined != 0 {
+        line := rt_new();
+        rt_reserveb(line, 400);
+        raw_store(line + 8, rt_fail_line(raw_load(line), 0, joined, view(" = in a job joined at ")));
+        rt_append(out, line);
+        rt_drop_seq(line);
+    }
+    return out;
 }
 // An explicit task failure (`task_fail(msg)`): the caller's own text, with the location of the call.
 // Contained exactly like a failed check, so it is a value at the join or the end of the process.
 fn rt_task_fail(text: u64) -> u64 {
     msg := rt_lit(raw_load(text), raw_load(wrapping_add(text, 8)));
+    j := rt_job_failing();
+    if j != 0 {
+        return rt_job_fail_here(j, 13, 0, 0, msg);
+    }
     t := rt_containable();
     if t != 0 {
         return rt_contain_site(t, 13, 0, 0, rt_site_here(t + 200), msg);
@@ -3863,7 +6716,12 @@ fn rt_scope_end(s: u64) -> u64 {
             rt_abort();
         }
         kind := raw_load(t + 160);
-        if (state == 2) & (kind != 0) {
+        if (state == 2) & (kind == 16) & (raw_atomic_load(s + 8) != 0) {
+            // A child that ended Cancelled because this scope was cancelled did what was asked:
+            // not re-raised. Its texts go with it.
+            rt_drop_seq(rt_task_message(t));
+            rt_drop_seq(rt_task_site(t));
+        } else if (state == 2) & (kind != 0) {
             // An abandoned handle whose task failed: the scope's result type has no arm for it, so
             // the failure is reported here - contained by the enclosing task, fatal at the top.
             rt_fail_text(kind, rt_task_message(t), rt_task_site(t));
@@ -3937,27 +6795,39 @@ fn rt_sleep_now(spec: u64, unused: u64) -> u64 {
     return rt_syscall(35, spec, 0, 0);
 }
 fn f_host_sleep_ms(ms: u64) -> u64 {
+    return rt_sleep_for(ms, 3);
+}
+fn rt_sleep_job(t: u64, ms: u64) -> u64 {
+    s := rt_sched();
+    until := f_host_now_ms() + ms;
+    mut left = ms;
+    while left != 0 {
+        if rt_os_timer(s, t, left) != 0 {
+            rt_sleep_plain(left);
+            return 0;
+        }
+        rt_suspend(t);
+        rt_os_timer_done(s, t);
+        now := f_host_now_ms();
+        if now < until {
+            left = until - now;
+        } else {
+            left = 0;
+        }
+    }
+    raw_atomic_cas(t + 24, 3, 0);
+    return 0;
+}
+// The sleep with no task to park: this thread sleeps, or a helper does while the task parks.
+fn rt_sleep_plain(ms: u64) -> u64 {
     spec := rt_alloc(32);
     raw_store(spec + 16, rt_div(ms, 1000));
     raw_store(spec + 24, (ms % 1000) * 1000000);
     if (rt_current() == 0) | rt_task_threads() {
-        // A plain OS thread, or a task that owns its thread: sleeping this thread sleeps nobody
-        // else.
         rt_syscall(35, spec + 16, 0, 0);
-        rt_free(spec);
-        return 0;
-    }
-    t := rt_current();
-    s := rt_sched();
-    if (rt_os_reactor() == 0) | (rt_os_timer(s, t, ms) != 0) {
-        // Green task, no timer to park on: the sleep runs on a helper thread and the task parks,
-        // exactly as host::read_file hands off a blocking call. Other tasks keep running.
+    } else {
         rt_blocking_call(rt_sleep_now, spec + 16, 0);
-        rt_free(spec);
-        return 0;
     }
-    rt_suspend(t);
-    rt_os_timer_done(s, t);
     rt_free(spec);
     return 0;
 }
@@ -3987,6 +6857,15 @@ fn f_host_now_ms() -> u64 {
     rt_free(spec);
     return ms;
 }
+// The same monotonic clock in microseconds: a frame time or a join cost is not measurable in
+// whole milliseconds.
+fn f_host_now_us() -> u64 {
+    spec := rt_alloc(16);
+    rt_syscall(228, 1, spec, 0);
+    us := raw_load(spec) * 1000000 + rt_div(raw_load(spec + 8), 1000);
+    rt_free(spec);
+    return us;
+}
 // CLOCK_REALTIME (clockid 0) in milliseconds since the Unix epoch; the wall clock a program
 // reports rather than the monotonic one it measures with. Both fit u64 milliseconds.
 fn f_host_wall_ms() -> u64 {
@@ -4010,8 +6889,12 @@ fn f_host_pipe() -> u64 {
     return out;
 }
 // Reads up to max bytes; suspends (green) while no data is available. Empty on end/cancel.
-fn f_host_read_fd(fd: u64, max: u64) -> u64 {
+// `max` with bit 62 set (2^62 + n) reads at most n bytes and does not wait: nothing to read yet is an
+// empty vector (the jobserver's token take, compiler/jobs.grl).
+fn f_host_read_fd(fd: u64, asked: u64) -> u64 {
     out := rt_new();
+    now_only := (asked / 4611686018427387904) & 1;
+    max := asked % 4611686018427387904;
     if max == 0 {
         return out;
     }
@@ -4019,6 +6902,9 @@ fn f_host_read_fd(fd: u64, max: u64) -> u64 {
     while true {
         n := rt_io(rt_read_now, fd, buf, max);
         if n == wrapping_sub(0, 11) {
+            if now_only {
+                break;
+            }
             if rt_wait_fd(fd, 1) != 0 {
                 break;
             }
@@ -4068,8 +6954,8 @@ fn f_host_close(fd: u64) -> u64 {
 
 // ---- blocking foreign calls (B3 contract) ----
 // The contract: a foreign call blocks the executing task. A task is green on every platform, so the
-// call occupies the scheduler thread that was running it - on Linux one of the pool's workers, on
-// Windows the only scheduler thread - for the whole call. The runtime's own blocking operations
+// call occupies the scheduler thread that was running it - one of the scheduler's workers - for the
+// whole call. The runtime's own blocking operations
 // never do that: they hand off through rt_blocking_call (or park on the reactor where there is one).
 // A call the user makes through `extern "C"` or a `cfn` runs on that thread itself, so a wrapper
 // that knows it blocks declares it with rt_blocking_enter, and the runtime says so once per process
@@ -4675,7 +7561,9 @@ fn f_host_tcp_connect(host: u64, port: u64) -> u64 {
 }
 
 // Opens a file for reading (write==0) or writing (create/truncate). Returns the descriptor or a
-// negative errno (as a wrapped word) instead of aborting.
+// negative errno (as a wrapped word) instead of aborting. `write == 2` is the jobserver's fifo
+// (compiler/jobs.grl): made first if the path does not exist, then opened for reading and writing
+// and non-blocking, so a process that holds it open never sees its end.
 fn f_host_open(path: u64, write: u64) -> u64 {
     name := rt_cstr(path);
     rt_view_free(path);
@@ -4683,7 +7571,11 @@ fn f_host_open(path: u64, write: u64) -> u64 {
         return wrapping_sub(0, 22);
     }
     mut flags = 524288;
-    if write {
+    if write == 2 {
+        // mknodat(AT_FDCWD, name, S_IFIFO | 0600, 0); an existing one is the one to open.
+        rt_syscall(259, wrapping_sub(0, 100), name, 4480);
+        flags = 526338;
+    } else if write {
         flags = 524865;
     }
     fd := rt_syscall(2, name, flags, 438);
@@ -6497,7 +9389,10 @@ fn rt_slot4u(s: u64, i: u64) -> u64 {
 }
 fn rt_slot4(s: u64, i: u64) -> u64 {
     if (i < raw_load(wrapping_add(s, 8))) == 0 {
-        rt_abort();
+        // Reported like rt_slot's: an index check names the index and the length, and a task can
+        // contain it. The native backend writes this check in line; this body is what the LLVM
+        // backend calls.
+        rt_fail(1, i, raw_load(wrapping_add(s, 8)));
     }
     return wrapping_add(raw_load(s), wrapping_mul(i, 4));
 }
@@ -6573,6 +9468,137 @@ fn rt_vec_reverse4(s: u64) -> u64 {
     mut i = 0;
     while i < rt_div(n, 2) {
         rt_vec_swap4(s, i, n - 1 - i);
+        i += 1;
+    }
+    return 0;
+}
+// ---- flat vectors: elements of `w` bytes stored inline (docs/design/unboxed-values.md, 1b) ----
+// A vector of plain records or `extern "C"` records holds the elements' bytes, `w` each, after one
+// another; the header is the same {pointer, length, capacity}, counted in elements. A value taken out
+// of one is a box of its own (rt_flat_box); a value put in is copied from its box, which is freed.
+fn rt_flat_box(src: u64, w: u64) -> u64 {
+    // Rounded up to whole words; rt_div is a software division and this runs per element.
+    box := rt_alloc((w + 7) & 18446744073709551608);
+    rt_copy_bytes(box, src, w);
+    return box;
+}
+// The address of element `i` of an array of `n` elements `w` bytes wide at `base`
+// (docs/design/fixed-arrays.md). `n` is the array's constant length: nothing is loaded to check it.
+fn rt_aslot(base: u64, i: u64, n: u64, w: u64) -> u64 {
+    if (i < n) == 0 {
+        rt_fail(1, i, n);
+    }
+    return wrapping_add(base, wrapping_mul(i, w));
+}
+// The same address for an index already known to be below the length.
+fn rt_aslotu(base: u64, i: u64, w: u64) -> u64 {
+    return wrapping_add(base, wrapping_mul(i, w));
+}
+// `[x; n]`: element 0 of the array at `dst` is written; copy it to the other `n - 1`, doubling.
+fn rt_array_rep(dst: u64, w: u64, n: u64) -> u64 {
+    mut have = 1;
+    while have < n {
+        mut take = have;
+        if n - have < take {
+            take = n - have;
+        }
+        rt_copy_bytes(wrapping_add(dst, have * w), dst, take * w);
+        have = have + take;
+    }
+    return 0;
+}
+fn rt_slotw(s: u64, i: u64, w: u64) -> u64 {
+    if (i < raw_load(wrapping_add(s, 8))) == 0 {
+        rt_fail(1, i, raw_load(wrapping_add(s, 8)));
+    }
+    return wrapping_add(raw_load(s), wrapping_mul(i, w));
+}
+fn rt_pushw(s: u64, src: u64, w: u64) -> u64 {
+    rt_pushwk(s, src, w);
+    rt_free(src);
+    return 0;
+}
+// rt_pushw without freeing the source: the source is frame words (--frame-records).
+fn rt_pushwk(s: u64, src: u64, w: u64) -> u64 {
+    n := raw_load(wrapping_add(s, 8));
+    cap := raw_load(wrapping_add(s, 16));
+    if n == cap {
+        mut capacity = cap * 2;
+        if capacity == 0 {
+            capacity = 8;
+        }
+        // No product here can overflow: 2^40 elements of at most 2^20 bytes.
+        if (1099511627776 < capacity) + (1048576 < w) {
+            rt_abort();
+        }
+        ptr := rt_grow(raw_load(s), wrapping_mul(n, w), wrapping_mul(capacity, w));
+        raw_store(s, ptr);
+        raw_store(wrapping_add(s, 16), capacity);
+    }
+    rt_copy_bytes(wrapping_add(raw_load(s), wrapping_mul(n, w)), src, w);
+    raw_store(wrapping_add(s, 8), n + 1);
+    return 0;
+}
+fn rt_popw(s: u64, w: u64) -> u64 {
+    n := raw_load(wrapping_add(s, 8));
+    if n == 0 {
+        rt_fail(8, 0, 0);
+    }
+    raw_store(wrapping_add(s, 8), n - 1);
+    return rt_flat_box(wrapping_add(raw_load(s), wrapping_mul(n - 1, w)), w);
+}
+fn rt_popw_quiet(s: u64, w: u64) -> u64 {
+    if raw_load(wrapping_add(s, 8)) == 0 {
+        return 0;
+    }
+    return rt_popw(s, w);
+}
+fn rt_vec_insertw(s: u64, index: u64, src: u64, w: u64) -> u64 {
+    rt_vec_insertwk(s, index, src, w);
+    rt_free(src);
+    return 0;
+}
+fn rt_vec_insertwk(s: u64, index: u64, src: u64, w: u64) -> u64 {
+    n := rt_len(s);
+    if n < index {
+        rt_abort();
+    }
+    rt_pushw(s, rt_flat_box(src, w), w);
+    mut i = n;
+    while index < i {
+        rt_copy_bytes(rt_slotw(s, i, w), rt_slotw(s, i - 1, w), w);
+        i -= 1;
+    }
+    rt_copy_bytes(rt_slotw(s, index, w), src, w);
+    return 0;
+}
+fn rt_vec_removew(s: u64, index: u64, w: u64) -> u64 {
+    n := rt_len(s);
+    if (index < n) == 0 {
+        rt_abort();
+    }
+    v := rt_flat_box(rt_slotw(s, index, w), w);
+    mut i = index;
+    while i + 1 < n {
+        rt_copy_bytes(rt_slotw(s, i, w), rt_slotw(s, i + 1, w), w);
+        i += 1;
+    }
+    raw_store(wrapping_add(s, 8), n - 1);
+    return v;
+}
+fn rt_vec_swapw(s: u64, i: u64, j: u64, w: u64) -> u64 {
+    a := rt_slotw(s, i, w);
+    b := rt_slotw(s, j, w);
+    if i != j {
+        rt_swap(a, b, w);
+    }
+    return 0;
+}
+fn rt_vec_reversew(s: u64, w: u64) -> u64 {
+    n := rt_len(s);
+    mut i = 0;
+    while i < (n >> 1) {
+        rt_vec_swapw(s, i, n - 1 - i, w);
         i += 1;
     }
     return 0;
@@ -6769,6 +9795,9 @@ fn rt_vec_contains(s: u64, v: u64) -> u64 {
 //
 // The control page is the first 4096 bytes of the sample mapping:
 //   0 magic  8 sample base  16 capacity  24 claimed  32 dropped  40 rate  48 cpu start (ns)
+//   56 words per sample: 1, or 8 for a request of version 2 (`grail profile --callers`), whose
+//      samples are the instruction pointer and then up to seven return addresses, read up the
+//      frame-pointer chain and ended by a zero. A version-1 request takes exactly the old path.
 fn rt_prof_words() -> u64 {
     return raw_state() + 2048;
 }
@@ -6785,7 +9814,36 @@ fn rt_prof_handler(sig: u64, info: u64, ctx: u64) -> u64 {
     if i < raw_load(page + 16) {
         // The kernel's rt_sigframe keeps the ucontext at a fixed offset from the third handler
         // argument; RIP is gregs[16] inside its sigcontext, 40 + 16 * 8.
-        raw_store(raw_load(page + 8) + i * 8, raw_load(ctx + 168));
+        depth := raw_load(page + 56);
+        if depth < 2 {
+            raw_store(raw_load(page + 8) + i * 8, raw_load(ctx + 168));
+        } else {
+            // The callers: every Grail frame keeps rbp, so the chain gives the return addresses.
+            // A frame pointer is followed only while it lies above the interrupted stack pointer,
+            // within 64 MiB of it, aligned and climbing - a leaf caught in its prologue or a frame
+            // without one ends the chain rather than sending the handler to read anywhere.
+            slot := raw_load(page + 8) + i * depth * 8;
+            raw_store(slot, raw_load(ctx + 168));
+            sp := raw_load(ctx + 160);
+            mut bp = raw_load(ctx + 120);
+            mut j = 1;
+            while j < depth {
+                if (bp < sp) | (sp + 67108864 < bp) | ((bp & 7) != 0) {
+                    break;
+                }
+                raw_store(slot + j * 8, raw_load(bp + 8));
+                next := raw_load(bp);
+                j += 1;
+                if next <= bp {
+                    break;
+                }
+                bp = next;
+            }
+            while j < depth {
+                raw_store(slot + j * 8, 0);
+                j += 1;
+            }
+        }
     } else {
         rt_atomic_fetch_add(page + 32, 1);
     }
@@ -6885,8 +9943,13 @@ fn rt_prof_start() -> u64 {
     // "1 RATE CAPACITY PATH": the format version, the sampling rate in Hz, the sample capacity and
     // the file the raw addresses go to. The CLI writes it; a hand-written file is accepted too.
     v := rt_prof_token(text, n, 0);
-    if rt_prof_num(text, n, v) != 1 {
+    version := rt_prof_num(text, n, v);
+    if (version != 1) & (version != 2) {
         return 0;
+    }
+    mut depth = 1;
+    if version == 2 {
+        depth = 8;
     }
     mut r = rt_prof_end(text, n, v);
     mut rate = rt_prof_num(text, n, rt_prof_token(text, n, r));
@@ -6916,7 +9979,7 @@ fn rt_prof_start() -> u64 {
         used = used + 1;
     }
     raw_putbyte(words + 128 + used, 0);
-    page := raw_map(4096 + cap * 8);
+    page := raw_map(4096 + cap * 8 * depth);
     if rt_error(page) {
         return 0;
     }
@@ -6955,6 +10018,7 @@ fn rt_prof_start() -> u64 {
     raw_store(page + 24, 0);
     raw_store(page + 32, 0);
     raw_store(page + 40, rate);
+    raw_store(page + 56, depth);
     ts := words + 608;
     if rt_error(rt_syscall(228, 2, ts, 0)) {
         raw_store(page + 48, 0);
@@ -7004,8 +10068,14 @@ fn rt_prof_dump() -> u64 {
     // "GRPROF2\n" then rate, capacity, count, dropped and the CPU nanoseconds the samples cover:
     // the rate a caller asks for is capped by the kernel's timer granularity, so the report derives
     // the effective rate from this measurement instead of assuming the request was honoured.
+    // "GRPROF3\n" for samples with their callers, `page + 56` words each.
     h := words + 352;
-    raw_store(h, 734726995712168519);
+    depth := raw_load(page + 56);
+    if depth < 2 {
+        raw_store(h, 734726995712168519);
+    } else {
+        raw_store(h, 735008470688879175);
+    }
     raw_store(h + 8, raw_load(page + 40));
     raw_store(h + 16, cap);
     raw_store(h + 24, count);
@@ -7017,7 +10087,11 @@ fn rt_prof_dump() -> u64 {
     }
     raw_store(h + 40, cpu);
     if rt_write_all(fd, h, 48) == 0 {
-        rt_write_all(fd, raw_load(page + 8), count * 8);
+        mut words_each = depth;
+        if words_each < 2 {
+            words_each = 1;
+        }
+        rt_write_all(fd, raw_load(page + 8), count * 8 * words_each);
     }
     rt_syscall(3, fd, 0, 0);
     return 0;

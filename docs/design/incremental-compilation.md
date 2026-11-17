@@ -75,131 +75,346 @@ the damaged entry instead of leaving it to miss forever (`tools/cache-test.mjs`,
 
 ## Below the module: the function-level cache
 
-**Implemented** (2026-11-15). A module's run is not one artifact but many: a big module has
-hundreds of functions, and an edit touches one of them. The per-function cache makes **one emitted
-function** the unit of reuse inside a module run that has to be redone:
+**Implemented** (2026-11-15), **made to hold after an edit** (2026-11-16). A module's run is not one
+artifact but many: a big module has hundreds of functions, and an edit touches one of them. The
+per-function cache makes **one emitted function** the unit of reuse inside a module run that has to
+be redone, and after an edit to one body every other body of the module is a hit.
 
-- `compiler/fncache.grl` is the store: one file per unit under `<store>/fn/`, written through
-  `stage/` and renamed into place, with the key record carried *inside* the file and compared on
-  the way out (two keys that hash to the same name are a miss, never a wrong hit).
+- `compiler/fncache.grl` is the store and the `Unit` type: one file per unit under `<store>/fn/`,
+  written through `stage/` and renamed into place, with the key record carried *inside* the file
+  and compared on the way out (two keys that hash to the same name are a miss, never a wrong hit),
+  and a checksum over the records the emitter will decode.
 - `compiler/native.grl` owns what a unit *is* and what its key names (`fn_key`, `fn_surface_now`,
-  `fn_flags_now`, `fn_open`, `fn_marks`), and `compiler/cli.grl` passes `--fn-cache DIR` to every
-  per-module run when `--cache` is asked for. It is `store/fn/`, so `grail cache clear` and
-  `grail cache prune` take it with everything else.
-- `tools/cache-test.mjs` section (i) is the proof, and prints the numbers.
+  `fn_flags_now`, `fn_open`, `fn_marks`), how one is produced (`fn_unit_of`) and how one is put
+  into a run (`fn_apply`). `compiler/cli.grl` passes `--fn-cache DIR` to every per-module run of a
+  build that goes through the store. It is `store/fn/`, so `grail cache clear` and `grail cache
+  prune` take it with everything else.
+- `tools/cache-test.mjs` sections (i), (j) and (k) and `bun tools/test-native.mjs x86_64
+  --unit-identity` are the proof, and print the numbers.
 
 A run that is a full module-level hit never reaches this layer: the compiler does not run at all.
-A run that misses replays the unchanged functions' bytes into its own stream at the position the
-function occupies and re-emits the rest through the front end and the emitter as it does today.
+A run that misses replays the unchanged functions and compiles the rest.
+
+### A unit is a value, produced and applied
+
+A `fncache::Unit` is everything one function's compilation hands the run:
+
+| field | what it is |
+| --- | --- |
+| `key` | the record below; compared, not trusted by name |
+| `text` | the function's emitted assembly, from its `.globl`/`.type` to its last line |
+| `facts` | the typed-IR facts its emission recorded, which the optimiser reads |
+| `regs` | its *registrations*: every drop helper it names and every specialisation it asks for |
+
+The two halves are separate functions with that value between them. **Produce** is `func` compiling
+the body and `fn_unit_of` taking what it left as a `Unit`. **Apply** is `fn_apply`: the function
+takes its ordinal in the part, `.gbase LINE` is written, then the text, the facts, and the
+registrations made again through the calls a fresh emission makes (`drop_ref_name`, `specialize`).
+A cache hit is a load and an apply. A miss that turns out to be a unit is produced, filed, taken
+back out of the run (output, fact table, drop requests, ordinal) and applied - so a body compiled
+in this run and a body replayed from the store reach the run by one route, and nothing reaches the
+run from a unit except through what the unit records. That is the shape parallel body compilation
+needs: workers produce units, the parent applies them in order.
+
+### Why a unit's text does not depend on the bodies before it
+
+Three things used to tie a body's bytes to everything emitted before it; each is now the body's own.
+
+- **Labels.** Inside a function a label is `.L<unit prefix>_<f>_<n>`: `f` is the function's ordinal
+  in its unit and `n` restarts at 1 with each function (`scope_begin`, `scoped_number`). The frame
+  constant (`.F...`) and the refinement strings (`.Lrfp...`, `.Lrfr...`) are spelled the same way.
+  Outside any function - drop helpers, the thunk, vtables - a unit's own counter mints
+  `.L<prefix>_<n>` as before. Specialisations and closures are emitted after every ordinary body,
+  so an edit to a body cannot move a later ordinary function's ordinal; the ordinal is in the key
+  all the same. The optimiser reads both spellings (`ir::label_number`) and leaves a body that mixes
+  two numberings as written; its own expansion labels (`.Lopt<prefix>_<ordinal * 2^20 + k>`) were
+  already per function, counted the same way by `run_range` and by `plan()` for the forked
+  workers, so nothing there changed and the output is still the same text at any `GRAIL_JOBS`.
+  *Cost:* about one byte per label mention; the compiler's own assembly went from 109,628,863 to
+  112,511,826 bytes (+2.6 %) on the same sources. *Rejected:* `f * 2^20 + n` in the one-number
+  spelling (no reader changes, 7-10 digits on every label); and keeping run-wide numbers and
+  patching them on replay (the output would be today's bytes, but every later body's text would
+  still shift after an edit, and the optimiser's body memo, keyed on that text, would miss).
+- **Positions.** A function states the line it starts on before its body - `.gbase LINE`, outside
+  the unit's text and outside the body the optimiser hashes - and each statement's marker is
+  `.gpos FILE DELTA COL RAW`, counting from that line (`site_base`, `site_pos`). A replay writes a
+  fresh `.gbase` and the stored text. `site_table` keeps the current base and adds it. A body the
+  optimiser copies out to inline elsewhere would carry deltas into a function with another base, so
+  the copy's markers are rewritten once, when it is registered (`ir::absolute_positions`, called
+  where `inline_candidate` files a copy and where `one_body` takes one from its memo), to
+  `.gposa FILE LINE COL RAW`, which `site_table` reads without consulting the base. The memoised
+  copy keeps its deltas; the inline pass itself is untouched. *Rejected:* bracketing each inlined
+  copy with two `.gbase` lines (the inline pass would have to track bases), and patching absolute
+  lines back in on replay (same memo problem as for labels).
+- **Registrations.** A body that named a drop helper or asked for a specialisation used to be
+  excluded, and one that *used* a specialisation an earlier body had asked for recorded nothing -
+  so when the earlier body stopped asking, the replayed one left an undefined symbol
+  (`tools/cache-test.mjs` (k) is that program). Now every naming and every request is recorded,
+  first of the run or not, in the order the body made it: `1 <type>` for a drop helper, `2
+  <template> <n> <type>...` for a specialisation, with types spelled structurally by
+  `iface_w_type` and read back by `iface_r_type`; the template is its index in the function table,
+  which the declaration surface in the key fixes. Before a unit is filed its registrations are read
+  back and must intern to the very types the body named, or the body is not a unit. On apply, all
+  of a unit's registrations decode or none of the unit is used. The drop walk follows suit:
+  `emit_drops` emits a helper for each type something named, in the order they were first named,
+  instead of one for every type the run interned - a replayed body interns nothing, so the old walk
+  would have written a different set in a different order with a store than without.
 
 ### The rule: which functions are units, and why the rest are not
 
-A *unit* is one function's **whole emitted region** - from the point `func` starts writing for it
-(the `.globl`, the `.type`, the label, the prologue, the body, the epilogue, the `.set` of the frame
-constant and the `.proved` second entry) to the point it stops. Two things have to hold.
+**1. The body must hand the run nothing a unit does not record.** `fn_marks` takes one counter per
+rule at the body's first byte and compares at its last; each rule counts every use, not only the
+first of the run. A body that trips one stays as emitted and is never filed. The build's
+`grail: fn-cache:` line lists how many bodies each rule kept out.
 
-**1. The emission must stay inside those bytes.** The front end registers work for later steps as it
-goes, and a replay that skipped the registration would hand the link an object missing a symbol.
-So a body is a unit only when, across its own emission, none of these moved: the closure list, the
-specialisation list, the drop-helper references or names, the vtable list, a module's link inputs,
-the compile-time constant table, the debug records, the fn thunk and the effect records. (The typed
-IR fact table *is* allowed to move: its entries for the body are stored in the unit and appended
-again on replay, because the optimizer's `DynPair` rules and the LLVM lifter read it.)
-This is measured, not assumed: `fn_marks` takes the counters at the unit's first byte and compares
-them at its last.
+| rule | why it is not a unit in this pass |
+| --- | --- |
+| creates a **closure** | the closure body is emitted by a later step from a record a unit does not carry |
+| uses a **vtable** (registers one, or names one an earlier body registered) | emitted later from the vtable list |
+| adds a **link input** | the link request is program-wide state |
+| adds a **constant** | the constant table is read by later bodies |
+| uses the **fn thunk** | emitted once, later, if any body used it |
+| spells a **position as text** (a refinement's `file:line`, or a statement above the function's own first line) | the text names a line of the file, so it moves when lines above it do |
+| **synthesises a declaration** (the first tuple of a size, the first result union, a closure environment) | a replay synthesises nothing, so the bodies after it would start with a different declaration count than the run that filed them, and their keys carry it |
+| names a type with **no interface spelling**, in its signature or in a registration | a key or a registration that cannot say the type would be a guess |
+| records an **effect** | a run with effect records files no units at all |
 
-**2. The key must name every input the bytes are a function of.** The key is a text record holding
+Also outside this layer, as before: a generic template (it is replayed per specialisation), a
+specialisation replay, and whole runs of the shapes `fn_on` refuses - `--debug`, `--backend=llvm`,
+`--emit-ir`, `--export`, PE/Mach-O, ARM/RISC-V, a validating run - and a run whose surface cannot
+be spelled, which includes a run with a compile-time constant still pending when the surface is
+taken (its value will reach bodies, and the function that computes it is a body, not surface).
+
+**2. The key must name every input the bytes are a function of.** `grail-fnkey 2`:
 
 | field | why it is there |
 | --- | --- |
-| the part and its label prefix | labels are `.L<prefix>_<n>`; the prefix is the module's |
+| the part and its label prefix | labels are `.L<prefix>_...`; the prefix is the module's |
 | the symbol the label spells | a renamed or re-signatured function is a different unit |
-| the option vector (every argument except the output path and `--fn-cache`) | a flag that changes code generation changes every body; hashing the words means a flag added later is in the key by construction |
-| the **compiler's own identity** | a unit is code *this* compiler emitted. The driver passes the digest of the binary it runs (`--fn-cache-id`, from `cache_build_id`); a hand-run compiler, which has no digest to pass, is identified by its executable's path, size and modification time instead. Without this a rebuilt compiler would replay its predecessor's bytes, which is the worst stale splice the layer could make |
-| the **declaration surface** of the run | a field offset, a drop bit, a symbol spelling and a constant's value all reach the emitted text as numbers. The surface is every declaration, alias, function *signature*, constant, import, interface and implementation - and every interface the run read, as its surface (the bytes before the trailer). No body is in it. |
+| the option vector (every argument except the output path and `--fn-cache`) | a flag that changes code generation changes every body; the words include the modules the run was told to read (`--use-module`) |
+| the **compiler's own identity** | a unit is code *this* compiler emitted (`--fn-cache-id`, or the executable's path, size and time for a hand-run compiler) |
+| the **declaration surface** of the run | a field offset, a drop bit, a symbol spelling and a constant's value all reach the text as numbers; it is every declaration, alias, signature, constant, import, interface and implementation, and the surface of every interface the run read. No body is in it. |
 | the declaration's own source text | the obvious input, and the only one an ordinary edit moves |
-| the function's typed signature, spelled by `iface_w_type` | the types after substitution, structurally - not the run's interned ids |
-| the line and column the declaration starts at | `.gpos` bakes a statement's absolute line into the body, so an edit that adds a line above a function must invalidate it |
-| the label number, the `.Lrfp` number and the declaration count it starts at | a body's text names the numbers it was written with, and a declaration synthesised by an earlier body changes what a later one can see |
+| the typed signature, spelled by `iface_w_type` | types after substitution, structurally |
+| the file's index and the column the declaration starts at | `.gpos` prints both |
+| the function's ordinal in its unit | its labels spell it |
 
-Not in the key, and why that is safe: other functions' *bodies* (a body reaches another only through
-its signature, which is in the surface; there is no per-function inlining at this stage), the whole
-module's text (that is the problem units exist to remove), and the run's interned type ids (they
-never reach the text).
+Gone from the key since version 1: the line the declaration starts at, and the label and `.Lrfp`
+numbers it starts at - the three fields that made an edit to one body miss every body after it -
+and, since version 3, the declaration count the body starts with (below).
 
-**What replay restores**: the bytes, the label and `.Lrfp` counters the text consumes (so the next
-function mints the numbers it would have minted), and the body's fact records. Everything else the
-run's bookkeeping holds is untouched, because the body added nothing to it.
+### The declaration count in the key
 
-### What is deliberately not cached, with the reason
+The count is run-order state: it says how many declarations exist when the body starts, and a
+worker compiling one body in isolation would not have it. What moves it during bodies is the
+find-or-create synthesis of `.tuple::TupleN` (`tuple_decl`), result unions (`make_union`), the
+function-value record (`fn_value_decl`) and closure environments. Measured rather than argued: the
+whole x86_64 corpus (689 programs that compile) was compiled with three extra tuple declarations
+synthesised before the first body, shifting every later declaration index, and every assembly was
+byte-identical to the unshifted compile. So nothing in the emitted text was found to depend on the
+count; names reach symbols by module and name (`type_key`), not by index. So the count is not in
+the key (version 3), and the experiment is permanent: `--shift-declarations N` synthesises N tuple
+declarations before the first body, and `--unit-identity` compiles every case with it and requires
+the same assembly. A text dependency on declaration order that creeps in later fails that leg.
 
-| class | why | cost |
-| --- | --- | --- |
-| a body that requests a **specialisation** | the request is a record in `c.specs` that `drain_specs` emits later, from the template's body and type arguments - neither of which a unit carries | 60 % of the compiler's own bodies; this is the 97 %-of-bytes class the earlier measurement found, and it is still the ceiling |
-| a body that creates a **closure**, a **drop helper** or a **vtable** | same: emitted by a later step, registered here | included in the above |
-| a **generic template** of this module | pass 3 skips its body; pass 4 replays it per specialisation, which is that specialisation's unit, not this declaration's | every `impl` method of `Option`/`Result`, all of `core` and `result` |
-| a **specialisation replay** (`-- fn` pass 4) | its identity is the template plus its type arguments, and the replay path shares the request dedupe list; keying it is a later stage, and a guess here is a wrong splice | all specialised code |
-| a run with **effect records** (`@no_alloc`/`@no_panic` anywhere) | a body's call edges are per-body records in the effect table; the layer does not carry them | nothing in this tree claims effects |
-| the **first body of a part** | `part()` writes the `.grail_part`/`.text` marker inside that body's own bytes and resets the part's counters; it is one miss per part per run | one body per module run |
-| a body whose **signature cannot be spelled** (`iface_w_type` has no spelling for a kind) | a key that cannot name the signature would reuse a body on a guess | none in this tree |
-| `--debug`, `--backend=llvm`, `--emit-ir`, `--export`, PE/Mach-O, ARM/RISC-V | the shape is not the one this layer re-emits: line tables and the lifter inspect the whole stream, the other writers rewrite it after selection, and `--export` counts definitions a replay never reaches | all of those shapes (the module cache covers them) |
+### What a run reads
 
-The direction is lexical throughout: **a body the key cannot describe is a body that is re-emitted,
-never one that is reused on a guess.** A wrong splice is a silent miscompile, and a missed hit costs
-what the build cost before this layer existed.
+A unit key names the surface of every interface the run read. A module's run reads the interfaces
+the driver names (`--use-named`, `--use-module NAME`), which is the list the module key is built
+from, so a cold build with every module running at once and a later rebuild of one module compute
+the same surface, and the first edit after a cold build replays. (Before that, a run read whatever
+interface files its build directory held when it started, and the first rebuild of a module after a
+cold build missed every unit once.)
 
-### Where it plugs in
+### The test switch
 
-Inside `func`, after the signature is parsed and the body's brace range is known (`start`/`end`) but
-before `part()` writes anything: `fn_open` decides whether this body can be a unit, `fn_key` builds
-the key, and a hit appends the stored bytes and returns - the body's tokens are skipped with
-`skip_braces`, so its checking, lowering and emission never happen. On a miss the body is emitted
-exactly as before, and at the end of `func` `fn_marks` decides whether the bytes just written are a
-unit; if they are, they are filed under the key with their label counts and facts.
+`GRAIL_FN_CACHE=0` in the environment of `grail build` leaves the module store on and the unit
+layer off: `--fn-cache` is not passed to the module runs. It exists for `tools/cache-test.mjs`,
+whose reference build is the same tree built from an empty store with the layer off - a plain
+`grail build` goes through the store too, and would hand back the objects the build under test had
+just filed. Nothing else reads it.
 
-Generics: **not yet** a unit of this layer. A specialisation is keyed by the template's body hash and
-the structural key of its type arguments (`type_key`, already content-addressed and index-free) and
-by the interfaces it reads, so the design above carries over unchanged; what is missing is the
-replay path's own bookkeeping (the request dedupe list and `spec_closures`), which is why the whole
-specialisation class is excluded rather than half-handled.
+## Measured: the function-level cache after the 2026-11-16 pass
 
-## Measured: the function-level cache on the compiler's own sources
+Counts are exact; the clock is a shared host's and moves by tens of percent between runs (best of
+the runs taken is given, with the range where it matters).
 
-The compiler is the natural subject: `compiler/*.grl` is 2,569 emitted bodies and 105,315,043 bytes
-of assembly. Compiled as one `--separate` run (all of its modules in one stream, the shape
-`bun tools/native.mjs build` uses), with the unit store under `.work/` and this host's load moving
-the clock by a few percent in either direction:
+**How many bodies are units.**
 
-| | bodies | units | wall clock |
+| program | bodies | units | not units |
 | --- | --- | --- | --- |
-| cold unit store | 2,569 | 879 filed, 1,690 not units | 82.2 s |
-| the same tree again | 2,569 | 879 replayed, 0 filed, 1,690 not units | 80.0 s |
-| one function's body reverted | 2,569 | 878 replayed, 1 filed, 1,690 not units | 72.1 s (another run, less loaded) |
-| a clean build of the same tree, empty store | 2,569 | - | 75.7 s (the same other run) |
+| syn1000 (1000 x {record, constructor, 15-line function}), before | 2,001 | 0 | 2,000 (every body names a drop helper or is the first to) |
+| syn1000, after | 2,001 | 2,000 | 1: first of part |
+| the compiler's own sources, before | 2,707 | 928 | 1,763 |
+| the compiler's own sources, after | 2,724 | 2,708 | 16: first of part, one per module |
+| the x86_64 corpus (689 programs, runtime and library included each time) | 320,891 | 320,531 | 360 |
 
-**34 % of the bodies are units, and a run that replays all of them is 3-5 % faster.** The assembly
-of the replayed run is byte-identical to the clean build's (105,315,043 bytes, `cmp`), and the
-one-function case differs from the other variant in that function's own bytes and nowhere else. The
-counts are exact; the clock moves with the machine.
+Over the corpus the rules that kept a body out, in bodies (a body can meet several): first of part
+2,478, a position spelled as text 222, a synthesised declaration 112, a closure 90, a vtable 26,
+the fn thunk 12. (The first-of-part count is per part and is not in the 360: those bodies are never
+candidates.)
 
-That is the ceiling the earlier measurement predicted (40 % of bodies, 2.9 % of bytes), and it is
-worth stating plainly rather than dressing up: the front end of the 1,690 bodies that request a
-specialisation, a closure or a drop helper is what a module run is mostly made of, and no key can
-describe those today. Widening the layer means making a specialisation *request* replayable, not
-making the key cleverer.
+**A rebuild after a one-body edit.**
 
-Two costs, also stated plainly:
+| | before | after |
+| --- | --- | --- |
+| syn1000, `grail build`: replayed / compiled | 0 / 2,000 | 1,999 / 1 |
+| syn1000, wall clock, edit keeps the line count | 2.73 s | 1.98 s |
+| syn1000, wall clock, edit adds lines | 2.83 s | 1.97 s |
+| syn1000, the same edit with the unit layer off | 2.64 s | 2.80 s |
+| syn1000, first edit after a cold build | 2.79 s, 0 replayed | 2.41 s, 1,999 replayed |
+| compiler sources, one process (`grail OUT.s compiler/*.grl`): replayed / compiled, edit keeps the line count | 927 / 1 (+1,763 not units) | 2,707 / 1 |
+| the same, edit adds lines | 711 / 217 (+1,763 not units) | 2,707 / 1 |
+| compiler sources, wall clock, edit keeps the line count | 16.7 s | 6.9 s (6.9-10.2) |
+| compiler sources, wall clock, edit adds lines | 20.4 s | 8.7 s (8.7-11.0) |
+| compiler sources, the same edit with no unit store | 21.6 s | 13.5 s (13.5-15.5) |
 
-- **Filing is not free.** A cold build writes one store entry per unit: on the six-module project
-  `tools/cache-test.mjs` builds, 837 entries cost roughly half a second, which is why the cold
-  column above is not faster than a clean build. It is paid once per unit and only by a run that
-  missed.
-- **The word optimizer still runs.** The unit covers the front end and the emitter, not
-  `optimize.grl`: that pass walks the whole stream (and `inline_calls` rewrites callers from
-  callees), so a per-function replay of its *output* would need the inliner's verdict for every
-  call in the key - which the earlier plan called out as `inlined: <callee>@<n>` and which this
-  stage does not record. What a unit skips is the expensive, per-body part: parsing the body again,
-  checking it, lowering it and emitting it.
+The "before" compiler-source times were taken on the tree before the unboxed-view work was merged,
+which made every compile faster, so read the last three rows across, not down: with the store an
+edit to one body of the compiler now costs about half of what it costs without it, where it used
+to cost three quarters when the line count held and nearly all of it when it did not.
+
+In one process with `GRAIL_JOBS=1` (CPU seconds, same sources): no store 25.7, a cold store 32.4
+(filing 2,708 units and as many optimiser memo entries), every body replayed 13.8.
+
+**Where an all-hit rebuild of the compiler goes** (`grail profile`, leaf samples, `GRAIL_JOBS=1`):
+`rt_alloc_unlocked` 14.6 %, `optimize::run_range` 12.3 %, `rt_int_cast` 7.9 %,
+`optimize::lines_of_interest` 7.4 %, `rt_free_unlocked` 7.3 %, `native::site_table` 6.0 %,
+`xxhash::read64` 4.6 %, `rt_read_file_blocking` 3.9 %, `rt_copy_bytes` 3.6 %, `rt_int_neg` 3.5 %.
+The front end is no longer in the top ten: what is left is the back end walking 100 MB of text
+that did not change (the optimiser's line scan even when every body is a memo hit, the inline
+pass's index, the site table), the hashing of every body for the memo, and allocation - much of it
+the per-fact and per-entry vectors of the two stores' decoders. `fncache::rs`, `iface_r_type` and
+`fn_apply` together are under 5 %.
+
+**Costs.** Filing is not free: a cold build of the compiler's sources with a store is about a
+quarter more CPU than one without (above), paid once per unit and only by a run that missed. And
+the unit covers the front end and the emitter; the optimiser has its own per-body memo
+(`one_body`), which this pass makes effective after an edit - a body's text no longer shifts when
+another body changes, so its memo entry is found - but the passes over the whole stream still run.
+
+The first body of a part used to be excluded because `part()` writes the part's marker inside its
+bytes. Its unit's text starts after the marker (the point `func` takes a unit back to, `apply_mark`),
+and a hit or a worker's unit opens the part before it is applied, so since the parallel-bodies pass
+the first body is a unit like any other.
+
+## Parallel bodies
+
+**Implemented** (2026-11-16, branch `gaps12-parbodies`). A unit is a value produced by compiling one
+body and applied to the run by `fn_apply`, so the bodies of one module can be produced by several
+processes and applied by one.
+
+- **When the fork happens.** `par_start` only arms the walk. The parent walks the bodies itself,
+  applying hits from the store, and forks when it has compiled `par_threshold` bodies the store did
+  not have (`par_fork`: 1 with no store, 16 with one), cutting only the source still ahead of it.
+  A rebuild after an edit therefore never forks: forking it anyway made workers load and pipe back
+  2,700 hits the parent can load itself, and the compiler's one-body-edit rebuild went from about
+  7 s to 13-14 s; with the lazy fork it is 8-11 s on the same loaded host.
+- **The shape.** At the fork the source still ahead is cut into slices of about equal size, counted in bytes over the files in
+  order. The process forks one worker per slice after the first; the copies share its memory until
+  they write, so they start with every declaration, signature, interface and the declaration
+  surface. Each worker walks pass 3 like the parent, compiles the bodies of its slice into units -
+  keying, loading from the store and filing exactly as one process does - and skips every other
+  body the way a hit does (it opens the part and spends the function's ordinal, so its labels are
+  numbered as the parent's). It keeps what it made in memory and writes it to its pipe once, when
+  it has walked past its slice, so it never waits on the parent while it compiles.
+- **The parent** compiles the first slice itself and, as its walk reaches each later body, reads
+  that worker's stream (once, the first time it needs it) and applies the unit the worker sent if
+  its key is the key the parent computes for the body - the route a cache hit takes. A body a
+  worker reported as not a unit (a closure, a vtable, ...: the rules above), or one whose key does
+  not match, the parent compiles itself, in place. The walk, its counters and its registrations are
+  therefore the ones a single process has, and the output is byte-identical at any worker count.
+- **Diagnostics.** Today a body's error is printed by `fail`, and `next_error` runs the compile
+  again with that body skipped to report the next one (up to 20 runs); an error outside a body ends
+  the compile. A worker never reports: `fail` in a worker exits at once. The parent finds the
+  stream short (or the status non-zero), collects every worker, says so under `GRAIL_DEBUG` ("the
+  rest of this module is compiled in one process"), and compiles every remaining body itself - so
+  the first error, the re-runs, the text, the order and the exit status are exactly one process's.
+  A re-run with `--skip-body` does not fork. `tools/jobs-test.mjs` (d) checks three errors spread
+  over a 1000-function module, for `grail check` and for a compile.
+- **Check runs.** `--check` walks the same way (it returns only before the optimiser), so it is
+  parallel too. Its workers send a unit with no text and no facts - a check writes no assembly and
+  runs no optimiser - only the key and the registrations, which the parent applies so the
+  specialisations and drop helpers the checked bodies ask for are still checked. That is everything
+  else a checked body contributes to a check run: the closures and vtables it creates are the
+  non-unit rules, so the parent checks those bodies itself, and the effect tables turn the whole
+  layer off.
+- **What else a body contributes.** Audited before this pass, by every vector `func` and what it
+  calls can push to (`c.<field>.push`): besides its text, facts and registrations a body leaves only
+  per-body state (borrow and prover state, hints, the `caddr`/`embedded`/`pointers` places, reset
+  at its entry), memos that never reach text (`caps_memo`, the interned type table, file caches),
+  the interface names a `dyn` type adds to `dyn_ifaces` (read only by `check_interfaces`, which runs
+  before any body), diagnostics (`reported`, `diag_json`: only `fail` writes them, and it ends the
+  process) and the effect tables (any effect record turns units off for the run). So the store lost
+  nothing on a hit before this pass either.
+- **The cut cannot matter.** A unit's text is a function of its key - the identity leg shows a
+  replay equals a fresh emission, and `--shift-declarations` that declaration indices do not reach
+  text - and the parent applies in source order. To make that a test rather than an argument,
+  `GRAIL_BODY_SLICE=2` forces two processes with the source cut in two and `GRAIL_BODY_SLICE=1`
+  deals the bodies out in turn, so that no process compiles two consecutive bodies;
+  `GRAIL_TEST_BODY_WORKER_DIE=1` makes the first worker die at once. The `unit-identity` leg
+  compiles every corpus program all three ways and requires the one-process bytes.
+- **When.** Not with `--debug`, the LLVM backend, `--emit-ir`, PE/Mach-O, ARM/RISC-V, `--export`,
+  a run with effect records or a `--skip-body` re-run (`par_start`'s conditions, the same shape the
+  store's units need), and not when the source is under 128 KB per worker (`PAR_MIN`): below that a
+  fork and a pipe cost more than the bodies. The worker count is `GRAIL_JOBS` or the processor
+  count, reduced to that size, and then to the tokens the jobserver has free.
+- **The parent takes a slice.** It compiles the first slice rather than waiting: measured against
+  a variant where every slice goes to a worker and the parent only applies, there was no
+  difference beyond the host's noise (self-check 6.1-8.9 s against 6.4-8.5 s, self-compile 17.4-19.0
+  s against 15.8-19.1 s, load average near 38), and the variant runs one process more, so the
+  parent keeps its slice.
+
+### The optimiser's memo under a unit's key
+
+A body the front end applied from a unit is noted where its opening and closing lines are written
+(`ir::Known`, filled by `fn_apply`). The optimiser takes those bodies from the notes - `run_range`
+scans line by line only the text between them - and keys their memo entries by the unit's key
+(plus the meta it always had: the compiler, the unit, the ordinal, the facts digest, the replay
+range) instead of an xxhash of the body's text. Sound because a unit's text is a function of its
+key, which the identity leg shows; `GRAIL_MEMO_VERIFY=1` optimises every such body again and fails
+on any difference, and `tools/cache-test.mjs` (l) runs it on a warm rebuild of the compiler. Every
+note is checked to be a whole body before it is used. On the compiler's sources a rebuild after a
+one-body edit went from 10.2 to 6.1 CPU seconds in one process, and from 7.8-8.5 to 4.9-5.4 s
+at the default job count (self-built compilers, load average 25-28).
+
+### The jobserver
+
+`grail build` runs one compiler process per module, each forks optimiser workers, and each now
+forks body workers: bounded by the processor count each, that is hundreds of processes on a large
+project. `compiler/jobs.grl` is one counter for the whole build, in GNU make's protocol: a fifo
+holding one byte per token, `N - 1` tokens for `N` jobs because every process owns one implicit
+token. The outermost `grail build` makes it beside its output (`OUT.jobs`, removed when the build
+ends) and names it to the processes it starts in `GRAIL_JOBSERVER`; a build started under `make -j`
+finds make's in `MAKEFLAGS` (`--jobserver-auth=fifo:PATH`) and uses it instead. The driver's
+module runs, the optimiser's workers (`run_forked`) and the body workers all take tokens from it.
+
+- A token is taken by the process that starts the work and given back by that process after it has
+  waited for the work - never by the work itself - so a worker that dies cannot lose one; the
+  optimiser's failure exit and every return of the driver give back what they hold.
+- A take never waits (`host::read_fd` with bit 62 set reads what is there and returns). A process
+  that gets no token runs fewer workers or does the work itself, so no set of processes can each
+  hold tokens while waiting for another's - a waiting take would allow that deadlock.
+- With no jobserver in the environment a process behaves as before, bounded by its own count.
+- `host::open(path, 2)` makes the fifo if it is missing and opens it for reading and writing,
+  non-blocking; pipes are close-on-exec, so a pair of descriptors would not reach the module runs.
+
+`tools/jobs-test.mjs` checks a body worker that dies (one-process bytes, the fallback said, every
+token back), a 17-run build under `GRAIL_JOBS=3` (at most 7 compiler processes at once: the driver,
+and per token one module run - its wrapper and its compiler - or one worker), and a build under a
+make-style fifo (its tokens all back afterwards). On the 24-module benchmark with `GRAIL_JOBS=4` the
+peak is 9 processes where the previous compiler ran 49.
+
+### Not yet: effects
+
+Any effect claim (`@no_alloc`, `@no_panic`) turns units off for the whole run, so a program with
+one gets neither the store's per-function layer nor parallel bodies. The effect checker records per
+body which functions it calls and whether it allocates or fails, and settles the claims over the
+whole call graph at the end (`fx_solve`). Those per-body records are exactly what a unit would
+have to carry - one summary per body: its own allocation and failure facts and its call edges -
+for the parent to put them into the effect tables on apply, as it puts the registrations. That is
+the next widening of the unit, and it is a contained one: the solver already works from the
+tables, not from the bodies.
 
 ## What a module run can now skip, per edit (the numbers `tools/cache-test.mjs` prints)
 
@@ -215,9 +430,24 @@ The proof builds a six-module project whose `big` module is generated with 400 f
 4. an interface edit - every unit of the runs that read that interface misses, and the units of a
    run that read no such interface still replay.
 
-Every case ends with the image compared against a build with no cache at all, and (1) additionally
-compares the module assembly against an empty-store build's, because a replayed body that is not the
-body a fresh emission writes is a silent miscompile and has to be caught as bytes.
+Section (j) is the same question on a module of the shape real code has - 150 records with a string
+field, a constructor and a function each, every body naming a drop helper and instantiating a
+generic at a shared type and at a type of its own: an edit that keeps the line count (and adds a
+branch, so the body mints more labels), an edit that adds five lines, and one that removes them
+again each compile one body and replay the other 298, and the module assembly and the image are
+compared byte for byte with the reference build. Section (k) is the undefined-symbol hole: two
+bodies instantiate `same<u64>`, the first stops, and the replayed second has to ask for it.
+`--units` runs (j) and (k) alone.
+
+The reference build in (h) to (k) is the same tree built to the same output name from an empty
+store with `GRAIL_FN_CACHE=0`, because a replayed body that is not the body a fresh emission writes
+is a silent miscompile and has to be caught as bytes.
+
+`bun tools/test-native.mjs x86_64 --unit-identity` (gate leg `unit-identity`) asks it of every
+program in the corpus: each case that compiles is compiled with no unit store, with an empty one
+and with the one that compile filled, and the three assemblies must be identical, with every filed
+unit replayed; then the same three with `--debug`, each assembled. Its first run found a crash that
+predated this pass (a pending compile-time constant under `--fn-cache`).
 
 ## Watch mode
 
@@ -395,9 +625,10 @@ emitted):
 The reason is structural: in this compiler almost every non-trivial body instantiates a generic
 (`view`, `push`, the iterator adapters), which registers a specialisation whose own body has to be
 emitted into the same object, and nearly every body that owns memory asks for a drop helper. The
-number to watch was 2.9 %, not 40 %, and the implementation now measures 34 % of bodies and about
-5 % of a run's wall clock - the same shape, slightly different counts because the shipped predicate
-admits typed-IR facts and also drops the first body of every part.
+number to watch was 2.9 %, not 40 %, and the first implementation measured 34 % of bodies and about
+5 % of a run's wall clock. The 2026-11-16 pass removed the two largest classes of that predicate -
+a specialisation request and a drop-helper naming are now recorded in the unit and made again on
+replay - and the compiler's own sources went to 2,708 units of 2,724 bodies.
 
 ## Measurements (printed by `tools/cache-test.mjs`)
 
