@@ -1,5 +1,13 @@
 ## Unreleased
 
+- **Fixed: an LLVM-backend miscompile of a vector grown through its address.** A call handed `&mut v`
+  receives the slot's address, not the header word, so the lifter did not count it as a call that
+  can grow `v`, and the `len`/`data` it had read before the call were used after it: `pad(&mut out,
+  4); out.len()` read the old length (65 / 73 / 0 instead of 72 / 73 / 7). Now any call that is not
+  known to leave headers alone makes the cached fields of every vector whose address the function
+  takes stale, and they are read again. `vector-grown-through-its-address-is-reread` covers the
+  direct call, a loop, a method on a record holding the vector and a record passed by `&mut`.
+
 - **The atomics family.** `Atomic<T>` now holds `u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`,
   `i64` or `bool`. Each width wraps at its own size, and `fetch_min`/`fetch_max` are signed for
   `i*` types.
