@@ -881,7 +881,7 @@ and of the assembler, and an image is a function of the objects and of the linke
 
 ```
 .work/cache/<target>/
-  blob/<sha256>     artifact bytes; the file name is the digest of the bytes inside it
+  blob/<digest>     artifact bytes; the file name is the digest of the bytes inside it
   map/prog/<key>    `blob <digest>`, `parts <n>`, `output <path>`, `link <digest> <path>` ...
   map/lnk/<key>     `blob <digest>`
   map/mod/<key>     `module <name>`, `asm <digest>`, `blob <digest>`
@@ -890,12 +890,13 @@ and of the assembler, and an image is a function of the objects and of the linke
 
 This is the discipline `tools/native.mjs` and `tools/bootstrap.mjs` already use - content in the
 path, write to a staging name, rename into place - extended to a store shared by all builds of a
-target. A record is written to `stage/` and `mv`d; a blob is copied to `stage/` and `mv`d. A crash
+target. A record or a blob is written into a directory of `stage/` that one write claims, then renamed
+into place with rename(2), in the build's own process. A crash
 leaves at worst a file in `stage/`, which the next build overwrites; it can never leave a partial
 entry under a name a later build would trust.
 
-A blob is only reused after its bytes have been hashed again and matched against the name it is filed
-under, and a module entry is only reused when the digest of the assembly it was built from still
+A blob is only reused when its bytes hash to the name it is filed under (its `fp/` record answers
+while the blob keeps the stamp it was filed with; any write since makes it hashed again), and a module entry is only reused when the digest of the assembly it was built from still
 matches the assembly just emitted. So a corrupted, truncated, edited or unreadable entry is a miss and
 a rebuild, and filing a repaired artifact replaces the damaged entry instead of leaving it to miss
 forever. `tools/cache-test.mjs` damages an object, an image and a record and asserts the rebuild, the
@@ -933,11 +934,18 @@ signed or keyed manifests are still what a cache that has to resist a hostile wr
 
 ### What it costs, and what it saves
 
-A cached build pays for hashing: the compiler's own binary (12 MB), every source, the tools' version
-probes, and a `sh` per digest. That is why the store prefers the host's `sha256sum` when it is there
-and falls back to the compiler's own SHA-256 when it is not - the same digest either way, milliseconds
-instead of seconds for the big files. On the proof project a cached build costs about 55 ms of that
-overhead and saves the 0.7 s build it replaces.
+A cached build hashes in its own process and starts no helper to do it. The digest is
+`store_hash` (cli.grl): XXH64 under four seeds, read a word at a time, a few instructions a byte,
+where SHA-256 written in Grail costs hundreds. The store needs collisions to be improbable, not
+unforgeable; anything that can write the store can plant a record anyway. A file is hashed only
+when its stamp (size, nanosecond modification time, inode, device) differs from the one its `fp/`
+record holds, as cargo and go decide. A file written in the last tenth of a second is not recorded
+by its stamp, because a rewrite within the kernel's timestamp granularity could keep it. The same
+record holds what the driver reads sources for: the module a file declares, the modules it `use`s
+and whether it has an `@embed`. A no-op build therefore reads no source; it stats each input and
+reads a handful of records. The compiler's `--print-inputs` answer is remembered the same way,
+under the stamps of the files it named and of the directories resolution looked in. A tool's
+`--version` is asked once per binary stamp.
 
 Measured by `tools/cache-test.mjs` (three modules plus runtime and `__start`, five parts; the absolute
 times move with the page cache, the ratio does not):

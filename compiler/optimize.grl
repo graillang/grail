@@ -211,6 +211,10 @@ fn opname<a>(o: (&a mut ir::Body), op: u64) {
         app(&mut o.out, view("cvtsi2sdq"));
         return ();
     }
+    if op == 77 {
+        app(&mut o.out, view("movsd"));
+        return ();
+    }
     if op == 98 {
         app(&mut o.out, view("movl"));
         return ();
@@ -2337,6 +2341,8 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
     dead_defs(&mut o, view(s), first, last);
     retarget(&mut o, view(s), last);
     offset_loads(&mut o, view(s), last);
+    xmm_loads(&mut o, view(s), last);
+    xmm_stores(&mut o, view(s), last);
     newframe := compact(&mut o, view(s), prologue, ns);
     // Rule 3 (call ABI S4): of the cleared range, only the slots that may be read before written.
     mut zkeep = u64[];
@@ -4271,6 +4277,71 @@ fn offset_loads<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
         kill(&mut o, i);
     }
 }
+// A float loaded through a general register - `movq MEM,%rax; movq %rax,%xmmN` with %rax dead after -
+// is `movsd MEM,%xmmN` (dev-gap nbody item 4): an element of an f64 array or vector, or a float
+// field, without the round trip.
+fn xmm_loads<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
+    for j in last {
+        if (o.del[j] != 0) || (o.op[j] != 1) || (o.k0[j] != 1) || (o.v0[j] != 0) {
+            continue;
+        }
+        if !((o.k1[j] == 7) || ((o.k1[j] == 6) && is_xmm_text(view(s), o.s1[j], o.e1[j]))) {
+            continue;
+        }
+        p := prev_live(&o, j);
+        if (p >= j) || (o.op[p] != 1) || !((o.k0[p] == 4) || (o.k0[p] == 5)) || (o.k1[p] != 1) || (o.v1[p] != 0) {
+            continue;
+        }
+        if ((o.m0[p] & 1) == 0) && (o.k0[p] == 5) {
+            // A generated operand is an address only when it names a register.
+            if o.m0[p] == 0 {
+                continue;
+            }
+        }
+        if !dead_after(&o, j, 0, 6) {
+            continue;
+        }
+        ir::put(&mut o.op, p, 77);
+        set_operand(&mut o, p, 1, o.k1[j], o.v1[j]);
+        set_range(&mut o, p, 1, o.s1[j], o.e1[j]);
+        kill(&mut o, j);
+    }
+}
+// The store side: `movq %xmmN,%rax; movq %rax,MEM` with %rax dead after is `movsd %xmmN,MEM`. It runs
+// last, after every pass that reads a memory destination's kind.
+fn xmm_stores<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
+    for p in last {
+        if (o.del[p] != 0) || (o.op[p] != 1) || (o.k1[p] != 1) || (o.v1[p] != 0) {
+            continue;
+        }
+        if !((o.k0[p] == 7) || ((o.k0[p] == 6) && is_xmm_text(view(s), o.s0[p], o.e0[p]))) {
+            continue;
+        }
+        // Up to three plain moves that leave %rax alone may come first (the address loaded into
+        // %rcx): `movq %xmm8,%rax; movq -984(%rbp),%rcx; movq %rax,(%rcx)`.
+        mut j = next_live(&o, p, last);
+        mut steps = 0;
+        while (j < last) && (steps < 3) && (o.op[j] == 1) && (o.k1[j] == 1)
+            && ((((ir::reads(&o, j) | ir::writes(&o, j)) & 1) == 0)) {
+            j = next_live(&o, j, last);
+            steps += 1;
+        }
+        if (j >= last) || (o.op[j] != 1) || (o.k0[j] != 1) || (o.v0[j] != 0) || (o.k1[j] != 4) {
+            continue;
+        }
+        if (o.m1[j] & 1) != 0 {
+            // The address uses %rax itself.
+            continue;
+        }
+        if !dead_after(&o, j, 0, 6) {
+            continue;
+        }
+        ir::put(&mut o.op, j, 77);
+        set_operand(&mut o, j, 0, o.k0[p], o.v0[p]);
+        set_range(&mut o, j, 0, o.s0[p], o.e0[p]);
+        kill(&mut o, p);
+    }
+}
 fn name_hash<b>(s: &b [u8], a: u64, e: u64) -> u64 {
     mut h = 0;
     for i in e - a {
@@ -4319,7 +4390,7 @@ fn inline_candidate<a, b>(o: (&a mut ir::Body), s: &b [u8], prologue: u64) {
                         if o.k0[i] != 4 {
                             return ();
                         }
-                        if !ir::same_range(view(s), o.s0[i], o.e0[i], view("rt_abort")) {
+                        if !never_returns(&o, view(s), i) && !tail_call(&o, i, last, &dead) {
                             return ();
                         }
                     }
@@ -4426,11 +4497,15 @@ fn inline_candidate<a, b>(o: (&a mut ir::Body), s: &b [u8], prologue: u64) {
     while mark < o.out.len() {
         o.out.pop()!;
     }
-    na := o.ls[1];
-    ne := o.le[1] - 1;
-    mut name = u8[];
-    for x in ne - na {
-        name.push(s[na + x]);
+    // Filed under the body's symbol, from its `.type` line: the line after it is a statement's site
+    // label (`.Lgs<n>:`) in a build with error locations, not the symbol's own label.
+    mut name = o.name.copy();
+    if name.len() == 0 {
+        na := o.ls[1];
+        ne := o.le[1] - 1;
+        for x in ne - na {
+            name.push(s[na + x]);
+        }
     }
     unit := o.unit.copy();
     // Filed with its positions made absolute (the copy will stand in other functions); the copy as
@@ -4438,6 +4513,30 @@ fn inline_candidate<a, b>(o: (&a mut ir::Body), s: &b [u8], prologue: u64) {
     absolute := ir::absolute_positions(view(body), o.gbase);
     exchange(&mut o.inl_rel, body);
     inl_file(&mut o, name, absolute, unit);
+}
+// A direct call the body returns straight after (`call X`, then `leave; ret`): nothing of the body
+// is live across it, so its copy may keep the call - a dispatcher like rt_alloc, which picks one of
+// two routines, is inlined as its test and the call it picks. The call is made at the caller's stack
+// pointer, which is aligned at a call site, and it clobbers only what the call it replaces did.
+fn tail_call<a, b>(o: (&a ir::Body), i: u64, last: u64, dead: (&b u64[])) -> bool {
+    mut j = i + 1;
+    mut seen = 0;
+    while j < last {
+        if (o.del[j] == 0) && (dead[j] == 0) {
+            op := o.op[j];
+            if (op != 100) && (op != 101) {
+                if (seen == 0) && (op == 29) {
+                    seen = 1;
+                } else if (seen == 1) && (op == 30) {
+                    return true;
+                } else {
+                    return false;
+                }
+            }
+        }
+        j += 1;
+    }
+    return false;
 }
 // The instructions after the prologue no path reaches: those after a `ret`, a `jmp` or a call that
 // does not return, up to the next label. A body's fall-off return (`xorq %rax,%rax; leave; ret` after
