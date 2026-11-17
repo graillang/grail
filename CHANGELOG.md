@@ -1,5 +1,8 @@
 ## Unreleased
 
+- `mul_add` on f32 and f64 vectors: `a * b + c` per lane with one rounding, identical to C's `fma`
+  on every target and backend. AArch64 uses `fmla`, RISC-V `fmadd`, and baseline x86-64 an exact
+  software routine in the runtime, which is slow there.
 - Fixed: an interface whose methods carry default bodies could not be read back and written again
   unchanged ("does not round-trip"): the reader kept a default body only as the source it compiles,
   not as the method's text.
