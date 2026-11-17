@@ -9941,6 +9941,38 @@ fn rt_popw(s: u64, w: u64) -> u64 {
     raw_store(wrapping_add(s, 8), n - 1);
     return rt_flat_box(wrapping_add(raw_load(s), wrapping_mul(n - 1, w)), w);
 }
+// rt_popw into `dst` (the caller's frame words) instead of a fresh box.
+fn rt_popw_into(s: u64, w: u64, dst: u64) -> u64 {
+    n := raw_load(wrapping_add(s, 8));
+    if n == 0 {
+        rt_fail(8, 0, 0);
+    }
+    raw_store(wrapping_add(s, 8), n - 1);
+    rt_copy_bytes(dst, wrapping_add(raw_load(s), wrapping_mul(n - 1, w)), w);
+    return dst;
+}
+// The quiet form: 1 and the element copied to `dst` when there was one, 0 when the vector was empty.
+fn rt_popw_quiet_into(s: u64, w: u64, dst: u64) -> u64 {
+    if raw_load(wrapping_add(s, 8)) == 0 {
+        return 0;
+    }
+    rt_popw_into(s, w, dst);
+    return 1;
+}
+fn rt_vec_removew_into(s: u64, index: u64, w: u64, dst: u64) -> u64 {
+    n := rt_len(s);
+    if (index < n) == 0 {
+        rt_abort();
+    }
+    rt_copy_bytes(dst, rt_slotw(s, index, w), w);
+    mut i = index;
+    while i + 1 < n {
+        rt_copy_bytes(rt_slotw(s, i, w), rt_slotw(s, i + 1, w), w);
+        i += 1;
+    }
+    raw_store(wrapping_add(s, 8), n - 1);
+    return dst;
+}
 fn rt_popw_quiet(s: u64, w: u64) -> u64 {
     if raw_load(wrapping_add(s, 8)) == 0 {
         return 0;
