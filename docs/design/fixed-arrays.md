@@ -352,3 +352,18 @@ The struct's in-place drop calls the array's helper at the field's address; a fl
 then `rt_free`. Still refused: a runtime holder that needs a dropper function for it (`drop_name`:
 a `dyn` value, a task's result), since an array has no boxed helper; enum payloads and captures as
 before. The two refusal cases became `array-owned-in-records-and-vectors`.
+
+## Probe backstop (2026-11-17)
+
+The probe was lost once, silently: frames gained a saved-register area (`subq $.F<n>+K,%rsp`) and
+`probe_frames` matched only `subq $.F<n>,%rsp`. Now `optimize::probe_backstop` runs after the
+pass over its output: every line that moves %rsp down by a `.F` constant (any `+K`), every
+`framesub`, and every literal `subq $N,%rsp` whose frame plus K is over a page must have its probe
+label, or the compiler stops with exit 70 naming the function (checked by hand by breaking the
+matcher: `f_main_fill's frame is larger than a page and has no stack probe`). The probe pass runs
+for frames within 128 bytes of a page (frame_limit) and probes when the frame plus K is over one.
+Emitting the probe where the frame is laid out was not taken: the size is known only at the
+function's end (`.set`), so the prologue would need a symbolic page count in all three assemblers
+and in the optimiser's prologue rewrites. Pins: `array-frame-probe-pinned` (+K, x86_64),
+`array-frame-probe-plain-frame-line` (plain, --debug), the windows leg's `array-frame-probe` and
+`array-frame-probe-task` (framesub, run under wine), and the frame cases on aarch64 and riscv64.

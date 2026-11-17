@@ -1,5 +1,11 @@
 ## Unreleased
 
+- Stack probes have a backstop: after the probe pass, any frame line (`subq $.F<n>[+K],%rsp`,
+  `framesub`, or a literal `subq`) whose frame is larger than a page without its probe is an
+  internal compiler error naming the function, so a new spelling of the frame line cannot drop the
+  probe silently again. Frames within 128 bytes of a page are probed when the saved-register area
+  carries them over it.
+
 - **Small runtime functions are inlined into every module.** A small runtime body (the scheduler's
   `rt_current`, `rt_list_set`, `rt_list_head`, ...) is now inlined where another module calls it,
   in every build shape: a per-module build carries the bodies in `runtime.facts`. A failure inside
