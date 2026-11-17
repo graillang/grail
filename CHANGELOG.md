@@ -8,6 +8,12 @@
   so every `@no_alloc` function that indexes was refused there. The failure path and the scheduler
   use `rt_syscall_low` (write to a handle, exit, park, wake, yield, sleep, clock, unmap), and the
   profile dump creates and closes its file with `rt_create_file`/`rt_close_file`.
+- **Native backend: a vector the loop cannot change is read once before the loop.** With the
+  front end's loop-stability fact, the optimiser loads the vector's data pointer (and its length,
+  when a check or `len()` in the loop needs it) into registers on the way into the loop, and the
+  accesses inside read those. An unchecked access needs only the data register. fnv executes 11%
+  fewer instructions.
+
 - **Interface format 11:** an interface's trailer ends with `fast_hash` of the bytes before it (XXH64
   under four seeds, the build store's digest) instead of SHA-256. It guards against corruption, which
   is all a digest in the file itself can do; the source digest stays SHA-256. Interfaces written by
