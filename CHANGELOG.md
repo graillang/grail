@@ -1,5 +1,8 @@
 ## Unreleased
 
+- Fixed: an interface whose methods carry default bodies could not be read back and written again
+  unchanged ("does not round-trip"): the reader kept a default body only as the source it compiles,
+  not as the method's text.
 - `grail check` no longer builds the list of SIMD type names for every identifier it reads: names
   that cannot be one (wrong length, first letter or `x` position) are rejected first. This was 7% of
   checking a large program since the SIMD types arrived.
