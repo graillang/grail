@@ -1,5 +1,10 @@
 ## Unreleased
 
+- **Raw address offsets.** In an `unsafe module`, the address operand of `raw_load`/`raw_store`
+  and their narrow forms written as `p + k` with a literal `k` has no overflow check and is folded
+  into the load's addressing (`movq 16(%rax),%rax`); other integer arithmetic there still follows
+  the build's overflow mode. The runtime loses about 950 of its 2,664 overflow checks
+  (docs/ffi.md; decision record "Raw address offsets").
 - **Soundness: a callable bound's reference parameters are fresh on every call.** In
   `F: FnMut((&mut T), C) -> R` the `&mut T` has a lifetime the bound names nowhere else, so - as in
   Rust's `for<'a>` elision - the closure or function given for `F` must accept any lifetime there. One

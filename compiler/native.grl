@@ -810,6 +810,8 @@ struct C {
     pv_pred_mode: u64,
     // 1 for the next subtraction `binary` emits: the facts show it cannot underflow.
     pv_arith_ok: u64,
+    // The first token (+1) of the raw call argument being parsed as an address (raw_address_offset).
+    addr_arg: u64,
     // 1 while an assignment's target path is read: its last field is written directly (and its
     // predicate owed there), not lent out, so `field_path` records it instead of refusing the loan.
     ref_assign_target: u64,
@@ -4000,13 +4002,40 @@ fn win32_arity<a>(name: (&a [u8])) -> u64 {
     }
     return 18446744073709551615;
 }
-fn raw_arguments<a>(c: (&a mut C)) -> u64[] {
+// The address operand of raw_load, raw_store and their narrow forms written as `p + k` or `p - k`
+// with a literal k is address formation, not integer arithmetic: it has no overflow check in any
+// build (docs/design/decisions, "raw address offsets"; the unsafe author's contract, like Rust's
+// `ptr.add`), and the optimiser folds it into `k(%reg)` addressing. Only the whole operand counts:
+// the operator's left side starts the argument and its right side, one literal token, ends it.
+// Integer arithmetic elsewhere in an unsafe module follows the build's overflow mode.
+fn raw_address_offset<a>(c: (&a mut C), lstart: u64, rstart: u64, rend: u64) -> unit {
+    if (lstart + 1 != c.addr_arg) || (rend != rstart + 1) {
+        return ();
+    }
+    lit := tok_text(&mut c, rstart);
+    if (lit.len() == 0) || (lit[0] < 48) || (lit[0] > 57) {
+        return ();
+    }
+    next := tok_text(&mut c, rend);
+    if !(same(view(next), view(",")) || same(view(next), view(")"))) {
+        return ();
+    }
+    exchange(&mut c.pv_arith_ok, 1);
+}
+fn raw_arguments<a>(c: (&a mut C), address: bool) -> u64[] {
     mut args = u64[];
     if eat(&mut c, view(")")) {
         return args;
     }
     while true {
+        // The marker is this argument's own: a nested raw call parses its arguments with its own.
+        mut mine = 0;
+        if address && (args.len() == 0) {
+            mine = c.pos + 1;
+        }
+        outer := exchange(&mut c.addr_arg, mine);
         mut v = expr(&mut c, 0);
+        exchange(&mut c.addr_arg, outer);
         get(&mut c, v.t, view("%rax"));
         n := save(&mut c);
         args.push(n);
@@ -34094,7 +34123,7 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
         }
         if !eat(&mut c, view(")")) {
             expect(&mut c, view(","));
-            args = raw_arguments(&mut c);
+            args = raw_arguments(&mut c, false);
         }
     } else {
         if id == 134 {
@@ -34102,10 +34131,10 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
             api = ident(&mut c);
             if !eat(&mut c, view(")")) {
                 expect(&mut c, view(","));
-                args = raw_arguments(&mut c);
+                args = raw_arguments(&mut c, false);
             }
         } else {
-            args = raw_arguments(&mut c);
+            args = raw_arguments(&mut c, (id == 101) || (id == 102) || (id == 103) || (id == 104) || (id == 136) || (id == 137));
         }
     }
     if (id == 133) && ((c.target == 3) || (c.target == 4)) {
@@ -46181,6 +46210,9 @@ fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
                                                 if ((k == 45) || (k == 43)) & (c.raw == 0) {
                                                     pv_arith_proof(&mut c, k, lstart, rstart, rend);
                                                 }
+                                                if ((k == 45) || (k == 43)) & (c.raw != 0) & (c.addr_arg != 0) {
+                                                    raw_address_offset(&mut c, lstart, rstart, rend);
+                                                }
                                                 t = binary(&mut c, k, snap, right.t);
                                                 ty = 0;
                                                 if is_comparison(k)
@@ -56330,6 +56362,7 @@ pub fn main() -> u64 {
         pv_caps: u8[][],
         pv_pred_mode: 0,
         pv_arith_ok: 0,
+        addr_arg: 0,
         ref_assign_target: 0,
         dyn_result_seen: 0,
         proved_label: 0,
