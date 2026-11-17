@@ -5707,12 +5707,22 @@ fn rt_job_take_background(s: u64, w: u64) -> u64 {
         return 0;
     }
     r := rt_job_take(s, w, 2);
-    if r == 0 {
-        raw_atomic_fetch_sub(raw_load(rt_state_jobs()) + 400, 1);
-        return 0;
+    return rt_job_hold_background(r);
+}
+// The slot reserved for a Background job goes with the job only once the job is this worker's: it
+// is claimed here, at once. An entry is a hint, so its job may already be another stack's - claimed
+// by its forker - and a slot marked on a job that someone else runs would never come back (which
+// is how the cap once leaked away until Background work stopped). The claimed job is handed on
+// tagged with bit 0, so the runner does not claim it again.
+fn rt_job_hold_background(r: u64) -> u64 {
+    if (r != 0) && (raw_atomic_cas(r + 32, 1, rt_job_claim_word()) == 1) {
+        raw_store(r + 88, 1);
+        return r + 1;
     }
-    raw_store(r + 88, 1);
-    return r;
+    raw_atomic_fetch_sub(raw_load(rt_state_jobs()) + 400, 1);
+    // A slot came back: queued Background work may be waiting for it.
+    rt_notify(raw_atomic_load(raw_state() + 72));
+    return 0;
 }
 fn rt_job_reserve_background() -> u64 {
     j := raw_load(rt_state_jobs());
@@ -5773,6 +5783,9 @@ fn rt_job_exec(r: u64) -> u64 {
     if background {
         raw_store(r + 88, 0);
         raw_atomic_fetch_sub(raw_load(rt_state_jobs()) + 400, 1);
+        // A slot of the cap came free: Background work that waited for one may be queued with every
+        // worker parked (a worker that could not take it parked), so it needs a wake now.
+        rt_notify(raw_atomic_load(raw_state() + 72));
     }
     return rt_job_publish(r);
 }
@@ -6320,6 +6333,8 @@ fn rt_runner_main(t: u64, unused: u64) -> u64 {
             raw_atomic_store(t + 24, 4);
             rt_os_ctx_leave(t);
             raw_atomic_store(t + 24, 0);
+        } else if (j & 1) != 0 {
+            rt_job_exec(j - 1); // a Background job, claimed when its slot was taken
         } else {
             if raw_atomic_cas(j + 32, 1, rt_job_claim_word()) == 1 {
                 rt_job_exec(j);
@@ -6353,8 +6368,7 @@ fn rt_job_take_own(w: u64) -> u64 {
             break;
         }
         if raw_load(r + 112) == 2 {
-            raw_store(r + 88, 1);
-            return r;
+            return rt_job_hold_background(r);
         }
     }
     raw_atomic_fetch_sub(raw_load(rt_state_jobs()) + 400, 1);
