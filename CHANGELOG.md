@@ -1,5 +1,29 @@
 ## Unreleased
 
+- **Writing interfaces no longer costs the square of the declarations.** The interface writer put
+  each list of names in order with a selection sort, and looked up every type's inherent methods
+  by scanning every function of the program. A stable merge sort and a by-module index of the
+  functions give the same interface bytes: an edited build of the 104k-line syn4000 program (one
+  body changed, warm store) takes 36% fewer instructions.
+- **Arrays by value and arrays of owners** (fixed-arrays.md, A3). Functions take and return
+  `[T; N]` by value (a result travels in a short-lived box until results are in registers);
+  `extern "C"` signatures refuse an array by value with a message naming the pointer form.
+  Arrays may hold strings, vectors, options and records that own data: they move, drop their
+  elements at the end of their scope, and replace an element by dropping the old one.
+- **Generic array lengths** (A4): `fn sum<@n: u64>(a: &[f32; n])`, inferred from the argument's
+  array type or given (`zeros<4>()`), and record value parameters as lengths
+  (`struct Mat<@R: u64, @C: u64> { m: [[f32; C]; R] }`).
+
+- **Arrays in records, vectors and C structs; arrays as slices** (fixed-arrays.md, A2). `[T; N]`
+  is a field of structs, tuples and generic records (inline) and the element of a flat vector
+  (`[f32; 4][]` is a C `float[n][4]`). Elements may be plain or extern records and C handles. `&a`
+  is a `&[T]` / `&mut [T]` / `&[u8]` where one is expected, `a[lo: hi]` a sub-slice, every slice
+  method works on an array, and `a.copy_from(&v)` copies a vector of exactly N in.
+- **Changed: an `extern "C" record` field `[T; N]` is now an array, not a vector.** `ids := d.ids`
+  is a `[u32; 4]`; `d.ids[3]` reads and writes in place and `&d.name` is a `&[u8]`. Initialise and
+  assign it with an array literal (`name: [0; 16]` where `u8[0; 16]` was written); a vector is
+  copied in with `d.ids.copy_from(&v)`, which checks the length. The copy-as-vector surface
+  (`rt_carray_store`, the field-assignment special case) is gone.
 - The landing queue's build host runs the aarch64 legs under the patched qemu-aarch64:
   `tools/land-remote.sh` builds it there with `tools/qemu/build.sh` before starting the legs, and
   `tools/land.sh --remote-status` (`just land-status-remote`) prints each emulated leg's verdict for
