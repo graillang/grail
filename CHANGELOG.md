@@ -27,7 +27,13 @@
     work, added the summary rows of every listed function).
   - `bun tools/test-atomics-litmus.mjs` runs the litmus suite on every target and both backends.
     `bun tools/test-optimiser-atomics.mjs` checks that the optimiser moves nothing across an
-    atomic.
+    atomic. Both are gate legs.
+  - The aarch64 tests run under the repository's own qemu-aarch64: `tools/qemu/build.sh` builds
+    QEMU 11.1.3 with `tools/qemu/stlr-rcsc.patch` into `.work/architectures/toolchain`. Stock
+    11.1.3 on an x86 host lets a store-release pass a later load-acquire, which ARMv8 forbids;
+    the store-buffering test saw up to 7,458 forbidden outcomes in 200,000 rounds there, and none
+    under the patched build. The gate builds it and prints its version (`docs/testing.md`, "The
+    aarch64 emulator").
 - **`thread::scope`: threads that borrow.** `thread::scope(|t| { a := t.spawn(|| ..); ..; a.join() })`
   starts OS threads whose closures may borrow from the caller - shared or exclusive - because the
   scope waits for every one of them before it returns. The compiler refuses two threads taking one
