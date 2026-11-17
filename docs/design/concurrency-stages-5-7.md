@@ -767,7 +767,16 @@ operands as a byte offset from the symbol. The accessors lift, and LLVM inlines 
 worker is 1,807 instructions under LLVM** (native ~3,100). The ordered atomics are already in (stage
 7, merged earlier), so no `fence seq_cst` remains on these paths.
 
-Three LLVM-backend cases fail before and after this change, and so are not caused by it:
-`sched-job-failure-is-contained` and `sched-join-failure-names-the-user-join` (the failing
-statement's site line is missing, which points at the frame walk under LLVM frames), and
-`mutex-poisoned-by-failed-holder-and-recovered` (sync's).
+**One form with gaps12-sync.** The read is lifted as thread_alloc's caaf9c6 does it: `call i64 asm
+sideeffect "movq %fs:..., $0"`. A plain `load` from addrspace(257) is not safe, because LLVM may
+merge two reads across a call, and a green task can resume on another thread between them. The
+write of the record word is lifted the same way, `rt_tls_record` is `.globl .hidden` so the LLVM
+object links, and `sym+offset(%rip)` operands become a GEP; that is the same text as caaf9c6, so the
+merge is one implementation. `sched-thread-pointer-read-after-migration` pins the rule: 400 tasks
+each read their worker, sleep, and read again, and at least one has moved. Measured: 1,751
+instructions per join on a worker (1,807 with the load form).
+
+**An LLVM build carries no statement table**, so no failure site can be named in one. That is the
+cause of sched-job-failure-is-contained, sched-join-failure-names-the-user-join and sync's
+mutex-poisoned case failing under LLVM, before and after this change. The two sched cases are
+native-only until the LLVM backend emits a table; that gap belongs to the LLVM backend's owner.
