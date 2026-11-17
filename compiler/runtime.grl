@@ -7310,7 +7310,14 @@ fn rt_block_give(w: u64) -> u64 {
     // program whose blocked calls wait for a task that cannot run (100 FIFO readers and their
     // writer: colourless-io-suspension-cancel-blocking). Idle spares are what is bounded: one idle
     // for a second exits when more than the worker count of them are waiting (rt_worker_thread).
-    raw_atomic_fetch_add(j + 456, 1);
+    // One safety limit, as Go has: a program with this many threads blocked in foreign calls is
+    // stuck, and making more would only exhaust the machine. It fails loudly instead.
+    if 10000 <= raw_atomic_fetch_add(j + 456, 1) {
+        text := view("error: 10000 threads are blocked in foreign calls; making more would exhaust the machine (does a blocking call wait for something that cannot run?)\n");
+        packed := rt_pack(text);
+        rt_write_all(2, packed, rt_len(text));
+        rt_abort();
+    }
     rt_thread_spawn_detached(rt_worker_thread, 0);
     return 0;
 }

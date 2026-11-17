@@ -802,3 +802,14 @@ function (callgrind self cost per join):
 | fork, claim, run, publish, release (deque push/pop, the claim CAS, record recycling, the wake check) | 1,059 | the scheduler's own; with inlining it should fall to a few hundred |
 | the program: `pool::join`'s body, the two closure bodies, the slot, the loop | 633 | code generation (S4/S5, inlining) |
 | **total** | **3,549** | rayon 153, oneTBB 713 |
+
+### Stage 6 as built: threads for blocked calls
+
+Spares are made on demand - a thread for each blocked call when no spare is idle - and idle ones
+retire after a second once more than the worker count are waiting. That is Go's model, and the
+approved hard cap of twice the workers was wrong: `colourless-io-suspension-cancel-blocking` has
+100 tasks blocked in `host::read_file` on FIFOs and one writer task that releases them. With any cap
+below the number of blocked calls, every thread is blocked and the block that would run the writer
+waits for a thread for ever. One safety limit remains, like Go's 10,000-thread default: the
+10,000th thread blocked in foreign calls ends the program with a message instead of exhausting the
+machine.
