@@ -16,6 +16,10 @@
   --release on the Rust twin, measured alongside: 0.74 s). Part compiles are admitted against the
   memory available, so a release build of the compiler fits a 16 GB machine instead of being
   killed for memory.
+- Native backend: an f32 `+ - * /` with an f32 constant is one binary32 instruction (`mulss` with the
+  constant's bits) instead of widen, operate in f64 and round - the same result, since both operands
+  are binary32. bench/ecs_par.grl writes its updates as zip closure literals (no bounds checks).
+
 - After each landing the build host also runs the closure-passing fuzzer (`tools/fuzz-closures.mjs`, 400
   cases, compile and run) next to the front-end fuzzer. `tools/land.sh --remote-status` reports both.
 - Fixed: when two or more sequences proved stable across one loop had their data pointers hoisted

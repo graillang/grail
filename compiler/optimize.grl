@@ -1481,6 +1481,222 @@ fn put_num<a>(out: (&a mut u8[]), n: u64) {
     }
     out.push(48 + n % 10);
 }
+// An f32 operation with an f32 constant (docs/design/fixed-arrays.md, ecs_par's loop): the float
+// lowering widens the element, operates in f64 and rounds back,
+//     movabsq $K,%rcx; cvtss2sd %xmmA,%xmm0; movq %rcx,%xmm1; OPsd %xmm1,%xmm0; cvtsd2ss %xmm0,%xmm0
+// and when K is an f32 value widened, that is exactly `OPss` with the f32 constant: both operands are
+// binary32 values and + - * / rounded once in binary64 then to binary32 equal the binary32 operation
+// (53 >= 2*24 + 2). It becomes
+//     movl $K32,%ecx; movd %ecx,%xmm1; movaps %xmmA,%xmm0; OPss %xmm1,%xmm0
+// when %rcx and %xmm1 are not read again before they are written (they now hold the binary32
+// constant rather than the binary64 one): the scan stops at a label, a jump, a call or a return, and
+// then leaves the sequence alone.
+fn f32_exact_bits(b: u64) -> u64 {
+    if (b == 0) || (b == 9223372036854775808) {
+        return (b >> 32) + 1;
+    }
+    e := (b >> 52) & 2047;
+    m := b & 4503599627370495;
+    if (m & 536870911) != 0 {
+        return 0;
+    }
+    if (e < 1023 - 126) || (1023 + 127 < e) {
+        return 0;
+    }
+    return (((b >> 63) << 31) | ((e + 127 - 1023) << 23) | (m >> 29)) + 1;
+}
+fn line_at<a>(s: &a [u8], at: u64) -> u64 {
+    mut e = at;
+    while (e < s.len()) && (s[e] != 10) {
+        e += 1;
+    }
+    return e;
+}
+// Where label `name` is defined in `s` (the line after `name:`), or s.len() + 1 when it is not.
+fn label_line<a, b>(s: &a [u8], name: &b [u8]) -> u64 {
+    mut a = 0;
+    while a < s.len() {
+        e := line_at(view(s), a);
+        if (e - a == name.len() + 1) && (s[e - 1] == 58) && ir::same_range(view(s), a, e - 1, name) {
+            return e + 1;
+        }
+        a = e + 1;
+    }
+    return s.len() + 1;
+}
+// Whether `reg` (or its low half `low`) may be read on some path from line `from` before it is
+// written whole. Paths are followed through jumps - an unconditional one goes on at its target, a
+// conditional one is followed both ways - with a budget of lines and each label visited once;
+// a call, a return, an indirect jump, a missing label or the budget running out count as a read.
+fn reg_read_later<a, b>(s: &a [u8], from: u64, reg: &b [u8], low: &b [u8]) -> bool {
+    mut work = u64[];
+    work.push(from);
+    mut seen = u8[][];
+    mut budget = 600;
+    while work.len() != 0 {
+        mut a = work.pop()!;
+        mut going = true;
+        while going {
+            if a >= s.len() {
+                return true;
+            }
+            if budget == 0 {
+                return true;
+            }
+            budget -= 1;
+            e := line_at(view(s), a);
+            line := s[a: e].copy();
+            n := line.len();
+            if (n == 0) || (line[n - 1] == 58) || (line[0] == 46) {
+                a = e + 1;
+                continue;
+            }
+            // A call clobbers %rcx and every xmm register (caller-saved in both conventions the native
+            // backend emits) after reading only its argument registers: for a scratch register it
+            // ends the path, unless the register is an argument one. A return reads only the result
+            // registers, which no scratch candidate here is. `leave` touches neither.
+            if ir::at(view(line), 0, view("call")) {
+                // Both candidates (%rcx, %xmm1) can carry an argument, so a call may read them.
+                return true;
+            }
+            if ir::at(view(line), 0, view("ret")) {
+                going = false;
+                continue;
+            }
+            if ir::at(view(line), 0, view("leave")) {
+                a = e + 1;
+                continue;
+            }
+            if line[0] == 106 {
+                // jmp/jcc LABEL
+                mut sp = 0;
+                while (sp < n) && (line[sp] != 32) {
+                    sp += 1;
+                }
+                if (sp + 1 >= n) || (line[sp + 1] != 46) {
+                    return true;
+                }
+                target := line[sp + 1: n].copy();
+                mut visited = false;
+                for k in seen.len() {
+                    if ir::same_range(view(seen[k]), 0, seen[k].len(), view(target)) {
+                        visited = true;
+                    }
+                }
+                if !visited {
+                    at := label_line(view(s), view(target));
+                    if at > s.len() {
+                        return true;
+                    }
+                    seen.push(target.copy());
+                    work.push(at);
+                }
+                if ir::at(view(line), 0, view("jmp ")) {
+                    going = false;
+                } else {
+                    a = e + 1;
+                }
+                continue;
+            }
+            mut mentions = 0;
+            mut last_is = false;
+            for x in n {
+                for which in 2 {
+                    mut r = reg.copy();
+                    if which == 1 {
+                        if low.len() == 0 {
+                            continue;
+                        }
+                        r = low.copy();
+                    }
+                    if (x + r.len() <= n) && ir::same_range(view(line), x, x + r.len(), view(r)) {
+                        mentions += 1;
+                        if (x + r.len() == n) && (x > 0) && (line[x - 1] == 44) {
+                            last_is = true;
+                        }
+                    }
+                }
+            }
+            if mentions != 0 {
+                // A whole write - a move or lea whose destination is the register and that does not
+                // read it - ends this path; anything else reads it.
+                mov := ir::at(view(line), 0, view("mov")) || ir::at(view(line), 0, view("lea"));
+                partial := ir::at(view(line), 0, view("movss")) || ir::at(view(line), 0, view("movsd")) || ir::at(view(line), 0, view("movb")) || ir::at(view(line), 0, view("movw"));
+                if mov && !partial && last_is && (mentions == 1) {
+                    going = false;
+                } else {
+                    return true;
+                }
+            } else {
+                a = e + 1;
+            }
+        }
+    }
+    return false;
+}
+pub fn f32_const_ops<a>(s: &a [u8]) -> u8[] {
+    mut out = u8[];
+    mut a = 0;
+    while a < s.len() {
+        e := line_at(view(s), a);
+        mut done = false;
+        if (e - a > 14) && ir::at(view(s), a, view("movabsq $")) && ir::at(view(s), e - 5, view(",%rcx")) {
+            l2 := e + 1;
+            e2 := line_at(view(s), l2);
+            l3 := e2 + 1;
+            e3 := line_at(view(s), l3);
+            l4 := e3 + 1;
+            e4 := line_at(view(s), l4);
+            l5 := e4 + 1;
+            e5 := line_at(view(s), l5);
+            if (e5 <= s.len()) && (l5 < s.len()) && ir::at(view(s), l2, view("cvtss2sd %xmm")) && ir::at(view(s), e2 - 6, view(",%xmm0"))
+                && ir::same_range(view(s), l3, e3, view("movq %rcx,%xmm1"))
+                && (e4 - l4 == 17) && ir::at(view(s), l4 + 3, view("sd %xmm1,%xmm0"))
+                && ir::same_range(view(s), l5, e5, view("cvtsd2ss %xmm0,%xmm0")) {
+                op := s[l4: l4 + 3].copy();
+                okop := ir::same_range(view(op), 0, 3, view("mul")) || ir::same_range(view(op), 0, 3, view("add")) || ir::same_range(view(op), 0, 3, view("sub")) || ir::same_range(view(op), 0, 3, view("div"));
+                mut bits: u64 = 0;
+                mut digits = true;
+                for x in a + 9..e - 5 {
+                    if (48 <= s[x]) & (s[x] <= 57) {
+                        bits = bits * 10 + u64(s[x] - 48);
+                    } else {
+                        digits = false;
+                    }
+                }
+                f := f32_exact_bits(bits);
+                if okop && digits && (f != 0) && (e - 5 - (a + 9) < 21) && !reg_read_later(view(s), e5 + 1, view("%rcx"), view("%ecx")) && !reg_read_later(view(s), e5 + 1, view("%xmm1"), view("")) {
+                    out.append(view("movl $"));
+                    put_num(&mut out, f - 1);
+                    out.append(view(",%ecx\nmovd %ecx,%xmm1\n"));
+                    src := s[l2 + 9: e2 - 6].copy();
+                    if !ir::same_range(view(src), 0, src.len(), view("%xmm0")) {
+                        out.append(view("movaps "));
+                        out.append(view(src));
+                        out.append(view(",%xmm0\n"));
+                    }
+                    out.append(view(op));
+                    out.append(view("ss %xmm1,%xmm0"));
+                    if e5 < s.len() {
+                        out.push(10);
+                    }
+                    a = e5 + 1;
+                    done = true;
+                }
+            }
+        }
+        if !done {
+            for x in a..e {
+                out.push(s[x]);
+            }
+            if e < s.len() {
+                out.push(10);
+            }
+            a = e + 1;
+        }
+    }
+    return out;
+}
 // A build the optimiser does not run on (`--debug`) still gets the leaf accessors in line: every
 // line that is exactly `call NAME` for one of them becomes its expansion, with labels of its own.
 // Stack probes (docs/design/fixed-arrays.md): before a frame larger than a page is allocated, the
