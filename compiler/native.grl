@@ -17597,8 +17597,8 @@ fn ffi_emit_call<a, b, d, e, f>(
             rd := ty_arg(&mut c, ret);
             rsize = ffi_record_size(&mut c, rd);
             nwords := ffi_record_words(&mut c, rd);
-            words := imm(&mut c, nwords);
-            rslot = invoke(&mut c, view("rt_rec"), one(words));
+            // The result's bytes land in frame words of this call site (aggregate fact).
+            rslot = frame_alloc(&mut c, nwords);
             rmode = 1;
             rdecl = rd;
             if ffi_record_has_float_deep(&mut c, rd) {
@@ -28989,6 +28989,9 @@ fn member_align<a>(c: (&a mut C), ft: u64) -> u64 {
     if small_enum(&mut c, t) {
         return 8;
     }
+    if is_c_record(&mut c, t) != 0 {
+        return ffi_field_align(&mut c, t);
+    }
     if framable(&mut c, t) {
         at := field_layout(&mut c, t);
         n := c.layout_offsets[at].len();
@@ -29019,6 +29022,9 @@ fn value_bytes<a>(c: (&a mut C), ty: u64) -> u64 {
     if is_array(&mut c, ty) {
         return array_bytes(&mut c, ty);
     }
+    if is_c_record(&mut c, ty) != 0 {
+        return ffi_record_size(&mut c, ty_arg(&mut c, ty));
+    }
     if small_enum(&mut c, ty) {
         return enum_words(&mut c, ty) * 8;
     }
@@ -29037,11 +29043,13 @@ fn field_layout<a>(c: (&a mut C), alias: u64) -> u64 {
     while c.layout_offsets.len() <= ty {
         c.layout_offsets.push(u64[]);
     }
-    if c.layout_offsets[ty].len() != 0 {
-        return ty;
-    }
     d := ty_arg(&mut c, ty);
     count := c.decls[d].count;
+    // A table is good only for the fields the declaration has now: debug info can describe a record
+    // while its declaration is still being entered, before its fields are known.
+    if c.layout_offsets[ty].len() == count + 2 {
+        return ty;
+    }
     // Entries: each field's byte offset * 2 + 1 when it is held inline, then the end of the last
     // field * 2, then the record's alignment.
     mut table = u64[];
@@ -29229,6 +29237,13 @@ fn layout_bits<a>(c: (&a mut C), alias: u64) -> u64 {
     // A record being worked out is not plain to itself (a record cannot hold itself by value).
     c.layout_memo[ty] = 1;
     mut bits = 0;
+    if is_c_record(&mut c, ty) != 0 {
+        // An `extern "C"` record is plain C data held as its bytes in C layout wherever it is held:
+        // a frame, a record, a vector (docs/design/unboxed-values.md, after stage 7). Its fields
+        // keep their C access path (cfield_*).
+        c.layout_memo[ty] = 6;
+        return 5;
+    }
     if small_enum(&mut c, ty) {
         // Plain, and held as its words (5a): a small enum is frame words wherever it is held.
         bits = 5;
@@ -29269,6 +29284,10 @@ fn layout_bits<a>(c: (&a mut C), alias: u64) -> u64 {
         }
     }
     c.layout_memo[ty] = bits + 1;
+    if (ty_kind(&mut c, ty) == 8) && (c.decls[ty_arg(&mut c, ty)].count == 0) {
+        // Possibly a declaration whose fields are not entered yet: not remembered.
+        c.layout_memo[ty] = 0;
+    }
     return bits;
 }
 // Whether `ty` is held as its own words (layout bit 4): a struct, a tuple or an array.
@@ -30029,8 +30048,7 @@ fn cfield_store<a>(c: (&a mut C), base: u64, d: u64, k: u64, value: u64) -> unit
 fn c_record_copy<a>(c: (&a mut C), src: u64, ty: u64) -> u64 {
     d := ty_arg(&mut c, ty);
     words := ffi_record_words(&mut c, d);
-    n := imm(&mut c, words);
-    fresh := invoke(&mut c, view("rt_rec"), one(n));
+    fresh := frame_alloc(&mut c, words);
     size := ffi_record_size(&mut c, d);
     bytes := imm(&mut c, size);
     invoke(&mut c, view("rt_copy_bytes"), three(fresh, src, bytes));
@@ -30085,7 +30103,7 @@ fn caddr_store<a>(c: (&a mut C), slot: u64, ty: u64, value: u64) -> unit {
         size := ffi_record_size(&mut c, d);
         bytes := imm(&mut c, size);
         invoke(&mut c, view("rt_copy_bytes"), three(slot, value, bytes));
-        invoke(&mut c, view("rt_free"), one(value));
+        // An extern record's value is frame words (or a holder's), never a box to release here.
         return ();
     }
     size := ffi_field_size(&mut c, ty);
@@ -44908,7 +44926,7 @@ fn is_vector_type<a>(c: (&a mut C), ty: u64) -> bool {
 // An element taken out of an inline vector lands in frame words of the site when it is a framed
 // record (not an array, which has its own unboxing, and not a C record, whose value is a box).
 fn pop_in_place<a>(c: (&a mut C), ty: u64) -> bool {
-    return framed(&mut c, ty) && !is_array(&mut c, ty) && (is_c_record(&mut c, ty) == 0);
+    return framed(&mut c, ty) && !is_array(&mut c, ty);
 }
 fn option_of<a>(c: (&a mut C), ty: u64) -> u64 {
     mut oa = u64[];
@@ -50081,8 +50099,7 @@ fn map_loop<a, b, d>(c: (&a mut C), name: &b [u8], value_name: &d [u8]) -> unit 
 fn zero_record_binding<a>(c: (&a mut C), name: u8[], ty: u64, mutable: u64) -> unit {
     d := ty_arg(&mut c, ty);
     words := ffi_record_words(&mut c, d);
-    sz := imm(&mut c, words);
-    rec := invoke(&mut c, view("rt_rec"), one(sz));
+    rec := frame_alloc(&mut c, words);
     zero := imm(&mut c, 0);
     for k in words {
         rec_store(&mut c, rec, k, zero);
