@@ -6269,30 +6269,9 @@
   },
   {
     "name": "static-prover-known-values",
-    "source": "static SQ: u64[] = @squares();\nstatic LIMIT: u64 = 8;\nconst CLIMIT: u64 = 8;\nfn squares() -> u64[] {\n    mut v = u64[];\n    for i in 8 {\n        v.push(i * i);\n    }\n    return v;\n}\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn small(x: u64 where x < 10) -> u64 {\n    return x;\n}\nfn walk() -> u64 {\n    mut t = 0;\n    for i in SQ.len() {\n        t += get(SQ, i);\n    }\n    return t;\n}\nfn fixed() -> u64 {\n    return get(SQ, 3);\n}\nfn lim() -> u64 {\n    return small(LIMIT);\n}\nfn clim() -> u64 {\n    return small(CLIMIT);\n}\nfn direct() -> u64 {\n    mut t = 0;\n    for i in SQ.len() {\n        t += SQ[i];\n    }\n    return t;\n}\nfn main() -> u64 {\n    println(walk() + fixed() + lim() + clim() + direct());\n    return 0;\n}\n",
+    "source": "static SQ: u64[] = @squares();\nstatic LIMIT: u64 = 8;\nconst CLIMIT: u64 = 8;\nfn squares() -> u64[] {\n    mut v = u64[];\n    for i in 8 {\n        v.push(i * i);\n    }\n    return v;\n}\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn small(x: u64 where x < 10) -> u64 {\n    return x;\n}\n@strict\nfn walk() -> u64 {\n    mut t = 0;\n    for i in SQ.len() {\n        t += get(SQ, i);\n    }\n    return t;\n}\n@strict\nfn fixed() -> u64 {\n    return get(SQ, 3);\n}\n@strict\nfn lim() -> u64 {\n    return small(LIMIT);\n}\n@strict\nfn clim() -> u64 {\n    return small(CLIMIT);\n}\nfn direct() -> u64 {\n    mut t = 0;\n    for i in SQ.len() {\n        t += SQ[i];\n    }\n    return t;\n}\nfn main() -> u64 {\n    println(walk() + fixed() + lim() + clim() + direct());\n    return 0;\n}\n",
     "stdout": "305\n",
-    "asm": [
-      {
-        "in": "f_main_walk",
-        "text": "call f_main_get.proved"
-      },
-      {
-        "in": "f_main_fixed",
-        "text": "call f_main_get.proved"
-      },
-      {
-        "in": "f_main_lim",
-        "text": "call f_main_small.proved"
-      },
-      {
-        "in": "f_main_clim",
-        "text": "call f_main_small.proved"
-      }
-    ],
-    "targets": [
-      "x86_64"
-    ],
-    "note": "module-values stage 5: the prover reads a static's name as a term (it never changes), an integer static's or constant's value as a literal, and a baked table's `.len()` as its length - so `get(SQ, i)` in `for i in SQ.len()`, `get(SQ, 3)` (SQ has 8 elements), `small(LIMIT)` and `small(CLIMIT)` (8 < 10) call the proved entries"
+    "note": "module-values stage 5: the prover reads a static's name as a term (it never changes), an integer static's or constant's value as a literal, and a baked table's `.len()` as its length - so `get(SQ, i)` in `for i in SQ.len()`, `get(SQ, 3)` (SQ has 8 elements), `small(LIMIT)` and `small(CLIMIT)` (8 < 10) are proved, which `@strict` on each caller requires (a proved call is a plain call since the second entry was removed)"
   },
   {
     "name": "static-prover-stays-sound",
@@ -6300,20 +6279,6 @@
     "stdout": "49\n",
     "signal": "SIGABRT",
     "stderr": "error: refinement violated: i < v.len()\n",
-    "asmAbsent": [
-      {
-        "in": "f_main_shadow",
-        "text": "call f_main_small.proved"
-      },
-      {
-        "in": "f_main_big",
-        "text": "call f_main_small.proved"
-      },
-      {
-        "in": "f_main_past",
-        "text": "call f_main_get.proved"
-      }
-    ],
     "targets": [
       "x86_64",
       "aarch64",
@@ -6322,7 +6287,27 @@
     "backends": [
       "native"
     ],
-    "note": "a local that shadows a static is not the static's value, a static whose value breaks the bound (12 < 10) proves nothing, and `get(SQ, 9)` on an 8-element static stays checked and fails at run time"
+    "note": "`get(SQ, 9)` on an 8-element static stays checked and fails at run time; the refusals under `@strict` are static-prover-refuses-*"
+  },
+  {
+    "name": "static-prover-refuses-bad-bound",
+    "source": "static SQ: u64[] = @squares();\nstatic LIMIT: u64 = 8;\nstatic BIG: u64 = 12;\nfn squares() -> u64[] {\n    mut v = u64[];\n    for i in 8 {\n        v.push(i * i);\n    }\n    return v;\n}\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn small(x: u64 where x < 10) -> u64 {\n    return x;\n}\nfn shadow() -> u64 {\n    LIMIT := 20;\n    return small(LIMIT);\n}\n@strict\nfn big() -> u64 {\n    return small(BIG);\n}\nfn past() -> u64 {\n    return get(SQ, 9);\n}\nfn main() -> u64 {\n    println(get(SQ, 7));\n    println(past());\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "cannot prove the refinement `x < 10`",
+    "note": "a static whose value breaks the bound (BIG = 12, `x < 10`) proves nothing: `@strict` refuses the call"
+  },
+  {
+    "name": "static-prover-refuses-shadow",
+    "source": "static SQ: u64[] = @squares();\nstatic LIMIT: u64 = 8;\nstatic BIG: u64 = 12;\nfn squares() -> u64[] {\n    mut v = u64[];\n    for i in 8 {\n        v.push(i * i);\n    }\n    return v;\n}\nfn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\nfn small(x: u64 where x < 10) -> u64 {\n    return x;\n}\n@strict\nfn shadow() -> u64 {\n    LIMIT := 20;\n    return small(LIMIT);\n}\nfn big() -> u64 {\n    return small(BIG);\n}\nfn past() -> u64 {\n    return get(SQ, 9);\n}\nfn main() -> u64 {\n    println(get(SQ, 7));\n    println(past());\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "cannot prove the refinement `x < 10`",
+    "note": "a local that shadows a static is not the static's value (`LIMIT := 20`)"
+  },
+  {
+    "name": "static-baked-plain-records",
+    "source": "struct P {\n    x: i64,\n    y: i64\n}\nstruct Seg {\n    a: P,\n    b: P,\n    tag: u8\n}\nstatic PTS: P[] = @pts();\nstatic SEG: Seg = @seg();\nfn pts() -> P[] {\n    mut v = P[];\n    v.push(P { x: 1, y: -2 });\n    v.push(P { x: 3, y: 4 });\n    return v;\n}\nfn seg() -> Seg {\n    return Seg { a: P { x: 5, y: 6 }, b: P { x: -7, y: 8 }, tag: 9 };\n}\nfn main() -> u64 {\n    println(PTS[1].x + PTS[0].y);\n    println(SEG.b.x);\n    println(SEG.tag);\n    println(PTS.len());\n    return 0;\n}\n",
+    "stdout": "1\n-7\n9\n2\n",
+    "note": "plain records nested inline in their parent (Seg holds two P by value) and a vector of plain records stored flat, baked in the layout field_layout and flat_bytes give"
   },
   {
     "name": "comptime-signed-i8-min-neg-max",

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Fixed (statics, after the merge with unboxed records and the prover rework): a static's
+  initialiser is evaluated in its own module's scope whoever asks for it first, so `PAGE - 1` finds
+  `PAGE` when the interface writer asks at the end of the compile; a baked record is laid out as the
+  record layout now has it (a plain record held in a field inline, a vector of plain records flat)
+  and read through the record's address, which is what a record reference now is.
+
 - **A compile-time probe never starts another probe** (comptime-speed R1). Inside a probe a read of
   a run-tier value calls a value function the probe defines - a static is computed once on first
   read behind a guard, a module binding at each read - so N values cost N flat compiles instead of

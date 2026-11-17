@@ -21557,7 +21557,9 @@ fn static_value<a, b, d>(c: (&a mut C), module: &b [u8], name: &d [u8]) -> Val {
         word := save(&mut c);
         return val(word, ty);
     }
-    slot := save(&mut c);
+    // The word's address; a record's reference is the record's own address (word_reference).
+    mut slot = save(&mut c);
+    slot = word_reference(&mut c, slot, ty);
     rty := reference_type(&mut c, ty, 0);
     own(&mut c, slot, rty);
     if c.raw == 0 {
@@ -21775,20 +21777,26 @@ fn static_bake<a>(c: (&a mut C), ty: u64, text: &a [u8], at: (&a mut u64), is_la
             }
             return static_seq_object(&mut c, &bytes, n);
         }
-        // Elements that are objects themselves: each is emitted first, then the word table.
+        // Elements that are objects themselves: each is emitted first, then the word table. A
+        // vector of plain records holds its elements' words inline instead (flat_bytes).
         mut words = u64[];
         mut kinds = u64[];
+        flat := (ty_kind(&mut c, base_type(&mut c, elem)) == 8) && plain(&mut c, elem);
         for j in n {
-            mut flag = 0;
-            w := static_bake(&mut c, elem, text, &mut at, &mut flag);
-            words.push(w);
-            kinds.push(flag);
+            if flat {
+                static_bake_fields(&mut c, base_type(&mut c, elem), text, &mut at, &mut words, &mut kinds);
+            } else {
+                mut flag = 0;
+                w := static_bake(&mut c, elem, text, &mut at, &mut flag);
+                words.push(w);
+                kinds.push(flag);
+            }
         }
         data := label(&mut c);
         obj := label(&mut c);
         o(&mut c, view(".p2align 4\n.quad 0\n.quad 2\n"));
         mark(&mut c, data);
-        for j in n {
+        for j in words.len() {
             static_quad_label(&mut c, words[j], kinds[j]);
         }
         o(&mut c, view(".quad 0\n.p2align 4\n.quad 0\n.quad 2\n"));
@@ -21802,29 +21810,40 @@ fn static_bake<a>(c: (&a mut C), ty: u64, text: &a [u8], at: (&a mut u64), is_la
         c.out.push(10);
         return obj;
     }
-    // A record: one word per field, as rt_rec lays it out.
-    d := ty_arg(&mut c, ty);
-    first := c.decls[d].first;
-    count := c.decls[d].count;
+    // A record: its words as the record's layout has them (field_layout) - a word per field, and a
+    // plain record held in a field laid inline in its parent's words.
     mut words = u64[];
     mut kinds = u64[];
-    for j in count {
-        mut flag = 0;
-        fty := c.fields[first + j].ty;
-        w := static_bake(&mut c, fty, text, &mut at, &mut flag);
-        words.push(w);
-        kinds.push(flag);
-    }
+    static_bake_fields(&mut c, ty, text, &mut at, &mut words, &mut kinds);
     rec := label(&mut c);
     o(&mut c, view(".p2align 4\n.quad 0\n.quad 2\n"));
     mark(&mut c, rec);
-    for j in count {
+    for j in words.len() {
         static_quad_label(&mut c, words[j], kinds[j]);
     }
-    if count == 0 {
+    if words.len() == 0 {
         o(&mut c, view(".quad 0\n"));
     }
     return rec;
+}
+// The words of record `ty`, read from the flat form, appended to `words` (with `kinds` saying
+// which are labels): a plain record held in a field contributes its own words in place.
+fn static_bake_fields<a>(c: (&a mut C), ty: u64, text: &a [u8], at: (&a mut u64), words: (&a mut u64[]), kinds: (&a mut u64[])) -> unit {
+    d := ty_arg(&mut c, ty);
+    first := c.decls[d].first;
+    count := c.decls[d].count;
+    for j in count {
+        fty := c.fields[first + j].ty;
+        if inline_field(&mut c, ty, j) {
+            static_bake_fields(&mut c, base_type(&mut c, fty), text, &mut at, &mut words, &mut kinds);
+        } else {
+            mut flag = 0;
+            w := static_bake(&mut c, fty, text, &mut at, &mut flag);
+            words.push(w);
+            kinds.push(flag);
+        }
+    }
+    return ();
 }
 
 fn static_refuse<a, b>(c: (&a mut C), at: u64, msg: &b [u8]) -> unit {
@@ -22172,6 +22191,10 @@ fn static_resolve<a>(c: (&a mut C), i: u64) -> unit {
         exchange(&mut c.file, file);
     }
     module := c.statics[i].module.copy();
+    // The initialiser's names are its module's: a constant it reads (`PAGE - 1`) is looked up in
+    // the static's module, whoever asks for the value - the interface writer runs after the last
+    // module has been read, so the current module is then someone else's.
+    saved_module := exchange(&mut c.module, module.copy());
     name := c.statics[i].name.copy();
     ty := c.statics[i].ty;
     at_name := c.statics[i].at;
@@ -22271,6 +22294,7 @@ fn static_resolve<a>(c: (&a mut C), i: u64) -> unit {
     exchange(&mut c.statics[i].text, text);
     exchange(&mut c.statics[i].ready, ready);
     exchange(&mut c.statics[i].state, 2);
+    exchange(&mut c.module, saved_module);
     if file != saved_file {
         load_file(&mut c, saved_file);
         exchange(&mut c.file, saved_file);
