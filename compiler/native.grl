@@ -28093,7 +28093,8 @@ fn layout_bits<a>(c: (&a mut C), alias: u64) -> u64 {
 // Whether `ty` is held as its own words (layout bit 4): a struct, a tuple or an array.
 fn framable<a>(c: (&a mut C), alias: u64) -> bool {
     ty := base_type(&mut c, alias);
-    if is_array(&mut c, ty) {
+    // An array, and a SIMD vector (docs/design/simd.md), are always frame values.
+    if is_array(&mut c, ty) || is_simd(&mut c, ty) {
         return true;
     }
     return (layout_bits(&mut c, ty) & 4) != 0;
@@ -28322,7 +28323,7 @@ fn frame_result<a>(c: (&a mut C), slot: u64, ty: u64) -> unit {
 // A copy of the framed record at the address in `src`, in fresh frame slots of this site.
 fn frame_copy<a>(c: (&a mut C), src: u64, ty: u64) -> u64 {
     if is_simd(&mut c, ty) {
-        return simd_emit(&mut c, view("copy"), base_type(&mut c, ty), base_type(&mut c, ty), src, 0, 0, 0, 0, false);
+        return simd_emit(&mut c, view("copy"), base_type(&mut c, ty), base_type(&mut c, ty), src, SIMD_NONE, SIMD_NONE, SIMD_NONE, 0, false);
     }
     words := record_words(&mut c, base_type(&mut c, ty));
     dst := frame_alloc(&mut c, words);
@@ -40128,8 +40129,10 @@ fn simd_mask_of<a>(c: (&a mut C), ty: u64) -> u64 {
     return intern_full(&mut c, 36, int_type(&mut c, simd_bits(&mut c, ty), 1), simd_lanes(&mut c, ty) + 1024, u64[]);
 }
 // One `simd.OP SHAPE [K]` line over frame vectors: `dst` (a fresh vector of `rty`'s words when `rty`
-// is a vector type), operand addresses in `a`, `b`, `third` (slots holding addresses, or 0), a scalar
-// in `scalar` (or 0). Returns the result's slot: the vector, or the scalar left in %rax.
+// is a vector type), operand addresses in `a`, `b`, `third` (slots holding addresses, or SIMD_NONE),
+// a scalar in `scalar` (or SIMD_NONE). Returns the result's slot: the vector, or the scalar left in %rax.
+// An operand `simd_emit` does not take. Not 0: slot 0 is a function's first parameter.
+const SIMD_NONE: u64 = 18446744073709551615;
 fn simd_emit<a, b>(c: (&a mut C), op: &b [u8], shape_ty: u64, rty: u64, a: u64, b: u64, third: u64, scalar: u64, k: u64, scratch: bool) -> u64 {
     mut dst = 0;
     if is_simd(&mut c, rty) {
@@ -40141,22 +40144,22 @@ fn simd_emit<a, b>(c: (&a mut C), op: &b [u8], shape_ty: u64, rty: u64, a: u64, 
     }
     zero := imm(&mut c, 0);
     get(&mut c, dst, view("%rdi"));
-    if a != 0 {
+    if a != SIMD_NONE {
         get(&mut c, a, view("%rsi"));
     } else {
         get(&mut c, zero, view("%rsi"));
     }
-    if b != 0 {
+    if b != SIMD_NONE {
         get(&mut c, b, view("%rdx"));
     } else {
         get(&mut c, zero, view("%rdx"));
     }
-    if third != 0 {
+    if third != SIMD_NONE {
         get(&mut c, third, view("%rcx"));
     } else {
         get(&mut c, zero, view("%rcx"));
     }
-    if scalar != 0 {
+    if scalar != SIMD_NONE {
         get(&mut c, scalar, view("%rax"));
     }
     mut line = copy_bytes(view("simd."));
@@ -40277,7 +40280,7 @@ fn simd_static<a, b>(c: (&a mut C), ty: u64, name: &b [u8]) -> Val {
             s = simd_scalar_arg(&mut c, elem);
         }
         expect(&mut c, view(")"));
-        return val(simd_emit(&mut c, view("splat"), ty, ty, 0, 0, 0, s, 0, false), ty);
+        return val(simd_emit(&mut c, view("splat"), ty, ty, SIMD_NONE, SIMD_NONE, SIMD_NONE, s, 0, false), ty);
     }
     if same(view(name), view("new")) && !mask {
         lanes := simd_lanes(&mut c, ty);
@@ -40309,7 +40312,7 @@ fn simd_static<a, b>(c: (&a mut C), ty: u64, name: &b [u8]) -> Val {
         index := simd_scalar_arg(&mut c, int_type(&mut c, 64, 0));
         expect(&mut c, view(")"));
         at := simd_elements(&mut c, src, index, ty, false);
-        return val(simd_emit(&mut c, view("copy"), ty, ty, at, 0, 0, 0, 0, false), ty);
+        return val(simd_emit(&mut c, view("copy"), ty, ty, at, SIMD_NONE, SIMD_NONE, SIMD_NONE, 0, false), ty);
     }
     mut msg = copy_bytes(view("`"));
     push_bytes(&mut msg, view(simd_shape(&mut c, ty)));
@@ -40327,7 +40330,7 @@ fn simd_method<a, b>(c: (&a mut C), value: Val, name: &b [u8]) -> Val {
     float := simd_float(&mut c, ty);
     if same(view(name), view("sum")) && !mask {
         expect(&mut c, view(")"));
-        return val(simd_emit(&mut c, view("sum"), ty, elem, value.t, 0, 0, 0, 0, true), elem);
+        return val(simd_emit(&mut c, view("sum"), ty, elem, value.t, SIMD_NONE, SIMD_NONE, SIMD_NONE, 0, true), elem);
     }
     if same(view(name), view("lane")) && !mask {
         // A constant lane: `v.lane(2)`.
@@ -40347,7 +40350,7 @@ fn simd_method<a, b>(c: (&a mut C), value: Val, name: &b [u8]) -> Val {
         }
         advance(&mut c);
         expect(&mut c, view(")"));
-        return val(simd_emit(&mut c, view("lane"), ty, elem, value.t, 0, 0, 0, k, false), elem);
+        return val(simd_emit(&mut c, view("lane"), ty, elem, value.t, SIMD_NONE, SIMD_NONE, SIMD_NONE, k, false), elem);
     }
     if same(view(name), view("store")) && !mask {
         dst := expr(&mut c, 0);
@@ -40362,7 +40365,7 @@ fn simd_method<a, b>(c: (&a mut C), value: Val, name: &b [u8]) -> Val {
     if (same(view(name), view("min")) || same(view(name), view("max"))) && !mask {
         other := simd_vector_arg(&mut c, ty);
         expect(&mut c, view(")"));
-        return val(simd_emit(&mut c, name, ty, ty, value.t, other, 0, 0, 0, false), ty);
+        return val(simd_emit(&mut c, name, ty, ty, value.t, other, SIMD_NONE, SIMD_NONE, 0, false), ty);
     }
     cmps := u8[][copy_bytes(view("eq")), copy_bytes(view("ne")), copy_bytes(view("lt")), copy_bytes(view("le")), copy_bytes(view("gt")), copy_bytes(view("ge"))];
     for i in cmps.len() {
@@ -40370,7 +40373,7 @@ fn simd_method<a, b>(c: (&a mut C), value: Val, name: &b [u8]) -> Val {
             other := simd_vector_arg(&mut c, ty);
             expect(&mut c, view(")"));
             mty := simd_mask_of(&mut c, ty);
-            return val(simd_emit(&mut c, name, ty, mty, value.t, other, 0, 0, 0, false), mty);
+            return val(simd_emit(&mut c, name, ty, mty, value.t, other, SIMD_NONE, SIMD_NONE, 0, false), mty);
         }
     }
     if mask && same(view(name), view("select")) {
@@ -40384,15 +40387,15 @@ fn simd_method<a, b>(c: (&a mut C), value: Val, name: &b [u8]) -> Val {
         }
         require_type(&mut c, b.ty, a.ty);
         vty := base_type(&mut c, a.ty);
-        return val(simd_emit(&mut c, view("select"), vty, vty, value.t, a.t, b.t, 0, 0, false), vty);
+        return val(simd_emit(&mut c, view("select"), vty, vty, value.t, a.t, b.t, SIMD_NONE, 0, false), vty);
     }
     if mask && (same(view(name), view("any")) || same(view(name), view("all"))) {
         expect(&mut c, view(")"));
-        return val(simd_emit(&mut c, name, ty, bool_type(&mut c), value.t, 0, 0, 0, 0, false), bool_type(&mut c));
+        return val(simd_emit(&mut c, name, ty, bool_type(&mut c), value.t, SIMD_NONE, SIMD_NONE, SIMD_NONE, 0, false), bool_type(&mut c));
     }
     if mask && same(view(name), view("not")) {
         expect(&mut c, view(")"));
-        return val(simd_emit(&mut c, view("not"), ty, ty, value.t, 0, 0, 0, 0, false), ty);
+        return val(simd_emit(&mut c, view("not"), ty, ty, value.t, SIMD_NONE, SIMD_NONE, SIMD_NONE, 0, false), ty);
     }
     mut msg = copy_bytes(view("`"));
     push_bytes(&mut msg, view(simd_shape(&mut c, ty)));
@@ -40445,7 +40448,7 @@ fn simd_binary<a>(c: (&a mut C), k: u64, left: u64, ty: u64, right: Val) -> Val 
         push_bytes(&mut msg, view("`"));
         fail(&mut c, view(msg));
     }
-    return val(simd_emit(&mut c, view(op), vty, vty, left, right.t, 0, 0, 0, false), vty);
+    return val(simd_emit(&mut c, view(op), vty, vty, left, right.t, SIMD_NONE, SIMD_NONE, 0, false), vty);
 }
 fn atomic_element<a>(c: (&a mut C), ty: u64) -> bool {
     if (ty == 0) || is_bool(&mut c, ty) {

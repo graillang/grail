@@ -23,28 +23,28 @@ const ok = (what, condition, detail = '') => {
 };
 ok('the program prints the dot product', ran.status === 0 && ran.stdout === '177\n', `${ran.status} ${ran.stdout}${ran.stderr}`);
 
-const dump = spawnSync('objdump', ['-d', '--no-show-raw-insn', exe], { encoding: 'utf8' }).stdout;
-const lines = dump.split('\n');
-const from = lines.findIndex(line => /<f_main_dot>:$/.test(line));
-const to = lines.findIndex((line, i) => i > from && line.trim() === '');
-const body = lines.slice(from + 1, to).map(line => {
+// The lifted functions are internal, so LLVM may inline `dot` into its caller and the symbol may be
+// gone: the loop is found by what it is - a backward conditional jump whose body multiplies and adds
+// packed singles - in the object clang wrote for the lifted code.
+const dump = spawnSync('objdump', ['-d', '--no-show-raw-insn', join(work, 'p.ll.o')], { encoding: 'utf8' }).stdout;
+const insns = dump.split('\n').map(line => {
   const m = /^\s*([0-9a-f]+):\s+(.*)$/.exec(line);
   return m ? { at: parseInt(m[1], 16), text: m[2].trim() } : null;
 }).filter(Boolean);
-ok('dot is in the binary', from !== -1 && body.length > 0);
-// The loop: the backward conditional jump whose target is inside the function.
-const back = body.find(insn => {
-  const m = /^j[a-z]+\s+([0-9a-f]+)\b/.exec(insn.text);
-  return m && !insn.text.startsWith('jmp') && parseInt(m[1], 16) < insn.at && parseInt(m[1], 16) >= body[0].at;
-});
-ok('dot has a loop', back !== undefined, body.map(i => i.text).join('\n'));
-if (back) {
-  const head = parseInt(/^j[a-z]+\s+([0-9a-f]+)/.exec(back.text)[1], 16);
-  const loop = body.filter(insn => insn.at >= head && insn.at <= back.at);
+const loops = [];
+for (const insn of insns) {
+  const m = /^j([a-z]+)\s+([0-9a-f]+)\b/.exec(insn.text);
+  if (!m || m[1] === 'mp') continue;
+  const head = parseInt(m[2], 16);
+  if (head >= insn.at) continue;
+  loops.push(insns.filter(i => i.at >= head && i.at <= insn.at));
+}
+const loop = loops.find(body => body.some(i => /^mulps/.test(i.text)) && body.some(i => /^addps/.test(i.text)));
+ok('a loop multiplies and adds packed singles', loop !== undefined, `${loops.length} loops`);
+if (loop) {
   const shown = loop.map(i => i.text).join('\n');
   ok('the loop touches no stack slot', !loop.some(i => /\(%r[sb]p\)|%r[sb]p\)/.test(i.text)), shown);
   ok('the loop calls nothing', !loop.some(i => /^call/.test(i.text)), shown);
-  ok('the loop multiplies and adds packed singles', loop.some(i => /^mulps/.test(i.text)) && loop.some(i => /^addps/.test(i.text)), shown);
   ok('the loop is short (no per-lane code)', loop.length <= 12, shown);
 }
 if (failed) process.exit(1);
