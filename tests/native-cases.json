@@ -6057,6 +6057,49 @@
     "note": "a compile-time probe stops at its first error (no reruns to find the next): the error is reported once, then the outer compile names the call. Reruns inside probes re-ran every probe beneath them, which made a failure deep in a chain exponential (docs/design/comptime-speed.md)"
   },
   {
+    "name": "comptime-cycle-direct",
+    "source": "static A: u64 = @fa();\nstatic B: u64 = @fb();\nfn fa() -> u64 {\n    return B + 1;\n}\nfn fb() -> u64 {\n    return A + 1;\n}\nfn main() -> u64 {\n    return A;\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "`main::A` and `main::B` depend on each other while compiling: main::A -> main::B -> main::A",
+      "1 | static A: u64 = @fa();"
+    ],
+    "note": "R1: a probe never starts another probe; reads inside it compute values through guarded value functions, and one found mid-computation is a cycle named with its path"
+  },
+  {
+    "name": "comptime-cycle-three-deep",
+    "source": "static A: u64 = @fa();\nstatic B: u64 = @fb();\nstatic C: u64 = @fc();\nfn fa() -> u64 {\n    return B + 1;\n}\nfn fb() -> u64 {\n    return C + 1;\n}\nfn fc() -> u64 {\n    return A + 1;\n}\nfn main() -> u64 {\n    return A;\n}\n",
+    "reject": true,
+    "diagnostic": "`main::A`, `main::B` and `main::C` depend on each other while compiling: main::A -> main::B -> main::C -> main::A",
+    "note": "a three-step cycle through statics names all three in order"
+  },
+  {
+    "name": "comptime-cycle-self",
+    "source": "static A: u64 = @fa();\nfn fa() -> u64 {\n    return A + 1;\n}\nfn main() -> u64 {\n    return A;\n}\n",
+    "reject": true,
+    "diagnostic": "`main::A` depends on itself while compiling: main::A -> main::A",
+    "note": "a static whose initialiser reads itself"
+  },
+  {
+    "name": "comptime-cycle-bindings",
+    "source": "X := fx();\nY := fy();\nfn fx() -> u64 {\n    return Y + 1;\n}\nfn fy() -> u64 {\n    return X + 1;\n}\nfn main() -> u64 {\n    return X;\n}\n",
+    "reject": true,
+    "diagnostic": "depend on each other while compiling: main::",
+    "note": "a cycle between two module bindings is found the same way"
+  },
+  {
+    "name": "comptime-chain-twelve-values",
+    "source": "static V0: u64 = @f0();\nfn f0() -> u64 {\n    mut t = 0;\n    for i in 10 {\n        t += i;\n    }\n    return t;\n}\nstatic V1: u64 = @f1();\nfn f1() -> u64 {\n    mut t = 0;\n    for i in 11 {\n        t += i;\n    }\n    return t;\n}\nstatic V2: u64 = @f2();\nfn f2() -> u64 {\n    mut t = 0;\n    for i in 12 {\n        t += i;\n    }\n    return t;\n}\nstatic V3: u64 = @f3();\nfn f3() -> u64 {\n    mut t = 0;\n    for i in 13 {\n        t += i;\n    }\n    return t;\n}\nstatic V4: u64 = @f4();\nfn f4() -> u64 {\n    mut t = 0;\n    for i in 14 {\n        t += i;\n    }\n    return t;\n}\nstatic V5: u64 = @f5();\nfn f5() -> u64 {\n    mut t = 0;\n    for i in 15 {\n        t += i;\n    }\n    return t;\n}\nstatic V6: u64 = @f6();\nfn f6() -> u64 {\n    mut t = 0;\n    for i in 16 {\n        t += i;\n    }\n    return t;\n}\nstatic V7: u64 = @f7();\nfn f7() -> u64 {\n    mut t = 0;\n    for i in 17 {\n        t += i;\n    }\n    return t;\n}\nstatic V8: u64 = @f8();\nfn f8() -> u64 {\n    mut t = 0;\n    for i in 18 {\n        t += i;\n    }\n    return t;\n}\nstatic V9: u64 = @f9();\nfn f9() -> u64 {\n    mut t = 0;\n    for i in 19 {\n        t += i;\n    }\n    return t;\n}\nstatic V10: u64 = @f10();\nfn f10() -> u64 {\n    mut t = 0;\n    for i in 20 {\n        t += i;\n    }\n    return t;\n}\nstatic V11: u64 = @f11();\nfn f11() -> u64 {\n    mut t = 0;\n    for i in 21 {\n        t += i;\n    }\n    return t;\n}\nfn main() -> u64 {\n    println(V0);\n    println(V1);\n    println(V2);\n    println(V3);\n    println(V4);\n    println(V5);\n    println(V6);\n    println(V7);\n    println(V8);\n    println(V9);\n    println(V10);\n    println(V11);\n    return 0;\n}\n",
+    "stdout": "45\n55\n66\n78\n91\n105\n120\n136\n153\n171\n190\n210\n",
+    "note": "twelve run-tier statics: each probe computes what it reads itself, so nothing nests (this was a chain twelve probes deep, past the eight-deep limit, and its error reruns never finished)"
+  },
+  {
+    "name": "static-probe-read-equals-baked",
+    "source": "static T8: i8[] = @table8();\nstatic LO8: i64 = @low8();\nstatic HI8: i64 = @high8();\nfn table8() -> i8[] {\n    mut v = i8[];\n    v.push(127);\n    v.push(-128);\n    v.push(-1);\n    return v;\n}\nfn low8() -> i64 {\n    mut m = i64(T8[0]);\n    for i in T8.len() {\n        if i64(T8[i]) < m {\n            m = i64(T8[i]);\n        }\n    }\n    return m;\n}\nfn high8() -> i64 {\n    mut m = i64(T8[2]);\n    for i in T8.len() {\n        if m < i64(T8[i]) {\n            m = i64(T8[i]);\n        }\n    }\n    return m;\n}\nstatic T16: i16[] = @table16();\nstatic LO16: i64 = @low16();\nstatic HI16: i64 = @high16();\nfn table16() -> i16[] {\n    mut v = i16[];\n    v.push(32767);\n    v.push(-32768);\n    v.push(-1);\n    return v;\n}\nfn low16() -> i64 {\n    mut m = i64(T16[0]);\n    for i in T16.len() {\n        if i64(T16[i]) < m {\n            m = i64(T16[i]);\n        }\n    }\n    return m;\n}\nfn high16() -> i64 {\n    mut m = i64(T16[2]);\n    for i in T16.len() {\n        if m < i64(T16[i]) {\n            m = i64(T16[i]);\n        }\n    }\n    return m;\n}\nstatic T32: i32[] = @table32();\nstatic LO32: i64 = @low32();\nstatic HI32: i64 = @high32();\nfn table32() -> i32[] {\n    mut v = i32[];\n    v.push(2147483647);\n    v.push(-2147483648);\n    v.push(-1);\n    return v;\n}\nfn low32() -> i64 {\n    mut m = i64(T32[0]);\n    for i in T32.len() {\n        if i64(T32[i]) < m {\n            m = i64(T32[i]);\n        }\n    }\n    return m;\n}\nfn high32() -> i64 {\n    mut m = i64(T32[2]);\n    for i in T32.len() {\n        if m < i64(T32[i]) {\n            m = i64(T32[i]);\n        }\n    }\n    return m;\n}\nstatic T64: i64[] = @table64();\nstatic LO64: i64 = @low64();\nstatic HI64: i64 = @high64();\nfn table64() -> i64[] {\n    mut v = i64[];\n    v.push(9223372036854775807);\n    v.push(-9223372036854775807 - 1);\n    v.push(-1);\n    return v;\n}\nfn low64() -> i64 {\n    mut m = i64(T64[0]);\n    for i in T64.len() {\n        if i64(T64[i]) < m {\n            m = i64(T64[i]);\n        }\n    }\n    return m;\n}\nfn high64() -> i64 {\n    mut m = i64(T64[2]);\n    for i in T64.len() {\n        if m < i64(T64[i]) {\n            m = i64(T64[i]);\n        }\n    }\n    return m;\n}\nstruct Flag {\n    name: string,\n    weight: i32\n}\nstatic FLAGS: Flag[] = @flags();\nstatic TOTAL: i64 = @total();\nfn flags() -> Flag[] {\n    mut v = Flag[];\n    v.push(Flag { name: \"output\", weight: -3 });\n    v.push(Flag { name: \"verbose\", weight: 7 });\n    return v;\n}\nfn total() -> i64 {\n    mut t: i64 = 0;\n    for i in FLAGS.len() {\n        f := FLAGS[i];\n        t += i64(f.name.len()) * 100 + i64(f.weight);\n    }\n    return t;\n}\nfn main() -> u64 {\n    println(LO8 == low8());\n    println(HI8 == high8());\n    println(LO8);\n    println(HI8);\n    println(LO16 == low16());\n    println(HI16 == high16());\n    println(LO16);\n    println(HI16);\n    println(LO32 == low32());\n    println(HI32 == high32());\n    println(LO32);\n    println(HI32);\n    println(LO64 == low64());\n    println(HI64 == high64());\n    println(LO64);\n    println(HI64);\n    println(TOTAL == total());\n    println(TOTAL);\n    return 0;\n}\n",
+    "stdout": "true\ntrue\n-128\n127\ntrue\ntrue\n-32768\n32767\ntrue\ntrue\n-2147483648\n2147483647\ntrue\ntrue\n-9223372036854775808\n9223372036854775807\ntrue\n1304\n",
+    "note": "a static read inside a probe (LO/HI/TOTAL computed from T/FLAGS while compiling) gives the value the program reads from the baked object at run time: every signed width at min, -1 and max, and a record table"
+  },
+  {
     "name": "static-baked-scalars",
     "source": "const PAGE: u64 = 4096;\nstatic MASK: u64 = PAGE - 1;\nstatic NEG: i32 = -7;\nstatic ON: bool = PAGE > 1;\nstatic NAME: string = \"grail\";\nfn main() -> u64 {\n    println(MASK);\n    println(NEG);\n    println(ON);\n    println(NAME);\n    println(NAME.len());\n    return 0;\n}\n",
     "stdout": "4095\n-7\ntrue\ngrail\n5\n",
@@ -6207,7 +6250,7 @@
     "name": "static-cycle-refused",
     "source": "static T: u64 = @f();\nfn f() -> u64 {\n    return T + 1;\n}\nfn main() -> u64 {\n    return T;\n}\n",
     "reject": true,
-    "diagnostic": "is still being computed",
+    "diagnostic": "`main::T` depends on itself while compiling: main::T -> main::T",
     "note": "S5: a static whose compile-time initialiser reads itself is a cycle"
   },
   {
@@ -6536,7 +6579,7 @@
     "name": "comptime-run-tier-cycle",
     "source": "fn f() -> u64 {\n    return A + 1;\n}\nA := f();\nfn main() -> u64 {\n    println(A);\n    return 0;\n}\n",
     "reject": true,
-    "diagnostic": "the constants depend on each other in a cycle"
+    "diagnostic": "`main::A` depends on itself while compiling: main::A -> main::A"
   },
   {
     "name": "errors-several-per-compile",

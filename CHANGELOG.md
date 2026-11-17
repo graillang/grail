@@ -1,5 +1,11 @@
 ## Unreleased
 
+- **A compile-time probe never starts another probe** (comptime-speed R1). Inside a probe a read of
+  a run-tier value calls a value function the probe defines - a static is computed once on first
+  read behind a guard, a module binding at each read - so N values cost N flat compiles instead of
+  a chain N deep (12 values: 7.6 s; before, never finished). A cycle is a compile error naming every
+  value on it and the path (`main::A -> main::B -> main::A`).
+
 - Fixed: **a chain of more than eight compile-time values hung the build.** The compile that hit
   the nesting limit re-ran itself to report its next error, up to 20 times, and inside a probe each
   re-run repeated every probe beneath it, so the failure multiplied through the chain (12 values
