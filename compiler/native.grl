@@ -4710,9 +4710,8 @@ fn borrow_parameter<a>(c: (&a mut C), slot: u64, ty: u64) -> Val {
 fn own<a>(c: (&a mut C), slot: u64, ty: u64) -> Val {
     materialise(&mut c, slot, ty);
     if c.raw == 0 {
-        k := ty_kind(&mut c, ty);
         drops := needs_drop(&mut c, ty);
-        if drops || k == 7 || array_moves(&mut c, ty) {
+        if affine(&mut c, ty) {
             mut flag = 0;
             if drops {
                 flag = imm(&mut c, 1) + 1;
@@ -4964,7 +4963,7 @@ fn member_place<a>(c: (&a mut C), root: u64, field: u64, ty: u64) -> u64 {
             return m.place;
         }
     }
-    copy := !needs_drop(&mut c, ty) & !affine_nodrop(&mut c, ty);
+    copy := !affine(&mut c, ty);
     place := ownership::field(&mut c.check, root, copy);
     c.members.push(Member { base: root, field: field, place: place });
     return place;
@@ -6937,10 +6936,8 @@ fn move_out<a>(c: (&a mut C), v: Val) -> unit {
         return ();
     }
     materialise(&mut c, v.t, v.ty);
-    if !needs_drop(&mut c, v.ty) {
-        if !affine_nodrop(&mut c, v.ty) {
-            return ();
-        }
+    if !affine(&mut c, v.ty) {
+        return ();
     }
     index := resource(&mut c, v.t);
     if index == 0 {
@@ -29835,6 +29832,14 @@ fn array_moves<a>(c: (&a mut C), ty: u64) -> bool {
 }
 // A value that is moved rather than copied but owns nothing to drop: an exclusive reference, or an
 // array larger than the copy rule's four words.
+// Whether a value of `ty` moves rather than copies - the checker's question (member_place, own,
+// move_out and every place that decides between a move and a copy). `needs_drop` is the emitters'
+// question: whether there is anything to drop or free. Today the two agree but for exclusive
+// references and arrays over the copy rule's four words, which move and drop nothing; stage 4 of
+// unboxed-values.md keeps records with owned fields inline, and there the two part further.
+fn affine<a>(c: (&a mut C), ty: u64) -> bool {
+    return needs_drop(&mut c, ty) || affine_nodrop(&mut c, ty);
+}
 fn affine_nodrop<a>(c: (&a mut C), ty: u64) -> bool {
     if c.raw != 0 {
         return false;
@@ -35465,7 +35470,7 @@ fn deref_value<a>(c: (&a mut C), a: Val) -> Val {
             release_temporary(&mut c, a.t);
             return val(slot, ty);
         }
-        if needs_drop(&mut c, ty) {
+        if affine(&mut c, ty) && (ty_kind(&mut c, ty) != 7) {
             fail(&mut c, view("cannot copy an owned value out of a reference; use exchange"));
         }
     }
@@ -38461,7 +38466,7 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
                 capture_aggregate_regions(&mut c, id, &mut caps);
             }
             observe(&mut c, id);
-            if needs_drop(&mut c, ty) || ty_kind(&mut c, ty) == 7 {
+            if affine(&mut c, ty) {
                 held := move_value(&mut c, val(id, ty));
                 move_out(&mut c, held);
             }
@@ -47752,7 +47757,7 @@ fn discard_value<a>(c: (&a mut C), v: Val) -> unit {
         base := info.base;
         kind := ty_kind(&mut c, v.ty);
         if base != 0 {
-            if needs_drop(&mut c, v.ty) || kind == 7 {
+            if affine(&mut c, v.ty) {
                 moved := move_value(&mut c, v);
                 owner := resource(&mut c, moved.t);
                 release(&mut c, owner - 1);
