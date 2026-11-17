@@ -7,6 +7,9 @@
   and calls to Grail's own functions no longer trip the vector-register guard meant for C calls.
   tools/test-facts.mjs checks that a blocking-extern caller is lifted.
 
+- `grail check` no longer builds the list of SIMD type names for every identifier it reads: names
+  that cannot be one (wrong length, first letter or `x` position) are rejected first. This was 7% of
+  checking a large program since the SIMD types arrived.
 - The optimiser parses each distinct instruction line once per compile and replays the record for
   its repeats (a label operand is numbered again, the frame-slot bookkeeping redone): byte-identical
   output, 2.6% fewer instructions for a 4000-function file. The plan for taking the remaining text
