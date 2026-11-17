@@ -18775,14 +18775,11 @@
     "diagnostic": "`@no_block` function `say` can block: it calls say -> rt_print_number -> rt_write_all"
   },
   {
-    "name": "fx-no-block-c-call-refused",
-    "note": "A C function not declared `nonblocking` may block.",
-    "source": "extern \"C\" lib \"c\" fn labs(x: i64) -> i64;\n@no_block\nfn mag(x: i64) -> i64 {\n    mut r: i64 = 0;\n    unsafe {\n        r = labs(x);\n    }\n    return r;\n}\nfn main() {\n    println(mag(i64(0) - 4));\n}\n",
-    "reject": true,
-    "diagnostic": "the target is `labs`, a C function not declared `nonblocking`",
     "name": "pool-chunks-mut-at-and-reduce-chunks",
     "note": "pool::chunks_mut_at hands each exclusive piece its first index; pool::reduce_chunks folds per-piece results in index order (simd-layout-parallel-loops.md 4.2, D4)",
     "source": "use pool;\nfn main() {\n    n := 1000;\n    mut xs = u64[0; n];\n    pool::chunks_mut_at(&mut xs[0: n], 64, |base: u64, s: &mut [u64]| -> unit {\n        for i in s.len() {\n            s[i] = base + i;\n        }\n    });\n    ok := pool::reduce_chunks<u64, bool>(&xs[0: n], 100, true, |s: &[u64]| -> bool {\n        mut good = true;\n        for i in s.len() - 1 {\n            if s[i + 1] != s[i] + 1 {\n                good = false;\n            }\n        }\n        return good;\n    }, |a: bool, b: bool| -> bool a && b);\n    total := pool::reduce_chunks<u64, u64>(&xs[0: n], 128, 0, |s: &[u64]| -> u64 {\n        mut t = 0;\n        for i in s.len() {\n            t += s[i];\n        }\n        return t;\n    }, |a: u64, b: u64| -> u64 a + b);\n    mut fs = f64[0.1; 10000];\n    s1 := pool::reduce_chunks<f64, f64>(&fs[0: 10000], 333, 0.0, |s: &[f64]| -> f64 {\n        mut t = 0.0;\n        for i in s.len() {\n            t = t + s[i];\n        }\n        return t;\n    }, |a: f64, b: f64| -> f64 a + b);\n    println(\"{} {} {}\", ok, total, s1);\n}\n",
+    "reject": true,
+    "diagnostic": "the target is `labs`, a C function not declared `nonblocking`",
     "stdout": "true 499500 1000.0000000000057\n"
   },
   {
@@ -18801,9 +18798,9 @@
     "diagnostic": "parallel_split callback takes (&mut [T]) or (u64, &mut [T])"
   },
   {
-    "name": "fx-no-block-stdlib-claims",
-    "note": "The standard library's `@no_block` claims - every `math` function, the `hash` writers and `finish`, `u64[].sum`, `[u8].is_char_boundary`, `strings::utf8_width` - are proved, and a `@no_block` frame function can call them all.",
-    "source": "use math;\nuse hash;\nuse vecs;\nuse strings;\n@no_block\nfn frame(x: f64, v: &u64[], t: &[u8]) -> u64 {\n    a := math::sin(x) + math::cos(x) + math::sqrt(x) + math::pow(x, 2.5) + math::atan2(x, 1.0) + math::ln(x + 1.0) + math::exp(x) + math::log10(x + 1.0) + math::log2(x + 1.0) + math::tan(x) + math::atan(x) + math::powi(x, 3) + math::abs(x) + math::floor(x) + math::ceil(x) + math::round(x);\n    mut h = hash::hasher(1, 2);\n    hash::write_num(&mut h, v.sum());\n    hash::write_byte(&mut h, 7);\n    hash::write_bytes(&mut h, t);\n    w := strings::utf8_width(t[0]);\n    b := t.is_char_boundary(1);\n    mut r = hash::finish(h) + w;\n    if b {\n        r = r + 1;\n    }\n    if a > 0.0 {\n        r = r + 1;\n    }\n    return r;\n}\nfn main() {\n    v := u64[1, 2, 3];\n    t := \"héllo\".text();\n    println(frame(0.5, &v, view(t)) != 0);\n}\n",
+    "name": "bce-loop-invariant-swap",
+    "note": "the loop-invariant pass: `v.len == n` and `tmp.len == v.len` are killed by the swap in the body, kept under check, and hold again where the body ends (the swap re-establishes them through `s`); so they hold after the loop and both reads are proved",
+    "source": "fn last(n0: u64) -> u64 {\n    n: u64 := 8;\n    mut v = u64[];\n    for i in n {\n        v.push(i + n0);\n    }\n    mut tmp = v.copy();\n    mut w: u64 = 1;\n    while w < n {\n        mut s = v;\n        v = tmp;\n        tmp = s;\n        w = w * 2;\n    }\n    return v[n - 1] + tmp[n / 2];\n}\nfn main() {\n    println(last(0));\n}\n",
     "modules": [
       "lib/math.grl",
       "lib/vecs.grl",
@@ -18813,9 +18810,6 @@
       "lib/order.grl",
       "lib/core.grl"
     ],
-    "stdout": "true\n",
-    "name": "bce-loop-invariant-swap",
-    "source": "fn last(n0: u64) -> u64 {\n    n: u64 := 8;\n    mut v = u64[];\n    for i in n {\n        v.push(i + n0);\n    }\n    mut tmp = v.copy();\n    mut w: u64 = 1;\n    while w < n {\n        mut s = v;\n        v = tmp;\n        tmp = s;\n        w = w * 2;\n    }\n    return v[n - 1] + tmp[n / 2];\n}\nfn main() {\n    println(last(0));\n}\n",
     "stdout": "11\n",
     "targets": [
       "x86_64",
@@ -18834,8 +18828,7 @@
         "in": "f_main_last",
         "text": "call rt_slot\n"
       }
-    ],
-    "note": "the loop-invariant pass: `v.len == n` and `tmp.len == v.len` are killed by the swap in the body, kept under check, and hold again where the body ends (the swap re-establishes them through `s`); so they hold after the loop and both reads are proved"
+    ]
   },
   {
     "name": "bce-loop-invariant-broken-kept",
@@ -19030,5 +19023,29 @@
     "source": "fn main() {\n    v := i32x4::splat(1);\n    println(v.mul_add(v, v).sum());\n}\n",
     "reject": true,
     "diagnostic": "`i32x4` has no method `mul_add`"
+  },
+  {
+    "name": "f32-constant-op-is-binary32",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "an f32 operation with an f32 constant is the binary32 operation (`mulss` with the constant's bits), not widen, operate in f64 and round: exact for + - * / since both operands are binary32 (optimize::f32_const_ops); the checksum is the same bits",
+    "source": "// The parallel twin of bench/ecs.grl: the same million entities, the same hundred frames, the same\n// sum, with each frame's update run on the pool's workers through parallel_for_zip\n// (docs/design/simd-layout-parallel-loops.md 4.2). Every axis is one zip of its velocity and\n// position columns, cut into pieces of GRAIN entities - the same pieces on any number of workers,\n// and each entity is updated by exactly the arithmetic of ecs.grl, so the sum is the same bits.\n// GRAIL_WORKERS sets the worker count.\nconst GRAIN: u64 = 16384;\nconst DT: f32 = 0.016;\nconst DAMPING: f32 = 0.999;\nconst GRAVITY: f32 = 0.0981;\nfn main() {\n    n: u64 := 1000000;\n    mut px = f32[];\n    mut py = f32[];\n    mut pz = f32[];\n    mut vx = f32[];\n    mut vy = f32[];\n    mut vz = f32[];\n    mut x: u64 = 88172645463325252;\n    for i in n {\n        x = x ^ (x << 13);\n        x = x ^ (x >> 7);\n        x = x ^ (x << 17);\n        px.push(f32(i64(x % 1000)) * 0.5);\n        py.push(f32(i64((x >> 10) % 1000)) * 0.5);\n        pz.push(f32(i64((x >> 20) % 1000)) * 0.5);\n        vx.push(f32(i64((x >> 30) % 100)) * 0.01);\n        vy.push(f32(i64((x >> 40) % 100)) * 0.01);\n        vz.push(f32(i64((x >> 50) % 100)) * 0.01);\n    }\n    for frame in 100 {\n        // Each callback is a literal at the call, so its body knows `p.len == v.len` and indexes\n        // both without a check.\n        parallel_for_zip(GRAIN, |v: &mut [f32], p: &mut [f32]| -> unit {\n            for i in v.len() {\n                v[i] = v[i] * DAMPING;\n                p[i] = p[i] + v[i] * DT;\n            }\n        }, &mut vx[0: n], &mut px[0: n]);\n        parallel_for_zip(GRAIN, |v: &mut [f32], p: &mut [f32]| -> unit {\n            for i in v.len() {\n                v[i] = v[i] * DAMPING - GRAVITY * DT;\n                p[i] = p[i] + v[i] * DT;\n            }\n        }, &mut vy[0: n], &mut py[0: n]);\n        parallel_for_zip(GRAIN, |v: &mut [f32], p: &mut [f32]| -> unit {\n            for i in v.len() {\n                v[i] = v[i] * DAMPING;\n                p[i] = p[i] + v[i] * DT;\n            }\n        }, &mut vz[0: n], &mut pz[0: n]);\n    }\n    mut sum: f64 = 0.0;\n    for i in n {\n        sum = sum + f64(px[i]) + f64(py[i]) + f64(pz[i]);\n    }\n    println(\"{}\", sum);\n}\n",
+    "stdout": "751091934.7614092\n",
+    "asm": [
+      {
+        "in": "f_.closure_main_c0",
+        "text": "mulss %xmm1,%xmm0"
+      }
+    ],
+    "asmAbsent": [
+      {
+        "in": "f_.closure_main_c0",
+        "text": "mulsd"
+      }
+    ]
   }
 ]
