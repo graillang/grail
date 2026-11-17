@@ -3,6 +3,8 @@
 # "Landing on main"):
 #   bash tools/land.sh BRANCH [--wait]     queue BRANCH (--wait blocks until its verdict)
 #   bash tools/land.sh --status            the queue, the landing in progress, the last results
+#   bash tools/land.sh --remote-status     the build host's emulated legs and fuzzer for the newest
+#                                          landing (tools/land-remote.sh), recorded in post.txt
 # The service merges the branch onto current main itself, gates it (possibly together with other
 # queued branches), and fast-forwards main and the branch on green. GRAIL_LAND_SVC names the
 # service's directory on this host.

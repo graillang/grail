@@ -91,6 +91,10 @@ allocation and a free per hop. The compiler is written in that idiom throughout
 (`same(view(a), view(b))`), and the optimiser reads assembly text line by line through views. No
 index removes that; the value representation does. That is stage 3.
 
+**An index that is itself a field read allocates.** `o.src[o.at]` (through `o: &mut A`) builds and
+drops a view record on every access; `i := o.at; o.src[i]` is a plain load. A code-generation bug to
+fix, found in the internal assembler (stage 4), where it was a fifth of the instructions.
+
 The optimiser is the other half of a small build (48 % of hello world): it parses the assembly text
 the front end wrote, and then clang parses what it writes. That is stage 4.
 
@@ -401,6 +405,24 @@ What it shows:
   after an edit, against 3.2 s cold) is the bar this misses.
 - **An edited build improves**: 3.9 s wall against 4.9 s, close to cargo's 3.6 s.
 - Hello world is unchanged, as it should be: one small module has nothing to fork.
+
+## Stage 4: the compiler assembles its own code
+
+`compiler/asm_x86.grl` and `compiler/elf.grl` assemble the Linux x86-64 stream inside the compiler
+run (`--object`): the module's assembly text is no longer written, re-read and parsed by clang. The
+objects are byte-identical to clang's from the same text (`tools/asm-oracle.mjs`; the gate's
+`asm-oracle` leg holds every corpus program to it), debug builds included (DWARF 5 line tables as
+LLVM writes them). Measured on syn4000's 35 MB of text: clang 15.5 G instructions; the internal
+assembler 3.8 G in the release compiler, 8.2 G natively built. The self-compile's 119 MB: clang
+50.8 G, internal 11.4 G (release).
+
+**Function units.** A function's text encodes to the same bytes wherever it stands (no jump leaves a
+function; every other reference is a fixup by name), so each object keeps its functions' encodings
+beside it (`OBJ.units`, keyed by each chunk's text hash and headed by the compiler's identity) and a
+build replays the functions whose text did not change. An edited syn4000 module run: 106.0 G
+instructions with units, 111.0 G without (dev compiler). The units cannot remove more than the
+assembler's own share: an edited build still regenerates and optimises the whole module's text,
+and spends a quarter of its time writing the interface (`iface_sorted`, routed to the front end).
 
 ## The order of the remaining work
 

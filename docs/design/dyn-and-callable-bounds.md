@@ -122,3 +122,27 @@ bounds alone fix the 2x; the 114x needs the adapters to be types. Both are propo
   per element, and `fold` over an `Iter` is that plus one closure call. No library change removes
   it; an unboxed `T?` for word-sized `T` (tag and payload in two registers, unboxed stage 3) does.
   Until then the erased `Iter` cannot get near the hand loop, which is the case for 2b/2c.
+
+## 4. Step 2b, built: callable bounds and direct closure calls
+
+- **Bound.** `F: FnMut(T) -> U` (or `Fn`, with closure bounds) in a generic list. It travels in the
+  parameter's requirement set as a tagged entry (`CALLABLE_BOUND + type`), so templates, interfaces
+  (an empty interface name followed by the type) and specialisation carry it with no new field. It is
+  read when the whole parameter scope exists (`resolve_callable_bounds`), because a method's bound
+  names its impl's `T`.
+- **Body.** A parameter's type carries its bound among its proofs; a local of that type, or of the
+  specialisation's alias of it, is called through `param_callable`: with the bound's signature in a
+  template, and in a specialisation with the closure's own environment plus the bound's signature as
+  the body sees it (`T`, `U` bindings), so the call is direct and the types line up.
+- **Call site.** The bound's parameters and result are inferred from the closure (`infer_callable`)
+  and hint an untyped closure's parameters; the closure must convert to the bound
+  (`require_interfaces`), else "this argument does not meet the callable bound".
+- **Direct calls.** `indirect_call` emits `call <closure body>` whenever the callee's type is a
+  closure expression's own type (it has an environment) - for local closures too.
+- **Specialisation key.** A closure's environment was keyed by its captures only, so two closures with
+  one signature and no captures were one specialisation - harmless while the call went through the
+  code word, a miscompile once it is direct (found by `vecs-fold-and-predicates`). The key now names
+  the closure literal (file and position).
+- **Loans.** A closure given for a callable-bound parameter without `Owned` is lent for the call: it
+  neither makes the type arguments "borrowing" nor binds its loans to the result (`captured_bonds`).
+- **Moved first.** The 16 `vecs` callback methods. Measured below once the before/after pair is run.
