@@ -5654,23 +5654,32 @@ fn rt_job_reserve_background() -> u64 {
 fn rt_now_us() -> u64 {
     return f_host_now_us();
 }
-// The victims are every worker and the external slot.
+// The victims are every worker and the external slot. An empty deque is passed over with two
+// loads and no call (an idle worker asks often, and most deques are empty).
 fn rt_job_steal(s: u64, w: u64, class: u64) -> u64 {
-    workers := raw_load(s + 32) + 1;
-    if 1 < workers {
-        array := raw_load(s + 72);
-        start := rt_worker_random(w) % workers;
-        mut i = 0;
-        while i < workers {
-            victim := (start + i) % workers;
-            if victim != raw_load(w + 40) {
-                r := rt_deque_steal(rt_job_deque(raw_load(array + victim * 8), class));
+    blocks := raw_load(s + 32) + 1;
+    array := raw_load(s + 72);
+    mut off = 128;
+    if class == 0 {
+        off = 512;
+    } else if class == 2 {
+        off = 640;
+    }
+    start := rt_worker_random(w) % blocks;
+    mine := raw_load(w + 40);
+    mut i = 0;
+    while i < blocks {
+        victim := (start + i) % blocks;
+        if victim != mine {
+            v := raw_load(array + victim * 8) + off;
+            if raw_atomic_load(v + 8) < raw_atomic_load(v + 16) {
+                r := rt_deque_steal(v);
                 if (r != 0) && (raw_load(r + 112) == class) {
                     return r;
                 }
             }
-            i += 1;
         }
+        i += 1;
     }
     return 0;
 }
