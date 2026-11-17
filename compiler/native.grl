@@ -4547,11 +4547,13 @@ fn ffi_signature_fact<a, b, d>(c: (&a mut C), argtypes: (&b u64[]), ret: u64, sy
     llvm::fact_ffi(&mut c.facts, copy_bytes(view(symbol)), ints, floats, mask, result);
     return ();
 }
-// The LLVM backend's signature fact for the body being emitted: its argument words, six in
+// The signature fact for the body being emitted: its argument words, six in
 // registers and the rest on the stack (with the hidden result address when it has one). The lifter
 // defines the body and its calls with exactly these words (llvm.grl `signatures`).
 fn signature_fact<a>(c: (&a mut C), declared: u64) -> unit {
-    if (c.backend == 0) || (c.validating != 0) || (c.facts_fn.len() == 0) {
+    // The native optimiser reads it too: a direct call to this body reads only its argument
+    // registers (ir.grl `exact_calls`).
+    if !wants_facts(&c) {
         return ();
     }
     mut words = arg_words(&c, declared);
