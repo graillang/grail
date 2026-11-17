@@ -19387,10 +19387,10 @@ fn fn_regs_decode<a, b, d>(c: (&a mut C), data: &b [u8], ok: (&d mut u64)) -> Fn
         } else if kind == 3 {
             data := iface_rs(&mut p);
             out.push(FnReg { kind: 3, template: 0, types: u64[], data: data });
-        } else if kind == 4 {
-            // A result adapter the body names (result_adapter): its shape code.
+        } else if (kind == 4) || (kind == 5) {
+            // A result adapter (4) or a zip adapter (5) the body names: its shape code.
             code := iface_rv(&mut p);
-            out.push(FnReg { kind: 4, template: code, types: u64[], data: u8[] });
+            out.push(FnReg { kind: kind, template: code, types: u64[], data: u8[] });
         } else {
             exchange(ok, 0);
             return out;
@@ -19535,6 +19535,8 @@ fn fn_apply<a, b, d>(c: (&a mut C), u: (&b fncache::Unit), regs: (&d FnReg[]), l
             fx_unit_replay(&mut c, view(regs[i].data), text_at, at, claim_alloc, claim_panic);
         } else if kind == 4 {
             box_thunk_add(&mut c, template);
+        } else if kind == 5 {
+            zip_adapter_add(&mut c, template);
         } else {
             specialize(&mut c, template, &types);
         }
@@ -35207,16 +35209,22 @@ fn zip_adapter<a>(c: (&a mut C), closure: bool, slices: u64) -> u8[] {
     name.push(95);
     decimal(&mut name, slices);
     code := u64(closure) * 16 + slices;
-    mut known = false;
+    // A registration of the body's unit, as for result adapters: a replay names it again.
+    if c.fn_rec != 0 {
+        c.fn_regs.push(5);
+        iface_wv(&mut c.fn_regs, code);
+    }
+    zip_adapter_add(&mut c, code);
+    return name;
+}
+fn zip_adapter_add<a>(c: (&a mut C), code: u64) -> unit {
     for i in c.zip_adapters.len() {
         if c.zip_adapters[i] == code {
-            known = true;
+            return ();
         }
     }
-    if !known {
-        c.zip_adapters.push(code);
-    }
-    return name;
+    c.zip_adapters.push(code);
+    return ();
 }
 fn emit_zip_adapters<a>(c: (&a mut C)) -> unit {
     if c.zip_adapters.len() == 0 {
