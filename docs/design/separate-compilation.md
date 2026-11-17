@@ -113,7 +113,7 @@ than misread.
  source "tests/interfaces/pair.grl"
  sha256 "ad1f2b3cf421decab61ea22f7dfc572fec79a74a3078b3ef330f4e49a94db2d0"
  mode typed_refs=1 default_u64=1 overflow=checked target=x86_64
- abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0 ref record = address record plain = inline plain record = frame args = 6 registers then stack
+ abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0 ref record = address record plain = inline plain record = frame args = 6 registers then stack layout = c
  unsafe 0
  std 0
  host 0
@@ -511,7 +511,8 @@ declaration kind meant a new spelling, a new parse rule and a new way to lose a 
 ```
 file   := "GRIF" VERSION:u8 record* trailer
 record := tag:u8 len:VAR payload[len]
-trailer   tag 2: source digest, then 32 raw bytes of SHA-256 over every byte before them
+trailer   tag 2: source digest, then 32 raw bytes of fast_hash over every byte before them
+          (XXH64 under the seeds 0-3, each big-endian; format 11 - format 10 carried SHA-256 there)
 ```
 
 `VAR` is LEB128, so a small count costs one byte. One tag per declaration kind:
@@ -519,7 +520,7 @@ trailer   tag 2: source digest, then 32 raw bytes of SHA-256 over every byte bef
 | tag | record | carries |
 | --- | --- | --- |
 | 1 | `module` | module, source path, `std`/`unsafe`/`host`, overflow mode, target, and the `dyn` ABI |
-| 2 | `trailer` | the source's SHA-256, then the file's own digest |
+| 2 | `trailer` | the source's SHA-256, then the file's own digest (fast_hash: it guards against corruption, as the build store's does) |
 | 3 | `link` | one `extern "C" lib` input |
 | 10 | `type` | kind (struct/record/enum/handle), parameter and lifetime counts, `transfer`/`share`, bounds, requirements, fields with their names, types and refinements |
 | 11 | `alias` | name and the type it denotes |

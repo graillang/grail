@@ -112,7 +112,7 @@ interface format (`// grail-interface 4`) therefore carries one `abi` header lin
 `iface_module_text` and checked by `iface_load`:
 
 ```
-abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0 ref record = address record plain = inline plain record = frame args = 6 registers then stack
+abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0 ref record = address record plain = inline plain record = frame args = 6 registers then stack layout = c
 ```
 
 (`ref record = address` joined the line with unboxed-values.md stage 1a: it says what a reference
