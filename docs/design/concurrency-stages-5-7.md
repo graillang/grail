@@ -802,3 +802,24 @@ function (callgrind self cost per join):
 | fork, claim, run, publish, release (deque push/pop, the claim CAS, record recycling, the wake check) | 1,059 | the scheduler's own; with inlining it should fall to a few hundred |
 | the program: `pool::join`'s body, the two closure bodies, the slot, the loop | 633 | code generation (S4/S5, inlining) |
 | **total** | **3,549** | rayon 153, oneTBB 713 |
+
+### Stage 6 as built: threads for blocked calls
+
+Spares are made on demand - a thread for each blocked call when no spare is idle - and idle ones
+retire after a second once more than the worker count are waiting. That is Go's model, and the
+approved hard cap of twice the workers was wrong: `colourless-io-suspension-cancel-blocking` has
+100 tasks blocked in `host::read_file` on FIFOs and one writer task that releases them. With any cap
+below the number of blocked calls, every thread is blocked and the block that would run the writer
+waits for a thread for ever. One safety limit remains, like Go's 10,000-thread default: the
+10,000th thread blocked in foreign calls ends the program with a message instead of exhausting the
+machine.
+
+The per-call marker: `ffi_marker_enter` finds the thread's block and increments the block's current
+counter (odd: inside a foreign call); `ffi_marker_leave` increments it again with a locked add,
+because the monitor may set the counter's top bit with a compare-and-swap at the same moment. If
+the top bit is set, the worker was given away during the call and `rt_foreign_lost` makes the
+thread block-less. On a handoff the monitor gives the block a fresh counter, so a late count-out
+by the old owner never touches the counter the new owner uses. Cost on 10M calls of `labs`, load
+average 56-60: 4.6-5.8 ns per loop iteration before and 5.7-6.5 ns after, about 1.2 ns per call
+(the bar is 2 ns). The loop itself is still about 2x C's 2.5-2.9 ns; that is the loop's own code
+(checked arithmetic), not the call.

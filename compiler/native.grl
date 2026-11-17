@@ -3464,6 +3464,60 @@ fn tls_enter_callback<a>(c: (&a mut C), slot: u64, adopt: u64) -> unit {
     callback_pin(&mut c, view("addq"));
     return ();
 }
+// The foreign-call marker (rt_sysmon): %r11 = this thread's record, then the block's counter word.
+fn ffi_marker_enter<a>(c: (&a mut C), slot: u64) -> unit {
+    other := label(&mut c);
+    have := label(&mut c);
+    none := label(&mut c);
+    done := label(&mut c);
+    o(&mut c, view("cmpq $0,rt_state+184(%rip)\n"));
+    jump(&mut c, view("je"), other);
+    o(&mut c, view("movq %fs:rt_tls_record@tpoff,%r11\n"));
+    jump(&mut c, view("jmp"), have);
+    mark(&mut c, other);
+    o(&mut c, view("movq %fs:0,%r11\n"));
+    mark(&mut c, have);
+    o(&mut c, view("cmpq $2,24(%r11)\n"));
+    jump(&mut c, view("jne"), none);
+    o(&mut c, view("movq 32(%r11),%r11\nmovq 320(%r11),%r11\nincq (%r11)\n"));
+    jump(&mut c, view("jmp"), done);
+    mark(&mut c, none);
+    o(&mut c, view("xorl %r11d,%r11d\n"));
+    mark(&mut c, done);
+    o(&mut c, view("movq %r11,"));
+    stack_slot(&mut c, slot);
+    c.out.push(10);
+    return ();
+}
+// The call's end: count out (a locked increment, because the monitor may have marked the word with
+// its top bit at the same moment); a set top bit says the worker was given away during the call, and
+// rt_foreign_lost makes this thread block-less and names the symbol once.
+fn ffi_marker_leave<a, b>(c: (&a mut C), slot: u64, symbol: &b [u8]) -> unit {
+    done := label(&mut c);
+    o(&mut c, view("movq "));
+    stack_slot(&mut c, slot);
+    o(&mut c, view(",%r11\ntestq %r11,%r11\n"));
+    jump(&mut c, view("je"), done);
+    o(&mut c, view("lock incq (%r11)\n"));
+    jump(&mut c, view("jns"), done);
+    o(&mut c, view("subq $32,%rsp\nmovq %rax,(%rsp)\nmovq %rdx,8(%rsp)\nmovq %xmm0,%r10\nmovq %r10,16(%rsp)\nmovq %xmm1,%r10\nmovq %r10,24(%rsp)\n"));
+    // The symbol's name, NUL-ended, as read-only data (as a `cstr` literal is emitted).
+    name := label(&mut c);
+    o(&mut c, view(".pushsection .rodata\n"));
+    mark(&mut c, name);
+    for i in symbol.len() {
+        o(&mut c, view(".byte "));
+        on(&mut c, symbol[i]);
+        c.out.push(10);
+    }
+    o(&mut c, view(".byte 0\n.popsection\nleaq "));
+    lname(&mut c, name);
+    o(&mut c, view("(%rip),%rdi\n"));
+    call_out(&mut c, view("rt_foreign_lost"));
+    o(&mut c, view("movq 16(%rsp),%r10\nmovq %r10,%xmm0\nmovq 24(%rsp),%r10\nmovq %r10,%xmm1\nmovq (%rsp),%rax\nmovq 8(%rsp),%rdx\naddq $32,%rsp\n"));
+    mark(&mut c, done);
+    return ();
+}
 // While a callback runs there are C frames under it on this stack, so the task (if this thread is
 // running one) must not resume on another thread: thread-record word 120 counts the callbacks this
 // thread is inside, and rt_suspend blocks the thread instead of switching the task away while it
@@ -17222,6 +17276,15 @@ fn ffi_emit_call<a, b, d, e, f>(
     if block_here {
         call_out(&mut c, view("rt_blocking_enter"));
     }
+    // Every other foreign call on x86-64 Linux marks the worker as inside a foreign call (an odd
+    // count in the word block word 320 names), so the scheduler's monitor can give the worker away
+    // if the call holds it for more than 10 ms (rt_sysmon). The word's address is kept in the call's
+    // `tls` slot for the exit; 0 there means "not on a worker". Clobbers %rax and %r11 only, before
+    // any argument register is loaded.
+    marked := (!blocking) & (c.target == 0) & (c.plat == 0) & (tls != 0);
+    if marked {
+        ffi_marker_enter(&mut c, tls);
+    }
     if area != 0 {
         if x86 {
             o(&mut c, view("subq $"));
@@ -17413,6 +17476,9 @@ fn ffi_emit_call<a, b, d, e, f>(
         }
     } else {
         call_out(&mut c, view(symbol));
+    }
+    if marked {
+        ffi_marker_leave(&mut c, tls, view(symbol));
     }
     if block_here {
         // The result registers survive the runtime call: rax, rdx, xmm0 and xmm1, in 32 bytes of
