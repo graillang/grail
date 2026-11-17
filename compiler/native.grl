@@ -540,6 +540,16 @@ struct C {
     // checks --verify-facts emits can be shown to fire (docs/design/typed-ir.md, "Tests that catch
     // a wrong fact"). 0, the default, records the type the front end actually has.
     f1_what: u64,
+    // --forge-index-facts: a test aid that treats every sequence index as proved in range, so the
+    // checks --verify-facts keeps can be shown to fire on an access the proof got wrong.
+    forge_index: u64,
+    // 1 while an element of a sequence is borrowed for an access (`v[i] = x`, `&mut v[i]`): the loan
+    // is of the element, and nothing written through it can move the sequence's length.
+    pv_element: u64,
+    // Every name whose facts were killed (a write, a mutable loan), in order, and every sequence an
+    // access asked about: a loop's body is read off these to say which headers it leaves stable.
+    pv_kill_log: u8[][],
+    pv_indexed: u8[][],
     debug_funcs: DebugFunc[],
     debug_vars: DebugVar[],
     debug_types: DebugType[],
@@ -730,8 +740,6 @@ struct C {
     cf_start: u64,
     cf_end: u64,
     cf_local: u64,
-    bce_index: u8[],
-    bce_base: u8[],
     // The refinements of the function being compiled: its parameters' predicates and its `ensures`,
     // the source name of the declaration (a specialisation is reported under its template's name),
     // where it is written, and the serial that keeps each obligation's data labels apart.
@@ -4793,7 +4801,7 @@ fn normalize_readonly<a>(c: (&a mut C), slot: u64, ty: u64) -> unit {
             live := l.live;
             if live != 0 {
                 if mode != 0 {
-                    child := ownership::reborrow(&mut c.check, loan, 0);
+                    child := relend(&mut c, loan, 0);
                     if child == 0 {
                         fail(&mut c, view("readonly result cannot borrow suspended authority"));
                     }
@@ -4993,7 +5001,7 @@ fn seed_storage<a>(c: (&a mut C), storage: u64, ty: u64) -> unit {
     for i in caps.len() {
         mut r = caps[i];
         source := external_place(&mut c, r, 0);
-        loan := ownership::borrow_place(&mut c.check, source, 0);
+        loan := lend(&mut c, source, 0);
         bond_kind(&mut c, storage, loan, 1);
     }
     return ();
@@ -5479,7 +5487,7 @@ fn require_write<a>(c: (&a mut C), slot: u64) -> unit {
                 fail(&mut c, view("write conflicts with active loan"));
             }
         } else {
-            loan := ownership::borrow_place(&mut c.check, place, 1);
+            loan := lend(&mut c, place, 1);
             if loan == 0 {
                 pointer_conflict(&mut c, place, view("modify"), 0);
                 borrow_context(&mut c, place, view("modify"));
@@ -5508,7 +5516,7 @@ fn external_place<a>(c: (&a mut C), region: u64, copy: u64) -> u64 {
 }
 fn add_external_capture<a>(c: (&a mut C), holder: u64, region: u64, mode: u64) -> u64 {
     source := external_place(&mut c, region, 0);
-    loan := ownership::borrow_place(&mut c.check, source, mode);
+    loan := lend(&mut c, source, mode);
     bond(&mut c, holder, loan);
     return source;
 }
@@ -5538,14 +5546,14 @@ fn init_parameter<a>(c: (&a mut C), slot: u64, ty: u64) -> unit {
     // ordinary escape error.
     if (k == 20) && (ty_env(&mut c, ty) == 0) && ((mode & (CLOSURE_OWNED + CLOSURE_UNBUILT)) == 0) && (rs.len() == 0) {
         call := external_place(&mut c, 0, 0);
-        scoped := ownership::borrow_place(&mut c.check, call, 0);
+        scoped := lend(&mut c, call, 0);
         bond_kind(&mut c, holder, scoped, 1);
     }
     captures := type_caps(&mut c, ty, 0);
     for i in captures.len() {
         mut r = captures[i];
         target := external_place(&mut c, r, 0);
-        loan := ownership::borrow_place(&mut c.check, target, 0);
+        loan := lend(&mut c, target, 0);
         bond_kind(&mut c, holder, loan, 1);
     }
     return ();
@@ -5614,7 +5622,7 @@ fn stored_source<a>(c: (&a mut C), slot: u64, ty: u64) -> unit {
     if guarded != 0 {
         mode := ty_mode(&mut c, ty);
         source := external_place(&mut c, 18446744073709551615, 0);
-        loan := ownership::borrow_place(&mut c.check, source, mode);
+        loan := lend(&mut c, source, mode);
         bond(&mut c, place, loan);
         if k == 7 {
             mut authority = authority_of(&mut c, slot);
@@ -5681,7 +5689,7 @@ fn bind_loan<a>(c: (&a mut C), value: u64, source: u64, target: u64, mode: u64) 
         if parent == 0 {
             fail(&mut c, view("reference has no access authority"));
         }
-        loan = ownership::reborrow_place(&mut c.check, parent, target, mode);
+        loan = relend_place(&mut c, parent, target, mode);
         owner := place_of(&mut c, authority - 1);
         holder := place_of(&mut c, value);
         n := c.bonds.len();
@@ -5695,7 +5703,7 @@ fn bind_loan<a>(c: (&a mut C), value: u64, source: u64, target: u64, mode: u64) 
             }
             if (h == owner) & (old != parent) & (guard == 0) {
                 if loan_live(&mut c, old) != 0 {
-                    extra := ownership::reborrow(&mut c.check, old, mode);
+                    extra := relend(&mut c, old, mode);
                     if extra == 0 {
                         fail(&mut c, view("ambiguous reborrow lacks authority"));
                     }
@@ -5704,12 +5712,12 @@ fn bind_loan<a>(c: (&a mut C), value: u64, source: u64, target: u64, mode: u64) 
             }
         }
     } else {
-        loan = ownership::borrow_place(&mut c.check, target, mode);
+        loan = lend(&mut c, target, mode);
         if loan == 0 {
             // Loans whose holders are all dead (a moved match scrutinee's payload loans) end
             // here, then the borrow is retried; a real conflict still fails.
             close_loans(&mut c);
-            loan = ownership::borrow_place(&mut c.check, target, mode);
+            loan = lend(&mut c, target, mode);
         }
     }
     if loan == 0 {
@@ -5845,7 +5853,7 @@ fn view_bonds<a>(c: (&a mut C), slot: u64, source: u64, mode: u64, copied_ref: b
                     if guard != 0 {
                         bond_kind(&mut c, holder, parent, 1);
                     } else {
-                        loan := ownership::reborrow(&mut c.check, parent, mode);
+                        loan := relend(&mut c, parent, mode);
                         if loan == 0 {
                             fail(&mut c, view("view reborrow lacks authority"));
                         }
@@ -9339,6 +9347,33 @@ fn pv_ir_pending<a>(c: (&a mut C), atoms: (&a Atom[])) -> unit {
     exchange(&mut c.pv_pending, out);
     return ();
 }
+// Replace the facts with the ones `keep` marks, in order, and move every open block's mark to the
+// number of kept atoms that were below it: a block's own atoms are the ones above its mark, and a
+// kill that removed atoms from below would otherwise leave a later atom of the block under the mark,
+// outliving the block (an inner binding's `i == 0` leaking to the outer `i`).
+fn pv_ir_keep<a>(c: (&a mut C), keep: (&a u64[])) -> unit {
+    mut out = Atom[];
+    mut below = u64[];
+    mut kept = 0;
+    for i in c.pv_facts.len() {
+        below.push(kept);
+        if keep[i] != 0 {
+            out.push(copy_atom_value(&c.pv_facts[i]));
+            kept += 1;
+        }
+    }
+    below.push(kept);
+    for j in c.pv_marks.len() {
+        m := c.pv_marks[j];
+        if m < below.len() {
+            c.pv_marks[j] = below[m];
+        } else {
+            c.pv_marks[j] = kept;
+        }
+    }
+    exchange(&mut c.pv_facts, out);
+    return ();
+}
 // A binding of `name` in the current block: the name means the new value, so what the facts said
 // about the old one is about nothing - until the block closes, where the old one is the name again.
 fn pv_ir_shadow<a, b>(c: (&a mut C), name: &b [u8]) -> unit {
@@ -9350,19 +9385,71 @@ fn pv_ir_shadow<a, b>(c: (&a mut C), name: &b [u8]) -> unit {
     if c.pv_trmarks.len() != 0 {
         owner = c.pv_trmarks[c.pv_trmarks.len() - 1];
     }
-    mut keep = Atom[];
+    mut keep = u64[];
     for i in c.pv_facts.len() {
         x := &c.pv_facts[i];
         hit := pv_mentions(view(x.a), view(name)) || pv_mentions(view(x.b), view(name));
         if hit {
             c.pv_trail.push(copy_atom_value(&x));
             c.pv_trown.push(owner);
+            keep.push(0);
         } else {
-            keep.push(copy_atom_value(&x));
+            keep.push(1);
         }
     }
-    exchange(&mut c.pv_facts, keep);
+    pv_ir_keep(&mut c, &keep);
     return ();
+}
+// A call that mentions `name`: it may write the name's value through anything the statement hands it,
+// but not its length. A length moves only through a mutable loan of the sequence (pv_lent kills
+// then), a move or an assignment of it (a write), or a closure that captured it (pv_caps): handing a
+// call `v[i]` hands it an element, and `v` by value moves it. So a fact whose every mention of the
+// name is a length - `v.len`, `s.items.len` - survives the call (docs/design/native-range-facts.md).
+fn pv_ir_called<a, b>(c: (&a mut C), name: &b [u8]) -> unit {
+    if !pv_ir_live(&c) {
+        return ();
+    }
+    // A local the statement hands a call by value cannot change: its value moves only through a
+    // mutable loan (pv_lent), an assignment, or a closure that captured it (pv_caps). Only a mutable
+    // reference or view hands the callee something it can write through.
+    l := find_local(&mut c, view(name));
+    if l != 0 {
+        lt := local_ty(&mut c, l - 1);
+        lk := ty_kind(&mut c, lt);
+        if !(((lk == 7) || (lk == 5) || (lk == 27)) & (ty_mode(&mut c, lt) != 0)) {
+            return ();
+        }
+        // A mutable reference or view handed to a call is written through, its length included.
+        pv_ir_wrote(&mut c, view(name));
+        return ();
+    }
+    mut keep = u64[];
+    for i in c.pv_facts.len() {
+        x := &c.pv_facts[i];
+        hit := (pv_mentions(view(x.a), view(name)) & !pv_len_of(view(x.a), view(name)))
+            || (pv_mentions(view(x.b), view(name)) & !pv_len_of(view(x.b), view(name)));
+        keep.push(u64(!hit));
+    }
+    pv_ir_keep(&mut c, &keep);
+    return ();
+}
+// Whether `term` is a length reached from `name`: `name.len` or `name.<fields>.len`.
+fn pv_len_of<a, b>(term: &a [u8], name: &b [u8]) -> bool {
+    n := term.len();
+    if (n < name.len() + 4) || !starts_with(view(term), view(name)) || (term[name.len()] != 46) {
+        return false;
+    }
+    if !((term[n - 4] == 46) & (term[n - 3] == 108) & (term[n - 2] == 101) & (term[n - 1] == 110)) {
+        return false;
+    }
+    // Only names and dots between: `v[i].len` is an element's length, which a call can move.
+    for i in name.len()..n {
+        b := term[i];
+        if !(((b >= 97) & (b <= 122)) || ((b >= 65) & (b <= 90)) || ((b >= 48) & (b <= 57)) || (b == 95) || (b == 46)) {
+            return false;
+        }
+    }
+    return true;
 }
 // A write to `name`: what the facts said is false from here on, and stays false, because the write
 // may have happened before the block that holds it closes.
@@ -9370,9 +9457,14 @@ fn pv_ir_wrote<a, b>(c: (&a mut C), name: &b [u8]) -> unit {
     if !pv_ir_live(&c) {
         return ();
     }
-    mut facts = exchange(&mut c.pv_facts, Atom[]);
-    pv_kill(&mut facts, view(name));
-    exchange(&mut c.pv_facts, facts);
+    c.pv_kill_log.push(copy_bytes(view(name)));
+    mut keep = u64[];
+    for i in c.pv_facts.len() {
+        x := &c.pv_facts[i];
+        hit := pv_mentions(view(x.a), view(name)) || pv_mentions(view(x.b), view(name));
+        keep.push(u64(!hit));
+    }
+    pv_ir_keep(&mut c, &keep);
     return ();
 }
 // The pure tests a predicate may use: spelled like a method call, but they read their receiver and
@@ -9568,7 +9660,7 @@ fn pv_ir_statement<a>(c: (&a mut C), lo: u64, hi: u64) -> unit {
     while i < hi {
         if kind_at(&mut c, i) == 1 {
             n := tok_text(&mut c, i);
-            pv_ir_wrote(&mut c, view(n));
+            pv_ir_called(&mut c, view(n));
         }
         i += 1;
     }
@@ -9626,6 +9718,8 @@ fn pv_ir_range<a, b>(c: (&a mut C), out: (&a mut Atom[]), name: &b [u8], lo: u64
 // the next one the compile emits.
 fn pv_begin<a>(c: (&a mut C)) -> unit {
     exchange(&mut c.pv_on, 0);
+    exchange(&mut c.pv_kill_log, u8[][]);
+    exchange(&mut c.pv_indexed, u8[][]);
     exchange(&mut c.pv_facts, Atom[]);
     exchange(&mut c.pv_marks, u64[]);
     exchange(&mut c.pv_trmarks, u64[]);
@@ -9947,69 +10041,6 @@ fn pv_call_proved<a>(c: (&a mut C), f: u64, count: u64, spans: (&a u64[]), at: u
     }
     return 1;
 }
-// The base a `.len` term is the length of: `v.len` answers `v`, anything else answers empty.
-fn pv_len_base<a>(t: &a [u8]) -> u8[] {
-    n := t.len();
-    if n <= 4 {
-        return u8[];
-    }
-    if (t[n - 4] != 46) || (t[n - 3] != 108) || (t[n - 2] != 101) || (t[n - 1] != 110) {
-        return u8[];
-    }
-    mut out = u8[];
-    for i in 0 .. n - 4 {
-        out.push(t[i]);
-    }
-    return out;
-}
-// Whether the body leaves a bound on a shared reference usable: neither name is written or bound
-// again, no mutable loan of either appears, and the reference is only indexed or asked its length.
-fn pv_bound_stable<a, b>(c: (&a mut C), index: &b [u8], base: &b [u8]) -> bool {
-    mut i = c.body_lo;
-    while i < c.body_hi {
-        k := kind_at(&mut c, i);
-        if k == 1 {
-            t := tok_text(&mut c, i);
-            // `match` arms and `let` patterns bind names the token walk cannot follow; a body with
-            // either could index with a name this bound says nothing about.
-            if same(view(t), view("match")) || same(view(t), view("let")) {
-                return false;
-            }
-            if same(view(t), view(index)) || same(view(t), view(base)) {
-                nk := kind_at(&mut c, i + 1);
-                // A write of any kind makes what the entry knew about the name stale.
-                if (nk == 61) || (nk == 262) || (nk == 263) || (nk == 264) || (nk == 265) || (nk == 266) || (nk == 268) {
-                    return false;
-                }
-                if i >= 2 {
-                    pk := kind_at(&mut c, i - 1);
-                    if pk == 1 {
-                        before := tok_text(&mut c, i - 1);
-                        // `&mut NAME` is a loan a callee can write through.
-                        if same(view(before), view("mut")) & (kind_at(&mut c, i - 2) == 38) {
-                            return false;
-                        }
-                        // `mut NAME = ..`, `let NAME ..`, `for NAME in ..`: the name is bound again.
-                        if same(view(before), view("mut")) || same(view(before), view("let")) || same(view(before), view("for")) {
-                            return false;
-                        }
-                    }
-                }
-                // `v.push(x)` and its siblings can change what the bound was measured against.
-                if same(view(t), view(base)) & (kind_at(&mut c, i + 1) == 46) & (kind_at(&mut c, i + 3) == 40) {
-                    m := tok_text(&mut c, i + 2);
-                    if !same(view(m), view("len")) {
-                        return false;
-                    }
-                }
-            }
-        }
-        i += 1;
-    }
-    return true;
-}
-// Whether this module compiles in strict mode: the flag, a `@strict;` in the module, or a `@strict`
-// on the declaration being compiled.
 fn ref_module_strict<a, b>(c: (&a C), m: &b [u8]) -> bool {
     for i in c.strict_modules.len() {
         if same(view(c.strict_modules[i]), view(m)) {
@@ -10123,64 +10154,6 @@ fn pv_strict_fail_why<a, b, d>(c: (&a mut C), pred: Pred, pos: u64, need: &b [u8
     push_bytes(&mut msg, view(pv_facts_text(&facts)));
     exchange(&mut c.pos, pos);
     fail(&mut c, view(msg));
-    return ();
-}
-// A refined parameter states a bound the body's indexing can use: `i < v.len()` on `v: &u64[]` is
-// exactly what the check on `v[i]` needs, so the entry sets the pair a `for i in v.len()` loop sets
-// (bce_index, bce_base) for this body. Nothing is assumed that the entry did not already check - the
-// checked entry checks it, and a proved one had it proved - and a body that could make the bound
-// stale sets nothing.
-fn pv_bce<a>(c: (&a mut C)) -> unit {
-    if (c.validating != 0) || (c.body_hi == 0) {
-        return ();
-    }
-    for i in c.cur_ppreds.len() {
-        mut pf = 0;
-        mut plo = 0;
-        mut phi = 0;
-        if i < c.cur_ppreds.len() {
-            p := &c.cur_ppreds[i];
-            pf = p.file;
-            plo = p.lo;
-            phi = p.hi;
-        }
-        if phi == 0 {
-            continue;
-        }
-        mut atoms = Atom[];
-        if !pv_read_pred(&mut c, Pred { file: pf, lo: plo, hi: phi }, &mut atoms) {
-            continue;
-        }
-        for j in atoms.len() {
-            // Only `i < v.len()` bounds an index: a side with a constant is arithmetic that may
-            // wrap, and any other comparison says nothing about an access.
-            if (atoms[j].rel != 0) || (atoms[j].ao != 0) || (atoms[j].bo != 0) {
-                continue;
-            }
-            index_name := atoms[j].a.copy();
-            bound := pv_len_base(view(atoms[j].b));
-            if (index_name.len() == 0) || (bound.len() == 0) {
-                continue;
-            }
-            l := find_local(&mut c, view(bound));
-            if l == 0 {
-                continue;
-            }
-            bty := local_ty(&mut c, l - 1);
-            k := ty_kind(&mut c, bty);
-            // Only a shared reference (or a shared slice) has a length this function cannot change:
-            // an owned vector could be pushed in the body.
-            if !((k == 7) || (k == 27)) || (ty_mode(&mut c, bty) != 0) {
-                continue;
-            }
-            if !pv_bound_stable(&mut c, view(index_name), view(bound)) {
-                continue;
-            }
-            exchange(&mut c.bce_index, index_name);
-            exchange(&mut c.bce_base, bound);
-            return ();
-        }
-    }
     return ();
 }
 fn ident<a>(c: (&a mut C)) -> u8[] {
@@ -18588,10 +18561,6 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     } else {
         ref_params(&mut c);
     }
-    // A refined parameter can state what the body's bounds checks need (pv_bce), for this body only.
-    old_bce_index := exchange(&mut c.bce_index, u8[]);
-    old_bce_base := exchange(&mut c.bce_base, u8[]);
-    pv_bce(&mut c);
     mut tls_slot = 0;
     mut adopt_slot = 0;
     if (export == 2) & tls_bridge(&mut c) {
@@ -18615,8 +18584,6 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     if unsafe_fn != 0 {
         exchange(&mut c.unsafe_depth, depth);
     }
-    exchange(&mut c.bce_index, old_bce_index);
-    exchange(&mut c.bce_base, old_bce_base);
     exchange(&mut c.export_tls, 0);
     exchange(&mut c.export_adopt, 0);
     if c.terminated == 0 {
@@ -26336,7 +26303,7 @@ fn reference_slot<a>(c: (&a mut C), id: u64, ty: u64) -> Val {
     slot := save(&mut c);
     out := reference_type(&mut c, ty, 1);
     own(&mut c, slot, out);
-    loan := ownership::borrow_place(&mut c.check, target, 1);
+    loan := lend(&mut c, target, 1);
     if loan == 0 {
         fail(&mut c, view("borrow conflicts with active access"));
     }
@@ -29324,9 +29291,9 @@ fn call_access<a>(c: (&a mut C), slot: u64) -> u64 {
         if parent == 0 {
             fail(&mut c, view("closure call has no live reference authority"));
         }
-        loan = ownership::reborrow_place(&mut c.check, parent, place, 1);
+        loan = relend_place(&mut c, parent, place, 1);
     } else {
-        loan = ownership::borrow_place(&mut c.check, place, 1);
+        loan = lend(&mut c, place, 1);
     }
     if loan == 0 {
         fail(
@@ -31634,6 +31601,50 @@ fn is_pointer_loan<a>(c: (&a mut C), loan: u64) -> u64 {
 }
 // The binding whose storage contains `place` (`app`, or `info` for a field of it), or the binding
 // whose referent does (`*out`). Empty when the place is a temporary nobody named.
+// A mutable loan of `place` is taken: whatever the facts said about the local that owns it - its
+// length, a field, its value - may be made false through the loan, by this statement or by any call
+// while the loan lives, so it is forgotten now. This is what keeps a length fact honest without a list
+// of the methods that move lengths: `v.push(..)`, `self.grow()`, `f(&mut s)` and a closure that
+// captures `v` mutably all borrow it mutably first (docs/design/native-range-facts.md).
+fn pv_lent<a>(c: (&a mut C), place: u64) -> unit {
+    if !pv_ir_live(&c) || (place == 0) || (c.pv_element != 0) {
+        return ();
+    }
+    name := place_name(&mut c, place);
+    mut root = u8[];
+    for i in name.len() {
+        b := name[i];
+        if (b == 42) & (root.len() == 0) {
+            continue;
+        }
+        if (b == 46) || (b == 91) {
+            break;
+        }
+        root.push(b);
+    }
+    if root.len() != 0 {
+        pv_ir_wrote(&mut c, view(root));
+    }
+    return ();
+}
+fn lend<a>(c: (&a mut C), place: u64, mode: u64) -> u64 {
+    if mode == 1 {
+        pv_lent(&mut c, place);
+    }
+    return ownership::borrow_place(&mut c.check, place, mode);
+}
+fn relend_place<a>(c: (&a mut C), parent: u64, place: u64, mode: u64) -> u64 {
+    if mode == 1 {
+        pv_lent(&mut c, place);
+    }
+    return ownership::reborrow_place(&mut c.check, parent, place, mode);
+}
+fn relend<a>(c: (&a mut C), parent: u64, mode: u64) -> u64 {
+    if mode == 1 {
+        pv_lent(&mut c, ownership::loan_source(&c.check, parent));
+    }
+    return ownership::reborrow(&mut c.check, parent, mode);
+}
 fn place_name<a>(c: (&a mut C), place: u64) -> u8[] {
     // The local that owns the storage names it first (`v`, not `*r` for an `r := &v`); a name
     // through a reference is the fallback, for storage this function reaches only by reference.
@@ -36375,6 +36386,7 @@ fn pattern_loop<a, b>(
     // The guard is evaluated again after every iteration, so what the body writes is forgotten
     // before the guard is compiled: a call in it is proved, and a constant in it is settled, only
     // from facts that hold at every evaluation.
+    loop_at := pv_loop_mark(&c);
     pv_loop_kill(&mut c, open, loopend);
     mark(&mut c, head);
     mut nomatch = 0;
@@ -36459,6 +36471,7 @@ fn pattern_loop<a, b>(
     entry := ownership::snapshot(&c.check);
     exchange(&mut c.terminated, 0);
     block(&mut c);
+    pv_loop_facts(&mut c, &loop_at, head);
     // The pattern's binding ends with each iteration, before the jump back: release it first, so
     // neither the backedge check nor the state the loop exits with still holds this iteration's
     // item (an iterator that hands out references left its last item's loan in the exit state,
@@ -39987,98 +40000,6 @@ fn binary<a>(c: (&a mut C), k: u64, left: u64, right: u64) -> u64 {
     }
     return save(&mut c);
 }
-// `for i in a..v.len() { .. v[i] .. }`: the body never names v except as v[..] or v.len(), so the
-// length cannot change and v[i] is in bounds. Returns v's name, or empty when not provable.
-fn len_bound_ahead<a, b>(c: (&a mut C), name: &b [u8]) -> u8[] {
-    p := c.pos;
-    if c.toks.len() < p + 7 {
-        return u8[];
-    }
-    if (kind_at(&mut c, p) != 1) || (kind_at(&mut c, p + 1) != 46) || (kind_at(&mut c, p + 3) != 40) || (kind_at(&mut c, p + 4) != 41) || (kind_at(&mut c, p + 5) != 123) {
-        return u8[];
-    }
-    method := tok_text(&mut c, p + 2);
-    if !same(view(method), view("len")) {
-        return u8[];
-    }
-    base := tok_text(&mut c, p);
-    if find_local(&mut c, view(base)) == 0 {
-        return u8[];
-    }
-    end := block_end(&mut c, p + 5);
-    mut j = p + 6;
-    while j < end {
-        k := kind_at(&mut c, j);
-        if (k == 124) || (k == 274) {
-            return u8[];
-        }
-        if k == 1 {
-            t := tok_text(&mut c, j);
-            if same(view(t), view("for")) || same(view(t), view("mut")) {
-                nt := tok_text(&mut c, j + 1);
-                if same(view(nt), view(name)) || same(view(nt), view(base)) {
-                    return u8[];
-                }
-            }
-            if same(view(t), view(name)) {
-                if kind_at(&mut c, j + 1) == 261 {
-                    return u8[];
-                }
-            }
-            if same(view(t), view(base)) {
-                mut ok = 0;
-                nk := kind_at(&mut c, j + 1);
-                if nk == 91 {
-                    ok = 1;
-                }
-                if (nk == 46) & (j + 5 < c.toks.len()) {
-                    if (kind_at(&mut c, j + 3) == 40)
-                        & (kind_at(&mut c, j + 4) == 41) {
-                        m := tok_text(&mut c, j + 2);
-                        if same(view(m), view("len")) {
-                            ok = 1;
-                        }
-                    }
-                }
-                if j != 0 && ok != 0 {
-                    pk := kind_at(&mut c, j - 1);
-                    if (pk == 46) || (pk == 38) {
-                        ok = 0;
-                    }
-                }
-                if ok == 0 {
-                    return u8[];
-                }
-            }
-        }
-        j += 1;
-    }
-    return base.copy();
-}
-// Whether `[ i ]` at the cursor indexes the proven base with the proven loop variable.
-fn proven_index<a>(c: (&a mut C), value: Val) -> bool {
-    if c.bce_index.len() == 0 {
-        return false;
-    }
-    p := c.pos;
-    if c.toks.len() < p + 3 {
-        return false;
-    }
-    if (kind_at(&mut c, p + 1) != 1) || (kind_at(&mut c, p + 2) != 93) {
-        return false;
-    }
-    t := tok_text(&mut c, p + 1);
-    ix := c.bce_index.copy();
-    if !same(view(t), view(ix)) {
-        return false;
-    }
-    l := find_local(&mut c, view(c.bce_base.copy()));
-    if l == 0 {
-        return false;
-    }
-    return local_id(&mut c, l - 1) == value.t;
-}
-// Exactly one dereference: map indexing exposes a V place, including when V is itself a reference.
 fn map_read_place<a>(c: (&a mut C), reference: Val) -> Val {
     old := reference.t;
     ty := ty_arg(&mut c, reference.ty);
@@ -40340,8 +40261,119 @@ fn refuse_span_index<a>(c: (&a mut C), ty: u64) -> unit {
     );
     return ();
 }
+// Where a loop starts in the kill log and the indexed list.
+fn pv_loop_mark<a>(c: (&a C)) -> u64[] {
+    return u64[c.pv_kill_log.len(), c.pv_indexed.len()];
+}
+// After a loop's body: one fact per sequence the body indexed and nothing in it killed - no write, no
+// mutable loan, no call that could reach it - so its header's data and length are what they were at
+// the loop head on every iteration (kind 5, docs/design/native-range-facts.md). The optimiser's
+// descriptor hoisting reads it; the unchecked accessor carries the per-access proof itself.
+fn pv_loop_facts<a>(c: (&a mut C), at: (&a u64[]), head: u64) -> unit {
+    if !pv_ir_live(&c) || (c.facts_fn.len() == 0) {
+        return ();
+    }
+    mut done = u8[][];
+    for i in at[1]..c.pv_indexed.len() {
+        n := c.pv_indexed[i].copy();
+        mut seen = false;
+        for j in done.len() {
+            if same(view(done[j]), view(n)) {
+                seen = true;
+            }
+        }
+        if seen {
+            continue;
+        }
+        done.push(n.copy());
+        mut killed = false;
+        for j in at[0]..c.pv_kill_log.len() {
+            if same(view(c.pv_kill_log[j]), view(n)) {
+                killed = true;
+            }
+        }
+        if killed {
+            continue;
+        }
+        l := find_local(&mut c, view(n));
+        if l == 0 {
+            continue;
+        }
+        ty := local_ty(&mut c, l - 1);
+        what := header_what(&mut c, ty);
+        if what == 0 {
+            continue;
+        }
+        slot := local_id(&mut c, l - 1);
+        name := copy_bytes(view(c.facts_fn));
+        llvm::fact_loop_stable(&mut c.facts, name, slot, head, what);
+    }
+    return ();
+}
+// Whether the index at tokens [lo, hi) of `base[...]` is below `base.len()` by the facts that hold
+// here (docs/design/native-range-facts.md). The facts are the prover's own, as the body is
+// compiled: a loop's bound, a guard, a refined parameter, `n := v.len()`; anything that can move the
+// length has already killed them (pv_lent, pv_ir_statement, pv_loop_kill). The index is one term
+// plus a non-negative literal, so the value the machine computes is the value proved: a negative
+// offset could wrap in a release build, and is not read. `--verify-facts` keeps every check.
+fn pv_index_ok<a>(c: (&a mut C), bracket: u64, lo: u64, hi: u64, base: u64) -> bool {
+    if (c.raw != 0) || (c.verify_facts != 0) {
+        return false;
+    }
+    if c.forge_index != 0 {
+        return true;
+    }
+    if !pv_ir_live(&c) || (bracket < 1) || (lo >= hi) {
+        return false;
+    }
+    if kind_at(&mut c, bracket - 1) != 1 {
+        return false;
+    }
+    if bracket >= 2 {
+        pk := kind_at(&mut c, bracket - 2);
+        // `s.v[i]`, `f()[i]`, `a[j][i]`: the base is no local the facts name.
+        // `s.v[i]`, `f()[i]`, `a[j][i]`, `m::v[i]`: the base is no local the facts name.
+        if (pk == 46) || (pk == 93) || (pk == 41) || (pk == 260) {
+            return false;
+        }
+    }
+    // The token before `[` is the whole base: the local it names, as bound here, is what is indexed.
+    name := tok_text(&mut c, bracket - 1);
+    if find_local(&mut c, view(name)) == 0 {
+        return false;
+    }
+    c.pv_indexed.push(name.copy());
+    mut used = 0;
+    term := pv_term(&mut c, lo, &mut used);
+    if term.len() == 0 {
+        return false;
+    }
+    mut off: i64 = 0;
+    at := lo + used;
+    if at != hi {
+        if (kind_at(&mut c, at) != 43) || (at + 2 != hi) {
+            return false;
+        }
+        lit := tok_text(&mut c, at + 1);
+        if !pv_digits(view(lit)) {
+            return false;
+        }
+        off = pv_number(view(lit));
+    }
+    mut facts = Atom[];
+    pv_ir_read(&mut c, &mut facts);
+    mut len = name.copy();
+    push_bytes(&mut len, view(".len"));
+    return pv_implies(&facts, 0, view(term), view(len), 0 - off);
+}
 fn index_view<a>(c: (&a mut C), value: Val, access: u64) -> Val {
-    unchecked := (c.raw == 0) & proven_index(&mut c, val(value.t, value.ty));
+    old := exchange(&mut c.pv_element, u64(access != 0));
+    r := index_view_inner(&mut c, value, access);
+    exchange(&mut c.pv_element, old);
+    return r;
+}
+fn index_view_inner<a>(c: (&a mut C), value: Val, access: u64) -> Val {
+    bracket := c.pos;
     advance(&mut c);
     input := value.t;
     inty := value.ty;
@@ -40387,13 +40419,14 @@ fn index_view<a>(c: (&a mut C), value: Val, access: u64) -> Val {
             require_mutable_binding(&mut c, xt, 0);
         }
         code := narrow_code(&mut c, elem);
+        proved := pv_index_ok(&mut c, bracket, bstart, bend, input);
         mut f = "rt_slot";
-        if unchecked {
+        if proved {
             f = "rt_slotu";
         }
         if code != 0 {
             f = "rt_slot4";
-            if unchecked {
+            if proved {
                 f = "rt_slot4u";
             }
         }
@@ -40413,7 +40446,7 @@ fn index_view<a>(c: (&a mut C), value: Val, access: u64) -> Val {
         mut slot = 0;
         if width != 0 {
             // An inline element: the reference is the element's own address.
-            slot = flat_element(&mut c, xt, index, width, unchecked);
+            slot = flat_element(&mut c, xt, index, width, proved);
         } else {
             at := apply(&mut c, view(f), two(xt, index));
             fact_seq_arg(&mut c, view(f), xt, xty);
@@ -40511,7 +40544,7 @@ fn index_view<a>(c: (&a mut C), value: Val, access: u64) -> Val {
             require_type(&mut c, bound.ty, 0);
         }
         mut f = "rt_atb";
-        if unchecked {
+        if pv_index_ok(&mut c, bracket, bstart, bend, input) {
             f = "rt_atbu";
         }
         result := apply(&mut c, view(f), two(x.t, bound.t));
@@ -40562,10 +40595,7 @@ fn index_view<a>(c: (&a mut C), value: Val, access: u64) -> Val {
         release_temporary(&mut c, slot);
         return val(result, vty);
     }
-    mut f = "rt_atb";
-    if unchecked {
-        f = "rt_atbu";
-    }
+    f := "rt_atb";
     expect(&mut c, view("]"));
     result := apply(&mut c, view(f), two(slot, start));
     release_temporary(&mut c, slot);
@@ -41286,9 +41316,9 @@ fn reserve_compound<a>(c: (&a mut C), slot: u64, through: u64) -> u64 {
     mut loan = 0;
     if authority != 0 {
         parent := authority_loan(&mut c, authority, place);
-        loan = ownership::reborrow_place(&mut c.check, parent, place, 0);
+        loan = relend_place(&mut c, parent, place, 0);
     } else {
-        loan = ownership::borrow_place(&mut c.check, place, 0);
+        loan = lend(&mut c, place, 0);
     }
     if loan == 0 {
         borrow_context(&mut c, place, view("modify"));
@@ -41873,6 +41903,9 @@ fn index_assignment<a>(c: (&a mut C)) -> unit {
     ft := c.flit_tok;
     fneg := c.flit_neg;
     exchange(&mut c.pos, start);
+    // From here on the statement borrows the place it stores to: an element, which a store cannot
+    // move the length of (the right side, compiled above, kills what its own loans reach).
+    old_element := exchange(&mut c.pv_element, 1);
     // A binding holding a mutable view/reference writes through its capability (no `mut` needed).
     mut capability = 0;
     name := tok_text(&mut c, start);
@@ -41924,6 +41957,7 @@ fn index_assignment<a>(c: (&a mut C)) -> unit {
         require_write(&mut c, r.t);
         array_store_elem(&mut c, r.t, elem, v);
         exchange(&mut c.pos, after);
+        exchange(&mut c.pv_element, old_element);
         return ();
     }
     if (k == 6) || (k == 27) {
@@ -42032,6 +42066,7 @@ fn index_assignment<a>(c: (&a mut C)) -> unit {
         invoke(&mut c, view("rt_write"), args);
     }
     exchange(&mut c.pos, after);
+    exchange(&mut c.pv_element, old_element);
     return ();
 }
 fn assignment_ahead<a>(c: (&a mut C)) -> bool {
@@ -43685,7 +43720,6 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
             map_loop(&mut c, name, second);
             return ();
         }
-        counted := len_bound_ahead(&mut c, view(name));
         loopbase := c.resources.len();
         // `for x in &s` / `for x in &mut s` over a slice borrows each element.
         borrowed := is(&mut c, view("&"));
@@ -43811,18 +43845,6 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
         mut i = 0;
         mut range_at = 0;
         mut range_end = 0;
-        mut proven = u8[];
-        mut proven_base = u8[];
-        if range != 0 {
-            proven_base = len_bound_ahead(&mut c, view(name));
-        } else {
-            if iterable == 0 {
-                proven_base = counted.copy();
-            }
-        }
-        if proven_base.len() != 0 {
-            proven = name.copy();
-        }
         if range != 0 {
             get(&mut c, v.t, view("%rax"));
             i = save(&mut c);
@@ -43999,14 +44021,12 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
                 pv_add(&mut guard, 0, view(loop_name), view(last), 0);
             }
         }
+        loop_at := pv_loop_mark(&c);
         pv_ir_statement(&mut c, iter_at, c.pos);
         pv_loop_kill(&mut c, open, loopend);
         pv_ir_pending(&mut c, &guard);
-        oldi := exchange(&mut c.bce_index, proven);
-        oldb2 := exchange(&mut c.bce_base, proven_base);
         block(&mut c);
-        exchange(&mut c.bce_index, oldi);
-        exchange(&mut c.bce_base, oldb2);
+        pv_loop_facts(&mut c, &loop_at, head);
         if (byref + consume) != 0 {
             if c.terminated == 0 {
                 cleanup(&mut c, loopmark);
@@ -50655,6 +50675,10 @@ pub fn main() -> u64 {
         no_sites: 0,
         check_only: 0,
         f1_what: 0,
+        forge_index: 0,
+        pv_element: 0,
+        pv_kill_log: u8[][],
+        pv_indexed: u8[][],
         debug_funcs: DebugFunc[],
         debug_vars: DebugVar[],
         debug_types: DebugType[],
@@ -50776,8 +50800,6 @@ pub fn main() -> u64 {
         cf_start: 0,
         cf_end: 0,
         cf_local: 0,
-        bce_index: u8[],
-        bce_base: u8[],
         cur_ppreds: Pred[],
         cur_rpred: no_pred(),
         body_lo: 0,
@@ -51353,7 +51375,10 @@ pub fn main() -> u64 {
                                     exchange(&mut c.backend, 1);
                                     offset += 1;
                                 } else {
-                                    if starts_with(view(option), view("--f1-what=")) {
+                                    if same(view(option), view("--forge-index-facts")) {
+                                        exchange(&mut c.forge_index, 1);
+                                        offset += 1;
+                                    } else if starts_with(view(option), view("--f1-what=")) {
                                         // A test aid: record a deliberately wrong F1 kind so the
                                         // --verify-facts checks can be shown to fire.
                                         mut n = 0;

@@ -16515,5 +16515,101 @@
       "^^^^^^ no module root holds this module"
     ],
     "note": "An unresolvable `use` is a diagnostic about the program: an `error:` line, the location of the `use` and the name underlined, not a bare `grail:` line from the driver."
+  },
+  {
+    "name": "bce-for-len-read-write",
+    "note": "`for i in w.len()` states `i < w.len` for the body; an element store neither moves the length nor kills the fact, so both the read and the write of `w[i]` are unchecked (docs/design/native-range-facts.md).",
+    "source": "fn twice(v: u64[]) -> u64 {\n    mut w = v;\n    mut s = 0;\n    for i in w.len() {\n        w[i] = wrapping_mul(w[i], 2);\n        s = wrapping_add(s, w[i]);\n    }\n    return s;\n}\nfn main() {\n    println(twice(u64[1, 2, 3]));\n}\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "stdout": "12\n",
+    "asmAbsent": [
+      {
+        "in": "f_main_twice",
+        "text": "movq $1,%rdx\ncall rt_trap"
+      },
+      {
+        "in": "f_main_twice",
+        "text": "call rt_slot\n"
+      }
+    ]
+  },
+  {
+    "name": "bce-while-len-binding",
+    "note": "`n := v.len()` is the value fact `n == v.len`, and `while i < n` the guard: together they put `v[i]` in range.",
+    "source": "fn total(v: &u64[]) -> u64 {\n    n := v.len();\n    mut s = 0;\n    mut i = 0;\n    while i < n {\n        s = wrapping_add(s, v[i]);\n        i += 1;\n    }\n    return s;\n}\nfn main() {\n    v := u64[4, 5, 6];\n    println(total(&v));\n}\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "stdout": "15\n",
+    "asmAbsent": [
+      {
+        "in": "f_main_total",
+        "text": "movq $1,%rdx\ncall rt_trap"
+      },
+      {
+        "in": "f_main_total",
+        "text": "call rt_slot\n"
+      }
+    ]
+  },
+  {
+    "name": "bce-kill-closure",
+    "note": "A closure that captures a mutable reference to `v` and is called may shrink it: the length fact dies, and the stale index is caught at run time.",
+    "source": "fn main() {\n    mut v = u64[1, 2, 3];\n    n := v.len();\n    {\n        r := &mut v;\n        mut wipe = || {\n            r.clear();\n        };\n        wipe();\n    }\n    mut t = 0;\n    for i in n {\n        t = wrapping_add(t, v[i]);\n    }\n    println(t);\n}\n",
+    "signal": "SIGABRT",
+    "stderr": "out of bounds"
+  },
+  {
+    "name": "bce-kill-method",
+    "note": "A `&mut self` method no list of mutating methods names: it borrows `v` mutably, and that loan is what kills the length fact.",
+    "source": "impl u64[] {\n    pub fn wipe(&mut self) {\n        self.clear();\n        return ();\n    }\n}\nfn main() {\n    mut v = u64[1, 2, 3];\n    n := v.len();\n    v.wipe();\n    mut t = 0;\n    for i in n {\n        t = wrapping_add(t, v[i]);\n    }\n    println(t);\n}\n",
+    "signal": "SIGABRT",
+    "stderr": "out of bounds"
+  },
+  {
+    "name": "bce-kill-mut-reference",
+    "note": "`r := &mut v` makes no call, but the loan lets `r.clear()` shrink `v` without naming it: the loan kills the fact.",
+    "source": "fn main() {\n    mut v = u64[1, 2, 3];\n    n := v.len();\n    r := &mut v;\n    r.clear();\n    mut t = 0;\n    for i in n {\n        t = wrapping_add(t, v[i]);\n    }\n    println(t);\n}\n",
+    "signal": "SIGABRT",
+    "stderr": "out of bounds"
+  },
+  {
+    "name": "bce-kill-struct-by-mut",
+    "note": "A vector reached through a struct passed by `&mut`: the callee shrinks it, and the access afterwards keeps its check.",
+    "source": "struct Bag { items: u64[] }\nfn empty(b: &mut Bag) {\n    b.items.clear();\n    return ();\n}\nfn main() {\n    mut b = Bag { items: u64[1, 2, 3] };\n    n := b.items.len();\n    empty(&mut b);\n    mut t = 0;\n    for i in n {\n        t = wrapping_add(t, b.items[i]);\n    }\n    println(t);\n}\n",
+    "signal": "SIGABRT",
+    "stderr": "out of bounds"
+  },
+  {
+    "name": "bce-forged-fact-verified",
+    "note": "--forge-index-facts treats every index as proved; --verify-facts keeps every check anyway, so a forged proof of an out-of-range index still stops the program.",
+    "source": "fn pick(v: &u64[], k: u64) -> u64 {\n    return v[k * 3];\n}\nfn main() {\n    v := u64[1, 2];\n    println(pick(&v, 2));\n}\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "flags": [
+      "--forge-index-facts",
+      "--verify-facts"
+    ],
+    "signal": "SIGABRT",
+    "stderr": "out of bounds"
+  },
+  {
+    "name": "bce-kill-mut-reference-call",
+    "note": "A mutable reference handed to a call is written through, its length included: the fact dies at the call.",
+    "source": "fn wipe(r: &mut u64[]) {\n    r.clear();\n    return ();\n}\nfn sum_after(r: &mut u64[]) -> u64 {\n    n := r.len();\n    wipe(r);\n    mut t = 0;\n    for i in n {\n        t = wrapping_add(t, r[i]);\n    }\n    return t;\n}\nfn main() {\n    mut v = u64[1, 2, 3];\n    println(sum_after(&mut v));\n}\n",
+    "signal": "SIGABRT",
+    "stderr": "out of bounds"
   }
 ]
