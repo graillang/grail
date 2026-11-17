@@ -819,6 +819,10 @@ struct C {
     // That field, one-based record declaration and zero-based index (0 when none was read).
     ref_assign_d: u64,
     ref_assign_k: u64,
+    // The record the assignment's path ends in, and its type: a predicate across fields reads the
+    // other fields from it when one of them is written.
+    ref_assign_base: u64,
+    ref_assign_rty: u64,
     // Strict refinements (docs/design/refinements.md): `--strict-refinements` for the whole program,
     // `@strict;` for a module (it stays with the module's name, so a replayed body keeps it), and
     // `@strict` on a declaration for the function that follows.
@@ -4760,7 +4764,7 @@ fn needs_drop<a>(c: (&a mut C), ty: u64) -> bool {
         // A plain or extern record element is its bytes inline, owning nothing.
         elem := ty_arg(&mut c, ty);
         if array_record_elem(&mut c, elem) {
-            return false;
+            return (is_c_record(&mut c, elem) == 0) && frame_drops(&mut c, elem);
         }
         return needs_drop(&mut c, elem);
     }
@@ -6940,6 +6944,29 @@ fn drop_symbol_known<a>(c: (&a mut C), ty: u64) -> unit {
     drop_symbol(&mut c, ty);
     return ();
 }
+// A struct's or tuple's in-place drop (unboxed-values.md, stage 4): the user's `drop`, then the
+// owners its words hold, at their offsets from the address in %rdi; it frees nothing. The boxed
+// helper (`drop_symbol`) is this and `rt_free`; a record held inline - in a frame, in another
+// record's words, flat in a vector - is dropped by this alone. For an array the helper already is
+// in place, so its name is the array's drop symbol.
+fn drop_in_place_symbol<a>(c: (&a mut C), ty: u64) -> u8[] {
+    if is_array(&mut c, ty) {
+        return drop_symbol(&mut c, ty);
+    }
+    mut name = drop_symbol(&mut c, ty);
+    name[1] = 80;
+    return name;
+}
+// Whether `ty` has a separate in-place drop: a Grail struct or tuple (not an enum, whose payload
+// is a word, nor a C record, whose bytes own nothing).
+fn in_place_record<a>(c: (&a mut C), ty: u64) -> bool {
+    if ty_kind(&mut c, ty) != 8 {
+        return false;
+    }
+    index := ty_arg(&mut c, ty);
+    d := &c.decls[index];
+    return (d.is_enum == 0) && (d.c_layout == 0);
+}
 fn drop_symbol<a>(c: (&a mut C), ty: u64) -> u8[] {
     while c.drop_names.len() <= ty {
         c.drop_names.push(u8[]);
@@ -6987,8 +7014,9 @@ fn drop_taken<a>(c: (&a mut C), ty: u64) -> u64 {
 }
 
 fn drop_name<a>(c: (&a mut C), ty: u64) -> unit {
-    // Named as a dropper, a framed record is always a holder's box (a dyn cell, a task result).
-    if framed(&mut c, ty) {
+    // Named as a dropper, a framed record is always a holder's box (a dyn cell, a task result): freed,
+    // after its owners are dropped in place (the boxed helper) when it has any.
+    if framed(&mut c, ty) && !frame_drops(&mut c, ty) {
         push_bytes(&mut c.out, view("rt_free"));
         return ();
     }
@@ -7014,7 +7042,12 @@ fn drop_ref_name<a>(c: (&a mut C), ty: u64) -> u8[] {
 fn drop_call_out<a>(c: (&a mut C), ty: u64) -> unit {
     // A framed record's words belong to a frame or to the place that holds them: nothing to free.
     // An array that owns its elements still drops them, in place (its helper frees no storage).
-    if framed(&mut c, ty) && !array_owned(&mut c, ty) {
+    if framed(&mut c, ty) && !frame_drops(&mut c, ty) {
+        return ();
+    }
+    // A framed value's words are where it is held, so it is dropped in place.
+    if framed(&mut c, ty) {
+        call_out(&mut c, view(drop_in_place_ref(&mut c, ty)));
         return ();
     }
     name := drop_ref_name(&mut c, ty);
@@ -8034,17 +8067,24 @@ fn pred_check<a, b, d>(c: (&a mut C), lo: u64, hi: u64, what: &b [u8], stop_a: &
     }
     return ();
 }
-// What a field predicate may say today (docs/design/refinements.md, "Field predicates"): it names
-// its own field and nothing else - another field, a parameter or a global would be read in the
-// scope of whoever builds the record - and the field is a number or an owned vector (its `len()`).
-// A predicate across fields is the named follow-up; until then it is refused here, at the struct.
-fn ref_field_pred_rules<a, b>(c: (&a mut C), field: &b [u8], ty: u64, lo: u64, hi: u64, at: u64) -> unit {
+// What a field predicate may say (docs/design/refinements.md, "Field predicates"): fields of its own
+// record and nothing else - a parameter or a global would be read in the scope of whoever builds the
+// record - each of them a number or an owned vector (its `len()`). The field's own type is checked
+// here; the names, once the record's fields are all known (ref_field_pred_names).
+fn ref_pred_type_ok<a>(c: (&a mut C), ty: u64) -> bool {
     t := base_type(&mut c, ty);
     k := ty_kind(&mut c, t);
-    if !((t == 0) || (k == 18) || (k == 21) || (k == 6)) {
+    return (t == 0) || (k == 18) || (k == 21) || (k == 6);
+}
+fn ref_field_pred_rules<a, b>(c: (&a mut C), field: &b [u8], ty: u64, lo: u64, hi: u64, at: u64) -> unit {
+    if !ref_pred_type_ok(&mut c, ty) {
         diag_label(&mut c, at, view("this field's type has no predicate the compiler checks"));
         fail(&mut c, view("a field predicate applies to an integer, a float or an owned vector (through `len()`)"));
     }
+    return ();
+}
+// Every name a field predicate reads must be a field of the record, of a type a predicate checks.
+fn ref_field_pred_names<a, b>(c: (&a mut C), record: &b [u8], fields: (&a Field[]), lo: u64, hi: u64) -> unit {
     mut i = lo;
     while i < hi {
         if kind_at(&mut c, i) == 1 {
@@ -8052,14 +8092,31 @@ fn ref_field_pred_rules<a, b>(c: (&a mut C), field: &b [u8], ty: u64, lo: u64, h
             after_dot := (i > lo) && (kind_at(&mut c, i - 1) == 46);
             call := kind_at(&mut c, i + 1) == 40;
             word := same(view(t2), view("true")) || same(view(t2), view("false"));
-            if !after_dot & !call & !word & !same(view(t2), view(field)) {
-                mut msg = copy_bytes(view("a field predicate may name only its own field: `"));
-                push_bytes(&mut msg, view(t2));
-                push_bytes(&mut msg, view("` is not `"));
-                push_bytes(&mut msg, view(field));
-                push_bytes(&mut msg, view("` (a predicate across fields is not supported yet)"));
-                exchange(&mut c.pos, i);
-                fail(&mut c, view(msg));
+            if !after_dot & !call & !word {
+                mut found = 0;
+                mut ty = 0;
+                for j in fields.len() {
+                    if same(view(fields[j].name), view(t2)) {
+                        found = 1;
+                        ty = fields[j].ty;
+                    }
+                }
+                if found == 0 {
+                    mut msg = copy_bytes(view("a field predicate may name only fields of its record: `"));
+                    push_bytes(&mut msg, view(t2));
+                    push_bytes(&mut msg, view("` is not a field of `"));
+                    push_bytes(&mut msg, view(record));
+                    push_bytes(&mut msg, view("`"));
+                    exchange(&mut c.pos, i);
+                    fail(&mut c, view(msg));
+                }
+                if !ref_pred_type_ok(&mut c, ty) {
+                    mut msg = copy_bytes(view("a field predicate may read only integer, float and vector fields: `"));
+                    push_bytes(&mut msg, view(t2));
+                    push_bytes(&mut msg, view("` is not one"));
+                    exchange(&mut c.pos, i);
+                    fail(&mut c, view(msg));
+                }
             }
         }
         i += 1;
@@ -8514,11 +8571,129 @@ fn ref_field_refined<a>(c: (&a mut C), d: u64, k: u64) -> bool {
     if k >= c.decls[d].count {
         return false;
     }
-    f := c.decls[d].first + k;
-    if f >= c.fields.len() {
-        return false;
+    // Its own predicate, or any predicate of the record that reads it: a write through a loan would
+    // skip either.
+    count := c.decls[d].count;
+    for j in count {
+        if ref_pred_reads(&mut c, d, j, k) {
+            return true;
+        }
     }
-    return c.fields[f].pred.hi != 0;
+    return false;
+}
+// The fields field `j`'s predicate reads, as field indices (its own included when it names itself).
+// Empty when the field has no predicate.
+fn ref_pred_fields<a>(c: (&a mut C), d: u64, j: u64) -> u64[] {
+    mut out = u64[];
+    f := c.decls[d].first + j;
+    if f >= c.fields.len() {
+        return out;
+    }
+    pf := c.fields[f].pred.file;
+    plo := c.fields[f].pred.lo;
+    phi := c.fields[f].pred.hi;
+    if phi == 0 {
+        return out;
+    }
+    text := pred_text(&mut c, Pred { file: pf, lo: plo, hi: phi });
+    mut i = 0;
+    while i < text.len() {
+        ch := text[i];
+        start_word := ((96 < ch) & (ch < 123)) || ((64 < ch) & (ch < 91)) || (ch == 95);
+        if !start_word {
+            i += 1;
+            continue;
+        }
+        mut word = u8[];
+        mut e = i;
+        while e < text.len() {
+            x := text[e];
+            if ((96 < x) & (x < 123)) || ((64 < x) & (x < 91)) || (x == 95) || ((47 < x) & (x < 58)) {
+                word.push(x);
+                e += 1;
+            } else {
+                break;
+            }
+        }
+        after_dot := (i > 0) && (text[i - 1] == 46);
+        if !after_dot {
+            idx := field_index(&mut c, d, view(word));
+            if idx != 0 {
+                mut seen = 0;
+                for q in out.len() {
+                    if out[q] == idx - 1 {
+                        seen = 1;
+                    }
+                }
+                if seen == 0 {
+                    out.push(idx - 1);
+                }
+            }
+        }
+        i = e;
+    }
+    return out;
+}
+fn ref_pred_reads<a>(c: (&a mut C), d: u64, j: u64, k: u64) -> bool {
+    fs := ref_pred_fields(&mut c, d, j);
+    for q in fs.len() {
+        if fs[q] == k {
+            return true;
+        }
+    }
+    return false;
+}
+// Whether field `j`'s predicate reads a field other than `j`: such a predicate is owed where every
+// field it reads has its value (ref_field_cross), not where `j` alone is stored.
+fn ref_pred_cross<a>(c: (&a mut C), d: u64, j: u64) -> bool {
+    fs := ref_pred_fields(&mut c, d, j);
+    for q in fs.len() {
+        if fs[q] != j {
+            return true;
+        }
+    }
+    return false;
+}
+// Field `j`'s predicate across fields, over the values in `slots` (one per field of the record,
+// indexed by field) with their terms. A field without a term makes the obligation unprovable: plain
+// code checks it, strict mode refuses it.
+fn ref_field_cross<a, b, e>(c: (&a mut C), d: u64, j: u64, rty: u64, slots_by_field: (&b u64[]), terms_by_field: (&e u8[][]), pos: u64, why: &b [u8]) -> unit {
+    f := c.decls[d].first + j;
+    pf := c.fields[f].pred.file;
+    plo := c.fields[f].pred.lo;
+    phi := c.fields[f].pred.hi;
+    owner := c.decls[d].name.copy();
+    mut who = owner.copy();
+    who.push(46);
+    push_bytes(&mut who, view(c.fields[f].name));
+    fs := ref_pred_fields(&mut c, d, j);
+    mut names = u8[][];
+    mut slots = u64[];
+    mut tys = u64[];
+    mut terms = u8[][];
+    mut all_terms = 1;
+    for q in fs.len() {
+        m := fs[q];
+        names.push(c.fields[c.decls[d].first + m].name.copy());
+        slots.push(slots_by_field[m]);
+        tys.push(field_type(&mut c, rty, m));
+        t := terms_by_field[m].copy();
+        if t.len() == 0 {
+            all_terms = 0;
+        }
+        terms.push(t);
+    }
+    mut proved = 0;
+    report := u64(ref_strict(&c));
+    need := pv_need(&mut c, view(who), pf, plo);
+    if all_terms != 0 {
+        proved = pv_proved(&mut c, Pred { file: pf, lo: plo, hi: phi }, &names, &terms, pos, report, view(need));
+    }
+    if (report != 0) & (proved == 0) {
+        pv_strict_fail_why(&mut c, Pred { file: pf, lo: plo, hi: phi }, pos, view(need), view(why));
+    }
+    ref_check(&mut c, Pred { file: pf, lo: plo, hi: phi }, &names, &slots, &tys, who, pf, plo, proved, 0);
+    return ();
 }
 // The refusal of a mutable borrow of a refined field, wherever the borrow is made.
 fn ref_field_loan_fail<a>(c: (&a mut C), d: u64, k: u64) -> unit {
@@ -8605,6 +8780,9 @@ fn ref_field<a, b>(c: (&a mut C), d: u64, k: u64, slot: u64, term: &b [u8], pos:
         owner = c.decls[d].name.copy();
     }
     if phi == 0 {
+        return ();
+    }
+    if ref_pred_cross(&mut c, d, k) {
         return ();
     }
     mut who = u8[];
@@ -8953,34 +9131,79 @@ fn pv_field_facts<a, b>(c: (&a mut C), term: &b [u8], facts: (&a mut Atom[])) ->
     if (dots == 0) || (field.len() == 0) {
         return ();
     }
-    pred := pv_field_pred(&mut c, view(root), view(field));
-    if pred.hi == 0 {
-        return ();
-    }
-    mut atoms = Atom[];
-    if !pv_read_pred(&mut c, pred, &mut atoms) {
-        return ();
-    }
-    mut path = root.copy();
-    path.push(46);
-    push_bytes(&mut path, view(field));
-    names := u8[][field];
-    paths := u8[][path];
-    mut renamed = Atom[];
-    for j in atoms.len() {
-        x := &atoms[j];
-        a := pv_rename(view(x.a), &names, &paths);
-        mut b = u8[];
-        if x.b.len() != 0 {
-            b = pv_rename(view(x.b), &names, &paths);
-            if b.len() == 0 {
-                return ();
-            }
-        }
-        if a.len() == 0 {
+    // The record `root` holds, when the path is one the field-path rule trusts.
+    if pv_field_pred(&mut c, view(root), view(field)).hi == 0 {
+        // The field has no predicate of its own; another field's may still read it.
+        if !pv_field_stable(&mut c, view(root), view(field)) {
             return ();
         }
-        renamed.push(Atom { rel: x.rel, a: a, b: b, k: x.k, ao: x.ao, bo: x.bo });
+    }
+    l := find_local(&mut c, view(root));
+    if l == 0 {
+        return ();
+    }
+    d := slot_record_decl(&mut c, local_ty(&mut c, l - 1));
+    if d == 18446744073709551615 {
+        return ();
+    }
+    k0 := field_index(&mut c, d, view(field));
+    if k0 == 0 {
+        return ();
+    }
+    // Every predicate of the record that reads this field, with each field it reads renamed to its
+    // path under `root` - and only when every one of those paths is one value too.
+    mut renamed = Atom[];
+    for j in c.decls[d].count {
+        if !ref_pred_reads(&mut c, d, j, k0 - 1) {
+            continue;
+        }
+        fs := ref_pred_fields(&mut c, d, j);
+        mut names = u8[][];
+        mut paths = u8[][];
+        mut stable = 1;
+        for q in fs.len() {
+            m := fs[q];
+            mname := c.fields[c.decls[d].first + m].name.copy();
+            if !pv_field_stable(&mut c, view(root), view(mname)) {
+                stable = 0;
+            }
+            mut path = root.copy();
+            path.push(46);
+            push_bytes(&mut path, view(mname));
+            names.push(mname);
+            paths.push(path);
+        }
+        if stable == 0 {
+            continue;
+        }
+        f := c.decls[d].first + j;
+        pred := Pred { file: c.fields[f].pred.file, lo: c.fields[f].pred.lo, hi: c.fields[f].pred.hi };
+        mut atoms = Atom[];
+        if !pv_read_pred(&mut c, pred, &mut atoms) {
+            continue;
+        }
+        mut ok = 1;
+        mut these = Atom[];
+        for i in atoms.len() {
+            x := &atoms[i];
+            a := pv_rename(view(x.a), &names, &paths);
+            mut b = u8[];
+            if x.b.len() != 0 {
+                b = pv_rename(view(x.b), &names, &paths);
+                if b.len() == 0 {
+                    ok = 0;
+                }
+            }
+            if a.len() == 0 {
+                ok = 0;
+            }
+            these.push(Atom { rel: x.rel, a: a, b: b, k: x.k, ao: x.ao, bo: x.bo });
+        }
+        if ok != 0 {
+            for i in these.len() {
+                renamed.push(copy_atom_value(&these[i]));
+            }
+        }
     }
     mut settled = Atom[];
     if pv_settle_all(&mut c, &renamed, &mut facts, &mut settled) {
@@ -11425,6 +11648,62 @@ fn closure_stated_borrower<a>(c: (&a mut C), ty: u64) -> bool {
     mode := ty_mode(&mut c, ty);
     return ((mode & CLOSURE_BOUNDS) != 0) & ((mode & CLOSURE_OWNED) == 0);
 }
+// Parameters that only a callable bound names (`impl<I, U, F: FnMut(I::Item) -> U> ... for Map<I, F>`:
+// `U`) are fixed by the closure or function the bound parameter was bound to, as Rust's `Fn` bounds
+// fix their output type.
+fn infer_from_callables<a, b>(c: (&a mut C), sets: (&a u64[][]), map: (&b mut u64[])) -> unit {
+    for i in sets.len() {
+        if i < map.len() {
+            bound := callable_in(&sets[i]);
+            if (bound != NO_TYPE) && (map[i] != NO_TYPE) {
+                actual := base_type(&mut c, map[i]);
+                ak := ty_kind(&mut c, actual);
+                if (ak == 20) || (ak == 12) {
+                    infer_callable(&mut c, bound, actual, &mut map);
+                }
+            }
+        }
+    }
+    return ();
+}
+// One entry of a parameter's requirement set, met by `ty` with the parameters bound by `map`: an
+// interface, or a callable bound (the closure or function `ty` converts to the bound).
+fn meets_requirement<a, b>(c: (&a mut C), ty: u64, id: u64, map: (&b u64[])) -> bool {
+    if CALLABLE_PENDING <= id {
+        return true;
+    }
+    if CALLABLE_BOUND <= id {
+        mut t = ty;
+        if ty_kind(&mut c, t) == 10 {
+            t = ty_arg(&mut c, t);
+        }
+        mut known = true;
+        for i in map.len() {
+            if map[i] == NO_TYPE {
+                known = false;
+            }
+        }
+        if !known {
+            return (ty_kind(&mut c, t) == 20) || (ty_kind(&mut c, t) == 12);
+        }
+        bound := bind_types(&mut c, id - CALLABLE_BOUND, &map);
+        if same_type(&mut c, t, bound) != 0 {
+            return true;
+        }
+        if (ty_kind(&mut c, t) == 20) && (closure_bounds_hold(&mut c, t, ty_mode(&mut c, bound) & CLOSURE_BOUNDS)) {
+            erased := closure_as(&mut c, t, bound);
+            mut m = u64[];
+            return callable_contract(&mut c, erased, bound, &mut m, 0);
+        }
+        if ty_kind(&mut c, t) == 12 {
+            plain := intern_args(&mut c, 20, ty_arg(&mut c, t), ty_mode(&mut c, bound), u64[], type_args(&mut c, t));
+            mut m = u64[];
+            return callable_contract(&mut c, plain, bound, &mut m, 0);
+        }
+        return false;
+    }
+    return satisfies_interface(&mut c, ty, id);
+}
 // A callable bound on a type parameter (`F: FnMut(T) -> U`, docs/design/dyn-and-callable-bounds.md
 // 2b) travels in the parameter's requirement set beside its interface ids, as this tag plus the
 // bound's closure type, so every place that carries requirements carries it too.
@@ -11468,7 +11747,11 @@ fn resolve_callable_bounds<a>(c: (&a mut C)) -> unit {
             entry := c.type_interfaces[i][j];
             if CALLABLE_PENDING <= entry {
                 here := exchange(&mut c.pos, entry - CALLABLE_PENDING);
+                // A bound is an input: an elided reference in it is a fresh input lifetime, as in a
+                // parameter list (an impl header reads it outside one).
+                was := exchange(&mut c.parsing_input, 1);
                 bound := parse_type(&mut c);
+                exchange(&mut c.parsing_input, was);
                 exchange(&mut c.pos, here);
                 c.type_interfaces[i][j] = CALLABLE_BOUND + bound;
             }
@@ -12330,6 +12613,7 @@ fn impl_bindings<a>(c: (&a mut C), id: u64, actual: u64) -> u64[] {
         return u64[];
     }
     sets := copy_constraints(&c.impl_params[r - 1].interfaces);
+    infer_from_callables(&mut c, &sets, &mut map);
     for i in count {
         if map[i] == NO_TYPE {
             return u64[];
@@ -12337,7 +12621,7 @@ fn impl_bindings<a>(c: (&a mut C), id: u64, actual: u64) -> u64[] {
         if i < sets.len() {
             for k in sets[i].len() {
                 bound := map[i];
-                if !satisfies_interface(&mut c, bound, sets[i][k]) {
+                if !meets_requirement(&mut c, bound, sets[i][k], &map) {
                     return u64[];
                 }
             }
@@ -12427,6 +12711,9 @@ fn impl_param_types<a>(c: (&a mut C), id: u64) -> u64[] {
                 if sets[i][k] < CALLABLE_BOUND {
                     proof := intern(&mut c, 15, sets[i][k]);
                     proofs.push(proof);
+                } else if sets[i][k] < CALLABLE_PENDING {
+                    // The same parameter type a name resolves to (it carries its callable bound).
+                    proofs.push(sets[i][k] - CALLABLE_BOUND);
                 }
             }
         }
@@ -12558,9 +12845,30 @@ fn require_interfaces<a, b, d>(c: (&a mut C), arguments: (&b u64[]), sets: (&d u
             if CALLABLE_BOUND <= id {
                 // The argument is the closure (or function) a callable-bound parameter was given:
                 // its own type must convert to the bound, with the call's type arguments in it.
-                bound := bind_types(&mut c, id - CALLABLE_BOUND, &arguments);
-                if (same_type(&mut c, ty, bound) == 0) && (closure_converts(&mut c, ty, bound) == 0) {
-                    if !((ty_kind(&mut c, ty) == 12) && (ty_kind(&mut c, bound) == 20)) {
+                // Compared without a specialisation's aliases: the closure's own signature names the
+                // plain types its bindings stand for.
+                mut plain_args = u64[];
+                for q in arguments.len() {
+                    if arguments[q] == NO_TYPE {
+                        plain_args.push(NO_TYPE);
+                    } else {
+                        plain_args.push(base_type(&mut c, arguments[q]));
+                    }
+                }
+                bound := bind_types(&mut c, id - CALLABLE_BOUND, &plain_args);
+                // A callable parameter passed on (`f: F` given to another `G: FnMut(..)`): its own
+                // bound must meet this one.
+                mut given = base_type(&mut c, ty);
+                own := param_callable(&mut c, ty);
+                if (own != NO_TYPE) && (ty_kind(&mut c, base_type(&mut c, ty)) == 9) {
+                    given = own;
+                }
+                // A closure written inside a specialisation is typed by its aliases, one passed in
+                // from outside by plain types: either form of the bound is met.
+                aliased := bind_types(&mut c, id - CALLABLE_BOUND, &arguments);
+                if (same_type(&mut c, given, bound) == 0) && (closure_converts(&mut c, given, bound) == 0)
+                    && (same_type(&mut c, given, aliased) == 0) && (closure_converts(&mut c, given, aliased) == 0) {
+                    if !((ty_kind(&mut c, given) == 12) && (ty_kind(&mut c, bound) == 20)) {
                         mut msg = copy_bytes(view("this argument does not meet the callable bound `"));
                         push_bytes(&mut msg, view(source_type_name(&mut c, bound)));
                         push_bytes(&mut msg, view("`: it is `"));
@@ -13191,7 +13499,7 @@ fn emit_vtables<a>(c: (&a mut C)) -> unit {
         mut entries = copy_bytes(view(".quad "));
         if needs_drop(&mut c, concrete) {
             drop_name(&mut c, concrete);
-            if framed(&mut c, concrete) {
+            if framed(&mut c, concrete) && !frame_drops(&mut c, concrete) {
                 // The cell's value is the box dyn_box made: freeing it is the whole drop.
                 push_bytes(&mut entries, view("rt_free"));
             } else {
@@ -13234,9 +13542,19 @@ fn emit_vtables<a>(c: (&a mut C)) -> unit {
                 push_bytes(&mut thunks, view(cell));
                 thunks.push(95);
                 decimal(&mut thunks, j);
-                push_bytes(&mut thunks, view(":\npushq %rbp\nmovq %rsp,%rbp\nmovq (%rdi),%rdi\ncall "));
-                push_bytes(&mut thunks, view(target));
-                push_bytes(&mut thunks, view("\nleave\nret\n"));
+                // The receiver is the record the cell's first word holds; the method returns to the
+                // dispatch site itself, so the adapter is a load and a jump (no frame of its own).
+                // On the LLVM backend the method may be in the other object, which a direct `jmp`
+                // cannot reach (`grail asm` relocates calls and RIP-relative operands, not jumps).
+                if (c.backend != 0) && (c.target == 0) {
+                    push_bytes(&mut thunks, view(":\nmovq (%rdi),%rdi\nleaq "));
+                    push_bytes(&mut thunks, view(target));
+                    push_bytes(&mut thunks, view("(%rip),%r11\njmp *%r11\n"));
+                } else {
+                    push_bytes(&mut thunks, view(":\nmovq (%rdi),%rdi\njmp "));
+                    push_bytes(&mut thunks, view(target));
+                    thunks.push(10);
+                }
             }
         }
         if boxed {
@@ -15920,6 +16238,13 @@ fn decl<a>(c: (&a mut C), pass: u64) -> unit {
         }
     }
     eat(&mut c, view(";"));
+    for i in pending.len() {
+        plo := pending[i].pred.lo;
+        phi := pending[i].pred.hi;
+        if phi != 0 {
+            ref_field_pred_names(&mut c, view(name), &pending, plo, phi);
+        }
+    }
     // A record that needs itself before it can exist has no value anyone can write: the field that
     // names it would need one first, so the type is uninhabited and the user is holding something
     // they can never build. This was accepted in silence (docs/design/frontend-robustness.md).
@@ -20511,6 +20836,7 @@ fn inherent_bindings<a>(c: (&a mut C), key: u64, actual: u64) -> (u64, u64[]) {
     if record != 0 {
         sets = copy_constraints(&c.impl_params[record - 1].interfaces);
     }
+    infer_from_callables(&mut c, &sets, &mut map);
     for k in count {
         mut bound = map[k];
         if bound == NO_TYPE {
@@ -20518,7 +20844,7 @@ fn inherent_bindings<a>(c: (&a mut C), key: u64, actual: u64) -> (u64, u64[]) {
         }
         if k < sets.len() {
             for j in sets[k].len() {
-                if !satisfies_interface(&mut c, bound, sets[k][j]) {
+                if !meets_requirement(&mut c, bound, sets[k][j], &map) {
                     return (0, u64[]);
                 }
             }
@@ -20598,7 +20924,11 @@ fn inherent_unmet_bound<a, b>(c: (&a mut C), ty: u64, name: &b [u8]) -> (u8[], u
             }
             for j in sets[k].len() {
                 iface := sets[k][j];
-                if satisfies_interface(&mut c, bound, iface) {
+                if meets_requirement(&mut c, bound, iface, &map) {
+                    continue;
+                }
+                if CALLABLE_BOUND <= iface {
+                    // A callable bound the receiver's closure does not meet: not this method.
                     continue;
                 }
                 tname := c.impl_params[record - 1].tnames[k].copy();
@@ -20720,6 +21050,7 @@ fn inherent_type_key<a>(c: (&a mut C), ty: u64, pass: u64) -> u64 {
     if pass == 2 {
         key := inherent_type_base() + c.inherent_types.len() + 1;
         c.inherent_types.push(ty);
+        resolve_callable_bounds(&mut c);
         c
             .impl_params
             .push(
@@ -20847,6 +21178,8 @@ fn implementation<a>(c: (&a mut C), pass: u64) -> unit {
         exchange(&mut c.type_interfaces, u64[][]);
         if is(&mut c, view("<")) {
             lifetime_parameters(&mut c);
+            // An impl's own bounds name only its own parameters: read them before its type is.
+            resolve_callable_bounds(&mut c);
         }
         module := module_copy(&mut c);
         ty := parse_inherent_owner(&mut c);
@@ -20870,6 +21203,7 @@ fn implementation<a>(c: (&a mut C), pass: u64) -> unit {
                 }
             }
             if pass == 2 {
+                resolve_callable_bounds(&mut c);
                 c
                     .impl_params
                     .push(
@@ -20920,10 +21254,12 @@ fn implementation<a>(c: (&a mut C), pass: u64) -> unit {
     // `impl<T: B> I for X<T>`: a generic implementation, its methods templates over T.
     if is(&mut c, view("<")) {
         lifetime_parameters(&mut c);
+        resolve_callable_bounds(&mut c);
     }
     impl_rnames := copy_names(&c.rnames);
     impl_tnames := copy_names(&c.tnames);
     impl_bounds := copy_numbers(&c.type_bounds);
+    resolve_callable_bounds(&mut c);
     impl_ifaces := copy_constraints(&c.type_interfaces);
     mut module = module_copy(&mut c);
     mut name = ident(&mut c);
@@ -23868,7 +24204,7 @@ fn static_bake<a>(c: (&a mut C), ty: u64, text: &a [u8], at: (&a mut u64), is_la
         // vector of plain records holds its elements' words inline instead (flat_bytes).
         mut words = u64[];
         mut kinds = u64[];
-        flat := (ty_kind(&mut c, base_type(&mut c, elem)) == 8) && plain(&mut c, elem);
+        flat := (ty_kind(&mut c, base_type(&mut c, elem)) == 8) && framable(&mut c, elem);
         for j in n {
             if flat {
                 static_bake_fields(&mut c, base_type(&mut c, elem), text, &mut at, &mut words, &mut kinds);
@@ -27496,7 +27832,7 @@ fn field_layout<a>(c: (&a mut C), alias: u64) -> u64 {
     mut word = 0;
     for i in count {
         ft := field_type(&mut c, ty, i);
-        if plain(&mut c, ft) {
+        if framable(&mut c, ft) {
             table.push(word * 2 + 1);
             word = word + record_words(&mut c, base_type(&mut c, ft));
         } else {
@@ -27525,7 +27861,7 @@ fn flat_bytes<a>(c: (&a mut C), elem: u64) -> u64 {
     if is_array(&mut c, ty) {
         return array_bytes(&mut c, ty);
     }
-    if plain(&mut c, ty) {
+    if framable(&mut c, ty) {
         return record_words(&mut c, ty) * 8;
     }
     if is_c_record(&mut c, ty) != 0 {
@@ -27638,9 +27974,36 @@ fn layout_bits<a>(c: (&a mut C), alias: u64) -> u64 {
         if holds {
             bits = bits | 2;
         }
+        // Framable (unboxed-values.md, stage 4): held as its words wherever it is held - in a frame,
+        // inline in another record, flat in a vector - whatever it owns. Every struct and tuple is,
+        // but one being worked out is not to itself (a by-value field of its own type would be
+        // infinite), so such a field stays a boxed word.
+        bits = bits | 4;
+        for i in c.decls[d].count {
+            ft := base_type(&mut c, field_type(&mut c, ty, i));
+            if framable(&mut c, ft) {
+                bits = bits | 2;
+            }
+        }
     }
     c.layout_memo[ty] = bits + 1;
     return bits;
+}
+// Whether `ty` is held as its own words (layout bit 4): a struct, a tuple or an array.
+fn framable<a>(c: (&a mut C), alias: u64) -> bool {
+    ty := base_type(&mut c, alias);
+    if is_array(&mut c, ty) {
+        return true;
+    }
+    return (layout_bits(&mut c, ty) & 4) != 0;
+}
+// A framed value that owns something, so its words have an in-place drop: a struct or tuple that is
+// not plain, or an array of owners.
+fn frame_drops<a>(c: (&a mut C), ty: u64) -> bool {
+    if is_array(&mut c, ty) {
+        return array_owned(&mut c, ty);
+    }
+    return framed(&mut c, ty) && !plain(&mut c, ty);
 }
 // A plain record field read as a value: the address of its words inside the container.
 fn inline_address<a>(c: (&a mut C), base: u64, ty: u64, k: u64) -> u64 {
@@ -27701,11 +28064,11 @@ fn enum_frame<a>(c: (&a mut C), tag: u64, payload: u64) -> u64 {
 // its value is the address of frame words, its drop frees nothing, and a holder that keeps it past
 // the statement boxes it.
 fn framed<a>(c: (&a mut C), ty: u64) -> bool {
-    // An array is always frame storage (docs/design/fixed-arrays.md).
+    // An array is always frame storage (docs/design/fixed-arrays.md), whatever the switch says.
     if is_array(&mut c, ty) {
         return true;
     }
-    return plain(&mut c, ty);
+    return framable(&mut c, ty);
 }
 // N adjacent fresh frame slots holding one value, declared to every pass by an aggregate fact
 // (llvm::fact_aggregate), laid out as a DynPair is: word 0 is the slot allocated last, the lowest
@@ -27819,8 +28182,13 @@ fn unbox_into_frame<a>(c: (&a mut C), slot: u64, ty: u64) -> unit {
 // The drop of a holder's word that holds `ty`: for a framed record it is the holder's box, freed;
 // for anything else the type's drop.
 fn holder_drop<a>(c: (&a mut C), ty: u64) -> unit {
-    if framed(&mut c, ty) {
+    if framed(&mut c, ty) && !frame_drops(&mut c, ty) {
         call_out(&mut c, view("rt_free"));
+        return ();
+    }
+    if framed(&mut c, ty) {
+        // The holder's box: its owners dropped in place, then the box freed (the boxed helper).
+        call_out(&mut c, view(drop_ref_name(&mut c, ty)));
         return ();
     }
     drop_call(&mut c, ty);
@@ -27861,6 +28229,17 @@ fn materialise<a>(c: (&a mut C), slot: u64, ty: u64) -> unit {
     c.interior[found] = 18446744073709551615;
     if framed(&mut c, ty) {
         copy := frame_copy(&mut c, slot, ty);
+        if frame_drops(&mut c, ty) {
+            // The words moved: the place they came from (a field held inline, an element) is left
+            // all zero, which its holder's in-place drop reads as nothing to drop (a live word of 0).
+            words := record_words(&mut c, base_type(&mut c, ty));
+            get(&mut c, slot, view("%rcx"));
+            for j in words {
+                o(&mut c, view("movq $0,"));
+                on(&mut c, j * 8);
+                o(&mut c, view("(%rcx)\n"));
+            }
+        }
         get(&mut c, copy, view("%rax"));
         o(&mut c, view("movq %rax,"));
         stack_slot(&mut c, slot);
@@ -27914,12 +28293,26 @@ fn record_words<a>(c: (&a mut C), ty: u64) -> u64 {
     if c.decls[d].c_layout != 0 {
         return ffi_record_words(&mut c, d);
     }
+    live := u64(live_word(&mut c, ty));
     if (layout_bits(&mut c, ty) & 2) == 0 {
-        return c.decls[d].count;
+        return c.decls[d].count + live;
     }
     at := field_layout(&mut c, ty);
     count := c.layout_offsets[at].len() - 1;
-    return c.layout_offsets[at][count] / 2;
+    return c.layout_offsets[at][count] / 2 + live;
+}
+// Whether the struct `ty` carries a live word after its fields (unboxed-values.md, stage 4): one
+// with its own `Drop`. Its constructor sets the word to 1; moving it out of the place that holds it
+// leaves every word 0, and its in-place drop does nothing - its `drop` included - when the word is 0.
+// A struct without its own `Drop` needs none: its owners' words are 0 when absent.
+fn live_word<a>(c: (&a mut C), alias: u64) -> bool {
+    ty := base_type(&mut c, alias);
+    if (ty == 0) || (ty_kind(&mut c, ty) != 8) || (c.raw != 0) {
+        return false;
+    }
+    index := ty_arg(&mut c, ty);
+    d := &c.decls[index];
+    return (d.drop != 0) && (d.is_enum == 0) && (d.c_layout == 0);
 }
 fn field_store<a>(c: (&a mut C), base: u64, ty: u64, k: u64, value: u64) -> unit {
     if inline_field(&mut c, ty, k) {
@@ -29103,6 +29496,8 @@ fn field_path<a>(c: (&a mut C), id: u64, lty: u64, address: u64) -> Val {
                 if c.ref_assign_target != 0 {
                     exchange(&mut c.ref_assign_d, d + 1);
                     exchange(&mut c.ref_assign_k, k);
+                    exchange(&mut c.ref_assign_base, b);
+                    exchange(&mut c.ref_assign_rty, base.ty);
                 } else {
                     if ref_field_refined(&mut c, d, k) {
                         ref_field_loan_fail(&mut c, d, k);
@@ -30002,7 +30397,7 @@ fn array_elem_bytes<a>(c: (&a mut C), alias: u64) -> u64 {
     if is_c_record(&mut c, ty) != 0 {
         return ffi_record_size(&mut c, ty_arg(&mut c, ty));
     }
-    if plain(&mut c, ty) {
+    if framable(&mut c, ty) {
         return record_words(&mut c, ty) * 8;
     }
     if (k == 19) || (k == 22) {
@@ -30032,7 +30427,7 @@ fn array_read_elem<a>(c: (&a mut C), elem: u64) -> bool {
 // bytes, reached through its address.
 fn array_record_elem<a>(c: (&a mut C), elem: u64) -> bool {
     ty := base_type(&mut c, elem);
-    return (ty != 0) && (ty_kind(&mut c, ty) == 8) && ((is_c_record(&mut c, ty) != 0) || plain(&mut c, ty));
+    return (ty != 0) && (ty_kind(&mut c, ty) == 8) && ((is_c_record(&mut c, ty) != 0) || framable(&mut c, ty));
 }
 // An element read as its value by `a[i]`: a number, a bool-free scalar, or a C word.
 fn array_scalar_elem<a>(c: (&a mut C), elem: u64) -> bool {
@@ -30676,6 +31071,10 @@ fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
     mut map = constructor_map(&mut c, d, hint);
     mut seen = u64[];
     mut sources = u64[];
+    // Each field value's term, in the order `sources` holds them: a predicate across fields reads
+    // them once the record is complete.
+    mut lit_terms = u8[][];
+    lit_at := c.pos;
     mut deferred = u64[];
     mut index = 0;
     if !eat_kind(&mut c, close) {
@@ -30775,7 +31174,10 @@ fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
             sources.push(held.t);
             if c.decls[d].c_layout == 0 {
                 fterm := pv_span_term(&mut c, astart, aend);
+                lit_terms.push(fterm.copy());
                 ref_field(&mut c, d, k, held.t, view(fterm), astart);
+            } else {
+                lit_terms.push(u8[]);
             }
             if eat_kind(&mut c, close) {
                 break;
@@ -30812,6 +31214,7 @@ fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
         require_type(&mut c, v.ty, expected);
         if c.decls[d].c_layout == 0 {
             fterm := pv_span_term(&mut c, start, end);
+            exchange(&mut lit_terms[index], fterm.copy());
             ref_field(&mut c, d, k, newslot, view(fterm), start);
         }
         exchange(&mut sources[index], newslot);
@@ -30831,6 +31234,32 @@ fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
         } else {
             field_store(&mut c, n, ty, seen[i], sources[i]);
         }
+    }
+    // A predicate across fields is owed once every field it reads has its value.
+    if c.decls[d].c_layout == 0 {
+        mut by_slot = u64[];
+        mut by_term = u8[][];
+        for i in c.decls[d].count {
+            by_slot.push(0);
+            by_term.push(u8[]);
+        }
+        for i in seen.len() {
+            exchange(&mut by_slot[seen[i]], sources[i]);
+            if i < lit_terms.len() {
+                exchange(&mut by_term[seen[i]], lit_terms[i].copy());
+            }
+        }
+        for j in c.decls[d].count {
+            if ref_pred_cross(&mut c, d, j) {
+                ref_field_cross(&mut c, d, j, ty, &by_slot, &by_term, lit_at, view("a value is not a name or a constant"));
+            }
+        }
+    }
+    if live_word(&mut c, ty) {
+        get(&mut c, n, view("%rax"));
+        o(&mut c, view("movq $1,"));
+        on(&mut c, (record_words(&mut c, ty) - 1) * 8);
+        o(&mut c, view("(%rax)\n"));
     }
     own(&mut c, n, ty);
     root := place_of(&mut c, n);
@@ -32044,6 +32473,14 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
         exchange(&mut c.cf_local, saved_cf_local);
         exchange(&mut c.none_start, saved_none_start);
         exchange(&mut c.none_end, saved_none_end);
+    }
+    // A parameter only a callable bound names is fixed by the closure bound to the bound parameter.
+    {
+        mut sets = u64[][];
+        for q in c.funcs[f - 1].constraints.len() {
+            sets.push(copy_numbers(&c.funcs[f - 1].constraints[q]));
+        }
+        infer_from_callables(&mut c, &sets, &mut map);
     }
     for i in map.len() {
         if map[i] == NO_TYPE {
@@ -36417,7 +36854,7 @@ fn task_scope_builtin<a>(c: (&a mut C), context: Val) -> Val {
     get(&mut c, context.t, view("%rsi"));
     get(&mut c, body.t, view("%rax"));
     call_slot_out(&mut c, view("call *%rax\n"), view("a call through a value the compiler did not name"));
-    slot := save(&mut c);
+    slot := save_result(&mut c, result);
     invoke(&mut c, view("rt_scope_end"), one(handle));
     observe(&mut c, context.t);
     release_temporary(&mut c, input);
@@ -39380,7 +39817,8 @@ fn mutex_method<a, b>(c: (&a mut C), value: Val, name: &b [u8]) -> Val {
     get(&mut c, heldslot, view("%rsi"));
     get(&mut c, target, view("%rax"));
     call_slot_out(&mut c, view("call *%rax\n"), view("a call through a value the compiler did not name"));
-    slot := save(&mut c);
+    // The callback's result as any call's is: a framed one in registers or its box (save_result).
+    slot := save_result(&mut c, result);
     invoke(&mut c, view("rt_mutex_unlock"), one(cell));
     own(&mut c, slot, result);
     if keeper != 0 {
@@ -41147,8 +41585,19 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
                 dropper = save(&mut c);
             }
             require_write(&mut c, xt);
+            if (width != 0) && frame_drops(&mut c, elem) {
+                // Inline elements that own something are dropped in place as they go.
+                o(&mut c, view("leaq "));
+                push_bytes(&mut c.out, view(drop_in_place_ref(&mut c, elem)));
+                o(&mut c, view("(%rip),%rax\n"));
+                inplace := save(&mut c);
+                mut args = three(xt, keep, imm(&mut c, width));
+                args.push(inplace);
+                invoke(&mut c, view("rt_vec_truncatew"), args);
+                return val(imm(&mut c, 0), 1);
+            }
             if (code != 0) || (width != 0) {
-                // 4-byte and inline elements own nothing: shortening is setting the length.
+                // 4-byte and plain inline elements own nothing: shortening is setting the length.
                 invoke(&mut c, view("rt_vec_truncate4"), two(xt, keep));
                 return val(imm(&mut c, 0), 1);
             }
@@ -41715,8 +42164,9 @@ fn ref_store<a>(c: (&a mut C), r: u64, ty: u64, value: u64) -> unit {
         caddr_store(&mut c, r, narrow, value);
         return ();
     }
-    if plain(&mut c, ty) & embedded_place(&mut c, r) {
-        // An inline plain record's place: the new value's words replace the old ones.
+    if framed(&mut c, ty) & embedded_place(&mut c, r) {
+        // An inline record's place: the new value's words replace the old ones (an owning one was
+        // dropped in place first, by the assignment).
         get(&mut c, r, view("%rax"));
         o(&mut c, view("movq (%rax),%rax\n"));
         dst := save(&mut c);
@@ -42940,7 +43390,12 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
         // body: called with the bound's signature. A specialisation binds `F` to the closure's own
         // type and takes the branch above.
         if local != 0 {
-            pty := local_ty(&mut c, local - 1);
+            outer := local_ty(&mut c, local - 1);
+            // `g := &mut self.f` with `f: F`: the reference's referent is the callable parameter.
+            mut pty = outer;
+            if ty_kind(&mut c, pty) == 7 {
+                pty = ty_arg(&mut c, pty);
+            }
             bound := param_callable(&mut c, pty);
             if bound != NO_TYPE {
                 slot := local_id(&mut c, local - 1);
@@ -42958,6 +43413,10 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
                     if (sig != NO_TYPE) && (ty_kind(&mut c, bound) == 12) {
                         calltype = intern_args(&mut c, 12, ty_arg(&mut c, sig), 0, u64[], type_args(&mut c, sig));
                     }
+                }
+                if ty_kind(&mut c, outer) == 7 {
+                    viaref := intern_full(&mut c, 7, calltype, ty_mode(&mut c, outer), type_regions(&mut c, outer));
+                    return indirect_call(&mut c, val(slot, viaref), 0);
                 }
                 return indirect_call(&mut c, val(slot, calltype), 0);
             }
@@ -45451,7 +45910,7 @@ fn chained_field_assignment<a>(c: (&a mut C)) -> unit {
     a := assign_field_path(&mut c, base.t, base.ty);
     target := a.t;
     fieldty := ty_arg(&mut c, a.ty);
-    assignment_tail(&mut c, 0, base.t, base.ty, target, u64[1, fieldty, c.ref_assign_d, c.ref_assign_k], view(fname), record_ty);
+    assignment_tail(&mut c, 0, base.t, base.ty, target, u64[1, fieldty, c.ref_assign_d, c.ref_assign_k, c.ref_assign_base, c.ref_assign_rty], view(fname), record_ty);
     return ();
 }
 // Writing or mutably borrowing a string's bytes. A string literal is a `string` (read-only,
@@ -47904,7 +48363,7 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
                     target := a.t;
                     fieldty := ty_arg(&mut c, a.ty);
                     mut none = u8[];
-                    assignment_tail(&mut c, 0, head.t, head.ty, target, u64[1, fieldty, c.ref_assign_d, c.ref_assign_k], view(none), 0);
+                    assignment_tail(&mut c, 0, head.t, head.ty, target, u64[1, fieldty, c.ref_assign_d, c.ref_assign_k, c.ref_assign_base, c.ref_assign_rty], view(none), 0);
                     return ();
                 }
                 capture_assignment(&mut c, view(name));
@@ -47943,6 +48402,8 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
         mut fname = u8[];
         mut assigned_d = 0;
         mut assigned_k = 0;
+        mut assigned_base = 0;
+        mut assigned_rty = 0;
         here_at := c.pos;
         if (kind(&mut c) == 46) & (kind_at(&mut c, here_at + 1) == 1) {
             fname = tok_text(&mut c, here_at + 1);
@@ -47954,6 +48415,8 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
             fieldty = ty_arg(&mut c, a.ty);
             assigned_d = c.ref_assign_d;
             assigned_k = c.ref_assign_k;
+            assigned_base = c.ref_assign_base;
+            assigned_rty = c.ref_assign_rty;
         }
         mut field_name = u8[];
         mut record_ty = 0;
@@ -47965,7 +48428,7 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
             }
             record_ty = shape;
         }
-        assignment_tail(&mut c, l, id, ty, target, u64[through, fieldty, assigned_d, assigned_k], view(field_name), record_ty);
+        assignment_tail(&mut c, l, id, ty, target, u64[through, fieldty, assigned_d, assigned_k, assigned_base, assigned_rty], view(field_name), record_ty);
         // `x = e` writes the binding; `x.f = e` writes a field of what `x` owns, which is not a fact
         // about `x`'s own value.
         if through == 0 {
@@ -48008,9 +48471,15 @@ fn assignment_tail<a, b>(c: (&a mut C), l: u64, id: u64, ty: u64, target: u64, t
     // The field the path ends at, when the target was read by `assign_field_path`.
     mut assigned_d = 0;
     mut assigned_k = 0;
+    mut assigned_base = 0;
+    mut assigned_rty = 0;
     if through_fieldty.len() > 3 {
         assigned_d = through_fieldty[2];
         assigned_k = through_fieldty[3];
+    }
+    if through_fieldty.len() > 5 {
+        assigned_base = through_fieldty[4];
+        assigned_rty = through_fieldty[5];
     }
     if through != 0 {
         pin_assignment(&mut c, target);
@@ -48125,6 +48594,32 @@ fn assignment_tail<a, b>(c: (&a mut C), l: u64, id: u64, ty: u64, target: u64, t
         }
         if assigned_d != 0 {
             ref_field(&mut c, assigned_d - 1, assigned_k, v.t, view(rterm), vstart);
+            // Every predicate across fields that reads this field is owed too, over the new value
+            // and the other fields as the record holds them now. Those have no term (the root is
+            // `mut`), so strict mode cannot prove such a write: it rebuilds the record instead.
+            ad := assigned_d - 1;
+            for j in c.decls[ad].count {
+                if ref_pred_cross(&mut c, ad, j) && ref_pred_reads(&mut c, ad, j, assigned_k) {
+                    fs := ref_pred_fields(&mut c, ad, j);
+                    mut by_slot = u64[];
+                    mut by_term = u8[][];
+                    for m in c.decls[ad].count {
+                        by_slot.push(0);
+                        by_term.push(u8[]);
+                    }
+                    for q in fs.len() {
+                        m := fs[q];
+                        if m == assigned_k {
+                            exchange(&mut by_slot[m], v.t);
+                            exchange(&mut by_term[m], rterm.copy());
+                        } else {
+                            loaded := field_load(&mut c, assigned_base, assigned_rty, m, 0);
+                            exchange(&mut by_slot[m], loaded);
+                        }
+                    }
+                    ref_field_cross(&mut c, ad, j, assigned_rty, &by_slot, &by_term, vstart, view("a write of one field leaves the others without a term: rebuild the record with a literal"));
+                }
+            }
         } else {
             if fname.len() != 0 {
                 ref_field_named(&mut c, rtype, view(fname), v.t, view(rterm), vstart);
@@ -48186,8 +48681,9 @@ fn assignment_tail<a, b>(c: (&a mut C), l: u64, id: u64, ty: u64, target: u64, t
     // is either the interior address itself (an address slot) or the proxy slot that holds it.
     embedded := ((is_c_record(&mut c, fieldty) != 0)
         & ((caddr_ty(&mut c, target) != 0) | embedded_place(&mut c, target)))
-        | (plain(&mut c, fieldty) & embedded_place(&mut c, target));
-    if through != 0 && !embedded {
+        | (framed(&mut c, fieldty) & embedded_place(&mut c, target));
+    // An inline record that owns something is dropped in place before its words are replaced.
+    if through != 0 && (!embedded || frame_drops(&mut c, fieldty)) {
         if needs_drop(&mut c, fieldty) {
             get(&mut c, target, view("%rax"));
             o(&mut c, view("movq (%rax),%rdi\n"));
@@ -48895,7 +49391,7 @@ fn host_fn<a, b>(c: (&a mut C), name: &b [u8], ret: u64) -> unit {
 fn drop_call<a>(c: (&a mut C), ty: u64) -> unit {
     // A framed record's words belong to a frame or to the place that holds them: nothing to free.
     // An array that owns its elements still drops them, in place (its helper frees no storage).
-    if framed(&mut c, ty) && !array_owned(&mut c, ty) {
+    if framed(&mut c, ty) && !frame_drops(&mut c, ty) {
         return ();
     }
     // A body emitted without its bindings (a template's validation replay) cannot name a helper: the
@@ -48969,6 +49465,25 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
                 // needs the name visible across parts, and a build made of several objects needs it
                 // too (B1 stage 3).
                 fx_end(&mut c);
+                if in_place_record(&mut c, ty) {
+                    emit_drop_in_place(&mut c, ty, view(hook));
+                    helper_sym := drop_symbol(&mut c, ty);
+                    fx_helper(&mut c, view(helper_sym));
+                    weak_def(&mut c);
+                    push_bytes(&mut c.out, view(helper_sym));
+                    c.out.push(10);
+                    push_bytes(&mut c.out, view(helper_sym));
+                    o(&mut c, view(":\ntestq %rdi,%rdi\n"));
+                    jump(&mut c, view("jz"), done);
+                    o(&mut c, view("pushq %rbp\nmovq %rsp,%rbp\npushq %r12\npushq %r13\nmovq %rdi,%r12\n"));
+                    call_out(&mut c, view(drop_in_place_symbol(&mut c, ty)));
+                    o(&mut c, view("movq %r12,%rdi\n"));
+                    call_out(&mut c, view("rt_free"));
+                    o(&mut c, view("popq %r13\npopq %r12\nleave\n"));
+                    mark(&mut c, done);
+                    o(&mut c, view("ret\n"));
+                    continue;
+                }
                 helper_sym := drop_symbol(&mut c, ty);
                 fx_helper(&mut c, view(helper_sym));
                 weak_def(&mut c);
@@ -49062,7 +49577,8 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
                     o(&mut c, view("movq %r13,%rax\nimulq $"));
                     on(&mut c, w);
                     o(&mut c, view(",%rax\naddq %r12,%rax\n"));
-                    if is_array(&mut c, arg) {
+                    if is_array(&mut c, arg) || array_record_elem(&mut c, arg) {
+                        // An inline element is dropped in place, at its address.
                         o(&mut c, view("movq %rax,%rdi\n"));
                     } else {
                         o(&mut c, view("movq (%rax),%rdi\n"));
@@ -49073,7 +49589,24 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
                     mark(&mut c, end);
                 }
                 if kind == 6 {
-                    // Inline elements (plain or C records) own nothing: only the buffer is freed.
+                    // Inline elements that own something are dropped in place, each at its address;
+                    // plain or C records own nothing. Then the buffer is freed.
+                    fw := flat_bytes(&mut c, arg);
+                    if (fw != 0) && frame_drops(&mut c, arg) {
+                        head := label(&mut c);
+                        end := label(&mut c);
+                        o(&mut c, view("xorq %r13,%r13\n"));
+                        mark(&mut c, head);
+                        o(&mut c, view("cmpq 8(%r12),%r13\n"));
+                        jump(&mut c, view("jae"), end);
+                        o(&mut c, view("movq %r13,%rdi\nimulq $"));
+                        on(&mut c, fw);
+                        o(&mut c, view(",%rdi\naddq (%r12),%rdi\n"));
+                        drop_call(&mut c, arg);
+                        o(&mut c, view("incq %r13\n"));
+                        jump(&mut c, view("jmp"), head);
+                        mark(&mut c, end);
+                    }
                     if needs_drop(&mut c, arg) & (flat_bytes(&mut c, arg) == 0) {
                         head := label(&mut c);
                         end := label(&mut c);
@@ -49129,6 +49662,65 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
         }
     }
     return ();
+}
+// The in-place drop of the struct or tuple `ty` (drop_in_place_symbol): with its address in %rdi,
+// the user's `drop` runs on it as `&mut self`, then each field that owns something is dropped - a
+// word that holds an owner by that owner's drop, an inline record or array by its own in-place
+// drop at its address. A zero owner word is an owner moved out (a partial move leaves 0 behind), so
+// the word's drop - which starts by testing for 0 - skips it. Nothing is freed.
+fn emit_drop_in_place<a, b>(c: (&a mut C), ty: u64, hook: &b [u8]) -> unit {
+    sym := drop_in_place_symbol(&mut c, ty);
+    fx_helper(&mut c, view(sym));
+    weak_def(&mut c);
+    push_bytes(&mut c.out, view(sym));
+    c.out.push(10);
+    push_bytes(&mut c.out, view(sym));
+    o(&mut c, view(":\npushq %rbp\nmovq %rsp,%rbp\npushq %r12\npushq %r13\nmovq %rdi,%r12\n"));
+    done := label(&mut c);
+    if live_word(&mut c, ty) {
+        // Moved out of the place that held it: nothing is here to drop.
+        o(&mut c, view("cmpq $0,"));
+        on(&mut c, (record_words(&mut c, ty) - 1) * 8);
+        o(&mut c, view("(%r12)\n"));
+        jump(&mut c, view("je"), done);
+    }
+    if hook.len() != 0 {
+        o(&mut c, view("movq %r12,%rdi\n"));
+        call_out(&mut c, hook);
+    }
+    index := ty_arg(&mut c, ty);
+    count := c.decls[index].count;
+    for i in count {
+        t := field_type(&mut c, ty, i);
+        if needs_drop(&mut c, t) {
+            if inline_field(&mut c, ty, i) {
+                // A plain record or array held inline owns nothing; one that owns has its own
+                // in-place drop.
+                if !frame_drops(&mut c, t) {
+                    continue;
+                }
+                o(&mut c, view("leaq "));
+                on(&mut c, field_word(&mut c, ty, i) * 8);
+                o(&mut c, view("(%r12),%rdi\n"));
+                call_out(&mut c, view(drop_in_place_ref(&mut c, t)));
+            } else {
+                o(&mut c, view("movq "));
+                on(&mut c, field_word(&mut c, ty, i) * 8);
+                o(&mut c, view("(%r12),%rdi\n"));
+                holder_drop(&mut c, t);
+            }
+        }
+    }
+    mark(&mut c, done);
+    o(&mut c, view("popq %r13\npopq %r12\nleave\nret\n"));
+    return ();
+}
+// Names the in-place drop of `ty` and asks for it to be emitted (its boxed helper is emitted with it).
+fn drop_in_place_ref<a>(c: (&a mut C), alias: u64) -> u8[] {
+    // An alias (a bound type parameter) names the helper of the type it stands for.
+    ty := base_type(&mut c, alias);
+    drop_ref_name(&mut c, ty);
+    return drop_in_place_symbol(&mut c, ty);
 }
 fn emit_exit<a, b>(c: (&a mut C), argument: &b [u8]) -> unit {
     if c.target == 4 {
@@ -50467,8 +51059,10 @@ fn iface_enc_impl_params<a>(c: (&a mut C), out: (&a mut u8[]), deps: (&a mut u64
     iface_w_reqs(&mut c, &mut out, &reqs);
     for i in reqs.len() {
         for j in reqs[i].len() {
-            deps.push(2);
-            deps.push(reqs[i][j]);
+            if reqs[i][j] < CALLABLE_BOUND {
+                deps.push(2);
+                deps.push(reqs[i][j]);
+            }
         }
     }
     return ();
@@ -54132,6 +54726,8 @@ fn iface_impl_self<a>(c: (&a mut C), record: u64) -> unit {
             for j in reqs[i].len() {
                 if reqs[i][j] < CALLABLE_BOUND {
                     proofs.push(intern_args(&mut c, 15, reqs[i][j], 0, u64[], u64[]));
+                } else if reqs[i][j] < CALLABLE_PENDING {
+                    proofs.push(reqs[i][j] - CALLABLE_BOUND);
                 }
             }
         }
@@ -54675,6 +55271,8 @@ pub fn main() -> u64 {
         proved_label: 0,
         ref_assign_d: 0,
         ref_assign_k: 0,
+        ref_assign_base: 0,
+        ref_assign_rty: 0,
         strict_refinements: 0,
         strict_modules: u8[][],
         strict_next: 0,

@@ -1,5 +1,26 @@
 ## Unreleased
 
+- **Typed iterator adapters: `iter::over(v).map(..).filter(..).fold(..)`.** `iter::VecIter<T>`,
+  `iter::Map<I, U, F>` and `iter::Filter<I, F>` implement `Iterator` with each callback held by its
+  own closure type, so a chain is one nested type, specialised and called directly, with no
+  allocation per element; a `for` loop runs over any of them. `iter::fold_all(it, init, f)` folds any
+  `I: Iterator`. `iter::Iter<T>` is unchanged (the erased form for `from_fn`, `dyn Iterator` or a
+  field). Callable bounds now work on an impl's own parameters (`impl<U, F: FnMut(u64) -> U> W<U, F>`)
+  and through interface files.
+- Release builds optimise the runtime's job, task and thread runners again: they make calls
+  through code pointers and were kept unoptimised after lifting them raced on the thread pointer.
+  That race is fixed (every thread-pointer read is now an opaque one), and
+  alloc-threads-pool-results-freed-by-waiter passes 50 runs of 50.
+
+- **The optimiser inlines small functions in ordinary builds again.** A small leaf (at most 24
+  instructions, no call but a failure exit) was only inlined when it carried no statement-position
+  marker, and every statement of a build with error locations carries one, so outside
+  `--no-error-sites` almost nothing was inlined (3 bodies on the scheduler's join probe, 57 with the
+  flag). The markers now travel with the copy. A failure inside an inlined function still reports
+  the line it was written on, but the inlined function is no longer a frame of its own: its caller's
+  `= called from` line is the next one shown. Measured (callgrind, one worker): a join 3406 -> 3355
+  instructions, a spawn 2089 -> 1858; the compiler's own text +0.4%.
+
 - Fixed: a module exporting a `u64` constant at or above 2^63, or a negative signed constant, could
   not be read back from its interface ("carries a number wider than 64 bits"), so `grail build` of a
   program using such a module failed. The reader now accepts the tenth LEB128 byte that holds bit 63.
@@ -13,6 +34,21 @@
   records each C function's argument and result types, and the lifter emits the call as C types it
   (`call double @scale(i64, double, float)`), on x86-64 for calls whose arguments are all in
   registers. Variadic calls, records and stack arguments keep the native body.
+- **Records that own data are no longer boxed** (unboxed-values.md, stage 4). Every struct and
+  tuple - strings, vectors and `impl Drop` included - is held as its words in the frame, inline in
+  the record that contains it and flat in vectors; each type gets an in-place drop, and the boxes
+  that remain (enum payloads, closures, `Mutex`, `dyn`, task results) drop in place and free.
+  `check syn1000`: record boxes 404 k -> 71 k, peak memory 53 -> 41 MB.
+- A `dyn` call on a record now costs one call: the vtable adapter that loads the record out of
+  its cell was a function with its own frame calling the method; it is a load and a tail jump.
+  dyncall (20 M dispatches): native 1,645 M -> 1,565 M instructions, LLVM 779 M -> 719 M (Rust -O:
+  648 M).
+- **Field predicates may relate fields of the same record:** `struct Span { lo: u64, hi: u64 where
+  lo <= hi }`. A literal owes the predicate once every field has its value, every write of a field it
+  reads owes it over the new value and the other fields, a mutable borrow of any such field is
+  refused, and a reader through a shared reference or a non-`mut` binding gets it as a fact. A name
+  that is not a field of the record is still refused at the struct. Strict mode proves literals; a
+  single-field write it cannot prove, and says to rebuild the record.
 
 - AArch64 and RV64 native code drops moves that move nothing (call ABI S7): the word machine's
   result register is x9 (t0) and its first argument x0 (a0), and moves go through the scratch x10
@@ -246,6 +282,12 @@
   and multiplying. And a float operation on values held in SSE registers works on them directly
   (`subsd %xmm9,%xmm8`) instead of copying both into the scratch pair and the result back. nbody
   executes 27% fewer instructions.
+- **Native backend: three small rewrites.** A local whose address is taken only to load it at once
+  (`leaq -N(%rbp),%R` ... `movq (%R),%R`) is loaded directly, so it can be kept in a register; a
+  shift by a constant uses the immediate, and the run-time check of a constant shift count (or any
+  comparison of two constants) is decided at compile time; an accumulator worked on in %rax
+  (`movq %r12,%rax; xorq ...,%rax; imulq ...,%rax; movq %rax,%r12`) is worked on in its own
+  register. fnv executes 15% fewer instructions, sieve 3%.
 
 - **Native backend: a slice's `data` and `len` live in registers.** The type facts are recorded on
   the native path too, and the optimiser reads F1's slice-descriptor fact: a slice written once at
