@@ -409,6 +409,18 @@ and per token one module run - its wrapper and its compiler - or one worker), an
 make-style fifo (its tokens all back afterwards). On the 24-module benchmark with `GRAIL_JOBS=4` the
 peak is 9 processes where the previous compiler ran 49.
 
+### An incremental check
+
+`grail check` takes the per-module path a build takes (cli.grl `check_command`, `per_module_build`
+with `--check` in the module runs). The module key leaves `--check` out, and so does a unit's key,
+so a check and a build of one module agree on both: a check reuses a build's module record
+(`unit_restore_check` reads only its interface and facts) or a check's own (`map/check/`, which
+holds no object, so a build never takes it), and a check run files full units for the bodies it
+checks, which a later build replays. A module with errors reports them as its run gives them; the
+modules that read it are not run and print one line each; the modules that do not read it are
+still checked. There is no whole-program fallback: an edit with a type error is the commonest
+check, and it must not be the slowest. `tools/cache-test.mjs` (m) is the proof.
+
 ### Not yet: effects
 
 Any effect claim (`@no_alloc`, `@no_panic`) turns units off for the whole run, so a program with
