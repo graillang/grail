@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Compile-time values cost one probe per build, and none when nothing they read changed**
+  (comptime-speed R2, R3). Every run-tier value a build needs is computed by one probe; each is then
+  cached with what it read - the program's function bodies its computation reached, the
+  non-function declarations, the other values, the runtime and standard library files, the compiler
+  and the options - so an edit anywhere else runs no probe. 100 values: one probe (+2.3 s CPU on a
+  first build, +0.9 s once the probes' function cache is warm), and no probe on a warm rebuild or
+  after an unrelated edit. A value that fails names itself, its call and its declaration (a failed
+  check, a refused effect, an exit).
+
 - Fixed (statics, after the merge with unboxed records and the prover rework): a static's
   initialiser is evaluated in its own module's scope whoever asks for it first, so `PAGE - 1` finds
   `PAGE` when the interface writer asks at the end of the compile; a baked record is laid out as the

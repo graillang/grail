@@ -278,6 +278,11 @@ struct Constant {
 // A run-tier value of the program: a module binding `NAME := f(...);` or a static `@f(...)`. Every
 // probe defines a wrapper for each (ct_probe_wrappers), so code the probe compiles reads a value by
 // calling its initialiser instead of starting another probe (docs/design/comptime-speed.md, R1).
+// A value the build's batch probe computed (ct_batch), looked up by run_tier before it starts a probe.
+struct CtDone {
+    key: u8[],
+    res: CTRes
+}
 struct CtCall {
     module: u8[],
     name: u8[],
@@ -698,6 +703,9 @@ struct C {
     constants: Constant[],
     statics: Static[],
     ct_calls: CtCall[],
+    ct_done: CtDone[],
+    // Where the batch probe writes the bodies each value reached (ct_write_deps), or empty.
+    ct_deps_path: u8[],
     // Where a static read parks the result of a call it makes only for its effect.
     static_scratch: u64,
     impl_params: ImplParams[],
@@ -20690,10 +20698,12 @@ fn ct_trace_report<a>(trace: &a [u8]) -> u8[] {
     mut start = 0;
     for i in trace.len() + 1 {
         if (i == trace.len()) || (trace[i] == 10) {
-            if (i > start) && (trace[start] != 64) {
-                for j in start..i {
-                    out.push(trace[j]);
-                }
+            line := slice_bytes(trace, start, i);
+            // Not the probe's own frames (its generated source is no one's program) and not the
+            // `timeout` wrapper's note about the core the abort left.
+            keep := (i > start) && (trace[start] != 64) && !ct_list_has_sub(view(line), view(".probe.grl")) && !ct_list_has_prefix(view(line), view("timeout: "));
+            if keep {
+                push_bytes(&mut out, view(line));
                 out.push(10);
             }
             start = i + 1;
@@ -20777,7 +20787,781 @@ fn ct_list_has_prefix<a, b>(text: &a [u8], prefix: &b [u8]) -> bool {
     }
     return true;
 }
+// Compile, link and run a probe program (cached by its text and every input file) and answer what
+// it printed. `text` names the call in messages; `key` is the value it computes, if it is one. With
+// `soft` set a failure is not reported: `status` says it (non-zero), the probe compile's errors are
+// discarded, and the caller decides (the batch falls back to one probe per value, which reports).
+fn ct_probe_exec<a, b, d, e>(c: (&a mut C), probe: &b [u8], text: &d [u8], key: &e [u8], soft: u64, status_out: (&a mut u64)) -> u8[] {
+    exchange(status_out, 0);
+    // The cache key: the probe and every input file.
+    mut keyed = copy_bytes(probe);
+    offset := c.arg_offset;
+    argc := host::argc();
+    mut files = u8[][];
+    mut fi = offset + 2;
+    if c.probe_mode != 0 {
+        // A probe compile's own first file is its probe; a nested probe takes the program's files.
+        fi = offset + 3;
+    }
+    while fi < argc {
+        path := host::arg(fi);
+        files.push(path.copy());
+        push_bytes(&mut keyed, view(path));
+        push_bytes(&mut keyed, view(host::read_file(view(path))));
+        fi += 1;
+    }
+    // The files the module roots added are inputs of the value too: the probe is compiled with the
+    // same roots, so a change to a resolved module changes what the call computes.
+    for i in c.mod_files.len() {
+        path := c.mod_files[i];
+        files.push(path.copy());
+        push_bytes(&mut keyed, view(path));
+        push_bytes(&mut keyed, view(host::read_file(view(path))));
+    }
+    digest := iface_digest(&keyed);
+    mut dir = copy_bytes(view(".work/comptime/"));
+    for i in 24 {
+        dir.push(digest[i]);
+    }
+    out_path := path_cat(view(dir), view("/value"));
+    if host::exists(view(out_path)) == 0 {
+        mut mk = u8[][copy_bytes(view("mkdir")), copy_bytes(view("-p")), dir.copy()];
+        host::command(mk);
+        // Compiles that run the same call at once (parallel test shards, a parallel build) share
+        // `dir`: each builds under names of its own - keyed by this compile's output path - and
+        // only the finished value is published, by rename, so no one reads a half-written file.
+        own_key := iface_digest(&host::arg(offset + 1));
+        mut tag = copy_bytes(view("/"));
+        for i in 12 {
+            tag.push(own_key[i]);
+        }
+        probe_src := path_cat(view(path_cat(view(dir), view(tag))), view(".probe.grl"));
+        probe_s := path_cat(view(path_cat(view(dir), view(tag))), view(".probe.s"));
+        probe_exe := path_cat(view(path_cat(view(dir), view(tag))), view(".probe"));
+        value_tmp := path_cat(view(path_cat(view(dir), view(tag))), view(".value"));
+        host::write_file(view(probe_src), view(probe));
+        self := host::exe_path();
+        mut cmd = ct_shell_quote(view(self));
+        mut opt = 1;
+        while opt < offset + 1 {
+            a := host::arg(opt);
+            // The probe is a compile of the same program, so it resolves `use` in the same roots; the
+            // options that change what the code means travel with it.
+            if starts_with(view(a), view("--overflow=")) {
+                cmd.push(32);
+                push_bytes(&mut cmd, view(a));
+            } else if same(view(a), view("--module-root")) {
+                cmd.push(32);
+                push_bytes(&mut cmd, view("--module-root"));
+                cmd.push(32);
+                push_bytes(&mut cmd, view(ct_shell_quote(view(host::arg(opt + 1)))));
+                opt += 1;
+            }
+            opt += 1;
+        }
+        // Probes share a function cache of their own: the runtime and the standard library are most
+        // of a probe's compile and are the same in every probe (comptime-speed.md); a probe never
+        // replays a normal compile's bodies, whose static reads are compiled differently.
+        push_bytes(&mut cmd, view(" --fn-cache .work/comptime/fn --fn-cache-quiet"));
+        push_bytes(&mut cmd, view(" --target x86_64 --comptime-probe "));
+        push_bytes(&mut cmd, view(ct_shell_quote(view(probe_s))));
+        cmd.push(32);
+        push_bytes(&mut cmd, view(ct_shell_quote(view(probe_src))));
+        for i in files.len() {
+            cmd.push(32);
+            push_bytes(&mut cmd, view(ct_shell_quote(view(files[i]))));
+        }
+        mut pending = host::env(view("GRAIL_COMPTIME_PENDING"));
+        if key.len() != 0 {
+            if pending.len() != 0 {
+                pending.push(44);
+            }
+            push_bytes(&mut pending, key);
+        }
+        depth_text := host::env(view("GRAIL_COMPTIME_DEPTH"));
+        mut depth = 0;
+        for i in depth_text.len() {
+            depth = depth * 10 + u64(depth_text[i] - 48);
+        }
+        if 8 <= depth {
+            if soft != 0 {
+                exchange(status_out, 1);
+                return u8[];
+            }
+            fail(&mut c, view("compile-time calls nest more than 8 deep"));
+        }
+        mut compile = copy_bytes(view("GRAIL_COMPTIME_DEPTH="));
+        decimal(&mut compile, depth + 1);
+        if c.ct_deps_path.len() != 0 {
+            push_bytes(&mut compile, view(" GRAIL_COMPTIME_DEPS="));
+            push_bytes(&mut compile, view(ct_shell_quote(view(c.ct_deps_path))));
+        }
+        push_bytes(&mut compile, view(" GRAIL_COMPTIME_PENDING="));
+        push_bytes(&mut compile, view(ct_shell_quote(view(pending))));
+        compile.push(32);
+        push_bytes(&mut compile, view(cmd));
+        if soft != 0 {
+            // A diagnostic is printed on stdout; the value's own probe reports it if it matters.
+            push_bytes(&mut compile, view(" > /dev/null 2>&1"));
+        }
+        mut sh = u8[][copy_bytes(view("sh")), copy_bytes(view("-c")), compile];
+        if host::command(sh) != 0 {
+            if soft != 0 {
+                exchange(status_out, 1);
+                return u8[];
+            }
+            mut msg = copy_bytes(view("compile-time call `"));
+            push_bytes(&mut msg, text);
+            push_bytes(&mut msg, view("` did not compile (the errors above)"));
+            fail(&mut c, view(msg));
+        }
+        asm := host::read_file(view(probe_s));
+        if ct_list_has_sub(view(asm), view("// grail-link: ")) {
+            if soft != 0 {
+                exchange(status_out, 1);
+                return u8[];
+            }
+            fail(&mut c, view("compile-time code cannot call C: the call reaches an extern function"));
+        }
+        mut cc = host::env(view("GRAIL_CC"));
+        if cc.len() == 0 {
+            cc = copy_bytes(view("cc"));
+        }
+        mut link = u8[][cc, copy_bytes(view("-nostdlib")), copy_bytes(view("-static")), copy_bytes(view("-o")), probe_exe.copy(), probe_s.copy()];
+        if host::command(link) != 0 {
+            if soft != 0 {
+                exchange(status_out, 1);
+                return u8[];
+            }
+            fail(&mut c, view("compile-time call: linking the probe failed (needs cc)"));
+        }
+        mut run = copy_bytes(view("GRAIL_COMPTIME=1 timeout 30 "));
+        push_bytes(&mut run, view(ct_shell_quote(view(probe_exe))));
+        push_bytes(&mut run, view(" > "));
+        push_bytes(&mut run, view(ct_shell_quote(view(value_tmp))));
+        // The probe's stderr carries its trace (`@enter`/`@leave`/`@cycle` lines from the value
+        // functions) and, on a failure, the runtime's report; both are read back below.
+        err_tmp := path_cat(view(path_cat(view(dir), view(tag))), view(".err"));
+        push_bytes(&mut run, view(" 2> "));
+        push_bytes(&mut run, view(ct_shell_quote(view(err_tmp))));
+        mut sh2 = u8[][copy_bytes(view("sh")), copy_bytes(view("-c")), run];
+        status := host::command(sh2);
+        if (status != 0) && (soft != 0) {
+            exchange(status_out, status);
+            return u8[];
+        }
+        if status != 0 {
+            trace := host::read_file(view(err_tmp));
+            report := ct_trace_report(view(trace));
+            if report.len() != 0 {
+                host::write_fd(2, view(report));
+            }
+            mut msg = u8[];
+            if key.len() != 0 {
+                push_bytes(&mut msg, view("compile-time value `"));
+                push_bytes(&mut msg, key);
+                push_bytes(&mut msg, view("` = `"));
+            } else {
+                push_bytes(&mut msg, view("compile-time call `"));
+            }
+            push_bytes(&mut msg, text);
+            if status == 124 {
+                push_bytes(&mut msg, view("` ran past the 30 s limit"));
+            } else if status == 4 {
+                cycle := ct_trace_cycle(view(trace));
+                if cycle.len() != 0 {
+                    msg = cycle;
+                } else {
+                    push_bytes(&mut msg, view("` reads a constant that is still being computed: the constants depend on each other in a cycle"));
+                }
+            } else if status == 134 {
+                push_bytes(&mut msg, view("` stopped with a runtime error while compiling (above)"));
+            } else if status == 3 {
+                push_bytes(&mut msg, view("` was refused an effect compile-time code may not have (above)"));
+            } else {
+                push_bytes(&mut msg, view("` exited with status "));
+                decimal(&mut msg, status);
+                push_bytes(&mut msg, view(" while compiling"));
+            }
+            fail(&mut c, view(msg));
+        }
+        mut mv = u8[][copy_bytes(view("mv")), copy_bytes(view("-f")), value_tmp.copy(), out_path.copy()];
+        host::command(mv);
+        mut tidy = u8[][copy_bytes(view("rm")), copy_bytes(view("-f")), probe_src.copy(), probe_s.copy(), probe_exe.copy(), err_tmp.copy()];
+        host::command(tidy);
+    }
+    if host::exists(view(out_path)) == 0 {
+        return u8[];
+    }
+    return host::read_file(view(out_path));
+}
+// ---- R3: compile-time values cached by what they reach (docs/design/comptime-speed.md) ----------
+//
+// A value's cache entry is keyed by its identity - the compiler, the options, the target, the value's
+// name, its call and its type - and records what its computation depended on: the declaration
+// surface that is not functions (types, aliases, constants), the text of every function body the
+// probe reached from the value's function (its effect call graph), and the calls of the other values
+// it read. A later build uses the entry when all of those are still what they were, so an edit
+// anywhere else runs no probe.
+
+// The hash of a function's declaration as written: its tokens from `pos` through the closing brace
+// of its body (or the `;` of a body-less one), so spacing and comments do not count.
+fn ct_decl_hash<a>(c: (&a mut C), file: u64, pos: u64) -> u8[] {
+    saved_file := c.file;
+    saved_pos := c.pos;
+    if (file != 0) && (file != saved_file) {
+        load_file(&mut c, file);
+        exchange(&mut c.file, file);
+    }
+    mut text = u8[];
+    mut i = pos;
+    mut depth = 0;
+    while i < c.toks.len() {
+        k := kind_at(&mut c, i);
+        if k == 0 {
+            break;
+        }
+        push_bytes(&mut text, view(tok_text(&mut c, i)));
+        text.push(32);
+        if k == 40 {
+            depth += 1;
+        }
+        if (k == 41) && (depth > 0) {
+            depth -= 1;
+        }
+        if (depth == 0) && (k == 59) {
+            break;
+        }
+        if (depth == 0) && (k == 123) {
+            mut braces = 1;
+            i += 1;
+            while (braces > 0) && (i < c.toks.len()) {
+                kb := kind_at(&mut c, i);
+                if kb == 0 {
+                    break;
+                }
+                push_bytes(&mut text, view(tok_text(&mut c, i)));
+                text.push(32);
+                if kb == 123 {
+                    braces += 1;
+                }
+                if kb == 125 {
+                    braces -= 1;
+                }
+                i += 1;
+            }
+            break;
+        }
+        i += 1;
+    }
+    if (file != 0) && (file != saved_file) {
+        load_file(&mut c, saved_file);
+        exchange(&mut c.file, saved_file);
+    }
+    exchange(&mut c.pos, saved_pos);
+    return fncache::hash(view(text));
+}
+// Whether a source file is the runtime, a platform module or the standard library: those are covered
+// by their files' contents in every value's identity (ct_std_digest), not body by body.
+fn ct_std_file<a>(c: (&a mut C), file: u64) -> bool {
+    path := file_path(&mut c, file);
+    if in_std_dir(view(path)) != 0 {
+        return true;
+    }
+    mut cut = 0;
+    for i in path.len() {
+        if (path[i] == 47) || (path[i] == 92) {
+            cut = i + 1;
+        }
+    }
+    base := slice_bytes(view(path), cut, path.len());
+    return same(view(base), view("runtime.grl")) || same(view(base), view("os-linux.grl")) || same(view(base), view("os-windows.grl")) || same(view(base), view("darwin.grl"));
+}
+// The contents of every runtime, platform and standard-library file this compile read.
+fn ct_std_digest<a>(c: (&a mut C)) -> u8[] {
+    mut all = u8[];
+    mut f = 2;
+    while f < c.mod_base + c.mod_files.len() {
+        if ct_std_file(&mut c, f) {
+            path := file_path(&mut c, f);
+            push_bytes(&mut all, view(path));
+            push_bytes(&mut all, view(fncache::hash(view(host::read_file(view(path))))));
+        }
+        f += 1;
+    }
+    return fncache::hash(view(all));
+}
+// What a run-tier value's call is, as a dependency of another value that read it.
+fn ct_call_hash<a>(c: (&a mut C), k: u64) -> u8[] {
+    mut t = copy_bytes(view("value "));
+    push_bytes(&mut t, view(c.ct_calls[k].module));
+    push_bytes(&mut t, view("::"));
+    push_bytes(&mut t, view(c.ct_calls[k].name));
+    t.push(32);
+    push_bytes(&mut t, view(c.ct_calls[k].text));
+    return fncache::hash(view(t));
+}
+fn ct_call_index<a, b>(c: (&a C), tag: &b [u8]) -> u64 {
+    for k in c.ct_calls.len() {
+        t := ct_value_tag(view(c.ct_calls[k].module), view(c.ct_calls[k].name));
+        if same(view(t), tag) {
+            return k + 1;
+        }
+    }
+    return 0;
+}
+// In a probe compile, after the call graph is solved: for every value function the probe defines,
+// the bodies it reaches, written to GRAIL_COMPTIME_DEPS as `TAG H <hash>` (a body's text) and
+// `TAG V <tag>` (another value it read).
+fn ct_write_deps<a>(c: (&a mut C)) -> unit {
+    path := host::env(view("GRAIL_COMPTIME_DEPS"));
+    if (c.probe_mode == 0) || (path.len() == 0) {
+        return ();
+    }
+    n := c.fx_syms.len();
+    mut adj = u64[][];
+    for i in n {
+        adj.push(u64[]);
+    }
+    for e in c.fx_edge_from.len() {
+        from := c.fx_edge_from[e];
+        // The probe makes no effect claim, so the solver did not resolve the edges: look them up.
+        name := c.fx_edge_name[e].copy();
+        mut to = 0;
+        if name.len() != 0 {
+            to = fx_lookup(&mut c, view(name));
+        }
+        if (to != 0) && (from < n) {
+            adj[from].push(to - 1);
+        }
+    }
+    value_prefix := "f_grail_probe_grail_value__";
+    mut out = u8[];
+    // A body's hash, once: many values reach the same functions.
+    mut memo = u8[][];
+    mut memo_done = u64[];
+    for i in n {
+        memo.push(u8[]);
+        memo_done.push(0);
+    }
+    for w in n {
+        if !ct_list_has_prefix(view(c.fx_syms[w]), view(value_prefix)) {
+            continue;
+        }
+        tag := slice_bytes(view(c.fx_syms[w]), value_prefix.len(), c.fx_syms[w].len());
+        mut seen = u64[];
+        for i in n {
+            seen.push(0);
+        }
+        mut work = u64[w];
+        seen[w] = 1;
+        while work.len() != 0 {
+            v := work.pop()!;
+            for j in adj[v].len() {
+                t := adj[v][j];
+                if seen[t] == 0 {
+                    seen[t] = 1;
+                    sym := c.fx_syms[t].copy();
+                    if ct_list_has_prefix(view(sym), view(value_prefix)) {
+                        // Another value: its own call is the dependency, not what it reaches.
+                        push_bytes(&mut out, view(tag));
+                        push_bytes(&mut out, view(" V "));
+                        push_bytes(&mut out, view(slice_bytes(view(sym), value_prefix.len(), sym.len())));
+                        out.push(10);
+                        continue;
+                    }
+                    work.push(t);
+                    if ct_list_has_prefix(view(sym), view("f_grail_probe_")) {
+                        continue;
+                    }
+                    if (t < c.fx_body.len()) && (c.fx_body[t] != 0) && (c.fx_fn_file[t] != 0) {
+                        if memo_done[t] == 0 {
+                            memo_done[t] = 1;
+                            tfile := c.fx_fn_file[t];
+                            if !ct_std_file(&mut c, tfile) {
+                                tpos := c.fx_fn_pos[t];
+                                memo[t] = ct_decl_hash(&mut c, tfile, tpos);
+                            }
+                        }
+                        if memo[t].len() != 0 {
+                            push_bytes(&mut out, view(tag));
+                            push_bytes(&mut out, view(" H "));
+                            push_bytes(&mut out, view(memo[t]));
+                            out.push(10);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    host::write_file(view(path), view(out));
+    return ();
+}
+// The declaration surface a value can read that is not a function: records and enums with their
+// fields, aliases, constants. Adding or editing a function does not change it.
+fn ct_types_digest<a>(c: (&a mut C)) -> u8[] {
+    mut out = u8[];
+    old_lenient := exchange(&mut c.spell_lenient, 1);
+    old_failed := exchange(&mut c.spell_failed, 0);
+    mut deps = u64[];
+    for i in c.decls.len() {
+        iface_ws(&mut out, view(c.decls[i].module));
+        iface_ws(&mut out, view(c.decls[i].name));
+        iface_wv(&mut out, c.decls[i].is_enum);
+        iface_wv(&mut out, c.decls[i].c_layout);
+        nf := c.decls[i].count;
+        first := c.decls[i].first;
+        iface_wv(&mut out, nf);
+        for j in nf {
+            fname := c.fields[first + j].name.copy();
+            fty := c.fields[first + j].ty;
+            iface_ws(&mut out, view(fname));
+            iface_w_type(&mut c, &mut out, &mut deps, fty);
+        }
+    }
+    for i in c.aliases.len() {
+        iface_ws(&mut out, view(c.aliases[i].module));
+        iface_ws(&mut out, view(c.aliases[i].name));
+        ty := c.aliases[i].ty;
+        iface_w_type(&mut c, &mut out, &mut deps, ty);
+    }
+    for i in c.constants.len() {
+        iface_ws(&mut out, view(c.constants[i].module));
+        iface_ws(&mut out, view(c.constants[i].name));
+        iface_ws(&mut out, view(c.constants[i].text));
+        iface_wv(&mut out, c.constants[i].value);
+    }
+    exchange(&mut c.spell_lenient, old_lenient);
+    exchange(&mut c.spell_failed, old_failed);
+    return fncache::hash(view(out));
+}
+// A value's identity: the compiler, the options, the target, the value, its call and its type.
+fn ct_value_id<a, b>(c: (&a mut C), k: u64, ty: u64, std: &b [u8]) -> u8[] {
+    mut t = copy_bytes(view("grail-ctv 1\n"));
+    push_bytes(&mut t, std);
+    t.push(10);
+    push_bytes(&mut t, view(host::exe_path()));
+    t.push(10);
+    push_bytes(&mut t, view(fn_flags_now(&mut c)));
+    t.push(10);
+    decimal(&mut t, c.target);
+    t.push(10);
+    push_bytes(&mut t, view(c.ct_calls[k].module));
+    push_bytes(&mut t, view("::"));
+    push_bytes(&mut t, view(c.ct_calls[k].name));
+    t.push(10);
+    push_bytes(&mut t, view(c.ct_calls[k].text));
+    t.push(10);
+    push_bytes(&mut t, view(type_name(&mut c, ty)));
+    return fncache::hash(view(t));
+}
+fn ct_entry_path<a>(id: &a [u8]) -> u8[] {
+    mut p = copy_bytes(view(".work/comptime/v/"));
+    push_bytes(&mut p, id);
+    return p;
+}
+// The cached flat value of entry `id`, or empty when there is no entry or one of what it read has
+// changed. `known` is every current function declaration's hash, `types` the current digest.
+fn ct_entry_valid<a, b>(c: (&a mut C), id: &b [u8], types: &b [u8], known: (&a u8[][])) -> u8[] {
+    path := ct_entry_path(id);
+    if host::exists(view(path)) == 0 {
+        return u8[];
+    }
+    data := host::read_file(view(path));
+    mut at = 0;
+    mut start = 0;
+    while at < data.len() {
+        if data[at] != 10 {
+            at += 1;
+            continue;
+        }
+        line := slice_bytes(view(data), start, at);
+        at += 1;
+        start = at;
+        if same(view(line), view("value")) {
+            return slice_bytes(view(data), at, data.len());
+        }
+        if ct_list_has_prefix(view(line), view("types ")) {
+            if !same(view(slice_bytes(view(line), 6, line.len())), types) {
+                return u8[];
+            }
+        } else if ct_list_has_prefix(view(line), view("H ")) {
+            h := slice_bytes(view(line), 2, line.len());
+            mut hit = false;
+            for i in known.len() {
+                if same(view(known[i]), view(h)) {
+                    hit = true;
+                    break;
+                }
+            }
+            if !hit {
+                return u8[];
+            }
+        } else if ct_list_has_prefix(view(line), view("V ")) {
+            // `V tag hash`: the other value's call is still that call.
+            rest := slice_bytes(view(line), 2, line.len());
+            mut sp = 0;
+            while (sp < rest.len()) && (rest[sp] != 32) {
+                sp += 1;
+            }
+            tag := slice_bytes(view(rest), 0, sp);
+            want := slice_bytes(view(rest), sp + 1, rest.len());
+            ki := ct_call_index(&c, view(tag));
+            if ki == 0 {
+                return u8[];
+            }
+            if !same(view(ct_call_hash(&mut c, ki - 1)), view(want)) {
+                return u8[];
+            }
+        }
+    }
+    return u8[];
+}
+// Skip one value of type `ty` in the flat form (static_dump_src): the reader static_bake uses,
+// without emitting anything.
+fn static_flat_skip<a>(c: (&a mut C), ty: u64, text: &a [u8], at: (&a mut u64)) -> unit {
+    if integer(&mut c, ty) || is_bool(&mut c, ty) {
+        static_read_num(text, &mut at);
+        return ();
+    }
+    if ty == 3 {
+        n := static_read_num(text, &mut at);
+        exchange(at, *at + n + 1);
+        return ();
+    }
+    if (ty == 2) || (ty_kind(&mut c, ty) == 6) {
+        mut elem = int_type(&mut c, 8, 0);
+        if ty != 2 {
+            elem = ty_arg(&mut c, ty);
+        }
+        n := static_read_num(text, &mut at);
+        for j in n {
+            static_flat_skip(&mut c, elem, text, &mut at);
+        }
+        return ();
+    }
+    d := ty_arg(&mut c, ty);
+    first := c.decls[d].first;
+    for j in c.decls[d].count {
+        fty := c.fields[first + j].ty;
+        static_flat_skip(&mut c, fty, text, &mut at);
+    }
+    return ();
+}
+// One value of the batch's output turned into what run_tier would have answered for it.
+fn ct_res_from_flat<a>(c: (&a mut C), ty: u64, text: &a [u8], at: (&a mut u64)) -> CTRes {
+    if integer(&mut c, ty) || is_bool(&mut c, ty) {
+        v := static_read_num(text, &mut at);
+        return CTRes { ty: ty, value: v, text: u8[] };
+    }
+    if ty == 3 {
+        n := static_read_num(text, &mut at);
+        mut bytes = u8[];
+        for j in n {
+            if *at + j < text.len() {
+                bytes.push(text[*at + j]);
+            }
+        }
+        exchange(at, *at + n + 1);
+        return CTRes { ty: 3, value: 0, text: bytes };
+    }
+    if ct_seq_elem(&mut c, ty) != NO_TYPE {
+        // The elements at the element's C width, as run_tier lays a table out.
+        elem := ct_seq_elem(&mut c, ty);
+        width := ffi_field_size(&mut c, elem);
+        n := static_read_num(text, &mut at);
+        mut data = u8[];
+        for j in n {
+            v := static_read_num(text, &mut at);
+            for b in width {
+                data.push(u8((v >> (8 * b)) & 255));
+            }
+        }
+        return CTRes { ty: ty, value: n, text: data };
+    }
+    start := *at;
+    static_flat_skip(&mut c, ty, text, &mut at);
+    return CTRes { ty: ty, value: 0, text: slice_bytes(text, start, *at) };
+}
+// R2 (docs/design/comptime-speed.md): every run-tier value of the build not computed yet, in one
+// probe that prints each after a `#k` line, in the flat form. The results go to `ct_done`, which
+// run_tier answers from. If the batch fails - a value does not compile, panics, is refused an
+// effect, exits, or the values form a cycle - nothing is recorded, and each value is computed
+// by its own probe where it is needed, which reports the failure at the value.
+fn ct_batch<a>(c: (&a mut C)) -> unit {
+    if c.probe_mode != 0 {
+        return ();
+    }
+    mut keys = u8[][];
+    mut types = u64[];
+    mut calls = u64[];
+    mut ids = u8[][];
+    mut uses = u8[][];
+    mut body = u8[];
+    // R3: what the cached entries are checked against, worked out once.
+    mut known = u8[][];
+    mut digest = u8[];
+    mut prepared = false;
+    mut std = u8[];
+    for k in c.ct_calls.len() {
+        m := c.ct_calls[k].module.copy();
+        n := c.ct_calls[k].name.copy();
+        if c.ct_calls[k].is_static != 0 {
+            st := find_static(&mut c, view(m), view(n));
+            if (st == 0) || (c.statics[st - 1].state != 0) {
+                continue;
+            }
+        } else {
+            kc := find_constant(&mut c, view(m), view(n));
+            if (kc == 0) || (c.constants[kc - 1].ty != CT_PENDING) {
+                continue;
+            }
+        }
+        ty := ct_call_type(&mut c, k);
+        if !is_type_id(ty) || !static_baked_type(&mut c, ty) {
+            continue;
+        }
+        mut key = m.copy();
+        push_bytes(&mut key, view("::"));
+        push_bytes(&mut key, view(n));
+        if std.len() == 0 {
+            std = ct_std_digest(&mut c);
+        }
+        id := ct_value_id(&mut c, k, ty, view(std));
+        if host::exists(view(ct_entry_path(view(id)))) != 0 {
+            if !prepared {
+                prepared = true;
+                digest = ct_types_digest(&mut c);
+                for f in c.funcs.len() {
+                    ffile := c.funcs[f].file;
+                    fpos := c.funcs[f].pos;
+                    if (ffile != 0) && !ct_std_file(&mut c, ffile) {
+                        known.push(ct_decl_hash(&mut c, ffile, fpos));
+                    }
+                }
+            }
+            flat := ct_entry_valid(&mut c, view(id), view(digest), &known);
+            if flat.len() != 0 {
+                mut fat = 0;
+                res := ct_res_from_flat(&mut c, ty, view(flat), &mut fat);
+                c.ct_done.push(CtDone { key: key.copy(), res: res });
+                continue;
+            }
+        }
+        ct_add_use(&mut uses, view(m));
+        mut var = copy_bytes(view("grail_v"));
+        decimal(&mut var, keys.len());
+        push_bytes(&mut body, view("    println(\"#"));
+        decimal(&mut body, keys.len());
+        push_bytes(&mut body, view("\");\n    "));
+        push_bytes(&mut body, view(var));
+        push_bytes(&mut body, view(" := "));
+        push_bytes(&mut body, view(key));
+        push_bytes(&mut body, view(";\n"));
+        static_dump_src(&mut c, ty, view(var), 0, &mut body);
+        keys.push(key);
+        types.push(ty);
+        calls.push(k);
+        ids.push(id);
+    }
+    if keys.len() == 0 {
+        return ();
+    }
+    wrappers := ct_probe_wrappers(&mut c, &mut uses);
+    mut probe = copy_bytes(view("module grail_probe;\n\n"));
+    for u in uses.len() {
+        push_bytes(&mut probe, view("use "));
+        push_bytes(&mut probe, view(uses[u]));
+        push_bytes(&mut probe, view(";\n"));
+    }
+    push_bytes(&mut probe, view("use host;\n\n"));
+    push_bytes(&mut probe, view(wrappers));
+    push_bytes(&mut probe, view("fn main() -> u64 {\n"));
+    push_bytes(&mut probe, view(body));
+    push_bytes(&mut probe, view("    return 0;\n}\n"));
+    mut status = 0;
+    host::command(u8[][copy_bytes(view("mkdir")), copy_bytes(view("-p")), copy_bytes(view(".work/comptime/v"))]);
+    deps_path := path_cat(view(".work/comptime/v/deps."), view(iface_digest(&probe)));
+    host::command(u8[][copy_bytes(view("rm")), copy_bytes(view("-f")), deps_path.copy()]);
+    exchange(&mut c.ct_deps_path, deps_path.copy());
+    printed := ct_probe_exec(&mut c, view(probe), view("the build's compile-time values"), view(""), 1, &mut status);
+    exchange(&mut c.ct_deps_path, u8[]);
+    if (status != 0) || (printed.len() == 0) {
+        return ();
+    }
+    mut at = 0;
+    mut results = CtDone[];
+    mut flats = u8[][];
+    for k in keys.len() {
+        // `#k` and its newline.
+        if (at >= printed.len()) || (printed[at] != 35) {
+            return ();
+        }
+        exchange(&mut at, at + 1);
+        idx := static_read_num(view(printed), &mut at);
+        if idx != k {
+            return ();
+        }
+        vstart := at;
+        res := ct_res_from_flat(&mut c, types[k], view(printed), &mut at);
+        results.push(CtDone { key: keys[k].copy(), res: res });
+        flats.push(slice_bytes(view(printed), vstart, at));
+    }
+    // R3: an entry per value - what it read, then the value - when the probe said what it reached.
+    if host::exists(view(deps_path)) != 0 {
+        deps := host::read_file(view(deps_path));
+        if digest.len() == 0 {
+            digest = ct_types_digest(&mut c);
+        }
+        for k in keys.len() {
+            tag := ct_value_tag(view(c.ct_calls[calls[k]].module), view(c.ct_calls[calls[k]].name));
+            mut entry = copy_bytes(view("grail-ctv 1\ntypes "));
+            push_bytes(&mut entry, view(digest));
+            entry.push(10);
+            mut start = 0;
+            for i in deps.len() + 1 {
+                if (i == deps.len()) || (deps[i] == 10) {
+                    line := slice_bytes(view(deps), start, i);
+                    start = i + 1;
+                    if (line.len() > tag.len() + 3) && ct_list_has_prefix(view(line), view(tag)) && (line[tag.len()] == 32) {
+                        rest := slice_bytes(view(line), tag.len() + 1, line.len());
+                        if ct_list_has_prefix(view(rest), view("H ")) {
+                            push_bytes(&mut entry, view(rest));
+                            entry.push(10);
+                        } else if ct_list_has_prefix(view(rest), view("V ")) {
+                            other := slice_bytes(view(rest), 2, rest.len());
+                            ki := ct_call_index(&c, view(other));
+                            if ki != 0 {
+                                push_bytes(&mut entry, view("V "));
+                                push_bytes(&mut entry, view(other));
+                                entry.push(32);
+                                push_bytes(&mut entry, view(ct_call_hash(&mut c, ki - 1)));
+                                entry.push(10);
+                            }
+                        }
+                    }
+                }
+            }
+            push_bytes(&mut entry, view("value\n"));
+            push_bytes(&mut entry, view(flats[k]));
+            host::write_file(view(ct_entry_path(view(ids[k]))), view(entry));
+        }
+        host::command(u8[][copy_bytes(view("rm")), copy_bytes(view("-f")), deps_path.copy()]);
+    }
+    for r in results.len() {
+        c.ct_done.push(CtDone { key: results[r].key.copy(), res: CTRes { ty: results[r].res.ty, value: results[r].res.value, text: results[r].res.text.copy() } });
+    }
+    return ();
+}
 fn run_tier<a, b, d, e>(c: (&a mut C), module: &b [u8], text: &d [u8], key: &e [u8]) -> CTRes {
+    if key.len() != 0 {
+        for i in c.ct_done.len() {
+            if same(view(c.ct_done[i].key), key) {
+                r := &c.ct_done[i].res;
+                return CTRes { ty: r.ty, value: r.value, text: r.text.copy() };
+            }
+        }
+    }
     // The call's function, for its result type.
     toks := lexer::tokenize(text);
     if (toks.len() < 3) || (toks[0].kind != 1) {
@@ -20860,161 +21644,8 @@ fn run_tier<a, b, d, e>(c: (&a mut C), module: &b [u8], text: &d [u8], key: &e [
     } else {
         push_bytes(&mut probe, view(";\n    println(v);\n    return 0;\n}\n"));
     }
-    // The cache key: the probe and every input file.
-    mut keyed = probe.copy();
-    offset := c.arg_offset;
-    argc := host::argc();
-    mut files = u8[][];
-    mut fi = offset + 2;
-    if c.probe_mode != 0 {
-        // A probe compile's own first file is its probe; a nested probe takes the program's files.
-        fi = offset + 3;
-    }
-    while fi < argc {
-        path := host::arg(fi);
-        files.push(path.copy());
-        push_bytes(&mut keyed, view(path));
-        push_bytes(&mut keyed, view(host::read_file(view(path))));
-        fi += 1;
-    }
-    // The files the module roots added are inputs of the value too: the probe is compiled with the
-    // same roots, so a change to a resolved module changes what the call computes.
-    for i in c.mod_files.len() {
-        path := c.mod_files[i];
-        files.push(path.copy());
-        push_bytes(&mut keyed, view(path));
-        push_bytes(&mut keyed, view(host::read_file(view(path))));
-    }
-    digest := iface_digest(&keyed);
-    mut dir = copy_bytes(view(".work/comptime/"));
-    for i in 24 {
-        dir.push(digest[i]);
-    }
-    out_path := path_cat(view(dir), view("/value"));
-    if host::exists(view(out_path)) == 0 {
-        mut mk = u8[][copy_bytes(view("mkdir")), copy_bytes(view("-p")), dir.copy()];
-        host::command(mk);
-        // Compiles that run the same call at once (parallel test shards, a parallel build) share
-        // `dir`: each builds under names of its own - keyed by this compile's output path - and
-        // only the finished value is published, by rename, so no one reads a half-written file.
-        own_key := iface_digest(&host::arg(offset + 1));
-        mut tag = copy_bytes(view("/"));
-        for i in 12 {
-            tag.push(own_key[i]);
-        }
-        probe_src := path_cat(view(path_cat(view(dir), view(tag))), view(".probe.grl"));
-        probe_s := path_cat(view(path_cat(view(dir), view(tag))), view(".probe.s"));
-        probe_exe := path_cat(view(path_cat(view(dir), view(tag))), view(".probe"));
-        value_tmp := path_cat(view(path_cat(view(dir), view(tag))), view(".value"));
-        host::write_file(view(probe_src), view(probe));
-        self := host::exe_path();
-        mut cmd = ct_shell_quote(view(self));
-        mut opt = 1;
-        while opt < offset + 1 {
-            a := host::arg(opt);
-            // The probe is a compile of the same program, so it resolves `use` in the same roots; the
-            // options that change what the code means travel with it.
-            if starts_with(view(a), view("--overflow=")) {
-                cmd.push(32);
-                push_bytes(&mut cmd, view(a));
-            } else if same(view(a), view("--module-root")) {
-                cmd.push(32);
-                push_bytes(&mut cmd, view("--module-root"));
-                cmd.push(32);
-                push_bytes(&mut cmd, view(ct_shell_quote(view(host::arg(opt + 1)))));
-                opt += 1;
-            }
-            opt += 1;
-        }
-        push_bytes(&mut cmd, view(" --target x86_64 --comptime-probe "));
-        push_bytes(&mut cmd, view(ct_shell_quote(view(probe_s))));
-        cmd.push(32);
-        push_bytes(&mut cmd, view(ct_shell_quote(view(probe_src))));
-        for i in files.len() {
-            cmd.push(32);
-            push_bytes(&mut cmd, view(ct_shell_quote(view(files[i]))));
-        }
-        mut pending = host::env(view("GRAIL_COMPTIME_PENDING"));
-        if key.len() != 0 {
-            if pending.len() != 0 {
-                pending.push(44);
-            }
-            push_bytes(&mut pending, key);
-        }
-        depth_text := host::env(view("GRAIL_COMPTIME_DEPTH"));
-        mut depth = 0;
-        for i in depth_text.len() {
-            depth = depth * 10 + u64(depth_text[i] - 48);
-        }
-        if 8 <= depth {
-            fail(&mut c, view("compile-time calls nest more than 8 deep"));
-        }
-        mut compile = copy_bytes(view("GRAIL_COMPTIME_DEPTH="));
-        decimal(&mut compile, depth + 1);
-        push_bytes(&mut compile, view(" GRAIL_COMPTIME_PENDING="));
-        push_bytes(&mut compile, view(ct_shell_quote(view(pending))));
-        compile.push(32);
-        push_bytes(&mut compile, view(cmd));
-        mut sh = u8[][copy_bytes(view("sh")), copy_bytes(view("-c")), compile];
-        if host::command(sh) != 0 {
-            mut msg = copy_bytes(view("compile-time call `"));
-            push_bytes(&mut msg, text);
-            push_bytes(&mut msg, view("` did not compile (the errors above)"));
-            fail(&mut c, view(msg));
-        }
-        asm := host::read_file(view(probe_s));
-        if ct_list_has_sub(view(asm), view("// grail-link: ")) {
-            fail(&mut c, view("compile-time code cannot call C: the call reaches an extern function"));
-        }
-        mut cc = host::env(view("GRAIL_CC"));
-        if cc.len() == 0 {
-            cc = copy_bytes(view("cc"));
-        }
-        mut link = u8[][cc, copy_bytes(view("-nostdlib")), copy_bytes(view("-static")), copy_bytes(view("-o")), probe_exe.copy(), probe_s.copy()];
-        if host::command(link) != 0 {
-            fail(&mut c, view("compile-time call: linking the probe failed (needs cc)"));
-        }
-        mut run = copy_bytes(view("GRAIL_COMPTIME=1 timeout 30 "));
-        push_bytes(&mut run, view(ct_shell_quote(view(probe_exe))));
-        push_bytes(&mut run, view(" > "));
-        push_bytes(&mut run, view(ct_shell_quote(view(value_tmp))));
-        // The probe's stderr carries its trace (`@enter`/`@leave`/`@cycle` lines from the value
-        // functions) and, on a failure, the runtime's report; both are read back below.
-        err_tmp := path_cat(view(path_cat(view(dir), view(tag))), view(".err"));
-        push_bytes(&mut run, view(" 2> "));
-        push_bytes(&mut run, view(ct_shell_quote(view(err_tmp))));
-        mut sh2 = u8[][copy_bytes(view("sh")), copy_bytes(view("-c")), run];
-        status := host::command(sh2);
-        if status != 0 {
-            trace := host::read_file(view(err_tmp));
-            report := ct_trace_report(view(trace));
-            if report.len() != 0 {
-                host::write_fd(2, view(report));
-            }
-            mut msg = copy_bytes(view("compile-time call `"));
-            push_bytes(&mut msg, text);
-            if status == 124 {
-                push_bytes(&mut msg, view("` ran past the 30 s limit"));
-            } else if status == 4 {
-                cycle := ct_trace_cycle(view(trace));
-                if cycle.len() != 0 {
-                    msg = cycle;
-                } else {
-                    push_bytes(&mut msg, view("` reads a constant that is still being computed: the constants depend on each other in a cycle"));
-                }
-            } else {
-                push_bytes(&mut msg, view("` aborted (exit "));
-                decimal(&mut msg, status);
-                push_bytes(&mut msg, view(")"));
-            }
-            fail(&mut c, view(msg));
-        }
-        mut mv = u8[][copy_bytes(view("mv")), copy_bytes(view("-f")), value_tmp.copy(), out_path.copy()];
-        host::command(mv);
-        mut tidy = u8[][copy_bytes(view("rm")), copy_bytes(view("-f")), probe_src.copy(), probe_s.copy(), probe_exe.copy(), err_tmp.copy()];
-        host::command(tidy);
-    }
-    printed := host::read_file(view(out_path));
+    mut probe_status = 0;
+    printed := ct_probe_exec(&mut c, view(probe), text, key, 0, &mut probe_status);
     if (rty == 3) || static_structured(&mut c, rty) {
         return CTRes { ty: rty, value: 0, text: printed };
     }
@@ -50053,6 +50684,8 @@ pub fn main() -> u64 {
         constants: Constant[],
         statics: Static[],
         ct_calls: CtCall[],
+        ct_done: CtDone[],
+        ct_deps_path: u8[],
         static_scratch: 0,
         impl_params: ImplParams[],
         receiver: 0,
@@ -50844,6 +51477,9 @@ pub fn main() -> u64 {
                     }
                 }
             }
+            // Every run-tier value of the build in one probe (comptime-speed R2), before anything
+            // asks for one: the interfaces below, the function cache's surface, the bodies.
+            ct_batch(&mut c);
             iface_emit_all(&mut c);
         }
         if (pass == 1) & (c.shift_decls != 0) {
@@ -50918,6 +51554,7 @@ pub fn main() -> u64 {
     if c.probe_mode == 0 {
         fx_report(&mut c);
     }
+    ct_write_deps(&mut c);
     iface_emit_facts(&mut c);
     if c.skip_bodies.len() != 0 {
         // Every error this compile has is reported; the program is still rejected, and nothing it
