@@ -4546,6 +4546,7 @@ fn flag_bits<a>(o: (&a Options), check_only: bool = false) -> u64 {
         + o.release
         * 8192
         + o.report_checks
+        * u64(o.release == 0)
         * 16384
         + o.cpu
         * 32768
@@ -4835,7 +4836,6 @@ fn take_text<a, b>(o: (&a mut Options), field: u64, word: &b [u8]) {
             host::exit(2);
         }
         o.report_checks = 1;
-        o.no_cache = 1;
     } else if field == F_IFACE {
         o.iface = copy(word);
     } else if field == F_IFACE_EMIT {
@@ -4959,6 +4959,7 @@ fn build<a, b>(args: (&a u8[][]), o: (&b mut Options)) -> u64 {
     // built whole (docs/design/compile-speed.md has the measurement).
     if (o.cache == 0)
         & (o.no_cache == 0)
+        & !((o.report_checks != 0) && (o.release == 0))
         & linux_target(view(o.target))
         & (o.debug == 0)
         & (o.split == 0)
@@ -5010,6 +5011,254 @@ fn build<a, b>(args: (&a u8[][]), o: (&b mut Options)) -> u64 {
 // One build, in this process: the named file, or the project's entry, into `-o` or `target/`. `diag`
 // is the file the compiler appends structured diagnostics to, and is empty for a plain `grail build`.
 fn build_pass<a, b, c>(h: (&a Home), o: (&b mut Options), diag: &c [u8]) -> u64 {
+    status := build_pass_inner(&h, &mut o, diag);
+    if (status == 0) && (o.report_checks != 0) && (o.release != 0) {
+        return release_checks_report(view(o.output));
+    }
+    return status;
+}
+// The kind a check's failure code names (rt_fail's codes, as the native report groups them).
+fn check_kind_word(kind: u64) -> string {
+    if (kind == 1) || (kind == 7) || (kind == 11) || (kind == 64) {
+        return "index";
+    }
+    if kind == 2 {
+        return "overflow";
+    }
+    if kind == 5 {
+        return "divide";
+    }
+    if (kind == 3) || (kind == 9) || (kind == 14) || (kind == 15) {
+        return "conversion";
+    }
+    if kind == 6 {
+        return "unwrap";
+    }
+    if kind == 12 {
+        return "assertion";
+    }
+    return "check";
+}
+// The immediate a `mov $K, REG` line puts in a register of `regs` (`%edx`, `%rdx`), or 0.
+fn mov_imm<a, b>(line: &a [u8], reg32: &b [u8], reg64: &b [u8]) -> u64 {
+    mut i = 0;
+    while (i + 4 < line.len()) && !((line[i] == 109) && (line[i + 1] == 111) && (line[i + 2] == 118)) {
+        i += 1;
+    }
+    if i + 4 >= line.len() {
+        return 0;
+    }
+    mut d = i;
+    while (d < line.len()) && (line[d] != 36) {
+        d += 1;
+    }
+    if d >= line.len() {
+        return 0;
+    }
+    d += 1;
+    mut v: u64 = 0;
+    mut hex = false;
+    if (d + 1 < line.len()) && (line[d] == 48) && (line[d + 1] == 120) {
+        hex = true;
+        d += 2;
+    }
+    mut any = false;
+    while d < line.len() {
+        b := line[d];
+        if (b >= 48) && (b <= 57) {
+            if hex {
+                v = v * 16 + u64(b) - 48;
+            } else {
+                v = v * 10 + u64(b) - 48;
+            }
+        } else if hex && (b >= 97) && (b <= 102) {
+            v = v * 16 + u64(b) - 87;
+        } else {
+            break;
+        }
+        any = true;
+        d += 1;
+    }
+    if !any {
+        return 0;
+    }
+    rest := line[d..line.len()].copy();
+    mut has = false;
+    for j in rest.len() {
+        if (j + reg32.len() <= rest.len()) && (eq(view(rest[j..j + reg32.len()]), reg32) || ((j + reg64.len() <= rest.len()) && eq(view(rest[j..j + reg64.len()]), reg64))) {
+            has = true;
+        }
+    }
+    if has {
+        return v;
+    }
+    return 0;
+}
+// `grail build --release --report checks`: the checks that survived LLVM's optimisation and the
+// thin-LTO link, read from the linked image itself - a branch to rt_fail, rt_trap, rt_abort (and
+// its `.cold` parts) or rt_refine from a program function (`f_*`), counted per function and grouped
+// by kind where the failure code is a constant moved just before the branch (x86-64). A release
+// build has no line tables, so a function is the finest grain the report can name.
+fn release_checks_report<a>(image: &a [u8]) -> u64 {
+    listing := cat(image, view(".checks.txt"));
+    mut argv = u8[][copy(view("sh")), copy(view("-c")), copy(view("exec \"$0\" -d --no-show-raw-insn \"$1\" > \"$2\"")), tool(view("GRAIL_OBJDUMP"), view("llvm-objdump")), copy(image), listing.copy()];
+    if host::command(argv) != 0 {
+        say(view("grail: --report checks on a release build reads the image with llvm-objdump, which failed (set GRAIL_OBJDUMP)"));
+        return 1;
+    }
+    text := host::read_file(view(listing));
+    host::remove(view(listing), 0);
+    mut names = u8[][];
+    mut counts = u64[];
+    mut kinds = u8[][];
+    mut func = u8[];
+    mut recent = u8[][];
+    mut total: u64 = 0;
+    mut a = 0;
+    while a < text.len() {
+        mut e = a;
+        while (e < text.len()) && (text[e] != 10) {
+            e += 1;
+        }
+        line := text[a..e].copy();
+        a = e + 1;
+        // `0000000000401000 <f_main_main>:` starts a function.
+        if (line.len() > 3) && (line[line.len() - 1] == 58) && (line[line.len() - 2] == 62) {
+            mut lt = 0;
+            while (lt < line.len()) && (line[lt] != 60) {
+                lt += 1;
+            }
+            if lt < line.len() {
+                func = line[lt + 1..line.len() - 2].copy();
+                recent = u8[][];
+            }
+            continue;
+        }
+        if (func.len() < 2) || (func[0] != 102) || (func[1] != 95) {
+            continue;
+        }
+        // A branch to a failure entry: `<rt_trap>`, `<rt_fail>`, `<rt_abort.cold.1>`, ...
+        mut target = u8[];
+        mut lt = 0;
+        while (lt < line.len()) && (line[lt] != 60) {
+            lt += 1;
+        }
+        if lt < line.len() {
+            mut gt = lt;
+            while (gt < line.len()) && (line[gt] != 62) {
+                gt += 1;
+            }
+            target = line[lt + 1..gt].copy();
+        }
+        mut which = 0;
+        if (target.len() >= 7) && eq(view(target[0..7]), view("rt_trap")) {
+            which = 1;
+        } else if (target.len() >= 7) && eq(view(target[0..7]), view("rt_fail")) {
+            which = 2;
+        } else if (target.len() >= 8) && eq(view(target[0..8]), view("rt_abort")) {
+            which = 3;
+        } else if (target.len() >= 9) && eq(view(target[0..9]), view("rt_refine")) {
+            which = 4;
+        }
+        // `+0x..` inside the brackets is a jump within the runtime body, not a call of it.
+        for j in target.len() {
+            if target[j] == 43 {
+                which = 0;
+            }
+        }
+        if which == 0 {
+            recent.push(line);
+            if recent.len() > 8 {
+                recent.remove(0);
+            }
+            continue;
+        }
+        mut kind = copy(view("check"));
+        if which == 4 {
+            kind = copy(view("refinement"));
+        } else {
+            mut r = recent.len();
+            while r > 0 {
+                r -= 1;
+                mut k: u64 = 0;
+                if which == 1 {
+                    k = mov_imm(view(item(&recent, r)), view("%edx"), view("%rdx"));
+                } else {
+                    k = mov_imm(view(item(&recent, r)), view("%edi"), view("%rdi"));
+                }
+                if k != 0 {
+                    kind = copy(view(check_kind_word(k)));
+                    break;
+                }
+            }
+        }
+        recent = u8[][];
+        total += 1;
+        mut at = names.len();
+        for n in names.len() {
+            if eq(view(item(&names, n)), view(func)) {
+                at = n;
+            }
+        }
+        if at == names.len() {
+            names.push(func.copy());
+            counts.push(0);
+            kinds.push(u8[]);
+        }
+        counts[at] = counts[at] + 1;
+        mut ks = item(&kinds, at);
+        if ks.len() != 0 {
+            ks.push(32);
+        }
+        ks.append(view(kind));
+        kinds[at] = ks;
+    }
+    mut out = cat(view("checks left in the program's own functions after optimisation (release): "), view(decimal(total)));
+    out.push(10);
+    for n in names.len() {
+        // `index index overflow` reads as `index 2, overflow 1`.
+        words := item(&kinds, n);
+        mut seen = u8[][];
+        mut tally = u64[];
+        mut w = 0;
+        while w < words.len() {
+            mut x = w;
+            while (x < words.len()) && (words[x] != 32) {
+                x += 1;
+            }
+            word := words[w..x].copy();
+            mut found = seen.len();
+            for q in seen.len() {
+                if eq(view(item(&seen, q)), view(word)) {
+                    found = q;
+                }
+            }
+            if found == seen.len() {
+                seen.push(word);
+                tally.push(0);
+            }
+            tally[found] = tally[found] + 1;
+            w = x + 1;
+        }
+        out.append(view("  "));
+        out.append(view(item(&names, n)));
+        out.push(9);
+        out.append(view(decimal(counts[n])));
+        out.push(9);
+        for q in seen.len() {
+            if q != 0 {
+                out.append(view(", "));
+            }
+            out.append(view(item(&seen, q)));
+            out.push(32);
+            out.append(view(decimal(tally[q])));
+        }
+        out.push(10);
+    }
+    host::print(view(out));
+    return 0;
+}
+fn build_pass_inner<a, b, c>(h: (&a Home), o: (&b mut Options), diag: &c [u8]) -> u64 {
     if o.file.len() != 0 {
         if o.output.len() == 0 {
             stem := basename(view(o.file));
