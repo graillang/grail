@@ -2757,6 +2757,16 @@ fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> uni
         rwords = callee_sig % 4;
     }
     if typed_ffi {
+        // The fact's integer words must cover every argument register loaded for the call.
+        ints := (fcode - 2) & 7;
+        if (loaded >> ints) != 0 {
+            mut why = copy(view("a C call passes "));
+            num(&mut why, ints);
+            put(&mut why, view(" integer words but more argument registers were loaded for it"));
+            fname := copy(view(l.fname));
+            sig_wrong(&mut l, view(fname), view(why));
+            return ();
+        }
         lower_ffi_call(&mut l, target, fcode - 2);
         return ();
     }

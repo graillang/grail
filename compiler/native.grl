@@ -4743,9 +4743,16 @@ fn release_call_args<a>(c: (&a mut C), area: u64) -> unit {
 // (0 an integer word or none, 1 f64, 2 f32). Only for x86-64 SysV calls whose every argument is in
 // a register and whose result is a scalar: the lifter then emits the call with those C types, so
 // the floats travel in the vector registers the platform ABI puts them in.
-fn ffi_signature_fact<a, b, d>(c: (&a mut C), argtypes: (&b u64[]), ret: u64, symbol: &d [u8], abi: u64) -> unit {
+fn ffi_signature_fact<a, b, d, e>(c: (&a mut C), argtypes: (&b u64[]), formals: (&e u64[]), ret: u64, symbol: &d [u8], abi: u64) -> unit {
     if (c.backend == 0) || (c.validating != 0) || (c.target != 0) || (abi != 0) {
         return ();
+    }
+    // A record passed `byval` crosses as its fields (one or two registers, or memory): not one word,
+    // so a call with one is left to the native text, which places it by its classification.
+    for i in formals.len() {
+        if ffi_byval(&mut c, formals[i]) {
+            return ();
+        }
     }
     mut ints = 0;
     mut floats = 0;
@@ -17902,7 +17909,7 @@ fn ffi_emit_call<a, b, d, e, f>(
         o(&mut c, view(",%eax\n"));
     }
     if (symbol.len() != 0) && (area == 0) && (fixed == args.len()) && (rmode == 0) && (copies == 0) {
-        ffi_signature_fact(&mut c, argtypes, ret, view(symbol), abi);
+        ffi_signature_fact(&mut c, argtypes, formals, ret, view(symbol), abi);
     }
     if symbol.len() == 0 {
         if c.target == 0 {
