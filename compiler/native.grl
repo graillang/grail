@@ -1023,6 +1023,11 @@ struct C {
     drop_names: u8[][],
     // By interned type: 1 once the drop walk has emitted its helper or found it emitted (emit_drops).
     drop_walked: u64[],
+    // A drop helper's symbol by interned type (drop_ref_name).
+    drop_names_by_ty: u8[][],
+    // framable's answer by type (0 not asked, 1 no, 2 yes), and layout_bits' nesting depth.
+    framable_memo: u64[],
+    layout_busy: u64,
     spec_emitted: u8[][],
     spell_lenient: u64,
     spell_failed: u64,
@@ -1724,9 +1729,18 @@ fn write_image<a, b, d>(c: (&a mut C), path: &b [u8], image: &d [u8]) -> u64 {
 // replays the ones whose text did not move (asm_x86, function units). `GRAIL_ASM_UNITS_VERIFY=1`
 // also assembles without them and refuses a difference.
 fn assemble_object<a, b>(c: (&a mut C), image: &b [u8]) -> asm_x86::Result {
+    // GRAIL_ASM_DUMP=PATH: the text the internal assembler is given, for a failure's diagnosis.
+    dump := host::env(view("GRAIL_ASM_DUMP"));
+    if dump.len() != 0 {
+        host::write_file(view(dump), view(image));
+    }
     // AArch64 (Linux): the same reader with asm_a64's encoder; no function units yet.
     if ((c.target == 1) || (c.target == 2)) && (c.plat == 0) {
         return asm_x86::assemble_for(c.target, copy_bytes(view(image)));
+    }
+    // macOS arm64: the AArch64 encoder with a Mach-O object (asm_x86 target 4).
+    if (c.target == 1) && (c.plat == 1) {
+        return asm_x86::assemble_for(4, copy_bytes(view(image)));
     }
     // Windows x86-64 (target 3): the x86 encoder with a COFF object.
     if c.target == 3 {
@@ -5138,7 +5152,18 @@ fn signature_fact<a>(c: (&a mut C), declared: u64) -> unit {
     if (c.forge_sig.len() != 0) && same(view(c.forge_sig), view(c.facts_fn)) {
         words = c.forge_words;
     }
-    llvm::fact_signature(&mut c.facts, copy_bytes(view(c.facts_fn)), words);
+    // The reference words among the first six (a `&T`, `&mut T` or `&dyn` parameter): the LLVM
+    // backend passes them as `ptr` so the caller's slot does not escape as an integer.
+    mut refs = 0;
+    for i in declared {
+        if (i < 6) && (i < c.locals.len()) {
+            pty := c.locals[i].ty;
+            if ty_kind(&mut c, pty) == 7 {
+                refs = refs | (1 << i);
+            }
+        }
+    }
+    llvm::fact_signature(&mut c.facts, copy_bytes(view(c.facts_fn)), words, refs);
     return ();
 }
 // The argument words a function takes: its declared parameters and, for a plain record result of
@@ -7647,9 +7672,18 @@ fn drop_ref_name<a>(c: (&a mut C), ty: u64) -> u8[] {
     ty := closure_record(&mut c, ty);
     fn_reg_drop(&mut c, ty);
     c.drop_refs.push(ty);
+    // The helper's name is a function of the type alone (a hash of its key), asked at every drop:
+    // spelled once per type and remembered.
+    if (ty < c.drop_names_by_ty.len()) && (c.drop_names_by_ty[ty].len() != 0) {
+        return c.drop_names_by_ty[ty].copy();
+    }
     rec := exchange(&mut c.fn_rec, 0);
     name := drop_symbol(&mut c, ty);
     exchange(&mut c.fn_rec, rec);
+    while c.drop_names_by_ty.len() <= ty {
+        c.drop_names_by_ty.push(u8[]);
+    }
+    exchange(&mut c.drop_names_by_ty[ty], name.copy());
     return name;
 }
 // A call to a type's drop helper: the `Drop` reached through the compiler's glue is a real edge.
@@ -28772,15 +28806,6 @@ fn text_count<a, b>(c: (&a C), from: u64, pat: &b [u8]) -> u64 {
     }
     return n;
 }
-// Whether the body being emitted is the runtime's rt_sites_fill, whose one raw call reaches the
-// compiler-emitted rt_sites helper.
-fn raw_call_is_sites_helper<a>(c: (&a mut C)) -> bool {
-    if (c.raw == 0) || (c.fx_cur == 0) || (c.fx_cur > c.fx_syms.len()) {
-        return false;
-    }
-    sym := c.fx_syms[c.fx_cur - 1].copy();
-    return same(view(sym), view("rt_sites_fill")) || same(view(sym), view("_rt_sites_fill"));
-}
 // A call through the import table to a named operating-system function. In the runtime (trusted code)
 // it is what a `syscall` instruction is on Linux: the OS does the work, so it neither allocates on the
 // Grail heap (whose roots are `rt_alloc` and `rt_grow`) nor reaches a Grail failure entry, and it
@@ -30572,7 +30597,15 @@ fn closure_env_record<a>(c: (&a mut C), ty: u64) -> bool {
     }
     return same(view(c.decls[ty_arg(&mut c, ty)].module), view(".closure"));
 }
+// How many layout computations are under way (layout_bits): an answer worked out inside one may
+// rest on a record still being laid out, so only an outermost one is final (framable's memo).
 fn layout_bits<a>(c: (&a mut C), alias: u64) -> u64 {
+    exchange(&mut c.layout_busy, c.layout_busy + 1);
+    bits := layout_bits_now(&mut c, alias);
+    exchange(&mut c.layout_busy, c.layout_busy - 1);
+    return bits;
+}
+fn layout_bits_now<a>(c: (&a mut C), alias: u64) -> u64 {
     alias := closure_record(&mut c, alias);
     ty := base_type(&mut c, alias);
     // An array of plain data is plain: its bytes are stored inline wherever it is held. One that
@@ -30674,6 +30707,25 @@ fn layout_bits<a>(c: (&a mut C), alias: u64) -> u64 {
 }
 // Whether `ty` is held as its own words (layout bit 4): a struct, a tuple or an array.
 fn framable<a>(c: (&a mut C), alias: u64) -> bool {
+    // Asked of every value a body touches: remembered by type once settled (2 framable, 1 not).
+    if (alias < c.framable_memo.len()) && (c.framable_memo[alias] != 0) {
+        return c.framable_memo[alias] == 2;
+    }
+    outermost := c.layout_busy == 0;
+    answer := framable_now(&mut c, alias);
+    if outermost && (alias < c.types.len()) {
+        while c.framable_memo.len() <= alias {
+            c.framable_memo.push(0);
+        }
+        mut code = 1;
+        if answer {
+            code = 2;
+        }
+        c.framable_memo[alias] = code;
+    }
+    return answer;
+}
+fn framable_now<a>(c: (&a mut C), alias: u64) -> bool {
     alias := closure_record(&mut c, alias);
     ty := base_type(&mut c, alias);
     // An array, and a SIMD vector (docs/design/simd.md), are always frame values.
@@ -30952,12 +31004,6 @@ fn unbox_into_frame<a>(c: (&a mut C), slot: u64, ty: u64) -> unit {
 // The drop of a holder's word that holds `ty`: for a framed record it is the holder's box, freed;
 // for anything else the type's drop.
 fn holder_drop<a>(c: (&a mut C), ty: u64) -> unit {
-    t := base_type(&mut c, ty);
-    if (ty_kind(&mut c, t) == 5) || (ty_kind(&mut c, t) == 27) {
-        // A view a holder keeps is a reference it borrowed (a captured `&[T]` stores the pair's
-        // address): there is nothing of its own to free.
-        return ();
-    }
     if array_owned(&mut c, ty) {
         // An array has no boxed helper: its elements dropped in place, then the holder's box freed.
         o(&mut c, view("pushq %rdi\npushq %rdi\n"));
@@ -36938,8 +36984,13 @@ fn view_into<a, b>(c: (&a mut C), f: &b [u8], args: u64[]) -> u64 {
 // The view of a whole vector or string, or of a view: its header (or pair) is already a {pointer,
 // length} pair at the value's address, so the view is that address - no allocation.
 fn view_of<a>(c: (&a mut C), source: u64) -> u64 {
-    get(&mut c, source, view("%rax"));
-    return save(&mut c);
+    // A pair of its own, copied from the header: a view is a value, and swapping or assigning one
+    // (exchange, `*r = v`) must not write into the vector's header.
+    dst := frame_alloc(&mut c, 2);
+    get(&mut c, source, view("%rcx"));
+    get(&mut c, dst, view("%rdx"));
+    o(&mut c, view("movq (%rcx),%rax\nmovq %rax,(%rdx)\nmovq 8(%rcx),%rax\nmovq %rax,8(%rdx)\n"));
+    return dst;
 }
 fn apply<a, b>(c: (&a mut C), f: &b [u8], args: u64[]) -> u64 {
     return invoke(&mut c, f, args);
@@ -37566,9 +37617,8 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
     if id == 143 {
         // raw_sites(out, capacity): the site-table helper this compiler emits beside the tables
         // (site_table), called by name - a leaf, so the effect walk follows a named edge. A build
-        // with no table has no helper and answers 0 words. The runtime moves to it from its
-        // raw_call2 through state word 3400 at the next reseed (a new intrinsic lands one reseed
-        // before its first use in the runtime: docs/testing.md).
+        // with no table has no helper and answers 0 words (rt_sites_fill asks only when the entry
+        // stub published a table).
         if site_table_on(&c) {
             get(&mut c, args[0], view("%rdi"));
             get(&mut c, args[1], view("%rsi"));
@@ -37581,18 +37631,7 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
         get(&mut c, args[1], view("%rdi"));
         get(&mut c, args[2], view("%rsi"));
         get(&mut c, args[0], view("%rax"));
-        if raw_call_is_sites_helper(&mut c) {
-            // The runtime's call to the site-table helper: the target is the address the entry stub
-            // published in state word 3400, and only the entry stub writes that word, always with
-            // `rt_sites` - a leaf this compiler emits beside the tables (site_table). So the call is
-            // named, not unknown. The runtime cannot spell it as a direct call: it is compiled by the
-            // bootstrap seed too, which knows no such form.
-            fx_edge(&mut c, view("rt_sites"), 0);
-            fx_called(&mut c);
-            o(&mut c, view("call *%rax\n"));
-        } else {
-            call_slot_out(&mut c, view("call *%rax\n"), view("a call through a value the compiler did not name"));
-        }
+        call_slot_out(&mut c, view("call *%rax\n"), view("a call through a value the compiler did not name"));
     }
     if id == 112 {
         get(&mut c, args[0], view("%rdi"));
@@ -37969,6 +38008,11 @@ fn element_code<a>(c: (&a mut C), ty: u64) -> u64 {
         if narrow_code(&mut c, inner) != 0 {
             // 4-byte elements (f32[], u32[], i32[]).
             return 4096 * sub + 8;
+        }
+        ik := ty_kind(&mut c, base_type(&mut c, inner));
+        if (ik == 5) || (ik == 27) {
+            // Views are inline {pointer, length} pairs, 16 bytes each.
+            return 4096 * sub + 9;
         }
         return 4096 * sub + 5;
     }
@@ -42836,8 +42880,17 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
             root := place_of(&mut c, obj);
             field_place := member_place(&mut c, root, 2 + j, ty);
             source := place_of(&mut c, slot);
-            get(&mut c, slot, view("%rax"));
-            pointer := save(&mut c);
+            vk := ty_kind(&mut c, base_type(&mut c, ty));
+            mut pointer = 0;
+            if (vk == 5) || (vk == 27) {
+                // A view's value is the address of its pair, which may be a copy in this frame that
+                // is gone when the closure runs: the environment keeps a box of the pair, which its
+                // drop frees (holder_drop).
+                pointer = frame_box(&mut c, slot, ty);
+            } else {
+                get(&mut c, slot, view("%rax"));
+                pointer = save(&mut c);
+            }
             rec_store(&mut c, obj, 2 + j, pointer);
             // A shared reference is copied, as Rust's `&T` is: the field holds the same shared
             // loans and the binding stays usable - two closures may capture one `r := &x`. An
@@ -44008,9 +44061,17 @@ fn simd_method<a, b>(c: (&a mut C), value: Val, name: &b [u8]) -> Val {
         if simd_bits(&mut c, ty) == 64 {
             rty = simd_with_elem(&mut c, ty, int_type(&mut c, 64, 1));
         }
-        dst := frame_alloc(&mut c, simd_words(&mut c, ty));
-        simd_copy_op(&mut c, view("copy"), dst, value.t, ty);
-        return val(dst, rty);
+        // A NaN lane reads as the one quiet NaN (0x7FC00000, 0x7FF8000000000000), as scalar
+        // bits() does: hardware differs in the NaN an operation makes. A lane equals itself unless
+        // it is a NaN, so the lanes that fail the compare take a splat of the canonical NaN.
+        mty := simd_mask_of(&mut c, ty);
+        same_lane := simd_emit(&mut c, view("eq"), ty, mty, value.t, value.t, SIMD_NONE, SIMD_NONE, 0, false);
+        nan_word := imm(&mut c, 9221120237041090560);
+        get(&mut c, nan_word, view("%rax"));
+        nan_scalar := save(&mut c);
+        nans := simd_emit(&mut c, view("splat"), ty, ty, SIMD_NONE, SIMD_NONE, SIMD_NONE, nan_scalar, 0, false);
+        canonical := simd_emit(&mut c, view("select"), ty, ty, same_lane, value.t, nans, SIMD_NONE, 0, false);
+        return val(canonical, rty);
     }
     if same(view(name), view("mul_add")) && float {
         // `a.mul_add(b, c)`: a * b + c in each lane with one rounding (docs/design/simd.md, S4).
@@ -47748,6 +47809,10 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
                 }
                 ty := int_type_named(&mut c, named);
                 if raw_bits != 0 {
+                    if is_float(&mut c, source) {
+                        // Every NaN reads as the one canonical pattern, whatever the target made.
+                        return val(invoke(&mut c, view("rt_float_bits"), one(value.t)), 0);
+                    }
                     return val(value.t, 0);
                 }
                 // A constant the target cannot hold is refused here rather than at run time: the
@@ -60459,6 +60524,9 @@ pub fn main() -> u64 {
         drop_refs: u64[],
         drop_names: u8[][],
         drop_walked: u64[],
+        drop_names_by_ty: u8[][],
+        framable_memo: u64[],
+        layout_busy: 0,
         spec_emitted: u8[][],
         spell_lenient: 0,
         spell_failed: 0,
@@ -61371,6 +61439,11 @@ pub fn main() -> u64 {
     count := f.count;
     result := f.ret;
     first := f.first;
+    // The entry parameter's source name, for the usage line when the argument is missing.
+    mut entry_param = copy_bytes(view("ARG"));
+    if 0 < f.pnames.len() {
+        entry_param = f.pnames[0].copy();
+    }
     entry_file := f.file;
     entry_pos := f.pos;
     named_main := same(view(name), view("main"));
@@ -61471,6 +61544,25 @@ pub fn main() -> u64 {
         ok := label(&mut c);
         o(&mut c, view("cmpq $2,%rdi\n"));
         jump(&mut c, view("je"), ok);
+        // The entry takes one argument and the command line gave another count: say so on stderr,
+        // `usage: PROGRAM NAME` with the parameter's own name, then exit 2 as before. The two pieces
+        // around the program name are bytes in .rodata, written with the runtime's plain writers.
+        mut tail = copy_bytes(view(" "));
+        push_bytes(&mut tail, view(entry_param));
+        tail.push(10);
+        o(&mut c, view(".pushsection .rodata\nrt_entry_usage_head:\n.byte 117,115,97,103,101,58,32\nrt_entry_usage_tail:\n.byte "));
+        for i in tail.len() {
+            if i != 0 {
+                o(&mut c, view(","));
+            }
+            on(&mut c, tail[i]);
+        }
+        o(&mut c, view("\n.popsection\n"));
+        o(&mut c, view("movl $2,%edi\nleaq rt_entry_usage_head(%rip),%rsi\nmovl $7,%edx\ncall rt_write_all\n"));
+        o(&mut c, view("xorl %edi,%edi\ncall f_host_arg\nmovq %rax,%rsi\nmovl $2,%edi\ncall rt_write_text\n"));
+        o(&mut c, view("movl $2,%edi\nleaq rt_entry_usage_tail(%rip),%rsi\nmovq $"));
+        on(&mut c, tail.len());
+        o(&mut c, view(",%rdx\ncall rt_write_all\n"));
         emit_exit(&mut c, view("movl $2,%edi\n"));
         mark(&mut c, ok);
         o(

@@ -352,7 +352,9 @@ fn rt_sites_fill(out: u64) -> u64 {
     raw_store(out + 24, 0);
     raw_store(out + 32, 0);
     cap := rt_sites_offer();
-    written := raw_call2(helper, out, cap);
+    // The helper by name (raw_sites): a direct call the effect walk follows. State word 3400 still
+    // says whether this program has a table at all - the entry stub publishes it only then.
+    written := raw_sites(out, cap);
     mut have = written;
     if have == 0 {
         // A helper emitted before this handshake carried a count answers nothing and writes the
@@ -5885,11 +5887,23 @@ fn rt_worker_loop(worker: u64) -> u64 {
                 rt_syscall_low(24, 0, 0, 0);
             }
         }
+        if raw_load(tp + 32) != worker {
+            // What this thread found and ran made a blocking call, and the block went to another
+            // thread meanwhile: its searching flag (word 280) is that thread's now - this thread's
+            // own count was cleared by rt_worker_run before the work ran - so it is not touched.
+            // Clearing it here took the other thread's count away too, the counter went below
+            // zero, and with "someone is searching" for ever no fork woke a parked worker again
+            // (bench/frame.grl's I/O task sat in the injection ring with every worker asleep).
+            return 0;
+        }
         if (found == 0) & (spin != 0) {
             // sched::Config.idle_spin_us: keep looking for that long before sleeping.
             until := rt_now_us() + spin;
             while (found == 0) & (rt_now_us() < until) {
                 found = rt_worker_step(s, worker);
+            }
+            if raw_load(tp + 32) != worker {
+                return 0;
             }
         }
         if raw_load(worker + 280) != 0 {
@@ -6672,17 +6686,24 @@ fn rt_job_await(r: u64) -> u64 {
             }
             if k != 0 {
                 idle = 0;
-                if raw_atomic_cas(k + 32, 1, rt_job_claim_word()) == 1 {
+                claim := rt_job_claim_word();
+                if raw_atomic_cas(k + 32, 1, claim) == 1 {
                     if rt_job_descends(k, r) != 0 {
                         rt_job_help(w, k);
-                    } else {
+                    } else if raw_atomic_cas(k + 32, claim, 1) == claim {
                         // The record was recycled between the look and the claim: this is some
-                        // other job. Give it back, where a worker will find it.
-                        raw_atomic_store(k + 32, 1);
+                        // other job. Give it back, where a worker will find it - with a CAS: its
+                        // forker may have seen the claim and registered as its waiter meanwhile,
+                        // and a plain store of `pending` would erase that registration, so the job
+                        // would later be published to nobody and the forker would sleep for ever
+                        // (sched-wake-not-lost-under-constant-parking hung this way on aarch64).
                         if rt_deque_push(rt_job_deque(w, raw_load(k + 112)), k) == 0 {
                             rt_job_inject_push(k);
                         }
                         rt_notify(s);
+                    } else {
+                        // Its forker is waiting on it now: run it here, and the publish wakes it.
+                        rt_job_help(w, k);
                     }
                 }
             } else {
@@ -8758,6 +8779,16 @@ fn rt_f64_from_int(v: u64, code: u64) -> u64 {
     half := raw_f64_from_i64(q);
     return raw_fadd(half, half);
 }
+// `bits(x)` of a float: its pattern, with every NaN made the one quiet NaN 0x7FF8000000000000.
+// Hardware differs in the NaN an operation produces (x86 sets the sign bit, ARM and RISC-V do
+// not), so without this a program would see different bits on different targets. A float is held
+// as its f64 pattern (an f32 widened), so one test covers both.
+fn rt_float_bits(v: u64) -> u64 {
+    if (v & 9223372036854775807) > 9218868437227405312 {
+        return 9221120237041090560;
+    }
+    return v;
+}
 // Truncating, checked: NaN or a value outside the target range stops the program.
 fn rt_int_from_f64(v: u64, code: u64) -> u64 {
     bits := code & 255;
@@ -9798,6 +9829,23 @@ fn rt_fmt_value(acc: u64, v: u64, code: u64) -> u64 {
                 rt_pushb(acc, 32);
             }
             rt_fmt_value(acc, rt_at(v, i), inner);
+            i += 1;
+        }
+        rt_pushb(acc, 93);
+        return 0;
+    }
+    if (code & 4095) == 9 {
+        // A vector of views: element i is the {pointer, length} pair at data + 16 * i.
+        inner := rt_div(code, 4096);
+        n := rt_len(v);
+        rt_pushb(acc, 91);
+        mut i = 0;
+        while i < n {
+            if i != 0 {
+                rt_pushb(acc, 44);
+                rt_pushb(acc, 32);
+            }
+            rt_fmt_value(acc, wrapping_add(raw_load(v), wrapping_mul(i, 16)), inner);
             i += 1;
         }
         rt_pushb(acc, 93);

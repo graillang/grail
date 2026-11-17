@@ -9,6 +9,14 @@ a unit does not record is not a unit (the FN_* rules; a `parallel_for_zip` adapt
 key names the whole run's surface, so it serves repeated and edited checks of a program; the
 owner-scoped key below, which would serve a new project's first check, is step 1b.
 
+**What it costs.** A first check files the template checks it ran, and with the whole-surface key a
+new project's first check never hits the ones `grail cache warm` filed. Measured on main 1cc4bee4
+(compile-perf, dev compiler, GRAIL_JOBS=1): hello 0.044G with `GRAIL_TEMPLATE_MEMO=0`, 0.046G with
+it (+4.5%: core's generics are filed once), syn1000/syn4000/build_syn1000 unchanged (+0.0%), and
+build_syn1000_edited 6.384G -> 6.380G. The compile-perf baseline carries the 0.046G (75ba9530). Step
+1b's owner-scoped key is what would take the hello cost back: the warm store's checks would then
+be the ones a new project's first check asks for.
+
 ## What the time is
 
 A check of `bench/iterchain.grl` with every standard module already in the store (`grail cache

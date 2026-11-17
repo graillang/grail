@@ -90,20 +90,26 @@ and Zig, written the way each language is usually written:
 
 {{perf:engine#release}}
 
-**Why Grail is behind**, read from the code of the commit charted. The standard map, strings and
-interface calls each got faster in the last round of work (the map is now a single open-addressed
-table, so hashmap fell from 22x the fewest instructions to 3.5x), and what remains is:
+**Why Grail is behind**, read from the code of the commit charted. Most of the gap closed in the last
+round of work: views are two words passed in registers, so `strings` no longer allocates per call
+and is at parity; header and element accesses carry separate alias tags, so `ecs`'s update loop
+vectorises; and release builds inline across modules, so the map's helpers fold into their callers.
+What remains:
 
-- **`iterchain`: the adapters are not types.** `Iter<T>` is the erased form: every element is a call
-  through a boxed closure returning an option, once per adapter, and nothing inlines through it.
-  Rust's chain compiles to the same loop as the hand-written one. Making the adapters types with
-  callable bounds is the plan in `docs/design/dyn-and-callable-bounds.md`.
-- **`ecs`: owned vectors re-read their headers.** The update loop stores through six vectors made
-  in the same function, and after each store the next access reloads a length and a data pointer
-  and checks the index, so the loop stays scalar where C, Rust and Zig vectorise it.
-- **`hashmap`, `strings`, `json`, `dyncall`** are within 2x to 3.5x: what is left is allocation per
-  piece (a new string per split field and per formatted record, a box per interface object) and
-  bounds checks in the inner loops.
+- **`iterchain`: a nested loop the vectoriser cannot see through.** The adapters are types with
+  callable bounds and the whole chain now inlines into one function, but `fold` still drives
+  `next()`, and `Filter::next` loops inside it. Rust overrides `fold` per adapter (internal
+  iteration); Grail needs interface methods generic over a callable to be callable through
+  `I: Iterator` before it can do the same.
+- **`json` and `dyncall`: a box per value.** Each parsed node and each `dyn` object is still a heap
+  allocation; enums whose payloads are stored inline and `dyn` values held in cells are the next
+  steps (`docs/design/unboxed-values.md`).
+- **`hashmap`: insertion order costs one memory touch.** One-word keys hash with a seeded
+  multiply mix (about eight instructions, as Go's and Zig's tables do) rather than SipHash-1-3,
+  which puts the map within about 1.1x of C in time. What remains is the layout: Grail's map keeps
+  its entries in insertion order in a dense vector beside the probe table, like Python's `dict`
+  and Zig's `ArrayHashMap`, so a lookup reads the slot and then the key. C's open-addressed table
+  keeps keys in the slots.
 - **`bintrees`** is where Grail does best against `malloc` and `Box`; Zig, with its release
   allocator, executes the fewest instructions.
 
@@ -123,7 +129,10 @@ pieces of at least 16,384), Go one goroutine per core, and Zig one `std.Thread` 
 others fuse the six columns into one loop, the usual way to write it in each; Grail's library has a
 zip of at most four columns, hence one call per axis. Each entity's arithmetic is independent and
 the final sum is serial, so every program prints the serial checksum at any worker count, and the
-tool checks that it does.
+tool checks that it does: a build that prints another answer is not charted. Grail's release build
+of this program is absent for that reason on the commit charted. With the three updates written as
+closure literals at the call, it prints a wrong checksum (the y axis's positions are lost), a
+miscompile in the LLVM backend that is being fixed; the development build prints the right one.
 
 A parallel loop is about time, so this chart is wall time, best of several runs, with every runtime
 told the same number of threads. It needs a machine doing nothing else, and the figures charted
@@ -151,14 +160,13 @@ compiler's columns, so a change is measured on the engine the same way.
 
 **What it found.** Every program of the port builds through the store and matches its reference
 (the ImGui program is left out where its library is not built). The figures charted were taken with
-the native-built compiler of the commit named, the one `grail` is during development, because no
-release build of that commit could be made on the shared machine; a release compiler compiles about
-three times faster. After a one-statement edit to `main` a rebuild costs a twentieth or less of a
-cold build, because the store replays every unchanged module and function.
+the release compiler of the commit named. After a one-statement edit to `main` a rebuild costs a
+twentieth or less of a cold build, because the store replays every unchanged module and function:
+`abgeo`, the largest, builds cold in 10.7 billion instructions and again after an edit in 0.25.
 
-`abgeo` (the cluster builder and its reader) is the slowest release run, and its time goes to
-building vectors rather than to geometry: growing them (`rt_grow`) and taking memory for them
-(`rt_alloc_take`) lead the profile, with meshoptimizer's own `simplify` third.
+The release runs are short: `abgeo` (the cluster builder and its reader) takes 0.49 billion
+instructions, and `job`, the slowest for its size, spends its time in the scheduler's stealing
+(`rt_job_steal`, `rt_worker_steal`) rather than in its own work, since its jobs are tiny.
 
 {{perf:abundance#abundance-compile-cpu}}
 
@@ -189,25 +197,20 @@ A second chart shows wall time with four jobs each, this machine's cap.
 
 {{perf:compile#compile-wall}}
 
-**Where Grail is ahead, and where it is behind.** On the commit charted, Grail is the fastest on
-every row of hello world and the seven engine programs except one (iterchain's check after an edit,
-level with cargo): a project's first check, its first build, a rebuild after an edit and a rebuild
-with nothing changed. A no-op rebuild is decided from fingerprints without reading the program
-again, and the build store files its results in-process. On the generated programs, Grail wins
-every edited build and no-op rebuild, and the edited check of the smaller one. It is behind in
-three places, with their causes from profiles of the compiler on these programs:
+**Where Grail is ahead, and where it is behind.** On the commit charted, counting instructions,
+Grail is the fastest on every row of hello world and the seven engine programs, on every check and
+build after an edit, and on the cold check and cold build of the 26,000-line program. It is level
+with Go on the cold build of the 104,000-line program. It is behind in two places:
 
-- **A cold check of a large program** (1.6x Zig at 26,000 lines, 3.2x at 104,000). The check of
-  one large module hashes its interface with SHA-256 (11 % of the instructions), writes the
-  interface (10 %) and still emits code text that it throws away (6 %); allocation and copying are
-  about a quarter. Zig checks the same program on one thread in a third of the instructions.
-- **A check of a large program after an edit** (1.4x Zig at 104,000 lines). The whole module is
-  checked again, at about half the cold cost, where `cargo check` re-checks only what changed.
-- **A cold build** (1.6x Go). The optimiser is a third of the build and re-reads the front end's
-  instruction text (about 18 %), and the assembler reads the optimiser's text again. A cold build of
-  the 104,000-line program grew from 38 to 53 billion instructions when the release compiler was
-  first built in parts (the runtime's small accessors stopped being inlined across them), and fell
-  to 35 billion once the parts were built with ThinLTO; the chart is that compiler.
+- **A cold check of a large program** (1.95x Zig at 104,000 lines, level at 26,000). The growth is
+  linear, so the cost is per line; profiles of the compiler (`docs/design/compile-speed.md`) put
+  about a third of it in allocation, then the interface's writing and its digests.
+- **A rebuild of the large program with nothing changed** (1.3x cargo): 0.09 billion instructions
+  against 0.07, both under a twentieth of a second.
+
+The chart is the release compiler of the commit named, built with ThinLTO. The wall times were
+taken with the machine loaded (the load average is recorded with the run), so they favour the
+instruction counts as the measure.
 
 {{perf:compile#compile-go-check}}
 

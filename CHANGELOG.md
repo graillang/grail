@@ -1,10 +1,63 @@
 ## Unreleased
 
+- **`bench-rivals` no longer charts a build that printed the wrong answer.** It already failed the
+  run when a build's output differed from C's, but still wrote that build's figures into the
+  results, so a miscompiled program could chart as the fastest. Such a figure is now left out and
+  shown as not measured.
+- **`grail build --release` no longer hangs on large programs.** The LLVM lifter's name table was
+  sized once from a guess and never grew; a program with more names than the guess (the Abundance
+  port's `abgeo` and `cache`) filled it, and the next lookup of a missing name probed for ever. The
+  table now doubles before it is half full.
+- **SIMD `.bits()` gives the same NaN bits on every target too.** A NaN lane of an `f32x*` or
+  `f64x*` vector now reads as `0x7FC00000` or `0x7FF8000000000000`, as scalar `bits(x)` does;
+  before, x86-64 gave negative NaNs (and a release build could mix the two), ARM and RISC-V
+  positive ones. Three vector instructions (compare with itself, select), no per-lane work.
+- **`bits(x)` of a NaN is the same on every target.** Hardware disagrees on the NaN an operation
+  makes (x86 sets the sign bit; ARM and RISC-V do not), so `bits(0.0 / 0.0)` used to be
+  `0xFFF8000000000000` on x86-64 and `0x7FF8000000000000` elsewhere. Every NaN now reads as the one
+  quiet NaN `0x7FF8000000000000`, on every target and both backends; arithmetic and printing are
+  unchanged, and other values' bits are untouched.
+- **Maps hash one-word keys with a keyed multiply mix instead of SipHash-1-3.** Integer, float and
+  other one-word keys hash in about eight instructions instead of sixty, keyed by the map's two seed
+  words (one mixed into the value, one as a secret odd multiplier), the same construction as the
+  seeded word hashes of Go's and Zig's tables. `bench/hashmap` falls from 0.71 to 0.46 billion
+  instructions and from 99 to 75 ms against C's 67 ms. It is not a cryptographic hash: `hash::hash`
+  still returns SipHash-1-3 and `hash::hasher` is still SipHash-2-4, and multi-word keys (strings,
+  records) still stream through SipHash-1-3.
+- **The scheduler's "a worker is searching" count could go below zero, and then no fork woke
+  anyone.** A worker that found work while searching, and lost its worker block to a blocking call
+  inside that work, cleared the searching flag that the block's new thread had set. The count went
+  to -1, which reads as "someone is searching" for ever, so a task put on the injection ring
+  waited with every worker asleep (`bench/frame.grl` hung about one run in 20). The thread now
+  touches the flag only while it still owns the block. 0 hangs in 300 runs.
+
+- **A lost wakeup in nested joins is fixed.** A waiter that took a stale queue entry for a recycled
+  job record gave it back with a plain store of "pending", which could erase the forker's
+  registration as the job's waiter in the moment between: the job was then published to nobody
+  and the forker slept for ever. It now gives the job back with a compare-and-swap, and runs the job
+  itself when its forker is already waiting. `sched-wake-not-lost-under-constant-parking` hung
+  about one run in four under aarch64 emulation; 0 of 50 now.
+
+- A program whose `main` takes the argument view and is run without one now prints `usage: PROGRAM NAME`
+  on stderr, with the parameter's declared name, before exiting 2. It used to exit 2 silently.
+- The SIMD benchmarks (`bench/simd_dot`, `simd_mat4`, `simd_aos`) take `check` for a three-round run that
+  prints only the result, and the corpus pins those results on every target and backend. A
+  benchmark run with no argument exits 2, as every `main(arg: &[u8])` program does.
+- macOS arm64 builds assemble in the compiler too: `compiler/macho.grl` writes Mach-O objects
+  identical to clang's (`grail asm --target macos-aarch64`). Intel macOS still assembles with clang.
+
 - **A closure copies a captured shared reference.** `r := &x` captured by two closures used to fail
   with "`r` was moved" at the second; a `&T` is now copied into each closure, which holds the shared
   loan, as in Rust (an exclusive `&mut`, and a shared slice value, which owns its header, still move).
   A closure given for a generic `F: Fn<Send>` now reports a capture that cannot cross a thread as
   soon as it is read.
+- **`dyn` calls devirtualise in release builds.** Vtables are constants in the LLVM module,
+  reference parameters cross calls as `ptr` (so a `&dyn` pair in the caller's frame no longer
+  escapes as an integer), frame-slot spills keep their pointer provenance, and slot offsets are
+  pointer arithmetic: when the vtable is known, LLVM calls the method directly and inlines it. A
+  loop calling `area()` through a `&dyn` of one type: 140 M -> 7.6 K instructions (folded). dyncall
+  (mixed types): 633 M -> 603 M (Rust -O: 648 M).
+
 - **Release builds inline small functions across modules.** A call to a function of another module
   was declared with a generic six-argument type that never matched the callee's real definition,
   so LLVM never inlined it: small std helpers (`bytes::load_u64`, hash and string methods) stayed

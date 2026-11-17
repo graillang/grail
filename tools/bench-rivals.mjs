@@ -221,10 +221,14 @@ if (jsonPath) {
   const counted = kind => kind === 'instructions' || (metric === 'instructions' && kind !== 'cpu');
   const walled = kind => metric === 'wall' && kind === 'time';
   const unitOf = (name, kind) => walled(kind) ? 's wall' : kind === 'cpu' ? (name === 'ffi_call' ? 's CPU (whole program)' : 's CPU') : counted(kind) ? (name === 'ffi_call' ? 'G instructions (whole program)' : 'G instructions') : name === 'ffi_call' ? 'ns per call' : 's CPU';
+  // A build that printed another answer than C's is not charted: its time is a wrong program's
+  // (a native-CPU rival's fused multiply-add digits are the one allowed difference, and are not in
+  // `columns`). The table shows it as not measured and the run still fails.
+  const wrong = (name, k) => columns.includes(k) && (results[name].differs ?? []).includes(k);
   const table = (id, title, keys, primary, threshold, chart, kind = 'time', note = undefined) => ({
     id, title, chart, threshold, primary, note, direction: 'lower',
     columns: keys.map(key => ({ key, label: headOf[key], grail: key.startsWith('grail') })),
-    rows: rowNames.map(name => ({ name, unit: unitOf(name.split(' ')[0], kind), values: Object.fromEntries(keys.map(k => [k, kind === 'cpu' ? results[name].cpu[k] : counted(kind) ? results[name].instructions[k] / 1e9 : results[name].best[k]])) })),
+    rows: rowNames.map(name => ({ name, unit: unitOf(name.split(' ')[0], kind), values: Object.fromEntries(keys.map(k => [k, wrong(name, k) ? null : kind === 'cpu' ? results[name].cpu[k] : counted(kind) ? results[name].instructions[k] / 1e9 : results[name].best[k]])) })),
   });
   const figure = metric === 'wall' ? `Wall time of the whole program, best of ${runs}${workerCounts.length ? `, at ${workerCounts.join(', ')} workers` : ''}; a parallel run is about time, so this is the figure, and the load is beside it` : metric === 'instructions' ? `User-space instructions (perf_event_open, every thread), fewest of ${runs}; chosen over time because the host was loaded` : `CPU time (user + sys), best of ${runs}`;
   writeResults(jsonPath, {

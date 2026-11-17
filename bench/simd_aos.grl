@@ -2,7 +2,7 @@
 // flat f32 slice split into four slices, four records at a time - a 4x4 transpose made of
 // two-vector shuffles, the unpack and move steps of C's _MM_TRANSPOSE4_PS. The C twin is
 // bench/simd_aos.c; `bun tools/bench-simd.mjs` builds and times both.
-//   simd_aos ROUNDS
+//   simd_aos ROUNDS     (or `check`: three rounds, the result only)
 use host;
 
 fn split<a>(src: (&a [f32]), x: (&a mut [f32]), y: (&a mut [f32]), z: (&a mut [f32]), w: (&a mut [f32])) -> unit {
@@ -39,9 +39,16 @@ fn split<a>(src: (&a [f32]), x: (&a mut [f32]), y: (&a mut [f32]), z: (&a mut [f
     }
 }
 fn main(arg: &[u8]) {
+    // `check`: three rounds and the result alone, no timing - what the corpus runs, so the program's
+    // answer is pinned on every target and backend (the timing line differs run to run).
+    check_mode := (arg.len() == 5) && (arg[0] == 99) && (arg[1] == 104) && (arg[2] == 101) && (arg[3] == 99) && (arg[4] == 107);
     mut rounds = 0;
-    for i in arg.len() {
-        rounds = rounds * 10 + arg[i] - 48;
+    if check_mode {
+        rounds = 3;
+    } else {
+        for i in arg.len() {
+            rounds = rounds * 10 + arg[i] - 48;
+        }
     }
     if rounds == 0 {
         rounds = 1000;
@@ -71,6 +78,8 @@ fn main(arg: &[u8]) {
         check = check + f64(x[i]) + 2.0 * f64(y[i]) + 3.0 * f64(z[i]) + 4.0 * f64(w[i]);
     }
     println(check);
-    print("ns/record ");
-    println(f64(t1 - t0) * 1000.0 / (f64(rounds) * f64(count)));
+    if !check_mode {
+        print("ns/record ");
+        println(f64(t1 - t0) * 1000.0 / (f64(rounds) * f64(count)));
+    }
 }

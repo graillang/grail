@@ -113,7 +113,7 @@ fn finish_at<a>(state:(&a mut Hasher))->u64{
     return v0^v1^v2^v3;
 }
 impl Hash for u64{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){write_num(state,*value);}
-    fn table_hash<a,b>(value:(&a Self),base:(&b Hasher))->u64{return word_hash(*value,base);}}
+    fn table_hash<a,b>(value:(&a Self),base:(&b Hasher))->u64{return word_mix(*value,base);}}
 impl Equal for u64{fn equal<a,b>(left:(&a Self),right:(&b Self))->bool{return *left==*right;}}
 impl Hash for u8[]{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){
     write_num(&mut state,value.len());write_bytes(&mut state,view(value));
@@ -129,30 +129,30 @@ impl Equal for string{fn equal<a,b>(left:(&a Self),right:(&b Self))->bool{
 }}
 // Sized integers hash their canonical 64-bit word (sign-extended for signed types).
 impl Hash for u8{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){write_num(state,bits(*value));}
-    fn table_hash<a,b>(value:(&a Self),base:(&b Hasher))->u64{return word_hash(bits(*value),base);}}
+    fn table_hash<a,b>(value:(&a Self),base:(&b Hasher))->u64{return word_mix(bits(*value),base);}}
 impl Equal for u8{fn equal<a,b>(left:(&a Self),right:(&b Self))->bool{return *left==*right;}}
 impl Hash for u16{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){write_num(state,bits(*value));}
-    fn table_hash<a,b>(value:(&a Self),base:(&b Hasher))->u64{return word_hash(bits(*value),base);}}
+    fn table_hash<a,b>(value:(&a Self),base:(&b Hasher))->u64{return word_mix(bits(*value),base);}}
 impl Equal for u16{fn equal<a,b>(left:(&a Self),right:(&b Self))->bool{return *left==*right;}}
 impl Hash for u32{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){write_num(state,bits(*value));}
-    fn table_hash<a,b>(value:(&a Self),base:(&b Hasher))->u64{return word_hash(bits(*value),base);}}
+    fn table_hash<a,b>(value:(&a Self),base:(&b Hasher))->u64{return word_mix(bits(*value),base);}}
 impl Equal for u32{fn equal<a,b>(left:(&a Self),right:(&b Self))->bool{return *left==*right;}}
 impl Hash for i8{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){write_num(state,bits(*value));}
-    fn table_hash<a,b>(value:(&a Self),base:(&b Hasher))->u64{return word_hash(bits(*value),base);}}
+    fn table_hash<a,b>(value:(&a Self),base:(&b Hasher))->u64{return word_mix(bits(*value),base);}}
 impl Equal for i8{fn equal<a,b>(left:(&a Self),right:(&b Self))->bool{return *left==*right;}}
 impl Hash for i16{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){write_num(state,bits(*value));}
-    fn table_hash<a,b>(value:(&a Self),base:(&b Hasher))->u64{return word_hash(bits(*value),base);}}
+    fn table_hash<a,b>(value:(&a Self),base:(&b Hasher))->u64{return word_mix(bits(*value),base);}}
 impl Equal for i16{fn equal<a,b>(left:(&a Self),right:(&b Self))->bool{return *left==*right;}}
 impl Hash for i32{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){write_num(state,bits(*value));}
-    fn table_hash<a,b>(value:(&a Self),base:(&b Hasher))->u64{return word_hash(bits(*value),base);}}
+    fn table_hash<a,b>(value:(&a Self),base:(&b Hasher))->u64{return word_mix(bits(*value),base);}}
 impl Equal for i32{fn equal<a,b>(left:(&a Self),right:(&b Self))->bool{return *left==*right;}}
 impl Hash for i64{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){write_num(state,bits(*value));}
-    fn table_hash<a,b>(value:(&a Self),base:(&b Hasher))->u64{return word_hash(bits(*value),base);}}
+    fn table_hash<a,b>(value:(&a Self),base:(&b Hasher))->u64{return word_mix(bits(*value),base);}}
 impl Equal for i64{fn equal<a,b>(left:(&a Self),right:(&b Self))->bool{return *left==*right;}}
 // SipHash-1-3 of the value's stream under the two seed words.
 pub fn hash<a,T:Hash>(value:(&a T),seed0:u64,seed1:u64)->u64{
     base:=table_hasher(seed0,seed1);
-    return hash_from(value,&base);
+    return stream_hash(value,&base);
 }
 // The SipHash-1-3 state `hash` starts from: a table can keep one and hash with `hash_from`.
 pub fn table_hasher(seed0:u64,seed1:u64)->Hasher{
@@ -185,6 +185,17 @@ fn stream_hash<a,b,T:Hash>(value:(&a T),base:(&b Hasher))->u64{
     v0=wrapping_add(v0,v3);v3=((v3<<21)|(v3>>43))^v0;
     v2=wrapping_add(v2,v1);v1=((v1<<17)|(v1>>47))^v2;v2=(v2<<32)|(v2>>32);
     return v0^v1^v2^v3;
+}
+// A table's hash of a one-word key: two xorshift-multiply rounds, keyed by the table's two seed
+// words (one mixed into the value, one as a secret odd multiplier), about eight instructions where
+// SipHash-1-3 takes sixty. The same construction as the seeded word hashes of Go and Zig's tables:
+// collisions cannot be planned without the seed, but it is not a cryptographic hash. `hash`,
+// `hasher` and `word_hash` stay SipHash for callers that need it.
+pub fn word_mix<a>(word:u64,base:(&a Hasher))->u64{
+    mut h=word^base.v0;
+    h=wrapping_mul(h^(h>>32),15700868781012133933);
+    h=wrapping_mul(h^(h>>29),base.v1|1);
+    return h^(h>>32);
 }
 // SipHash-1-3 of one eight-byte word from a prepared state: exactly what streaming the word gives,
 // straight-line, with the state in registers.

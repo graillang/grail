@@ -19184,5 +19184,89 @@
     "source": "handle H: transferable;\nstruct Holder { h: H, n: u64 }\nstruct Pair<A, B> { first: A, second: B }\nfn join<A: Send + Owned, B: Owned, F: Fn<Send>() -> A>(first: F, second: FnMut() -> B) -> Pair<A, B> { mut g = second; return Pair { first: first(), second: g() }; }\nfn main() {\n    mut raw: H;\n    holder := Holder { h: raw, n: 4 };\n    r := &holder;\n    pair := join(|| -> u64 r.n, || -> u64 r.n + 1);\n    println(pair.first + pair.second);\n}\n",
     "reject": true,
     "diagnostic": "cannot transfer closure capture `r`: r.h is thread-affine"
+  },
+  {
+    "name": "simd-bench-dot-result",
+    "note": "bench/simd_dot.grl in its `check` mode (three rounds, the result alone): its answer pinned on every target and backend, so the benchmark cannot break silently. It takes one argument, as every bench does: without one, a `main(arg: &[u8])` program exits 2.",
+    "files": [
+      "bench/simd_dot.grl"
+    ],
+    "args": [
+      "check"
+    ],
+    "stdout": "24570.375\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ]
+  },
+  {
+    "name": "simd-bench-mat4-result",
+    "note": "bench/simd_mat4.grl in its `check` mode (three rounds, the result alone): its answer pinned on every target and backend, so the benchmark cannot break silently. It takes one argument, as every bench does: without one, a `main(arg: &[u8])` program exits 2.",
+    "files": [
+      "bench/simd_mat4.grl"
+    ],
+    "args": [
+      "check"
+    ],
+    "stdout": "16377.5\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ]
+  },
+  {
+    "name": "simd-bench-aos-result",
+    "note": "bench/simd_aos.grl in its `check` mode (three rounds, the result alone): its answer pinned on every target and backend, so the benchmark cannot break silently. It takes one argument, as every bench does: without one, a `main(arg: &[u8])` program exits 2.",
+    "files": [
+      "bench/simd_aos.grl"
+    ],
+    "args": [
+      "check"
+    ],
+    "stdout": "102383\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ]
+  },
+  {
+    "name": "entry-missing-argument-says-usage",
+    "note": "A `main` that takes the argument view, run with no argument: `usage: PROGRAM NAME` on stderr with the parameter's declared name, exit 2 (it used to exit 2 silently).",
+    "source": "fn main(rounds: &[u8]) {\n    println(rounds.len());\n}\n",
+    "status": 2,
+    "stderr": " rounds\n",
+    "stdout": "",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ]
+  },
+  {
+    "name": "entry-argument-given-runs",
+    "source": "fn main(rounds: &[u8]) {\n    println(rounds.len());\n}\n",
+    "args": [
+      "abc"
+    ],
+    "stdout": "3\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ]
+  },
+  {
+    "name": "float-nan-bits-canonical",
+    "source": "fn main() {\n    zero: f64 = 0.0;\n    a := zero / zero;\n    inf: f64 = 1.0 / zero;\n    c := inf - inf;\n    println(\"{} {} {}\", bits(a), bits(-a), bits(c));\n    h: f32 = 0.0;\n    println(\"{}\", bits(h / h));\n    println(\"{}\", bits(1.5));\n}\n",
+    "stdout": "9221120237041090560 9221120237041090560 9221120237041090560\n9221120237041090560\n4609434218613702656\n"
+  },
+  {
+    "name": "simd-nan-bits-canonical",
+    "source": "fn main() {\n    zero: f32 = 0.0;\n    v := f32x4::new(zero / zero, 1.5, -(zero / zero), -2.0);\n    mut r = u32[0, 0, 0, 0];\n    v.bits().store(&mut r[:], 0);\n    println(\"{} {} {} {}\", r[0], r[1], r[2], r[3]);\n    w := f64x2::splat(0.0);\n    m := f64x2::new(1.0, 0.0) / w;\n    mut q = i64[0, 0];\n    (m - m).bits().store(&mut q[:], 0);\n    println(\"{} {}\", q[0], q[1]);\n}\n",
+    "stdout": "2143289344 1069547520 2143289344 3221225472\n9221120237041090560 9221120237041090560\n"
   }
 ]
