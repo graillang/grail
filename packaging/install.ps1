@@ -34,6 +34,10 @@ if (Test-Path $docSource) {
     Copy-Item -Force (Join-Path $docSource '*') $docTarget
 }
 
+# The standard library arrives checked and built in the build store, as rustup ships libstd.
+& (Join-Path $binDir 'grail.exe') cache warm
+if ($LASTEXITCODE -ne 0) { Write-Host "'grail cache warm' did not finish; the first build will check the standard library instead" }
+
 Write-Host "installed $binDir\grail.exe"
 Write-Host "runtime and standard library: $Prefix\lib\grail"
 Write-Host 'building programs still needs clang and lld on PATH'

@@ -2911,12 +2911,18 @@ fn simd_elem<a>(s: (&a machine::Simd)) -> u8[] {
         }
         return copy(view("double"));
     }
+    if s.bits == 8 {
+        return copy(view("i8"));
+    }
     if s.bits == 32 {
         return copy(view("i32"));
     }
     return copy(view("i64"));
 }
 fn simd_int_elem<a>(s: (&a machine::Simd)) -> u8[] {
+    if s.bits == 8 {
+        return copy(view("i8"));
+    }
     if s.bits == 32 {
         return copy(view("i32"));
     }
@@ -3002,8 +3008,14 @@ fn simd_word<a, b, d>(l: (&a mut L), s: (&b machine::Simd), e: &d [u8]) -> unit 
         v = def(&mut l, view("bitcast double {} to i64"), &u8[][d]);
     } else if s.elem == 1 {
         v = def(&mut l, view("bitcast double {} to i64"), &u8[][v]);
-    } else if s.bits == 32 {
-        v = def(&mut l, view("sext i32 {} to i64"), &u8[][v]);
+    } else if s.bits != 64 {
+        mut t = copy(view("sext i"));
+        if s.elem == 4 {
+            t = copy(view("zext i"));
+        }
+        num(&mut t, s.bits);
+        put(&mut t, view(" {} to i64"));
+        v = def(&mut l, view(t), &u8[][v]);
     }
     set_reg(&mut l, view("rax"), view(v));
     return ();
@@ -3068,10 +3080,14 @@ fn lift_simd<a, b>(l: (&a mut L), line: &b [u8]) -> unit {
             r = simd_select(&mut l, n, view(na), view(vt), view(b), view(r2), view(""));
         } else {
             mut lt = u8[];
+            mut pred = "icmp slt";
+            if s.elem == 4 {
+                pred = "icmp ult";
+            }
             if op == 8 {
-                lt = simd_op2(&mut l, view("icmp slt"), view(vt), view(b), view(a));
+                lt = simd_op2(&mut l, view(pred), view(vt), view(b), view(a));
             } else {
-                lt = simd_op2(&mut l, view("icmp slt"), view(vt), view(a), view(b));
+                lt = simd_op2(&mut l, view(pred), view(vt), view(a), view(b));
             }
             r = simd_select(&mut l, n, view(lt), view(vt), view(b), view(a), view(""));
         }
@@ -3088,7 +3104,10 @@ fn lift_simd<a, b>(l: (&a mut L), line: &b [u8]) -> unit {
             fp := u8[][copy(view("fcmp oeq")), copy(view("fcmp une")), copy(view("fcmp olt")), copy(view("fcmp ole")), copy(view("fcmp ogt")), copy(view("fcmp oge"))];
             pred = fp[op - 10].copy();
         } else {
-            ip := u8[][copy(view("icmp eq")), copy(view("icmp ne")), copy(view("icmp slt")), copy(view("icmp sle")), copy(view("icmp sgt")), copy(view("icmp sge"))];
+            mut ip = u8[][copy(view("icmp eq")), copy(view("icmp ne")), copy(view("icmp slt")), copy(view("icmp sle")), copy(view("icmp sgt")), copy(view("icmp sge"))];
+            if s.elem == 4 {
+                ip = u8[][copy(view("icmp eq")), copy(view("icmp ne")), copy(view("icmp ult")), copy(view("icmp ule")), copy(view("icmp ugt")), copy(view("icmp uge"))];
+            }
             pred = ip[op - 10].copy();
         }
         c := simd_op2(&mut l, view(pred), view(vt), view(a), view(b));
@@ -3130,8 +3149,10 @@ fn lift_simd<a, b>(l: (&a mut L), line: &b [u8]) -> unit {
             x = def(&mut l, view("fptrunc double {} to float"), &u8[][d]);
         } else if float {
             x = def(&mut l, view("bitcast i64 {} to double"), &u8[][x]);
-        } else if s.bits == 32 {
-            x = def(&mut l, view("trunc i64 {} to i32"), &u8[][x]);
+        } else if s.bits != 64 {
+            mut t = copy(view("trunc i64 {} to i"));
+            num(&mut t, s.bits);
+            x = def(&mut l, view(t), &u8[][x]);
         }
         if op == 24 {
             old := simd_load(&mut l, view(vt), view(pd), &s);
@@ -3212,6 +3233,84 @@ fn lift_simd<a, b>(l: (&a mut L), line: &b [u8]) -> unit {
         pa := address(&mut l, view("(%rsi)"));
         v := simd_load(&mut l, view(vt), view(pa), &s);
         simd_store(&mut l, view(vt), view(v), view(pd), &s);
+        return ();
+    }
+    if op == 27 {
+        pa := address(&mut l, view("(%rsi)"));
+        pb := address(&mut l, view("(%rdx)"));
+        a := simd_load(&mut l, view(vt), view(pa), &s);
+        b := simd_load(&mut l, view(vt), view(pb), &s);
+        mut t = copy(view("shufflevector "));
+        put(&mut t, view(vt));
+        put(&mut t, view(" {}, "));
+        put(&mut t, view(vt));
+        put(&mut t, view(" {}, <"));
+        num(&mut t, n);
+        put(&mut t, view(" x i32> <"));
+        for i in n {
+            if i != 0 {
+                put(&mut t, view(", "));
+            }
+            put(&mut t, view("i32 "));
+            num(&mut t, s.idx[i]);
+        }
+        put(&mut t, view(">"));
+        r := def(&mut l, view(t), &u8[][a, b]);
+        simd_store(&mut l, view(vt), view(r), view(pd), &s);
+        return ();
+    }
+    if (op == 28) || (op == 29) {
+        pa := address(&mut l, view("(%rsi)"));
+        ft := simd_vec(n, view("float"));
+        it := simd_vec(n, view("i32"));
+        if op == 28 {
+            a := simd_load(&mut l, view(it), view(pa), &s);
+            mut t = copy(view("sitofp "));
+            put(&mut t, view(it));
+            put(&mut t, view(" {} to "));
+            put(&mut t, view(ft));
+            r := def(&mut l, view(t), &u8[][a]);
+            simd_store(&mut l, view(ft), view(r), view(pd), &s);
+            return ();
+        }
+        // Truncation toward zero, saturated, a NaN lane 0: a select over the lanes fptosi would make
+        // poison for (selecting another operand there is defined).
+        a := simd_load(&mut l, view(ft), view(pa), &s);
+        mut t = copy(view("fptosi "));
+        put(&mut t, view(ft));
+        put(&mut t, view(" {} to "));
+        put(&mut t, view(it));
+        r0 := def(&mut l, view(t), &u8[][copy(view(a))]);
+        hi := simd_op2(&mut l, view("fcmp oge"), view(ft), view(a), view(simd_splat_const(n, view("float"), view("0x41E0000000000000"))));
+        lo := simd_op2(&mut l, view("fcmp olt"), view(ft), view(a), view(simd_splat_const(n, view("float"), view("0xC1E0000000000000"))));
+        nan := simd_op2(&mut l, view("fcmp uno"), view(ft), view(a), view(a));
+        r1 := simd_select(&mut l, n, view(hi), view(it), view(simd_splat_const(n, view("i32"), view("2147483647"))), view(r0), view(""));
+        r2 := simd_select(&mut l, n, view(lo), view(it), view(simd_splat_const(n, view("i32"), view("-2147483648"))), view(r1), view(""));
+        r := simd_select(&mut l, n, view(nan), view(it), view("zeroinitializer"), view(r2), view(""));
+        simd_store(&mut l, view(it), view(r), view(pd), &s);
+        return ();
+    }
+    if (op == 30) || (op == 31) {
+        // The aligned copies: copya's source (load_aligned) and copyd's destination
+        // (store_aligned) were checked to be aligned to the vector's size first.
+        pa := address(&mut l, view("(%rsi)"));
+        mut load_align = s.bits / 8;
+        mut store_align = s.bits / 8;
+        if op == 30 {
+            load_align = n * s.bits / 8;
+        } else {
+            store_align = n * s.bits / 8;
+        }
+        mut t = copy(view("load "));
+        put(&mut t, view(vt));
+        put(&mut t, view(", ptr {}, align "));
+        num(&mut t, load_align);
+        v := def(&mut l, view(t), &u8[][pa]);
+        mut u = copy(view("store "));
+        put(&mut u, view(vt));
+        put(&mut u, view(" {}, ptr {}, align "));
+        num(&mut u, store_align);
+        emit(&mut l, view(u), &u8[][v, pd]);
         return ();
     }
     if op == 25 {
@@ -7711,6 +7810,15 @@ fn lower_range<a, b, c, d, e, g, h>(l: (&a mut L), lines: (&b u8[][]), funcs: (&
             put(&mut p.functions, view("\"("));
             put(&mut p.functions, view(param_list(l.nargs)));
             put(&mut p.functions, view(") \"probe-stack\"=\"inline-asm\""));
+            // A runtime fast path stays small only if what it falls back to stays out of it: a
+            // `rt_..._slow` function is cold and never inlined, and the threaded allocator paths are
+            // never inlined into the one-thread wrappers (rt_alloc, rt_free), whose frame would
+            // otherwise save every callee-saved register on every allocation.
+            if starts(view(f.name), view("rt_")) && ends(view(f.name), view("_slow")) {
+                put(&mut p.functions, view(" noinline cold"));
+            } else if eq(view(f.name), view("rt_alloc_shared")) || eq(view(f.name), view("rt_free_shared")) {
+                put(&mut p.functions, view(" noinline"));
+            }
             atomics_inline(&mut p.functions, l.target);
             put(&mut p.functions, view(" {\n"));
             put(&mut p.functions, view(l.body));
