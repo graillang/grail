@@ -127,10 +127,12 @@ fn rt_stack_overflow_at(site: u64) -> u64 {
 fn rt_fail(kind: u64, a: u64, b: u64) -> u64 {
     j := rt_job_failing();
     if j != 0 {
+        raw_store(rt_fail_site_word(), 0);
         return rt_job_fail_here(j, kind, a, b, 0);
     }
     t := rt_containable();
     if t != 0 {
+        raw_store(rt_fail_site_word(), 0);
         return rt_contain_site(t, kind, a, b, rt_site_here(t + 200), 0);
     }
     if rt_abort_begin() == 0 {
@@ -668,7 +670,21 @@ fn rt_refine(msg: u64, req: u64) -> u64 {
 }
 // ` --> file:line:col` for the frame that failed, then one ` = called from` line per further frame
 // that lies in a statement - at most 32 of them.
+// A release (LLVM) build has no site table: a failure in lifted code writes a pointer to its
+// statement's record - the same {address, file, line | column << 32} shape - here just before it
+// calls the failure entry, and the report prints it as the ` --> ` line (llvm.grl site_hint). A
+// contained failure clears it, so the next report never reads a stale one.
+fn rt_fail_site_word() -> u64 {
+    return raw_state() + 3440;
+}
 fn rt_fail_where(buf: u64, n: u64) -> u64 {
+    hint := raw_load(rt_fail_site_word());
+    if hint != 0 {
+        raw_store(rt_fail_site_word(), 0);
+        if raw_load(hint + 8) != 0 {
+            return rt_fail_line(buf, n, hint, view(" --> "));
+        }
+    }
     // The program's entry stores the compiler-emitted rt_sites in state word 3400; asked for the
     // descriptor (rt_sites_fill), it fills in the tables' bounds and the caller's frame pointer. No
     // table, a refused descriptor or zeros: no location lines.
@@ -4885,6 +4901,7 @@ fn rt_thread_join(handle: u64) -> u64 {
 //   3416         a second thread was started  rt_allocator_lock          compile-speed
 //   3424         scheduler config block       rt_sched_config            sched-start
 //   3432         failure report block address rt_report_block            statics-no-alloc
+//   3440         release failure site record  rt_fail_site_word          release-sites
 //   3448         stacks discarded by re-raise rt_discarded_word          job-failure
 //   3456         abort report claim           rt_abort                   abort-once
 //   3464..3576   task-stack fault handler     rt_state_stack_guard       stack-guard

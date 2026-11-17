@@ -1,5 +1,14 @@
 ## Unreleased
 
+- **A release build's runtime error says where it failed.** A failing check in a release (LLVM)
+  build printed its message without the ` --> file:line:col` line a development build prints, because
+  that line came from the native backend's site table. The front end now records statement positions
+  for the lifter too (`.gsite` lines), and the failure path of lifted code - only the failure path -
+  points the runtime at a record of its statement before it calls the failure entry, which the report
+  prints as the ` --> ` line. Measured: no instruction changes on bench/ecs, sort, sieve, xform_f32 or
+  nbody. Failures inside a runtime helper that is not lifted in place still report no location, and a
+  contained task failure keeps the location it had.
+
 - **Capture-free and named-function callbacks to generic functions cost no allocation, and named
   functions are accepted.** A closure given for a lent `Fn(..)` parameter of a generic function was
   boxed whenever the call's type arguments were not all fixed yet - `Condition::wait_with`'s two
