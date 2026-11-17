@@ -1,5 +1,12 @@
 ## Unreleased
 
+- **Typed iterator adapters: `iter::over(v).map(..).filter(..).fold(..)`.** `iter::VecIter<T>`,
+  `iter::Map<I, U, F>` and `iter::Filter<I, F>` implement `Iterator` with each callback held by its
+  own closure type, so a chain is one nested type, specialised and called directly, with no
+  allocation per element; a `for` loop runs over any of them. `iter::fold_all(it, init, f)` folds any
+  `I: Iterator`. `iter::Iter<T>` is unchanged (the erased form for `from_fn`, `dyn Iterator` or a
+  field). Callable bounds now work on an impl's own parameters (`impl<U, F: FnMut(u64) -> U> W<U, F>`)
+  and through interface files.
 - Release builds optimise the runtime's job, task and thread runners again: they make calls
   through code pointers and were kept unoptimised after lifting them raced on the thread pointer.
   That race is fixed (every thread-pointer read is now an opaque one), and
