@@ -1,5 +1,12 @@
 ## Unreleased
 
+- **`dyn` calls devirtualise in release builds.** Vtables are constants in the LLVM module,
+  reference parameters cross calls as `ptr` (so a `&dyn` pair in the caller's frame no longer
+  escapes as an integer), frame-slot spills keep their pointer provenance, and slot offsets are
+  pointer arithmetic: when the vtable is known, LLVM calls the method directly and inlines it. A
+  loop calling `area()` through a `&dyn` of one type: 140 M -> 7.6 K instructions (folded). dyncall
+  (mixed types): 633 M -> 603 M (Rust -O: 648 M).
+
 - **Release builds keep vector headers in registers across element stores (TBAA).** The LLVM lifter
   writes the word and 4-byte element accessors (`rt_slot`, `rt_slot4`, `rt_at4` and their unchecked
   forms) in place: the header's `data`/`len` loads carry a `header` type tag, and every load or store
