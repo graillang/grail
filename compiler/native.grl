@@ -32792,6 +32792,26 @@ fn emit_resolved_call<a>(
         ty := argtypes[i];
         move_out(&mut c, val(slot, ty));
     }
+    // `Some(x)` and `None` of an inline option are written in place, not called: the tag and the
+    // payload words into frame words of this site (core::some / core::none, stage 5).
+    if (c.raw == 0) & same(view(m), view("core")) & (same(view(name), view("some")) || same(view(name), view("none"))) && framed(&mut c, ret) {
+        od := ty_arg(&mut c, base_type(&mut c, ret));
+        some := success_variant(&mut c, od);
+        mut slot = 0;
+        if same(view(name), view("some")) {
+            tag := imm(&mut c, some);
+            slot = enum_frame(&mut c, tag, args[0], ret, argtypes[0]);
+        } else {
+            tag := imm(&mut c, 1 - some);
+            zero := imm(&mut c, 0);
+            slot = enum_frame(&mut c, tag, zero, ret, 1);
+        }
+        own(&mut c, slot, ret);
+        mut none_lent = u64[];
+        captured_bonds(&mut c, val(slot, ret), &map, &sources, &argtypes, &none_lent);
+        call_bonds(&mut c, val(slot, ret), first, &sources, signature_ret);
+        return val(slot, ret);
+    }
     mut sent = args.copy();
     dest := call_dest(&mut c, ret);
     if dest != 0 {
