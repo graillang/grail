@@ -34862,6 +34862,20 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
                     }
                 }
             }
+            if (c.raw == 0) & (argi < count) & (types != 0) {
+                // A closure given for a callable-bound parameter (`F: Fn<Send>() -> A`): its capture
+                // bounds are checked here, as the argument is taken, as an erased `Fn<Send>()`
+                // parameter's are - not only once every argument is in, where an error a later
+                // argument makes (a capture that this closure moved) would be reported first.
+                formal := c.params[template_first + argi];
+                bound := param_callable(&mut c, formal);
+                if (bound != NO_TYPE) && (ty_kind(&mut c, bound) == 20) && (ty_kind(&mut c, v.ty) == 20) && (ty_env(&mut c, v.ty) != 0) {
+                    bm := ty_mode(&mut c, bound);
+                    if !closure_bounds_hold(&mut c, v.ty, bm & CLOSURE_BOUNDS) {
+                        closure_bound_fail(&mut c, v.ty, bm & CLOSURE_BOUNDS);
+                    }
+                }
+            }
             if (c.raw == 0) & (argi < count) {
                 formal := c.params[template_first + argi];
                 if (types == 0) & is_f32(&mut c, formal) {

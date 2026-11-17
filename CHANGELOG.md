@@ -1,5 +1,11 @@
 ## Unreleased
 
+- `pool::join` takes its first branch as a generic `F: Fn<Send>() -> A`, so a closure given for it is
+  held in the frame and called directly (no heap environment). An explicit type-argument list may
+  leave out trailing parameters that only a callable bound names (`pool::join<u64, u64>(a, b)` still
+  compiles), and a closure given for a callable-bound parameter has its capture bounds checked as
+  the argument is taken, as an erased `Fn<Send>()` parameter's are.
+
 - **A standard generic is checked once per surface, not once per run.** The check
   `emit_specializations` owes every template a run instantiates (a replay of its body with its own
   parameters opaque, its text thrown away) is now a unit of the per-function store: what it asked of
