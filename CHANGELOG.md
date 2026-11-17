@@ -1,5 +1,12 @@
 ## Unreleased
 
+- **The scheduler's "a worker is searching" count could go below zero, and then no fork woke
+  anyone.** A worker that found work while searching, and lost its worker block to a blocking call
+  inside that work, cleared the searching flag that the block's new thread had set. The count went
+  to -1, which reads as "someone is searching" for ever, so a task put on the injection ring
+  waited with every worker asleep (`bench/frame.grl` hung about one run in 20). The thread now
+  touches the flag only while it still owns the block. 0 hangs in 300 runs.
+
 - **A lost wakeup in nested joins is fixed.** A waiter that took a stale queue entry for a recycled
   job record gave it back with a plain store of "pending", which could erase the forker's
   registration as the job's waiter in the moment between: the job was then published to nobody
