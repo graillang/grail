@@ -167,7 +167,10 @@ remainder carried its `.type NAME,@function` line and that counted as a use.
 - `call *%rax`, the Grail-convention call through a code pointer (closure, vtable slot, function
   value), is lifted on x86-64 as a six-word call through the pointer. A C call through a `cfn` value
   is spelled `call *%r11` and stays native with the import thunks, which use the C ABI. AArch64 and
-  RV64 keep indirect calls native: a code pointer names the native-convention entry.
+  RV64 keep indirect calls native: a code pointer names the native-convention entry. The runtime's
+  own `rt_` callers through a pointer (job, task and thread runners) stay native too: their stacks
+  are switched away from, resumed and abandoned on failure, and lifting them raced in
+  `alloc-threads-pool-results-freed-by-waiter` (about one run in three aborted).
 
 Measured (fib(32), user instructions): 112.8 M before, 74.9 M after, clang -O2 67.1 M. LLVM now emits
 clang's own shape (one recursive call, the other turned into a loop, two pushes).
