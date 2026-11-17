@@ -131,7 +131,7 @@ fn need<a>(z: (&a mut Inflater), n: u64) -> bool {
 }
 
 fn take<a>(z: (&a mut Inflater), n: u64) -> u64 {
-    if !need(&mut z, n) {
+    if (z.nbits < n) && !need(&mut z, n) {
         z.failed = true;
         return 0;
     }
@@ -143,8 +143,11 @@ fn take<a>(z: (&a mut Inflater), n: u64) -> u64 {
 
 // The next symbol, or 9999 on a bad code or end of input.
 fn decode<a, b>(z: (&a mut Inflater), h: (&b Huffman)) -> u64 {
-    // Top up to 16 bits when the input allows; a short tail still decodes bit by bit.
-    need(&mut z, 16);
+    // Top up to 16 bits when the input allows (the call only when the buffer is short: a refill
+    // holds 56 or more); a short tail still decodes bit by bit.
+    if z.nbits < 16 {
+        need(&mut z, 16);
+    }
     // Bits above nbits are zero, so a fast entry is valid whenever its length fits in what is held.
     e := h.fast[z.bits & 511];
     if (e != 0) && ((e >> 9) <= z.nbits) {

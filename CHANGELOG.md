@@ -1,5 +1,8 @@
 ## Unreleased
 
+- Inflate calls its bit refill only when the buffer is short of the bits a symbol or extra field
+  needs (a word refill holds 56 or more), instead of on every symbol: the 4K png Grail-LLVM 4.94G ->
+  4.66G instructions (0.59 -> 0.53 s; stb_image 0.37 s), Grail-native 16.1G -> 15.1G.
 - xxhash reads its eight-byte lanes with one load (`bytes::load_u64`) now that the call inlines,
   instead of assembling each from eight indexed bytes: the 20 MB zstd archive (whose frames carry
   an XXH64 checksum) Grail-LLVM 5.88G -> 5.09G instructions, 0.65 -> 0.55 s (libzstd 0.26 s).
