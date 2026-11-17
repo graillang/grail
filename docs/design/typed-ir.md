@@ -1435,7 +1435,7 @@ units beside the assembly. The optimizer's passes and the native backend are unc
 decide.
 
 **Stage 2, the effects move.** `fx_end` no longer counts `call` lines in a body's bytes: the front
-end records what each claiming body emitted (its count and a replayed `.proved` range), the IR
+end records what each claiming body emitted (its count), the IR
 answers with `ir::count_calls`, and `fx_check_calls` compares them once the program has been walked.
 An indirect refusal now names its target (`fx_edge_why`, `iface_reason`), so a `dyn` receiver's call
 reads "the target is interface `Shape` of module `m`".
@@ -1457,10 +1457,9 @@ peer delete their input). All five that mattered re-ran serially as identical (1
 clean sweep of a quiet host. `tools/ssair-ir.mjs` holds the serializer to its own counts, refuses a
 value id outside its unit's table, and asserts that asking for the IR cannot change the assembly.
 
-**Not done: stage 3.** The serializer is written and tested; the reader, the per-function cache key
-(digest of the parsed structure re-serialised, so a unit that does not round-trip is a refusal rather
-than a hit) and the `cache-test` proof are the remaining work.
-`docs/design/incremental-compilation.md` is the note that specifies them.
+**Stage 3 has since landed** as the per-function codegen cache (`--fn-cache`, `compiler/fncache.grl`);
+`docs/design/incremental-compilation.md` is its note. (A `.proved` replay range that the effects
+record carried here went away on 2026-11-16 with the copied entry it described.)
 
 ## What this does not do
 
