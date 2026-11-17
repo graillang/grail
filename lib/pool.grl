@@ -136,15 +136,23 @@ pub fn reduce<R:Send+Owned>(n:u64,grain:u64 where grain > 0,zero:R,leaf:Fn<Share
 // and may write its own captures.
 pub struct Pair<A,B>{first:A,second:B}
 pub fn join<A:Send+Owned,B:Owned>(first:Fn<Send>()->A,second:FnMut()->B)->Pair<A,B>{
+    mut here=second;
     // `first` is forked as a job and joined before this returns (parallel_with): that join is what
     // lets it borrow the caller's frame, and it runs once, on one thread, so its captures need only
     // be transferable, not shareable. It is a structured fork, so if `second` fails, the failing
-    // stack waits for `first` before it is discarded (docs/design/concurrency-model.md, F1). Both
-    // results come back through `pair_of`, so nothing but the Pair itself is allocated here.
-    return parallel_with(first, second, pair_of<A,B>);
+    // stack waits for `first` before it is discarded (docs/design/concurrency-model.md, F1).
+    //
+    // `second`'s result goes through a slot rather than straight to a combining function: since
+    // unboxed records, a `Pair` comes back from a call in two registers, and the runtime's call of
+    // a combining function returns one word - so combining into a `Pair` there is not sound until the
+    // runtime can return two words (the follow-up named in concurrency-stages-5-7.md).
+    mut slot: B? = None;
+    out := &mut slot;
+    a := parallel_with(first, || -> unit { *out = Some(here()); }, first_of<A>);
+    return Pair{first:a,second:slot!};
 }
-fn pair_of<A,B>(first: A, second: B) -> Pair<A,B> {
-    return Pair{first:first,second:second};
+fn first_of<A>(first: A, unused: unit) -> A {
+    return first;
 }
 
 // Priority classes. Frame work is taken before Normal work, and Normal before tasks and Background

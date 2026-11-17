@@ -32,6 +32,9 @@ const chosen = compilerOptions(argv);
 const jsonPath = jsonOption(argv);
 const option = (name, fallback) => { const at = argv.indexOf(name); return at < 0 ? fallback : argv[at + 1]; };
 const runs = Number(option('--runs', 3));
+// --metric instructions charts user-space instructions (the tool and every process it started)
+// instead of CPU time: on a loaded host the count is what does not move.
+const metric = option('--metric', 'cpu');
 const sizes = option('--sizes', '1000,4000').split(',').map(Number);
 const work = join(root, '.work/compile-rivals');
 rmSync(work, { recursive: true, force: true });
@@ -236,7 +239,7 @@ for (const n of [0, ...sizes]) {
   for (const which of ['check', 'build']) {
     const cold = {}, edited = {};
     for (const lang of names) {
-      cold[lang] = { cpu: Infinity, wall: Infinity }; edited[lang] = { cpu: Infinity, wall: Infinity };
+      cold[lang] = { cpu: Infinity, wall: Infinity, instructions: Infinity }; edited[lang] = { cpu: Infinity, wall: Infinity, instructions: Infinity };
     }
     for (let r = 0; r < runs; r++) {
       // One seed per round, the same in every language (so every program prints the same number),
@@ -256,6 +259,7 @@ for (const n of [0, ...sizes]) {
         for (const [slot, m] of [[cold, a], [edited, b]]) {
           slot[lang].cpu = Math.min(slot[lang].cpu, m.cpu);
           slot[lang].wall = Math.min(slot[lang].wall, m.wall);
+          slot[lang].instructions = Math.min(slot[lang].instructions, m.instructions / 1e9);
         }
         rmSync(dir, { recursive: true, force: true });
       }
@@ -284,13 +288,17 @@ if (jsonPath) {
   const table = (id, title, field, chart, note) => ({
     id, title, chart, note, threshold: 1, primary: 'grail', direction: 'lower',
     columns: names.map(key => ({ key, label: headOf[key], grail: key === 'grail' })),
-    rows: rows.map(([name, figures]) => ({ name, unit: field === 'cpu' ? 's CPU' : 's wall', values: Object.fromEntries(names.map(k => [k, figures[k][field]])) })),
+    rows: rows.map(([name, figures]) => ({ name, unit: { cpu: 's CPU', wall: 's wall', instructions: 'G instructions' }[field], values: Object.fromEntries(names.map(k => [k, figures[k][field]])) })),
   });
   writeResults(jsonPath, {
     tool: 'compile-rivals', title: 'Compile speed against Go, Zig and rustc', commit: measuredGrail.commit, versions: v, load,
-    commands: [`bun tools/compile-rivals.mjs --runs ${runs} --sizes ${sizes.join(',')}`, ...names.map(n => `${headOf[n]}: check \`${languages[n].check.join(' ').replace('__grail', 'grail')}\`, build \`${languages[n].build.join(' ').replace('__grail', 'grail')}\``)],
+    commands: [`bun tools/compile-rivals.mjs --runs ${runs} --sizes ${sizes.join(',')}${metric === 'instructions' ? ' --metric instructions' : ''}${process.env.GRAIL_JOBS ? ` (GRAIL_JOBS=${process.env.GRAIL_JOBS}${process.env.GOFLAGS ? `, GOFLAGS=${process.env.GOFLAGS}` : ''}${process.env.CARGO_BUILD_JOBS ? `, CARGO_BUILD_JOBS=${process.env.CARGO_BUILD_JOBS}` : ''})` : ''}`, ...names.map(n => `${headOf[n]}: check \`${languages[n].check.join(' ').replace('__grail', 'grail')}\`, build \`${languages[n].build.join(' ').replace('__grail', 'grail')}\``)],
     tables: [
-      table('compile', 'Compile speed: check and build, cold and after a one-function edit', 'cpu', true, `CPU time of the tool and every process it waited for, best of ${runs}. The bar: the fastest of Go, Zig and rustc.`),
+      ...(metric === 'instructions'
+        ? [table('compile', 'Compile speed: instructions to check and build, cold and after a one-function edit', 'instructions', true, `User-space instructions of the tool and every process it started, fewest of ${runs}; chosen over time because the host was loaded. The bar: the fastest of Go, Zig and rustc.`),
+          table('compile-cpu', 'The same, CPU time', 'cpu', false, `CPU time, best of ${runs}; inflated by the load.`)]
+        : [table('compile', 'Compile speed: check and build, cold and after a one-function edit', 'cpu', true, `CPU time of the tool and every process it waited for, best of ${runs}. The bar: the fastest of Go, Zig and rustc.`),
+          table('compile-instructions', 'The same, instructions', 'instructions', false, 'User-space instructions; not moved by load.')]),
       table('compile-wall', 'The same, wall time', 'wall', false, 'Wall time: Go spreads a package over every core.'),
     ],
   });

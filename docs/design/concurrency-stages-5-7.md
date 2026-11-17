@@ -780,3 +780,12 @@ instructions per join on a worker (1,807 with the load form).
 cause of sched-job-failure-is-contained, sched-join-failure-names-the-user-join and sync's
 mutex-poisoned case failing under LLVM, before and after this change. The two sched cases are
 native-only until the LLVM backend emits a table; that gap belongs to the LLVM backend's owner.
+
+**Item 1 is undone for now (merging main).** Unboxed records landed: a `Pair` is now a two-word
+value returned in two registers, and `rt_parallel_with` calls its combining function with
+`raw_call2`, which keeps only the first. Combining into a `Pair` in the runtime crashed
+(`pool-join-second-fnmut`). `pool::join` writes `second`'s result through a slot again (the
+option, the `Some` and the inner closure are back: allocations 3-5), and the combining function
+returns only `first`'s word. The fix is a two-word return from the runtime - `rt_parallel_with`
+returning both registers, or the builtin calling the combining function itself through the normal
+call path. That needs the unboxed owner's two-register contract, so it is coordinated with them.
