@@ -306,9 +306,9 @@ pub fn float_opcode<b>(s: &b [u8], a: u64, space: u64) -> u64 {
 }
 // The element accessors 40, 41, 44, 49, 51, 47, 48, 50 with the slice's `data` and `len` in the
 // registers operands 0 and 1 name instead of read through the descriptor in rdi (90..97, in that
-// order; optimize.grl `desc_choose`).
+// order; optimize.grl `desc_choose`), and 89 for 55, the byte store.
 pub fn is_desc_op(op: u64) -> bool {
-    return (89 < op) && (op < 98);
+    return (88 < op) && (op < 98);
 }
 pub fn is_float_op(op: u64) -> bool {
     return (59 < op) && (op < 77);
@@ -1054,6 +1054,9 @@ pub fn parse<a, b>(o: (&a mut Body), s: &b [u8], a: u64, e: u64) {
             if same_range(view(s), first, e, view("rt_aslotu")) {
                 fast = 54;
             }
+            if same_range(view(s), first, e, view("rt_write")) {
+                fast = 55;
+            }
             if fast != 0 {
                 // stays: the written place is indexed (`&mut o.op[last]`), and two-phase defers
                 // only a plain `&mut path`, so the length read is part of taking the place.
@@ -1173,6 +1176,10 @@ pub fn reads<a>(o: (&a Body), i: u64) -> u64 {
     if op == 54 {
         return 196;
     }
+    if op == 55 {
+        // rt_write: the vector in rdi, the index in rsi, the byte in rdx.
+        return 196;
+    }
     if op == 42 {
         return 128;
     }
@@ -1180,8 +1187,16 @@ pub fn reads<a>(o: (&a Body), i: u64) -> u64 {
         // movl / movb: the source, and the registers of a memory destination's address.
         return src | dst_address(&o, i);
     }
+    if (op == 86) || (op == 87) {
+        // A fixed-size array's element with the length and width as immediates: base and index.
+        return 192;
+    }
     if is_desc_op(op) {
-        // The index in rsi and the hoisted data and len registers the operands name.
+        // The index in rsi and the hoisted data and len registers the operands name; the byte store
+        // also its value in rdx.
+        if op == 89 {
+            return 68 | src | dst;
+        }
         return 64 | src | dst;
     }
     if is_float_op(op) {
@@ -1220,10 +1235,13 @@ pub fn writes<a>(o: (&a Body), i: u64) -> u64 {
     if op == 45 || op == 46 {
         return caller_saved();
     }
-    if (46 < op) & (op < 55) {
+    if (46 < op) & (op < 56) {
         return 1;
     }
     if is_desc_op(op) {
+        return 1;
+    }
+    if (op == 86) || (op == 87) {
         return 1;
     }
     if (op == 98) || (op == 99) {
@@ -1814,10 +1832,10 @@ pub fn count_calls<a>(o: (&a Body)) -> u64 {
     mut n: u64 = 0;
     for i in o.op.len() {
         // A call line, plus the leaf accessors `parse` re-tags from `call rt_slot` and friends into
-        // pseudo-instructions 40..54: the front end wrote them with `call_out`, so they are calls the
+        // pseudo-instructions 40..55: the front end wrote them with `call_out`, so they are calls the
         // recorder counted even when the printer inlines them.
         mut call = o.op[i] == 15;
-        if (39 < o.op[i]) & (o.op[i] < 55) {
+        if (39 < o.op[i]) & (o.op[i] < 56) {
             call = true;
         }
         if call {
