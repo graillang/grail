@@ -519,6 +519,11 @@ struct C {
     no_sites: u64,
     // `--check`: stop after the last diagnostic can have been given.
     check_only: u64,
+    // A check-only run with no unit store writes no assembly, so the text emitters (`o`, `on`, the
+    // slot and label spellers) write nothing while this is 1 (docs/design/compile-speed.md). The
+    // stream is never read back in such a run, except by a diagnostic (`fail` turns this off) and
+    // for a body's own label (func turns it off around that).
+    quiet: u64,
     // --f1-what=N: a test aid that records a deliberately wrong F1 kind for every binding, so the
     // checks --verify-facts emits can be shown to fire (docs/design/typed-ir.md, "Tests that catch
     // a wrong fact"). 0, the default, records the type the front end actually has.
@@ -873,6 +878,8 @@ struct C {
     // interned type, so a reference can never outrun its definition.
     drop_refs: u64[],
     drop_names: u8[][],
+    // By interned type: 1 once the drop walk has emitted its helper or found it emitted (emit_drops).
+    drop_walked: u64[],
     spec_emitted: u8[][],
     spell_lenient: u64,
     spell_failed: u64,
@@ -961,11 +968,9 @@ struct C {
     fx_pending_alloc: u64,
     fx_pending_panic: u64,
     fx_bounded: u64,
-    // Where the body being recorded starts in `c.out`, whether it is trusted code (the runtime, a drop
-    // helper), how many calls it has recorded, and the byte range of its `.proved` entry's replayed
-    // prologue: bytes `fx_end`'s consistency check skips, because the checked entry already counted
-    // them.
-    fx_out_start: u64,
+    // Whether the body being recorded is trusted code (the runtime, a drop helper), how many calls it
+    // has recorded, and the byte range of its `.proved` entry's replayed prologue: bytes `fx_end`'s
+    // consistency check skips, because the checked entry already counted them.
     fx_trusted: u64,
     fx_calls: u64,
     fx_skip_lo: u64,
@@ -1208,12 +1213,18 @@ fn decl_index_sync<a>(c: (&a mut C)) -> unit {
 
 // ---- output ----
 fn o<a, b>(c: (&a mut C), s: &b [u8]) -> unit {
+    if c.quiet != 0 {
+        return ();
+    }
     for i in s.len() {
         c.out.push(s[i]);
     }
     return ();
 }
 fn on<a>(c: (&a mut C), n: u64) -> unit {
+    if c.quiet != 0 {
+        return ();
+    }
     if 9 < n {
         on(&mut c, n / 10);
     }
@@ -3043,6 +3054,9 @@ fn val(t: u64, ty: u64) -> Val {
 
 // Every intermediate and binding has an rbp-relative eight-byte stack slot.
 fn stack_slot<a>(c: (&a mut C), id: u64) -> unit {
+    if c.quiet != 0 {
+        return ();
+    }
     c.out.push(45);
     on(&mut c, (id + 1) * 8);
     o(&mut c, view("(%rbp)"));
@@ -3296,6 +3310,9 @@ fn tls_leave<a>(c: (&a mut C), slot: u64) -> unit {
 }
 fn save<a>(c: (&a mut C)) -> u64 {
     n := fresh(&mut c);
+    if c.quiet != 0 {
+        return n;
+    }
     o(&mut c, view("movq %rax,"));
     stack_slot(&mut c, n);
     c.out.push(10);
@@ -3335,6 +3352,9 @@ fn save_result<a>(c: (&a mut C), ret: u64) -> u64 {
     return save(&mut c);
 }
 fn get<a, b>(c: (&a mut C), id: u64, reg: &b [u8]) -> unit {
+    if c.quiet != 0 {
+        return ();
+    }
     o(&mut c, view("movq "));
     stack_slot(&mut c, id);
     c.out.push(44);
@@ -3406,6 +3426,9 @@ fn scope_undo<a>(c: (&a mut C)) -> unit {
 // `<unit prefix>_<n>` outside a function, `<unit prefix>_<f>_<n>` inside one: what follows `.L`,
 // `.F`, `.Lrfp` and `.Lrfr`. Copies, because `o` borrows `c` mutably and the prefix is a field of it.
 fn scoped_number<a>(c: (&a mut C), n: u64) -> unit {
+    if c.quiet != 0 {
+        return ();
+    }
     prefix := c.lpart.copy();
     o(&mut c, view(prefix));
     c.out.push(95);
@@ -7089,6 +7112,8 @@ fn fail<a, b>(c: (&a mut C), msg: &b [u8]) -> unit {
     if c.par_me != 0 {
         host::exit(3);
     }
+    // The diagnostic is rendered through the emitters.
+    exchange(&mut c.quiet, 0);
     p := c.pos;
     m := tok_text(&mut c, p);
     // The offending token's width: the caret run under the primary line, and the width a driver
@@ -18313,9 +18338,12 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             c.out.push(10);
         }
     }
+    // Spelled even in a quiet run: it is read back.
+    quiet := exchange(&mut c.quiet, 0);
     label_at := c.out.len();
     export_name(&mut c, view(m), view(name), view(body_symbol), export);
     label_end := c.out.len();
+    exchange(&mut c.quiet, quiet);
     // The body's own label, exactly as a `call` to it spells it: the effect facts are keyed by it.
     mut fx_label = u8[];
     for i in label_end - label_at {
@@ -22676,7 +22704,6 @@ fn fx_begin<a, b, d>(c: (&a mut C), sym: &b [u8], name: &d [u8], file: u64, pos:
     c.fx_entry_panic[k] = 0;
     trusted := c.raw;
     exchange(&mut c.fx_trusted, trusted);
-    exchange(&mut c.fx_out_start, c.out.len());
     edges := c.fx_edge_from.len();
     exchange(&mut c.fx_edge_mark, edges);
     exchange(&mut c.fx_calls, 0);
@@ -22893,7 +22920,6 @@ fn fx_helper<a, b>(c: (&a mut C), sym: &b [u8]) -> unit {
     c.fx_own_alloc[k] = 0;
     c.fx_own_panic[k] = 0;
     exchange(&mut c.fx_trusted, 1);
-    exchange(&mut c.fx_out_start, c.out.len());
     exchange(&mut c.fx_calls, 0);
     exchange(&mut c.fx_skip_lo, 0);
     exchange(&mut c.fx_skip_hi, 0);
@@ -44348,8 +44374,16 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
         at = at + 1;
         kind := ty_kind(&mut c, ty);
         arg := ty_arg(&mut c, ty);
+        // `drop_refs` has a type once per naming: a type this walk has settled is settled.
+        if (ty < c.drop_walked.len()) && (c.drop_walked[ty] != 0) {
+            continue;
+        }
         if concrete_type(&mut c, ty) {
             if needs_drop(&mut c, ty) {
+                while c.drop_walked.len() <= ty {
+                    c.drop_walked.push(0);
+                }
+                c.drop_walked[ty] = 1;
                 // One definition per key, not per interned index: two indices can describe the same
                 // drop - a view of one element type and a view of another both only release the
                 // backing store - and the key is what decides identity. The body is a function of
@@ -49703,6 +49737,7 @@ pub fn main() -> u64 {
         range_facts: 0,
         no_sites: 0,
         check_only: 0,
+        quiet: 0,
         f1_what: 0,
         debug_funcs: DebugFunc[],
         debug_vars: DebugVar[],
@@ -49920,6 +49955,7 @@ pub fn main() -> u64 {
         drop_generic: 0,
         drop_refs: u64[],
         drop_names: u8[][],
+        drop_walked: u64[],
         spec_emitted: u8[][],
         spell_lenient: 0,
         spell_failed: 0,
@@ -49976,7 +50012,6 @@ pub fn main() -> u64 {
         fx_pending_alloc: 0,
         fx_pending_panic: 0,
         fx_bounded: 0,
-        fx_out_start: 0,
         fx_trusted: 0,
         fx_calls: 0,
         fx_skip_lo: 0,
@@ -50550,6 +50585,10 @@ pub fn main() -> u64 {
         if pass == 2 {
             jobs::phase(view("declarations"));
             par_start(&mut c, n);
+            // From the bodies on, a check writes no text (`quiet`); a unit store would keep it.
+            if (c.check_only != 0) & (c.fn_dir.len() == 0) {
+                exchange(&mut c.quiet, 1);
+            }
         }
         mut i = 2;
         while i < n {
