@@ -1,5 +1,11 @@
 ## Unreleased
 
+- **A killed `grail build`/`grail check` leaves no compiler running.** The driver starts each module's
+  compiler run with `GRAIL_PARENT=<its pid>`; on Linux the run's runtime asks for
+  `PR_SET_PDEATHSIG`/SIGKILL at startup and exits if the driver is already gone (getppid), and on
+  Windows the driver puts such a child in a job object that kills it when the driver's handle closes.
+  The variable is consumed, so the run's own children are not affected. A driver SIGKILLed by a
+  timeout, an editor or the OOM killer used to leave its module runs going as orphans (one ran 1h45m).
 - **Closures given for a generic `F` live in the frame (S6(A)).** A closure whose type is its own
   literal's - a local closure, or one passed for a callable-bound parameter - is now held as its
   environment's words in the caller's frame, copied on a move and dropped in place, and called
