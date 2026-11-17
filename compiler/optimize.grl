@@ -2381,6 +2381,8 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
     xmm_stores(&mut o, view(s), last);
     xmm_fold(&mut o, view(s), last);
     xmm_memops(&mut o, view(s), last);
+    index_cse(&mut o, view(s), last);
+    dead_defs(&mut o, view(s), first, last);
     newframe := compact(&mut o, view(s), prologue, ns);
     // Rule 3 (call ABI S4): of the cleared range, only the slots that may be read before written.
     mut zkeep = u64[];
@@ -4782,6 +4784,209 @@ fn const_muls<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
         }
         kill(&mut o, i);
     }
+}
+// Scaled indices kept in scratch registers (CSE of `i*3`): nbody's element accesses each compute
+// `leaq (%rX,%rX,2),%rax; [addq $k,%rax;] movq %rax,%rsi` and load `(%rB,%rsi,8)`. In one straight
+// line (no jump, call, unknown instruction or jump-target label) the first such index for a given X
+// is computed once into a free register T among r8..r11 - one the body never names - and every
+// sequence for X after it is dropped, its loads reading `8k(%rB,%rT,8)`. %rax and %rsi must be dead
+// after the loads, and X and T unwritten between.
+fn index_cse<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
+    // A label no jump names (a statement's `.Lgs`) does not end a straight line.
+    mut target = u64[];
+    for i in last {
+        target.push(0);
+    }
+    mut named = 0;
+    for i in last {
+        if o.del[i] != 0 {
+            continue;
+        }
+        // Registers the body names in its operands (a call's own argument reads do not count: a call
+        // ends the straight line anyway).
+        named = named | ir::mask_of(o.k0[i], o.v0[i], o.m0[i]) | ir::mask_of(o.k1[i], o.v1[i], o.m1[i]);
+        if ir::is_jump(o.op[i]) && (o.op[i] != 15) {
+            t := jump_target(&o, i);
+            if t < last {
+                ir::put(&mut target, t, 1);
+            } else {
+                for z in last {
+                    if o.op[z] == 100 {
+                        ir::put(&mut target, z, 1);
+                    }
+                }
+            }
+        }
+    }
+    names := u8[][copy_text(view("r8")), copy_text(view("r9")), copy_text(view("r10")), copy_text(view("r11"))];
+    // X (register number) -> T (8..11), 99 for none; T's in use.
+    mut held = u64[];
+    for r in 16 {
+        held.push(99);
+    }
+    for i in last {
+        if o.del[i] != 0 {
+            continue;
+        }
+        op := o.op[i];
+        if ((op == 100) && (target[i] != 0)) || (op == 0) || (op == 15) || ir::is_jump(op) {
+            for r in 16 {
+                ir::put(&mut held, r, 99);
+            }
+            continue;
+        }
+        if op == 100 {
+            continue;
+        }
+        // Anything that writes X or T forgets the pair.
+        wr := ir::writes(&o, i);
+        for r in 16 {
+            if (held[r] != 99) && ((((wr >> r) & 1) != 0) || (((wr >> held[r]) & 1) != 0)) {
+                ir::put(&mut held, r, 99);
+            }
+        }
+        // A sequence: L1 `leaq (%rX,%rX,2),%rax`, L2 `addq $k,%rax`?, L3 `movq %rax,%rsi`.
+        if !((op == 3) && (o.k0[i] == 5) && (o.k1[i] == 1) && (o.v1[i] == 0)) {
+            continue;
+        }
+        x := o.m0[i];
+        mut xr = 99;
+        for r in 16 {
+            if x == (1 << r) {
+                xr = r;
+            }
+        }
+        if (xr == 99) || (o.e0[i] - o.s0[i] < 5) || (o.gen[o.e0[i] - 2] != 50) {
+            continue;
+        }
+        mut j = next_live(&o, i, last);
+        mut k = 0;
+        mut l2 = last;
+        if (j < last) && (o.op[j] == 4) && (o.k0[j] == 3) && (o.k1[j] == 1) && (o.v1[j] == 0) {
+            kv := imm_value(&o, view(s), j);
+            if (kv == 0) || (kv - 1 > 100000) {
+                continue;
+            }
+            k = kv - 1;
+            l2 = j;
+            j = next_live(&o, j, last);
+        }
+        // Lines that leave %rax, %rsi and X alone may come before the move (the base loaded into %rdi).
+        mut steps = 0;
+        while (j < last) && (steps < 2) && (o.op[j] == 1) && (o.k1[j] == 1) && (o.v1[j] != 0) && (o.v1[j] != 6) && (o.v1[j] != xr)
+            && (((ir::reads(&o, j) & 65) == 0)) {
+            j = next_live(&o, j, last);
+            steps += 1;
+        }
+        if !((j < last) && (o.op[j] == 1) && (o.k0[j] == 1) && (o.v0[j] == 0) && (o.k1[j] == 1) && (o.v1[j] == 6)) {
+            continue;
+        }
+        l3 := j;
+        if !dead_after(&o, l3, 0, 6) {
+            continue;
+        }
+        // The uses: loads through `(%rB,%rsi,8)` (and a folded op 87 before one), until %rsi is written.
+        mut uses = u64[];
+        mut folded = u64[];
+        mut y = next_live(&o, l3, last);
+        mut ok = true;
+        mut lastuse = l3;
+        while y < last {
+            yo := o.op[y];
+            if ((yo == 100) && (target[y] != 0)) || (yo == 0) || (yo == 15) || ir::is_jump(yo) {
+                break;
+            }
+            if yo == 100 {
+                y = next_live(&o, y, last);
+                continue;
+            }
+            if ((ir::reads(&o, y) >> 6) & 1) != 0 {
+                if (yo == 87) && (((o.v1[y] >> 24) & 1) != 0) {
+                    folded.push(y);
+                } else {
+                    t := o.e0[y];
+                    gen_load := (o.k0[y] == 5) && (t - o.s0[y] > 9) && (o.gen[o.s0[y]] == 40) && (o.gen[t - 1] == 41)
+                        && (o.gen[t - 2] == 56) && (o.gen[t - 3] == 44) && (o.gen[t - 4] == 105) && (o.gen[t - 5] == 115)
+                        && (o.gen[t - 6] == 114) && (o.gen[t - 7] == 37);
+                    if !gen_load {
+                        ok = false;
+                        break;
+                    }
+                    uses.push(y);
+                    lastuse = y;
+                }
+            }
+            if ((ir::writes(&o, y) >> 6) & 1) != 0 {
+                break;
+            }
+            y = next_live(&o, y, last);
+        }
+        if !ok || (uses.len() == 0) || !dead_after(&o, lastuse, 6, 6) {
+            continue;
+        }
+        mut tr = held[xr];
+        if tr == 99 {
+            // A free scratch register for X.
+            mut f = 8;
+            while f < 12 {
+                mut busy = ((named >> f) & 1) != 0;
+                for r in 16 {
+                    if held[r] == f {
+                        busy = true;
+                    }
+                }
+                if !busy {
+                    break;
+                }
+                f += 1;
+            }
+            if f == 12 {
+
+                continue;
+            }
+            tr = f;
+            ir::put(&mut held, xr, f);
+            // L1 computes 3X into T itself.
+            set_operand(&mut o, i, 1, 1, f);
+        } else {
+            kill(&mut o, i);
+        }
+        if l2 < last {
+            kill(&mut o, l2);
+        }
+        kill(&mut o, l3);
+        for z in folded.len() {
+            kill(&mut o, folded[z]);
+        }
+        for z in uses.len() {
+            u0 := uses[z];
+            sa := o.s0[u0];
+            t := o.e0[u0];
+            start := o.gen.len();
+            if k != 0 {
+                gen_number(&mut o, 8 * k);
+            }
+            // `(%rB,` copied, then T, then `,8)`.
+            mut w = sa;
+            while w < t - 7 {
+                o.gen.push(o.gen[w]);
+                w += 1;
+            }
+            o.gen.push(37);
+            for c in names[tr - 8].len() {
+                o.gen.push(names[tr - 8][c]);
+            }
+            app_gen(&mut o, view(",8)"));
+            end := o.gen.len();
+            m := (o.m0[u0] & (all_regs_mask() - 64)) | (1 << tr);
+            set_operand(&mut o, u0, 0, 5, 0);
+            ir::put(&mut o.m0, u0, m);
+            set_range(&mut o, u0, 0, start, end);
+        }
+    }
+}
+fn all_regs_mask() -> u64 {
+    return 65535;
 }
 fn name_hash<b>(s: &b [u8], a: u64, e: u64) -> u64 {
     mut h = 0;

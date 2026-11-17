@@ -1,5 +1,9 @@
 ## Unreleased
 
+- **Native backend: a scaled array index is computed once per straight line.** nbody's `p[i*3+k]`
+  computed `3*i` again for every `k`; it is now computed once into a free scratch register and the
+  later accesses read `8k(%rdi,%r8,8)`. nbody executes 5% fewer instructions.
+
 - **Native backend: unchecked multiplies by a constant are cheap.** A multiply the prover bounded
   (an array index `i * 3`) no longer loads the constant and uses `mulq`: it is
   `leaq (%r12,%r12,2),%rax` for 3, 5 and 9, a shift for a power of two, else `imulq $c`. nbody
