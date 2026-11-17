@@ -284,3 +284,20 @@ is completed second (`record-contains-itself-indirectly`).
 front-end crash cannot come back unnoticed. It runs the tree's compiler, not the checked-in seed, so
 the check answers for the sources in the tree; a host without the toolchain that builds a compiler
 skips the check rather than passing it.
+
+## Baselines: the unmutated source must check
+
+A mutated case is refused for one of two reasons: the mutation broke it, or the source was already
+broken. Only the first is evidence about the front end. A mutation touches one file, so a refused case
+whose first error points at another file (a library module, a sibling) is the second kind until shown
+otherwise: the fuzzer checks that source unmutated, once, and a source that fails as it is becomes a bug
+of kind `baseline` with the first error and its place. Seed 1 on main dfd7b5d turned up 16 such cases:
+check-mode `@no_alloc` false positives in `lib/strings.grl`, `lib/hash.grl` and
+`tests/interfaces/fx_eff_lib.grl`, an entry-point search that picks `result.iface`'s `unwrap_or` for
+files with no `main`, and a compile-time probe that needs `cc`. Before, every one of them was counted
+as a fine refusal. The same run also found two aborts the mutations reached directly, both fixed with
+cases of their own (`fuzz-extern-unmatched-closer-is-a-diagnostic`,
+`fuzz-file-ending-in-a-comment-without-newline`, `fuzz-file-of-one-slash`). The seed-1 "hang" in
+`tests/lib/zstd_test.grl` checks in 3 s alone, with the run's own compiler too: a 20 s timeout on a
+host at load 90, not a loop.
+

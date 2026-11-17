@@ -2981,29 +2981,6 @@ fn instruction<a, b, c>(l: (&a mut L), line: &b [u8], facts: (&c Facts)) -> unit
     }
     o := operands(view(rest));
     n := o.len();
-    if eq(view(op), view("movq")) && (n == 2) && (l.target == 0) && starts(view(o[0]), view("%fs:")) {
-        // The thread pointer (raw_tp_get): `%fs:0` is the Grail record, `%fs:SYM@tpoff` a TLS word.
-        // It is inline assembly with a side effect so LLVM never merges two reads: a green task
-        // can resume on another OS thread between them. Without this the whole function stayed in
-        // the unoptimised native stream - rt_current, the mutex fast path, the allocator's threaded
-        // path among them.
-        mut asm = copy(view("call i64 asm sideeffect \"movq "));
-        put(&mut asm, view(o[0]));
-        put(&mut asm, view(", $0\", \"=r\"()"));
-        v := def(&mut l, view(asm), &u8[][]);
-        store(&mut l, view(o[1]), view(v), 64);
-        return ();
-    }
-    if eq(view(op), view("movq")) && (n == 2) && (l.target == 0) && starts(view(o[1]), view("%fs:")) {
-        // Publishing this thread's record (raw_tp_set with libc loaded): a TLS word written by
-        // inline assembly, ordered like the reads above.
-        v := value(&mut l, view(o[0]), 64);
-        mut asm = copy(view("call void asm sideeffect \"movq $0, "));
-        put(&mut asm, view(o[1]));
-        put(&mut asm, view("\", \"r,~{memory}\"(i64 {})"));
-        emit(&mut l, view(asm), &u8[][v]);
-        return ();
-    }
     if eq(view(op), view("movq")) || eq(view(op), view("movabsq")) {
         if n != 2 {
             bad(&mut l);
