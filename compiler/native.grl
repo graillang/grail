@@ -23700,6 +23700,10 @@ fn static_emit<a, b>(c: (&a mut C), i: u64, ready: u64, value: u64, text: &b [u8
     o(&mut c, view("\n.popsection\n"));
     return ();
 }
+// Whether the initialiser is a vector literal: `u64[` (an element type, then the bracket).
+fn static_vector_literal_ahead<a>(c: (&a mut C)) -> bool {
+    return (kind(&mut c) == 1) && (kind_at(&mut c, c.pos + 1) == 91);
+}
 fn static_skip_item<a>(c: (&a mut C)) -> unit {
     while !is(&mut c, view(";")) {
         if kind(&mut c) == 0 {
@@ -23932,6 +23936,51 @@ fn static_resolve<a>(c: (&a mut C), i: u64) -> unit {
         fail(&mut c, view("a float static is not built yet; use `const NAME: f64 = ...;`"));
     } else if ct_call_ahead(&mut c) {
         fail(&mut c, view("this call would run when the program runs: a static with a run-time initialiser is the lazy tier, which is not built yet; write `@f(...)` to compute it while compiling"));
+    } else if (ct_seq_elem(&mut c, ty) != NO_TYPE) && static_vector_literal_ahead(&mut c) {
+        // `u64[1, 2, -3]`: a table of constant expressions, laid out as the run tier lays a table
+        // out (the element's C width), with no probe - the form the compiler's own sources use.
+        elem := ct_seq_elem(&mut c, ty);
+        width := ffi_field_size(&mut c, elem);
+        while !is(&mut c, view("[")) {
+            advance(&mut c);
+        }
+        expect(&mut c, view("["));
+        mut n = 0;
+        while !is(&mut c, view("]")) {
+            mut v = 0;
+            if eat(&mut c, view("-")) {
+                if kind(&mut c) != 2 {
+                    fail(&mut c, view("only an integer literal can be negated in a static's initialiser"));
+                }
+                t := tok_text(&mut c, c.pos);
+                lit := literal_value(&mut c, view(t));
+                if literal_fits(&mut c, elem, lit, 1) == 0 {
+                    fail(&mut c, view(literal_range_msg_v(&mut c, elem, lit, 1)));
+                }
+                advance(&mut c);
+                v = wrapping_sub(0, lit);
+            } else {
+                at := c.pos;
+                cv := ct_expr(&mut c, 0);
+                if is_bool(&mut c, cv.ty) || (cv.ty == ct_tag_ty()) {
+                    static_refuse(&mut c, at, view("a table static's elements are integers"));
+                }
+                if literal_fits(&mut c, elem, cv.value, 0) == 0 {
+                    exchange(&mut c.pos, at);
+                    fail(&mut c, view(literal_range_msg_v(&mut c, elem, cv.value, 0)));
+                }
+                v = cv.value;
+            }
+            for b in width {
+                text.push(u8((v >> (8 * b)) & 255));
+            }
+            n += 1;
+            if !eat(&mut c, view(",")) {
+                break;
+            }
+        }
+        expect(&mut c, view("]"));
+        value = n;
     } else {
         if !(integer(&mut c, ty) || is_bool(&mut c, ty)) {
             mut msg = copy_bytes(view("a `"));
@@ -32532,6 +32581,9 @@ fn builtin_id<a>(n: &a [u8]) -> u64 {
     if same(view(n), view("raw_import")) {
         return 133;
     }
+    if same(view(n), view("raw_sites")) {
+        return 143;
+    }
     return 0;
 }
 // Calls use the target word ABI (up to six words; machine.grl selects physical registers).
@@ -32638,6 +32690,9 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
     }
     if (id == 141) || (id == 142) {
         arity = 0;
+    }
+    if id == 143 {
+        arity = 2;
     }
     if id == 112 {
         arity = 3;
@@ -33126,6 +33181,20 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
         get(&mut c, args[3], view("%rdx"));
         get(&mut c, args[0], view("%rax"));
         call_slot_out(&mut c, view("call *%rax\n"), view("a call through a value the compiler did not name"));
+    }
+    if id == 143 {
+        // raw_sites(out, capacity): the site-table helper this compiler emits beside the tables
+        // (site_table), called by name - a leaf, so the effect walk follows a named edge. A build
+        // with no table has no helper and answers 0 words. The runtime moves to it from its
+        // raw_call2 through state word 3400 at the next reseed (a new intrinsic lands one reseed
+        // before its first use in the runtime: docs/testing.md).
+        if site_table_on(&c) {
+            get(&mut c, args[0], view("%rdi"));
+            get(&mut c, args[1], view("%rsi"));
+            call_out(&mut c, view("rt_sites"));
+        } else {
+            o(&mut c, view("xorl %eax,%eax\n"));
+        }
     }
     if id == 118 {
         get(&mut c, args[1], view("%rdi"));

@@ -1,5 +1,11 @@
 ## Unreleased
 
+- A table static can be a vector literal of constant expressions - `static K: u64[] = u64[0x428a2f98,
+  0x71374491];` - baked with no compile-time probe. The compiler's own sources hold only such
+  constant-tier values (`ci.mjs lint` refuses a run-tier one there, which would compile the whole
+  compiler in a probe on every cold build). The runtime gains `raw_sites`, the site-table helper
+  called by name, ahead of its first use at the next reseed.
+
 - The landing queue's build host runs the aarch64 legs under the patched qemu-aarch64:
   `tools/land-remote.sh` builds it there with `tools/qemu/build.sh` before starting the legs, and
   `tools/land.sh --remote-status` (`just land-status-remote`) prints each emulated leg's verdict for

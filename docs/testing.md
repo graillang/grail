@@ -91,6 +91,16 @@ statically by default, which needs no libc. Without a sysroot, a case that decla
 `GRAIL_SYSROOT_AARCH64` at a tree that only holds QEMU binaries *causes* the `-lc` failure, because
 it switches the link to dynamic.
 
+**A new intrinsic lands one reseed before its first use.** The runtime and the compiler's own sources
+are compiled by the seed, so they may use only what the seed knows. A new `raw_` intrinsic, builtin or
+syntax form therefore lands in two steps: first the compiler learns it (and nothing in
+`compiler/*.grl` uses it yet), then a routine reseed, then the runtime or the compiler switches to it.
+`raw_sites` (the site-table helper called by name) is in that state: it landed before its first use;
+`rt_sites_fill` moves to it from its `raw_call2` at the next reseed, deleting the named-edge special
+case for that call. For the same reason the compiler's own sources use only constant-tier statics
+and constants (`ci.mjs lint` checks it): a run-tier value would run a compile-time probe, a compile of
+the whole compiler, on every cold build of it.
+
 **The bootstrap reseed needs QEMU on `PATH` too.** `bun tools/bootstrap.mjs update all` compiles the
 compiler for every target and *runs* the aarch64/riscv64 results to check self-hosting, so without
 `$HOME/.local/qemu-static/usr/bin` on `PATH` it fails with `compiler execution failed (null)` and a
