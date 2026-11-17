@@ -793,6 +793,9 @@ struct C {
     // 1 while an assignment's target path is read: its last field is written directly (and its
     // predicate owed there), not lent out, so `field_path` records it instead of refusing the loan.
     ref_assign_target: u64,
+    // 1 once the body being emitted returned a two-word result (dyn_result): its wrapper returns the
+    // same rax:rdx pair and says so too.
+    dyn_result_seen: u64,
     // 1 while a refined function's body labels and declares itself: its symbol is `<name>.proved`,
     // and `<name>` is the checking wrapper emitted after it (ref_wrapper).
     proved_label: u64,
@@ -8246,6 +8249,14 @@ fn ref_wrapper<a, b, d>(c: (&a mut C), m: &b [u8], name: &b [u8], body_symbol: &
     }
     o(&mut c, view(":\n"));
     fx_begin(&mut c, view(sym), view(name), c.file, position, claimed_alloc, claimed_panic);
+    // The wrapper's own facts key, and the body's two-word result passing through it in rax:rdx.
+    body_facts := c.facts_fn.copy();
+    if body_facts.len() != 0 {
+        exchange(&mut c.facts_fn, sym.copy());
+    }
+    if c.dyn_result_seen != 0 {
+        dyn_result(&mut c);
+    }
     o(&mut c, view("pushq %rbp\nmovq %rsp,%rbp\n"));
     frame := label(&mut c);
     if c.target == 4 {
@@ -8257,19 +8268,34 @@ fn ref_wrapper<a, b, d>(c: (&a mut C), m: &b [u8], name: &b [u8], body_symbol: &
         fname(&mut c, frame);
         o(&mut c, view(",%rsp\n"));
     }
-    mut regs = count;
-    if 6 < count {
+    // A result of more than two words comes with the caller's destination address after the
+    // declared arguments (begin_result_dest): the wrapper keeps it in a slot of its own and hands it
+    // on, so the body writes the caller's words.
+    mut total = count;
+    if c.result_dest != 0 {
+        total = count + 1;
+    }
+    mut dslot = 0;
+    if total != count {
+        dslot = fresh(&mut c);
+    }
+    mut regs = total;
+    if 6 < total {
         regs = 5;
     }
     for i in regs {
         o(&mut c, view("movq "));
         o(&mut c, view(argreg(i)));
         c.out.push(44);
-        stack_slot(&mut c, i);
+        if i < count {
+            stack_slot(&mut c, i);
+        } else {
+            stack_slot(&mut c, dslot);
+        }
         c.out.push(10);
     }
     mut spill = 0;
-    if 6 < count {
+    if 6 < total {
         spill = fresh(&mut c);
         o(&mut c, view("movq %r9,"));
         stack_slot(&mut c, spill);
@@ -8285,7 +8311,11 @@ fn ref_wrapper<a, b, d>(c: (&a mut C), m: &b [u8], name: &b [u8], body_symbol: &
     ref_params(&mut c);
     for i in regs {
         o(&mut c, view("movq "));
-        stack_slot(&mut c, i);
+        if i < count {
+            stack_slot(&mut c, i);
+        } else {
+            stack_slot(&mut c, dslot);
+        }
         c.out.push(44);
         o(&mut c, view(argreg(i)));
         c.out.push(10);
@@ -8303,6 +8333,9 @@ fn ref_wrapper<a, b, d>(c: (&a mut C), m: &b [u8], name: &b [u8], body_symbol: &
     c.out.push(10);
     fx_end(&mut c);
     exchange(&mut c.check, after);
+    if body_facts.len() != 0 {
+        exchange(&mut c.facts_fn, body_facts);
+    }
     return ();
 }
 // Whether field `k` of record `d` carries a predicate. Such a field is written only where the
@@ -12912,6 +12945,7 @@ fn dyn_pair_of_words<a, b, d>(c: (&a mut C), data: &b [u8], table: &d [u8]) -> u
 // in the returning frame. The fact keeps the second word live at the `ret`; the caller rebuilds the
 // pair in its own frame (save_result).
 fn dyn_result<a>(c: (&a mut C)) -> unit {
+    exchange(&mut c.dyn_result_seen, 1);
     if c.facts_fn.len() != 0 {
         llvm::fact_dyn_result(&mut c.facts, copy_bytes(view(c.facts_fn)));
     }
@@ -19339,6 +19373,12 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     // parameters and calls the body (ref_wrapper). Both are ordinary functions to every later pass.
     wrapped := (export == 0) & (c.raw == 0) & (ref_pred_count(&mut c) != 0);
     exchange(&mut c.proved_label, u64(wrapped));
+    exchange(&mut c.dyn_result_seen, 0);
+    // The body's facts are keyed by the symbol it is labelled with: a fact about `<name>` would not
+    // reach `<name>.proved`, and the optimiser would read its two-word result as one word.
+    if wrapped & (c.facts_fn.len() != 0) {
+        push_bytes(&mut c.facts_fn, view(".proved"));
+    }
     func_directive(&mut c, view(m), view(name), view(body_symbol), export);
     if (c.debug != 0) & (c.validating == 0) {
         dstart = label(&mut c);
@@ -54333,6 +54373,7 @@ pub fn main() -> u64 {
         pv_pred_mode: 0,
         pv_arith_ok: 0,
         ref_assign_target: 0,
+        dyn_result_seen: 0,
         proved_label: 0,
         ref_assign_d: 0,
         ref_assign_k: 0,

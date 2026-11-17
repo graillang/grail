@@ -6,6 +6,14 @@
 - `tools/fuzz-frontend.mjs` checks the unmutated source of any refused case whose first error points
   outside the mutated file, and reports a source that fails as it is as a `baseline` bug: a library
   that stops checking can no longer pass as a stream of fine refusals.
+- **Fixed: a small record returned from a function with a refined parameter came back wrong.** Since
+  the body became `<name>.proved` beside a checking wrapper, the typed-IR facts were still keyed by
+  `<name>`: the optimiser did not see that a two-word result is returned in `rax:rdx` and dropped the
+  second word (`mk(2, 5).hi` read 0), and the wrapper did not pass on the destination address a
+  result of more than two words is written to. The body's facts now carry its own symbol, the wrapper
+  states its two-word result too, and it forwards the hidden destination argument (also past six
+  arguments). `refinement-wrapper-two-word-result`, `refinement-wrapper-dest-result`.
+
 - **Writing interfaces no longer costs the square of the declarations.** The interface writer put
   each list of names in order with a selection sort, and looked up every type's inherent methods
   by scanning every function of the program. A stable merge sort and a by-module index of the
