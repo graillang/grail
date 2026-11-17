@@ -1,5 +1,11 @@
 ## Unreleased
 
+- Fixed: `grail check` refused every program using a module that claims an effect (`use strings;`
+  alone: "`is_char_boundary` ... makes an indirect call the compiler cannot follow"). Check runs go
+  per module, and a check-only run recorded no effect facts, so the runtime's run wrote no
+  `runtime.facts` and every claim that reaches the runtime met an unknown callee. A check run that
+  writes interfaces records its bodies now; `tools/test-cli.mjs` checks a program using each lib/
+  module.
 - The internal assembler takes `.previous`.
 
 - **Text costs less to build and parse.** A string literal is checked to be UTF-8 while compiling,
