@@ -1,5 +1,9 @@
 ## Unreleased
 
+- LLVM backend: pushing a 4-byte element (f32, u32, i32) inlines at the call site - `rt_push4`'s
+  growth moved to `rt_push4_slow`, which the lifter keeps out of line, as `rt_push` already did.
+  bench/ecs on LLVM: 941M -> 823M instructions (C -O2: 710M), same checksum.
+
 - **`bench-rivals` no longer charts a build that printed the wrong answer.** It already failed the
   run when a build's output differed from C's, but still wrote that build's figures into the
   results, so a miscompiled program could chart as the fastest. Such a figure is now left out and
