@@ -25,7 +25,8 @@
 //   bun tools/bench-rivals.mjs [--runs N] [--metric cpu|instructions] [--compiler PATH | --branch REF] [NAME...]
 //   --compiler names the Grail compiler; --branch REF builds REF's (tools/rivals/common.mjs) and
 //   takes the runtime and libraries from REF's tree, the programs from this one, so the twins stay
-//   the same. Default: GRAIL_COMPILER, else this tree's. The tables name the commit measured. ffi_call is measured when
+//   the same. Default: GRAIL_COMPILER, else this tree's. The tables name the commit measured. ffi_call is this tree's
+//   when it has bench/ffi_call.grl; otherwise it is measured when
 //   GRAIL_SCHED_TREE names a checkout of a branch that has bench/ffi_call.grl (with its compiler
 //   built, `bun tools/native.mjs build` there, or named by GRAIL_SCHED_COMPILER); its figure is the
 //   program's own per-call time.
@@ -71,11 +72,12 @@ const measured = [...columns, ...nativeColumns];
 
 const names = argv.length ? argv
   : readdirSync(join(root, 'bench')).filter(f => f.endsWith('.grl')).map(f => f.slice(0, -4))
-    .filter(name => existsSync(join(root, 'bench', `${name}.c`)) && existsSync(join(root, 'bench/rivals', `${name}.rs`))).sort()
-    .concat(schedTree && existsSync(join(schedTree, 'bench/ffi_call.grl')) ? ['ffi_call'] : []);
+    .filter(name => existsSync(join(root, 'bench', `${name}.c`)) && (existsSync(join(root, 'bench/rivals', `${name}.rs`)) || existsSync(join(root, 'bench/rivals', `${name}-rs/Cargo.toml`)))).sort()
+    // ffi_call is this tree's when it has one, else the scheduler tree's (GRAIL_SCHED_TREE).
+    .concat(!existsSync(join(root, 'bench/ffi_call.grl')) && schedTree && existsSync(join(schedTree, 'bench/ffi_call.grl')) ? ['ffi_call'] : []);
 
 function build(name) {
-  const tree = name === 'ffi_call' ? schedTree : root;
+  const tree = name === 'ffi_call' && !existsSync(join(root, 'bench/ffi_call.grl')) ? schedTree : root;
   const dir = join(work, name);
   mkdirSync(dir, { recursive: true });
   const ctext = readFileSync(join(tree, 'bench', `${name}.c`), 'utf8');
@@ -87,15 +89,26 @@ function build(name) {
   // compiler's tree.
   const lib = tree === root ? measuredGrail.tree : tree;
   const grailInputs = [join(tree, 'bench', `${name}.grl`), join(lib, 'lib/core.grl')];
-  // ffi_call says `use host`: the compiler proper finds a module only under a module root.
-  const grailOptions = { runtime: join(lib, 'compiler/runtime.grl'), osRuntime: join(lib, 'compiler/os-linux.grl'), extra: tree === root ? [] : ['--module-root', join(tree, 'lib')] };
+  // A program that says `use host` (ffi_call) or `use json` finds the module under the module root.
+  const grailOptions = { runtime: join(lib, 'compiler/runtime.grl'), osRuntime: join(lib, 'compiler/os-linux.grl'), extra: ['--module-root', join(lib, 'lib')] };
   const exe = {};
   exe['grail-native'] = compileProgram(compiler, grailInputs, join(dir, 'native'), { ...grailOptions, backend: 'native', overflow: 'checked' });
   exe['grail-llvm'] = compileProgram(compiler, grailInputs, join(dir, 'llvm'), { ...grailOptions, backend: 'llvm', overflow: 'wrap' });
   run(['clang', '-O2', '-ffp-contract=off', ...cflags, join(tree, 'bench', `${name}.c`), '-o', exe.c = join(dir, 'c'), '-lm']);
   run(['clang', '-O2', '-march=native', '-ffp-contract=off', ...cflags, join(tree, 'bench', `${name}.c`), '-o', exe['c-native'] = join(dir, 'c-native'), '-lm']);
-  if (have.rust) run(['rustc', '--edition', '2021', '-C', 'opt-level=3', '-C', 'target-cpu=native', join(rivals, `${name}.rs`), '-o', exe['rust-native'] = join(dir, 'rust-native')]);
-  if (have.rust) {
+  // A twin that needs a crate (json: serde_json) is a cargo project, bench/rivals/NAME-rs, built
+  // from the offline registry with cargo's release and dev profiles; the rest are one file for rustc.
+  const crate = join(rivals, `${name}-rs`);
+  if (have.rust && existsSync(join(crate, 'Cargo.toml'))) {
+    const cargo = (profile, target, flags = '') => {
+      run(['cargo', 'build', '--offline', '-q', ...(profile === 'release' ? ['--release'] : [])], { cwd: crate, env: { ...env, CARGO_TARGET_DIR: join(dir, target), RUSTFLAGS: flags } });
+      return join(dir, target, profile === 'release' ? 'release' : 'debug', name);
+    };
+    exe['rust-release'] = cargo('release', 'cargo-release');
+    exe['rust-dev'] = cargo('dev', 'cargo-dev');
+    exe['rust-native'] = cargo('release', 'cargo-native', '-C target-cpu=native');
+  } else if (have.rust) {
+    run(['rustc', '--edition', '2021', '-C', 'opt-level=3', '-C', 'target-cpu=native', join(rivals, `${name}.rs`), '-o', exe['rust-native'] = join(dir, 'rust-native')]);
     run(['rustc', '--edition', '2021', '-C', 'opt-level=3', join(rivals, `${name}.rs`), '-o', exe['rust-release'] = join(dir, 'rust-release')]);
     run(['rustc', '--edition', '2021', '-C', 'opt-level=0', '-g', join(rivals, `${name}.rs`), '-o', exe['rust-dev'] = join(dir, 'rust-dev')]);
   }
@@ -123,24 +136,26 @@ function numbers(text) {
   });
 }
 // ffi_call reports its own per-call time on stderr: the loop around the call is what it measures.
-const selfReported = (name, r) => name === 'ffi_call' ? Number(r.stderr.match(/^ffi_call (\d+) ps/m)[1]) / 1000 : undefined;
+// Under --metric instructions it is counted like every other program (the whole program, both loops).
+const selfReported = (name, r) => name === 'ffi_call' && metric !== 'instructions' ? Number(r.stderr.match(/^ffi_call (\d+) ps/m)[1]) / 1000 : undefined;
 
 const load = [loadavg()];
 const results = {};
-const fmt = (name, v) => v === undefined ? '-' : name === 'ffi_call' ? `${v.toFixed(2)}ns` : metric === 'instructions' ? `${(v / 1e9).toFixed(2)}G` : `${v.toFixed(3)}`;
-console.log(`Grail: ${measuredGrail.commit}${names.includes('ffi_call') ? '; ffi_call: the scheduler tree ' + schedTree : ''}`);
+const fmt = (name, v) => v === undefined ? '-' : name === 'ffi_call' && metric !== 'instructions' ? `${v.toFixed(2)}ns` : metric === 'instructions' ? `${(v / 1e9).toFixed(2)}G` : `${v.toFixed(3)}`;
+console.log(`Grail: ${measuredGrail.commit}${names.includes('ffi_call') && !existsSync(join(root, 'bench/ffi_call.grl')) ? '; ffi_call: the scheduler tree ' + schedTree : ''}`);
 console.log(`bench-rivals: ${metric === 'instructions' ? 'user-space instructions (G)' : 'CPU seconds (user+sys)'}, best of ${runs}; ffi_call: ns per call as the program reports it`);
 console.log(`${'program'.padEnd(10)} ${heads.map(h => h.padStart(12)).join(' ')}   native/dev-best  LLVM/release-best`);
 let failed = 0;
 for (const name of names) {
   const exe = build(name);
-  const best = {}, out = {}, instructions = {};
+  const best = {}, out = {}, instructions = {}, cpu = {};
   for (let i = 0; i < runs; i++) {
     for (const column of measured) {
       const r = measure([exe[column]]);
       const v = selfReported(name, r) ?? (metric === 'instructions' ? r.instructions : r.cpu);
       best[column] = Math.min(best[column] ?? Infinity, v);
       instructions[column] = Math.min(instructions[column] ?? Infinity, r.instructions);
+      cpu[column] = Math.min(cpu[column] ?? Infinity, r.cpu);
       out[column] = r.stdout;
     }
   }
@@ -149,7 +164,7 @@ for (const name of names) {
   const differs = measured.filter(c => JSON.stringify(numbers(out[c])) !== JSON.stringify(numbers(out.c)));
   if (differs.some(c => columns.includes(c))) failed++;
   const dev = Math.min(...devRivals.map(c => best[c])), rel = Math.min(...releaseRivals.map(c => best[c]));
-  results[name] = { best, instructions, out: out.c, native_over_dev_best: best['grail-native'] / dev, llvm_over_release_best: best['grail-llvm'] / rel, differs };
+  results[name] = { best, instructions, cpu, out: out.c, native_over_dev_best: best['grail-native'] / dev, llvm_over_release_best: best['grail-llvm'] / rel, differs };
   console.log(`${name.padEnd(10)} ${columns.map(c => fmt(name, best[c]).padStart(12)).join(' ')}   ${ratio(best['grail-native'], dev).padStart(15)}  ${ratio(best['grail-llvm'], rel).padStart(17)}${differs.length ? `   OUTPUT DIFFERS: ${differs.join(', ')}` : ''}`);
 }
 // References: C written another way, to say what a gap is made of. Each is timed like the table and
@@ -194,19 +209,21 @@ const v = versions();
 console.log(`load average ${load[0]} at start, ${load[1]} at end; ${Object.values(v).join('; ')}`);
 writeFileSync(join(root, '.work/bench-rivals.json'), JSON.stringify({ grail: measuredGrail.commit, metric, runs, load, versions: v, results, at: new Date().toISOString() }, null, 2) + '\n');
 if (jsonPath) {
-  const unitOf = (name, kind) => name === 'ffi_call' ? (kind === 'instructions' ? 'G instructions (whole program)' : 'ns per call') : kind === 'instructions' ? 'G instructions' : 's CPU';
+  const counted = kind => kind === 'instructions' || (metric === 'instructions' && kind !== 'cpu');
+  const unitOf = (name, kind) => kind === 'cpu' ? (name === 'ffi_call' ? 's CPU (whole program)' : 's CPU') : counted(kind) ? (name === 'ffi_call' ? 'G instructions (whole program)' : 'G instructions') : name === 'ffi_call' ? 'ns per call' : 's CPU';
   const table = (id, title, keys, primary, threshold, chart, kind = 'time', note = undefined) => ({
     id, title, chart, threshold, primary, note, direction: 'lower',
     columns: keys.map(key => ({ key, label: headOf[key], grail: key.startsWith('grail') })),
-    rows: names.map(name => ({ name, unit: unitOf(name, kind), values: Object.fromEntries(keys.map(k => [k, kind === 'instructions' ? results[name].instructions[k] / 1e9 : results[name].best[k]])) })),
+    rows: names.map(name => ({ name, unit: unitOf(name, kind), values: Object.fromEntries(keys.map(k => [k, kind === 'cpu' ? results[name].cpu[k] : counted(kind) ? results[name].instructions[k] / 1e9 : results[name].best[k]])) })),
   });
+  const figure = metric === 'instructions' ? `User-space instructions (perf_event_open, every thread), fewest of ${runs}; chosen over time because the host was loaded` : `CPU time (user + sys), best of ${runs}`;
   writeResults(jsonPath, {
     tool: 'bench-rivals', title: 'Run time against C, Rust, Go and Zig', commit: measuredGrail.commit, versions: v, load,
     commands: [`bun tools/bench-rivals.mjs --runs ${runs}${chosen.branch ? ` --branch ${chosen.branch}` : ''}`, ...Object.entries({ 'Grail-native': 'native backend, --overflow=checked', 'Grail-LLVM': '--backend=llvm --overflow=wrap, clang -O2', 'C -O2': 'clang -O2 -ffp-contract=off', 'Rust rel': 'rustc --edition 2021 -C opt-level=3', Go: 'go build (GOAMD64=v1)', 'Zig RF': 'zig build-exe -O ReleaseFast -mcpu=baseline', 'Rust dev': 'rustc --edition 2021 -C opt-level=0 -g', 'Zig Debug': 'zig build-exe -O Debug -mcpu=baseline' }).map(([k, c]) => `${k}: ${c}`)],
     tables: [
-      table('release', 'Release builds: run time', ['grail-llvm', ...releaseRivals], 'grail-llvm', 1.05, true, 'time', `CPU time (user + sys), best of ${runs}. The bar: parity with clang -O2, within noise (5 %).`),
-      table('dev', 'Development builds: run time', ['grail-native', ...devRivals], 'grail-native', 1, true, 'time', `CPU time (user + sys), best of ${runs}. The bar: faster than Zig Debug, Rust's dev profile and Go.`),
-      table('instructions', 'User-space instructions', columns, 'grail-llvm', 1.05, false, 'instructions', 'perf_event_open, every thread; not moved by load.'),
+      table('release', metric === 'instructions' ? 'Release builds: instructions executed' : 'Release builds: run time', ['grail-llvm', ...releaseRivals], 'grail-llvm', 1.05, true, 'time', `${figure}. The bar: parity with clang -O2, within noise (5 %).`),
+      table('dev', metric === 'instructions' ? 'Development builds: instructions executed' : 'Development builds: run time', ['grail-native', ...devRivals], 'grail-native', 1, true, 'time', `${figure}. The bar: faster than Zig Debug, Rust's dev profile and Go.`),
+      ...(metric === 'instructions' ? [table('cpu', 'CPU time, the same runs', columns, 'grail-llvm', 1.05, false, 'cpu', `CPU time (user + sys), best of ${runs}; inflated by the load.`)] : [table('instructions', 'User-space instructions', columns, 'grail-llvm', 1.05, false, 'instructions', 'perf_event_open, every thread; not moved by load.')]),
       ...(nativeColumns.length ? [table('native-cpu', 'Rivals built for this CPU (Grail still baseline x86-64)', ['grail-llvm', ...nativeColumns], 'grail-llvm', 1.05, false)] : []),
     ],
   });

@@ -22,10 +22,15 @@
 // the source file, which keeps the compiler's own digest honest.
 //
 // Usage: bun tools/interface-test.mjs [--full] [--target T]
+//
+// The corpus part runs in GRAIL_JOBS processes (default 8), each taking every Nth case and writing to
+// its own directories, while this one runs the other proofs; the cases and their verdicts are the
+// same in any number of processes. GRAIL_TEST_FILTER=REGEX runs only the corpus cases whose name
+// matches, and none of the other proofs - the retry of a failed corpus case.
 
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import assert from 'node:assert/strict';
 import { assemble, buildCompiler, command, compilerSources, emulations, hostTarget, linkInputs, root, targetName, triples } from './native.mjs';
@@ -34,8 +39,12 @@ const flags = process.argv.slice(2);
 const target = targetName(flags.includes('--target') ? flags[flags.indexOf('--target') + 1] : hostTarget);
 const full = flags.includes('--full');
 const compiler = buildCompiler();
+// `--corpus-stripe K/N`: a corpus worker of the run that started it (proveCorpusParallel).
+const stripeAt = flags.indexOf('--corpus-stripe');
+const stripe = stripeAt >= 0 ? flags[stripeAt + 1].split('/').map(Number) : null;
+const filter = process.env.GRAIL_TEST_FILTER ? new RegExp(process.env.GRAIL_TEST_FILTER) : null;
 const work = join(root, '.work/interface-test', target);
-rmSync(work, { recursive: true, force: true });
+if (!stripe) rmSync(work, { recursive: true, force: true });
 mkdirSync(work, { recursive: true });
 const runtime = join(root, 'compiler/runtime.grl');
 const platform = join(root, 'compiler/os-linux.grl');
@@ -307,7 +316,7 @@ function proveDigests(directory) {
     // dereferences wrongly.
     assert.match(
       text,
-      /^abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0 ref record = address record plain = inline$/m,
+      /^abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0 ref record = address record plain = inline plain record = frame args = 6 registers then stack$/m,
       `${path}: the header does not state the \`dyn\` ABI`,
     );
     // Write, read, write again: the reader rebuilds the model the writer started from.
@@ -652,17 +661,17 @@ pub fn twice(x: u64) -> u64 {
   const version = compile(files, join(directory, 'version'), ['--interface', ifaces]);
   assert.equal(version.status, 1, 'an interface written by another compiler must be refused');
   assert.match(version.output, /was written in interface format 3/, `the version refusal must name the version it found: ${version.output}`);
-  assert.match(version.output, /this compiler reads format 8/, 'the version refusal must name the version this compiler reads');
+  assert.match(version.output, /this compiler reads format 9/, 'the version refusal must name the version this compiler reads');
 
   // ... and a file from a *newer* compiler is refused by name as well: a version this compiler
   // does not know is never half-read.
   const future = Buffer.from(original);
-  future[4] = 9;
+  future[4] = 10;
   repin(future);
   const ahead = compile(files, join(directory, 'future'), ['--interface', ifaces]);
   assert.equal(ahead.status, 1, 'an interface written by a newer compiler must be refused');
-  assert.match(ahead.output, /was written in interface format 9 by a newer compiler/, `the future-version refusal must name the version it found: ${ahead.output}`);
-  assert.match(ahead.output, /this one reads format 8/, 'the future-version refusal must name the version this compiler reads');
+  assert.match(ahead.output, /was written in interface format 10 by a newer compiler/, `the future-version refusal must name the version it found: ${ahead.output}`);
+  assert.match(ahead.output, /this one reads format 9/, 'the future-version refusal must name the version this compiler reads');
 
   // ... a truncated file is refused as truncated.
   repin(Buffer.from(original.subarray(0, Math.floor(original.length * 0.6))));
@@ -806,13 +815,15 @@ function corpusCases() {
     // still emitted and checked when `--full` asks for every case.
     if (modules.length === 0 && !full) continue;
     if (test.compileOnly && test.reject) continue;
+    if (filter && !filter.test(test.name)) continue;
     selected.push({ index: i, test, modules });
   }
   return selected;
 }
 
 function proveCorpus() {
-  const selected = corpusCases();
+  let selected = corpusCases();
+  if (stripe) selected = selected.filter((_, k) => k % stripe[1] === stripe[0]);
   let passed = 0;
   for (const { index, test, modules } of selected) {
     const directory = join(work, `${index}-${test.name.replace(/[^A-Za-z0-9_-]/g, '_')}`);
@@ -843,6 +854,51 @@ function proveCorpus() {
     passed += 1;
   }
   return passed;
+}
+
+// The corpus in GRAIL_JOBS worker processes, started now and waited for at the end: every case's
+// builds are its own, in its own directory, so the stripes do not touch each other. A worker's
+// output goes to a file, so a full pipe cannot stall it while this process runs the other proofs.
+function startCorpus() {
+  const jobs = Math.max(1, Number(process.env.GRAIL_JOBS || 8));
+  mkdirSync(work, { recursive: true });
+  const workers = [];
+  for (let k = 0; k < jobs; k += 1) {
+    const log = join(work, `corpus-${k}.log`);
+    const out = openSync(log, 'w');
+    const args = [process.argv[1], ...flags.filter(f => f !== '--corpus-stripe'), '--corpus-stripe', `${k}/${jobs}`];
+    const child = spawn(process.execPath, args, { stdio: ['ignore', out, out], env: { ...process.env, GRAIL_JOBS: '1' } });
+    workers.push({ log, done: new Promise(resolveDone => child.on('close', status => { closeSync(out); resolveDone(status); })) });
+  }
+  return workers;
+}
+async function finishCorpus(workers) {
+  let passed = 0;
+  let failed = false;
+  for (const w of workers) {
+    const status = await w.done;
+    const text = readFileSync(w.log, 'utf8');
+    const m = text.match(/^corpus-stripe: (\d+) passed$/m);
+    if (status !== 0 || !m) {
+      console.error(text);
+      failed = true;
+    } else passed += Number(m[1]);
+  }
+  if (failed) {
+    console.error('interface-test: a corpus case failed (above)');
+    process.exit(1);
+  }
+  return passed;
+}
+if (stripe) {
+  console.log(`corpus-stripe: ${proveCorpus()} passed`);
+  process.exit(0);
+}
+const corpusWorkers = startCorpus();
+if (filter) {
+  const corpus = await finishCorpus(corpusWorkers);
+  console.log(`interface: corpus agrees with source builds: ${corpus} programs matching ${filter}`);
+  process.exit(0);
 }
 
 // ---- the proofs -------------------------------------------------------------
@@ -969,7 +1025,7 @@ function proveGenericBodies() {
   const ifaces = emit(all, directory);
   const generic = join(ifaces, 'generic.iface');
   const text = dump(generic);
-  assert.match(text, /^grail-interface 8$/m, 'generics: the interface does not carry the current format version');
+  assert.match(text, /^grail-interface 9$/m, 'generics: the interface does not carry the current format version');
   assert.match(text, /^fn generic::twice <1> /m, 'generics: generic.iface does not declare the template');
   assert.match(text, /^\s*body$/m, 'generics: generic.iface carries no body section');
   // The body is the template's own source text, one `|` row per line, readable in a diff.
@@ -1389,7 +1445,7 @@ report('inherent methods on a written type travel in an interface', writtenInher
 const effects = proveEffectsTravel();
 report('checked effects travel in an interface, and only when claimed', effects);
 
-const corpus = proveCorpus();
+const corpus = await finishCorpus(corpusWorkers);
 report('corpus agrees with source builds', `${corpus} programs (interface build, verify build and source build agree)` + (full ? ' - full corpus' : ''));
 
 console.log(`\ninterface-test: ${results.length} checks passed`);

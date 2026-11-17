@@ -165,6 +165,18 @@ soundness bug.
   returned 0. A callback's record parameter is the `const R *` the caller owns, so it is registered
   as a borrow now and the fields stay readable under the ordinary rules.
 
+### Text at the operating-system boundary
+
+A Grail string is UTF-8 and Windows spells a path in UTF-16, so the platform layer converts in one
+place instead of at each call site. On Windows every file and process entry point takes UTF-8 and
+answers UTF-8; the wide form exists only between a conversion helper and the `-W` call that follows
+it. A path that is not valid UTF-8 is refused with `EINVAL` rather than replaced - a program that
+builds a name out of bytes that are not text gets an error it can report, not a differently-spelled
+file - while text the *system* hands back (a command line, an environment entry) decodes an unpaired
+surrogate to U+FFFD, because rejecting `argv[0]` would leave the process with no arguments at all.
+An argument and an environment entry reach a child process as UTF-16 too, which is what makes
+`host::command` behave the same on every platform.
+
 ## Bindings can be generated
 
 Writing `extern "C"` declarations by hand is the right way to bind a small surface. A whole C
@@ -206,3 +218,30 @@ What still has no expression: pointer arithmetic (an array of dynamic length is 
 record with its count checked afterwards). A C callback writes into the struct C hands it by taking
 `p: &mut R`, and `byval` records work on every ABI, Windows included. `docs/ffi.md` states each
 remaining limit with the diagnostic it produces.
+
+## Link inputs, and per-target bindings
+
+`lib "name"` is the compiler's statement of what the image needs: a bare name becomes `-lNAME`, a
+relative `.o`/`.a`/`.so` resolves beside the declaring source, and a flag passes through. The
+request is made when the declaration is **parsed**, not when it is called, and an unreferenced
+function is still emitted - so a binding placed in a module that is compiled into every program puts
+its library on every link line, whether the program uses it or not. A binding that should be
+optional belongs in a module the program imports only when it wants it (`lib/tls.grl` is the worked
+example: `use tls;` is what puts OpenSSL on the link line).
+
+One program is built for one target, but a module is compiled for every target the program is
+built for, so a binding that names a platform library needs a static branch:
+
+```grl
+@if target.os == .linux {
+    extern "C" lib "ssl" fn SSL_CTX_new(method: u64) -> u64;
+} else @if target.os == .windows {
+    extern "C" lib "secur32" fn AcquireCredentialsHandleA(/* ... */) -> i32;
+}
+```
+
+The branch not taken is parsed but neither type-checked nor emitted, so it asks the linker for
+nothing. On Windows the pair in the note is what the driver needs (`// grail-link: import secur32
+AcquireCredentialsHandleA`); on Mach-O targets a `lib` request is dropped rather than resolved
+against a framework, which is one reason `lib/tls.grl` refuses macOS for now: its plan, in the design
+note, needs `-framework Security`.

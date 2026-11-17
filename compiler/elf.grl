@@ -20,6 +20,8 @@ pub struct Obj {
     sec_data: u8[][],
     // The size of a section with no file content (SHT_NOBITS); the others use their data's length.
     sec_size: u64[],
+    // The entry size (1 for a string table that may be merged, `.debug_line_str`), else 0.
+    sec_entsize: u64[],
     // Relocations: the content section they patch, the offset, the ELF type, the index of the symbol
     // in `sym_*` (0 is the null symbol) and the addend. Each section's relocations are in offset
     // order.
@@ -32,13 +34,21 @@ pub struct Obj {
     // 0 for undefined and `abs` for an absolute value.
     sym_name: u8[][],
     sym_info: u64[],
+    // st_other: the visibility (1 internal, 2 hidden, 3 protected).
+    sym_other: u64[],
     sym_sec: u64[],
     sym_value: u64[],
+    sym_size: u64[],
     nlocal: u64
 }
 
 pub fn abs() -> u64 {
     return 0xfff1;
+}
+
+// A common symbol's section index (`.comm`): its value is the alignment, its size the size.
+pub fn common() -> u64 {
+    return 0xfff2;
 }
 
 pub fn new(machine: u64) -> Obj {
@@ -50,6 +60,7 @@ pub fn new(machine: u64) -> Obj {
         sec_align: u64[],
         sec_data: u8[][],
         sec_size: u64[],
+        sec_entsize: u64[],
         r_sec: u64[],
         r_off: u64[],
         r_type: u64[],
@@ -57,8 +68,10 @@ pub fn new(machine: u64) -> Obj {
         r_add: u64[],
         sym_name: u8[][],
         sym_info: u64[],
+        sym_other: u64[],
         sym_sec: u64[],
         sym_value: u64[],
+        sym_size: u64[],
         nlocal: 0
     };
 }
@@ -80,14 +93,12 @@ fn w64<a>(out: (&a mut u8[]), v: u64) {
     w32(&mut out, v & 0xffffffff);
     w32(&mut out, v >> 32);
 }
-// The zero bytes that bring `at` up to a multiple of `align`. The caller pushes them itself: a
-// helper that grows the caller's vector left `--backend=llvm` reading the length from before the
-// call (reported to /root with .work/m/bugs/llvm-stale-len.grl).
-fn pad_count(at: u64, align: u64) -> u64 {
-    if align <= 1 {
-        return 0;
+fn pad<a>(out: (&a mut u8[]), align: u64) {
+    if align > 1 {
+        while out.len() % align != 0 {
+            out.push(0);
+        }
     }
-    return (align - at % align) % align;
 }
 fn name<a, b>(strtab: (&a mut u8[]), text: &b [u8]) -> u64 {
     at := strtab.len();
@@ -151,17 +162,13 @@ pub fn write<a>(o: (&a Obj)) -> u8[] {
     }
     mut off = u64[];
     for k in n {
-        for i in pad_count(out.len(), o.sec_align[k]) {
-            out.push(0);
-        }
+        pad(&mut out, o.sec_align[k]);
         off.push(out.len());
         if o.sec_type[k] != 8 {
             out.append(view(o.sec_data[k]));
         }
     }
-    for i in pad_count(out.len(), 8) {
-        out.push(0);
-    }
+    pad(&mut out, 8);
     symtab_off := out.len();
     for i in 24 {
         out.push(0);
@@ -169,19 +176,17 @@ pub fn write<a>(o: (&a Obj)) -> u8[] {
     for i in o.sym_name.len() {
         w32(&mut out, symname[i]);
         w8(&mut out, o.sym_info[i]);
-        w8(&mut out, 0);
+        w8(&mut out, o.sym_other[i]);
         s := o.sym_sec[i];
         if s == 0 {
             w16(&mut out, 0);
+        } else if (s == abs()) || (s == common()) {
+            w16(&mut out, s);
         } else {
-            if s == abs() {
-                w16(&mut out, abs());
-            } else {
-                w16(&mut out, index[s - 1]);
-            }
+            w16(&mut out, index[s - 1]);
         }
         w64(&mut out, o.sym_value[i]);
-        w64(&mut out, 0);
+        w64(&mut out, o.sym_size[i]);
     }
     symtab_size := out.len() - symtab_off;
     // Relocations are grouped by section; within one, the caller's order is kept.
@@ -215,9 +220,7 @@ pub fn write<a>(o: (&a Obj)) -> u8[] {
     }
     strtab_off := out.len();
     out.append(view(strtab));
-    for i in pad_count(out.len(), 8) {
-        out.push(0);
-    }
+    pad(&mut out, 8);
     shoff := out.len();
     // Section headers.
     for i in 64 {
@@ -229,7 +232,7 @@ pub fn write<a>(o: (&a Obj)) -> u8[] {
         if o.sec_type[k] != 8 {
             size = o.sec_data[k].len();
         }
-        header(&mut out, sname[k], o.sec_type[k], o.sec_flags[k], off[k], size, 0, 0, o.sec_align[k], 0);
+        header(&mut out, sname[k], o.sec_type[k], o.sec_flags[k], off[k], size, 0, 0, o.sec_align[k], o.sec_entsize[k]);
         if nrel[k] != 0 {
             header(&mut out, rname[k], 4, 0x40, roff[k], nrel[k] * 24, symtab_index, index[k], 8, 24);
         }

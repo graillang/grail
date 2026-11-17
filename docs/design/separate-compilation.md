@@ -38,9 +38,9 @@ version, flags)`.
 
 ### Interface contents
 
-A versioned, length-counted record stream with one writer and one reader (format 8, built; see
+A versioned, length-counted record stream with one writer and one reader (format 9, built; see
 "Format 4 as built" below; format 7 added the effect summary rows of every listed function, and
-format 8 gives an `Atomic<T>` its element type). This section described a line-oriented text format when it was written;
+format 8 gives an `Atomic<T>` its element type; format 9 the bounds of a `dyn<..> I`). This section described a line-oriented text format when it was written;
 A versioned, length-counted record stream with one writer and one reader (format 7, built; see
 "Format 4 as built" below). This section described a line-oriented text format when it was written;
 that shape was replaced because its reader was a hand-written parser of a file the compiler had just
@@ -112,7 +112,7 @@ than misread.
  source "tests/interfaces/pair.grl"
  sha256 "ad1f2b3cf421decab61ea22f7dfc572fec79a74a3078b3ef330f4e49a94db2d0"
  mode typed_refs=1 default_u64=1 overflow=checked target=x86_64
- abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0 ref record = address record plain = inline
+ abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0 ref record = address record plain = inline plain record = frame args = 6 registers then stack
  unsafe 0
  std 0
  host 0
@@ -540,7 +540,7 @@ are keyed by index rather than written in order, so they cannot desynchronise fr
 and a parameter that gains a default does not change any other parameter's record.
 
 The module record also carries the **ABI line** - `abi dyn pair size = 16 align = 8 word0 = data
-word1 = vtable drop = 0 ref record = address record plain = inline`, one length-counted string holding exactly what
+word1 = vtable drop = 0 ref record = address record plain = inline plain record = frame args = 6 registers then stack`, one length-counted string holding exactly what
 `iface_dyn_abi()` returns. Its last clause says what a reference to a record is (the record's own
 address, docs/design/unboxed-values.md); a stage that changes a layout changes this line.
 A `&dyn I` in a signature or a field crosses a module boundary as a pair, so two modules built for
@@ -619,7 +619,7 @@ to look like. Nothing else should parse the bytes: a tool that needs to know wha
 runs the dump, and a test that needs to *corrupt* one changes a byte it located through the record
 framing (`tools/interface-test.mjs` does exactly that). The dump's shape is as stable as the format
 version: a field added to a record appears on the line of the record it belongs to, and a script that
-reads the dump sees the same grammar across format 8 files.
+reads the dump sees the same grammar across format 9 files.
 reads the dump sees the same grammar across format 7 files.
 
 ### The surface, computed structurally
