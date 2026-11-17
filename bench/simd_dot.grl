@@ -2,7 +2,7 @@
 // add per four elements into one accumulator, and the fixed halving-tree sum at the end. Its twin
 // in C with SSE2 intrinsics is bench/simd_dot.c; `bun tools/bench-simd.mjs` builds both (Grail
 // with --backend=llvm and the native backend, C with clang -O2) and reports ns per element.
-//   simd_dot ROUNDS     dot of two 4096-element vectors, ROUNDS times; prints the sum and time
+//   simd_dot ROUNDS     (or `check`: three rounds, the result only)     dot of two 4096-element vectors, ROUNDS times; prints the sum and time
 use host;
 
 fn dot<a>(x: (&a [f32]), y: (&a [f32])) -> f32 {
@@ -21,9 +21,16 @@ fn dot<a>(x: (&a [f32]), y: (&a [f32])) -> f32 {
     return acc.sum();
 }
 fn main(arg: &[u8]) {
+    // `check`: three rounds and the result alone, no timing - what the corpus runs, so the program's
+    // answer is pinned on every target and backend (the timing line differs run to run).
+    check_mode := (arg.len() == 5) && (arg[0] == 99) && (arg[1] == 104) && (arg[2] == 101) && (arg[3] == 99) && (arg[4] == 107);
     mut rounds = 0;
-    for i in arg.len() {
-        rounds = rounds * 10 + arg[i] - 48;
+    if check_mode {
+        rounds = 3;
+    } else {
+        for i in arg.len() {
+            rounds = rounds * 10 + arg[i] - 48;
+        }
     }
     if rounds == 0 {
         rounds = 100000;
@@ -42,6 +49,8 @@ fn main(arg: &[u8]) {
     }
     t1 := host::now_us();
     println(total);
-    print("ns/element ");
-    println(f64(t1 - t0) * 1000.0 / (f64(rounds) * f64(n)));
+    if !check_mode {
+        print("ns/element ");
+        println(f64(t1 - t0) * 1000.0 / (f64(rounds) * f64(n)));
+    }
 }
