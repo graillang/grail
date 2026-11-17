@@ -54,6 +54,12 @@
   result of more than two words is written to. The body's facts now carry its own symbol, the wrapper
   states its two-word result too, and it forwards the hidden destination argument (also past six
   arguments). `refinement-wrapper-two-word-result`, `refinement-wrapper-dest-result`.
+- `bun tools/abundance-perf.mjs`: every Abundance port program built through the build store (cold and
+  after a one-statement edit), run (dev and release, checked against the parity reference) and the
+  slowest profiled, on the current compiler and `--branch REF`; `bench/results/abundance.json` and a
+  section of the Performance chapter. It found that a module exporting a `u64` constant above 2^63
+  cannot be read back from its interface file, so eight of the ten programs do not build through
+  the store.
 
 - **Writing interfaces no longer costs the square of the declarations.** The interface writer put
   each list of names in order with a selection sort, and looked up every type's inherent methods

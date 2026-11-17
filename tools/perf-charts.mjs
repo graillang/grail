@@ -114,7 +114,7 @@ export function numbers(table) {
 
 export function provenance(data) {
   const load = Array.isArray(data.load) ? data.load.map(escape).join(' at start, ') + ' at end' : escape(data.load ?? '');
-  const items = [
+  let items = [
     ['Grail', `<code>${escape(data.commit)}</code>`],
     ['Measured', escape(data.date)],
     ['Machine', escape(`${data.machine?.cpu ?? 'unknown'}, ${data.machine?.cpus ?? '?'} CPUs, ${data.machine?.kernel ?? ''}`)],
@@ -122,6 +122,10 @@ export function provenance(data) {
     ['Toolchains', escape(Object.values(data.versions ?? {}).join('; '))],
   ];
   const commands = (data.commands ?? []).map(c => `<li><code>${escape(c)}</code></li>`).join('');
+  // abundance-perf: the slowest program's hottest functions, and any program that did not build or run.
+  if (data.hot) items.push(['Hot spots', `${escape(data.hot.program)}, the slowest release run: ${data.hot.top.length ? data.hot.top.map(t => `<code>${escape(t.fn)}</code> ${escape(t.percent)} %`).join(', ') : 'no samples'} of its time by inclusive samples (<code>grail profile --callers</code>)`]);
+  const failed = Object.entries(data.failed ?? {});
+  if (failed.length) items.push(['Did not build or run', failed.map(([k, v]) => `${escape(k)}: ${escape(v)}`).join('; ')]);
   return `<div class="perf-provenance"><dl>${items.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl><p>Reproduce with:</p><ul>${commands}</ul></div>`;
 }
 
