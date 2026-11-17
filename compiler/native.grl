@@ -14564,6 +14564,12 @@ fn header_what<a>(c: (&a mut C), ty: u64) -> u64 {
     if (k == 3) || (k == 4) {
         return 4;
     }
+    // A typed slice (`&[T]`, `&mut [T]`) is a descriptor `{data, len}` that never changes while the
+    // slice lives: element writes are all a `&mut [T]` permits, and the borrow checker refuses
+    // whatever would move the vector under it (SEQ-STABLE, docs/design/release-builds-and-parity.md).
+    if k == 27 {
+        return 5;
+    }
     if k != 6 {
         return 0;
     }
@@ -14602,13 +14608,11 @@ fn fact_seq_arg<a>(c: (&a mut C), callee: &[u8], seq: u64, seqty: u64) -> unit {
     llvm::fact_header_arg(&mut c.facts, name, c.f1_ord, cn, hw, wd);
     return ();
 }
-// Whether this compile records type facts: the LLVM lifter always wants them, and so does the typed
-// IR when `--emit-ir` asks for it (a plain native build records nothing and pays nothing).
+// Whether this compile records type facts: always, outside an `unsafe module` and validation. The
+// LLVM lifter reads them, the typed IR does for `--emit-ir`, and the native optimiser keeps a
+// slice's `data` and `len` in registers from them (optimize.grl `desc_choose`).
 fn wants_facts<a>(c: (&a C)) -> bool {
-    if (c.validating != 0) || (c.raw != 0) || (c.facts_fn.len() == 0) {
-        return false;
-    }
-    return (c.backend != 0) || (c.emit_ir != 0);
+    return (c.validating == 0) && (c.raw == 0) && (c.facts_fn.len() != 0);
 }
 fn emit_slot_fact<a>(c: (&a mut C), ty: u64, slot: u64) -> unit {
     // An `unsafe module` type-checks nothing, so in one a slot's declared type says nothing about
@@ -14664,7 +14668,10 @@ fn float_text<a>(c: (&a mut C), id: u64) -> unit {
     if id == 131 {
         name = "toi";
     }
-    if (c.target == 0) || (c.target == 3) {
+    // The arithmetic and sqrt are SSE text on every target - machine.grl translates it for AArch64
+    // and RISC-V like any other instruction - so the optimiser keeps their values in registers
+    // everywhere. Compares and integer conversions produce integers and stay `fop` off x86.
+    if (id < 127) || (id == 129) || (c.target == 0) || (c.target == 3) {
         if id < 127 {
             mut instr = "addsd";
             if id == 124 {
@@ -14798,24 +14805,19 @@ fn float_arith<a>(c: (&a mut C), op: u64, lhs: u64, rhs: u64, single: u64) -> u6
     }
     get(&mut c, lhs, view("%rax"));
     get(&mut c, rhs, view("%rcx"));
-    if (c.target == 0) || (c.target == 3) {
-        mut instr = "addsd";
-        if id == 124 {
-            instr = "subsd";
-        }
-        if id == 125 {
-            instr = "mulsd";
-        }
-        if id == 126 {
-            instr = "divsd";
-        }
-        o(&mut c, view("movq %rax,%xmm0\nmovq %rcx,%xmm1\n"));
-        o(&mut c, view(instr));
-        o(&mut c, view(" %xmm1,%xmm0\ncvtsd2ss %xmm0,%xmm0\ncvtss2sd %xmm0,%xmm0\nmovq %xmm0,%rax\n"));
-    } else {
-        float_text(&mut c, id);
-        o(&mut c, view("cf32bits\ncf32widen\n"));
+    mut instr = "addsd";
+    if id == 124 {
+        instr = "subsd";
     }
+    if id == 125 {
+        instr = "mulsd";
+    }
+    if id == 126 {
+        instr = "divsd";
+    }
+    o(&mut c, view("movq %rax,%xmm0\nmovq %rcx,%xmm1\n"));
+    o(&mut c, view(instr));
+    o(&mut c, view(" %xmm1,%xmm0\ncvtsd2ss %xmm0,%xmm0\ncvtss2sd %xmm0,%xmm0\nmovq %xmm0,%rax\n"));
     return save(&mut c);
 }
 // A binary64 word rounded to the nearest f32 (ties to even) and widened again: the value every f32
@@ -14828,11 +14830,7 @@ fn f32_round<a>(c: (&a mut C), value: u64) -> u64 {
         return invoke(&mut c, view("rt_f32_round"), one(value));
     }
     get(&mut c, value, view("%rax"));
-    if (c.target == 0) || (c.target == 3) {
-        o(&mut c, view("movq %rax,%xmm0\ncvtsd2ss %xmm0,%xmm0\ncvtss2sd %xmm0,%xmm0\nmovq %xmm0,%rax\n"));
-    } else {
-        o(&mut c, view("cf32bits\ncf32widen\n"));
-    }
+    o(&mut c, view("movq %rax,%xmm0\ncvtsd2ss %xmm0,%xmm0\ncvtss2sd %xmm0,%xmm0\nmovq %xmm0,%rax\n"));
     return save(&mut c);
 }
 // `op(lhs, rhs)` on floats. With `single` (both operands' static type is f32) the call carries the

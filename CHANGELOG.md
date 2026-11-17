@@ -21,6 +21,36 @@
   text (`&Fn` call loop: 430 M -> 120 M instructions).
 
 - `tools/land.sh BRANCH` (`just land`) lands a branch on main through one queue: the branch must already contain main, the fast gate runs on exactly its tree, and green fast-forwards main. Emulated targets run after the landing on the build host.
+- **Native backend: a slice's `data` and `len` live in registers.** The type facts are recorded on
+  the native path too, and the optimiser reads F1's slice-descriptor fact: a slice written once at
+  the top of a function keeps its data pointer and length in two callee-saved registers, so a
+  checked access is `cmpq %rL,%rsi; jb` and an indexed load (`movq (%rD,%rsi,8),%rax`), and
+  `n := x.len()` is the length's register. A failed check still names the index and the length
+  (`rt_trap` kind 64; `slice-hoisted-len-index-message`). With it: `movl`/`movb` are known
+  instructions (they were barriers across which every register was live); a float slot is found
+  through the temporaries the front end copies results through; a float held in a register across a
+  drop helper call is saved around it; and the type facts of a frame slot are looked up under the
+  table's own numbering (`-8(k+1)(%rbp)` is slot k), which the typed IR had off by one.
+  Instructions per element against scalar C: xform_f32 8.7x -> 6.9x, xform_f64 7.1x -> 5.6x,
+  dot_f32 10.8x -> 8.9x, dot_f64 8.6x -> 6.7x, matmul 12.4x -> 11.4x.
+
+- **`grail build --release`** (and `grail run --release`, a project's `grail test --release`):
+  every module is compiled by the LLVM backend and its LLVM module optimised by `clang -O2`, per
+  module through the build store as before, and integer overflow wraps unless `--overflow=` says
+  otherwise. A release unit is still one object: the assembled stream and the optimised module are
+  folded together with `ld.lld -r`. Release builds are refused on macOS and Windows and with
+  `--debug` or `--split`, rather than quietly built native. Runtime failures print their message
+  without the `--> file:line` location in a release build (the location table is a native-backend
+  artefact for now). The LLVM backend's `memcpy`/`memset`/`memmove` are weak, so several modules can
+  each carry them.
+
+- **LLVM backend: loops over slices vectorise.** A slice's descriptor (`&[T]`, `&mut [T]`) cannot
+  change while the slice lives, so the front end says so (F1 kind 5) and the lifter reads its
+  `data` (as a pointer) and `len` once per function; element addresses are `getelementptr`s on that
+  pointer, which keeps their provenance. `x[i] = x[i] * a + y[i]` over one million elements goes
+  from 7x to 1.2x (`f32`) and from 4x to 1.1x (`f64`) of vectorised `clang -O2`. Under
+  `--verify-facts` every such access re-reads the header and aborts if it moved.
+
 - Fixed: the native optimiser took an `f32` constant whose 64-bit immediate it cannot read (2.0 is
   `$4611686018427387904`, more than 18 digits) for zero, held the variable as binary32 and read 2.0
   back as 0.0. It changed Abundance's abgeo mesh digests (meshopt's `quadric_error_attr`);
@@ -46,6 +76,8 @@
   (`bench/rivals/`), release and debug builds of each, CPU time from `getrusage`, one table with
   Grail's two builds as ratios to the best competitor of their bar. The numbers and the named
   reason for every miss are in `docs/design/runtime-parity.md`, "Against other languages".
+
+
 
 - **A foreign call costs what it costs in C (x86-64).** In a program that loaded libc, every
   `extern "C"` call switched the thread pointer to libc's TCB and back, and on x86-64 a write to the
@@ -242,6 +274,11 @@
   that is rounded to `f32` at once (`addsd; cvtsd2ss; cvtss2sd`) is the single-precision one
   (`addss`): exact for + - * / and sqrt, since 53 >= 2*24 + 2. Loads that feed anything else are
   widened in place of the copy. `f32-held-as-binary32-in-registers` pins the results.
+- The float arithmetic is SSE text on AArch64 and RISC-V too, translated by machine.grl (xmm0/1 to
+  d0/d1 and ft0/ft1, xmm8..xmm14 to v17..v23 and ft2..ft8, all caller-saved), so floats are kept in
+  registers there as on x86-64; compares and integer conversions stay `fop`. And a call to a
+  runtime exit or a drop helper reads only the argument registers it takes, so a value left in
+  %rcx before one is no longer kept alive for it.
 
 - **Records of plain data are stored inline.** A struct or tuple with no `Drop` whose fields are
   numbers, bools, chars, references or other such records is now stored in place where it is a

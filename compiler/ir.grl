@@ -175,7 +175,62 @@ pub fn arg_regs() -> u64 {
 // general register except the ones named (the integer side of `movd`, `cvttsd2si`, `cvtsi2sdq`)
 // and no memory. Before they had numbers they were unknown instructions, after which every
 // register was live and nothing could be removed across them.
+// The argument registers a call reads, when the callee is one whose arguments are known: the runtime
+// exits (llvm.grl `never_returns`, and `rt_abort`; rdi, rsi, rdx by arity, runtime.grl and
+// os-linux.grl) and the compiler's drop helpers (`.D` and 16 hex digits, native.grl `drop_symbol`),
+// which take the value in rdi alone. A register mask with bit 63 set; 0 for any other call, which
+// reads every argument register.
+pub fn call_args<b>(s: &b [u8], a: u64, e: u64) -> u64 {
+    if (e - a == 18) && at(view(s), a, view(".D")) {
+        return 9223372036854775808 + 128;
+    }
+    if same_range(view(s), a, e, view("rt_abort")) {
+        return 9223372036854775808 + 0;
+    }
+    if same_range(view(s), a, e, view("rt_fail")) {
+        return 9223372036854775808 + 196;
+    }
+    if same_range(view(s), a, e, view("rt_trap")) {
+        return 9223372036854775808 + 196;
+    }
+    if same_range(view(s), a, e, view("rt_refine")) {
+        return 9223372036854775808 + 192;
+    }
+    if same_range(view(s), a, e, view("rt_task_fail")) {
+        return 9223372036854775808 + 128;
+    }
+    if same_range(view(s), a, e, view("rt_fail_text")) {
+        return 9223372036854775808 + 196;
+    }
+    if same_range(view(s), a, e, view("rt_report_die")) {
+        return 9223372036854775808 + 192;
+    }
+    if same_range(view(s), a, e, view("rt_abort_final")) {
+        return 9223372036854775808 + 0;
+    }
+    if same_range(view(s), a, e, view("rt_abort_park")) {
+        return 9223372036854775808 + 0;
+    }
+    if same_range(view(s), a, e, view("rt_hard_exit")) {
+        return 9223372036854775808 + 128;
+    }
+    if same_range(view(s), a, e, view("rt_stack_overflow")) {
+        return 9223372036854775808 + 0;
+    }
+    if same_range(view(s), a, e, view("rt_stack_overflow_at")) {
+        return 9223372036854775808 + 128;
+    }
+    return 0;
+}
 pub fn float_opcode<b>(s: &b [u8], a: u64, space: u64) -> u64 {
+    // The narrow moves the front end writes for 4-byte and byte elements: before they had numbers
+    // they were unknown instructions, across which every register was live.
+    if same_range(view(s), a, space, view("movl")) {
+        return 98;
+    }
+    if same_range(view(s), a, space, view("movb")) {
+        return 99;
+    }
     if same_range(view(s), a, space, view("addsd")) {
         return 60;
     }
@@ -228,6 +283,12 @@ pub fn float_opcode<b>(s: &b [u8], a: u64, space: u64) -> u64 {
         return 76;
     }
     return 0;
+}
+// The element accessors 40, 41, 44, 49, 51, 47, 48, 50 with the slice's `data` and `len` in the
+// registers operands 0 and 1 name instead of read through the descriptor in rdi (90..97, in that
+// order; optimize.grl `desc_choose`).
+pub fn is_desc_op(op: u64) -> bool {
+    return (89 < op) && (op < 98);
 }
 pub fn is_float_op(op: u64) -> bool {
     return (59 < op) && (op < 77);
@@ -895,11 +956,29 @@ pub fn parse<a, b>(o: (&a mut Body), s: &b [u8], a: u64, e: u64) {
     // A float instruction is understood only in the shapes the front end writes: no frame slot, and a
     // register destination (an SSE register, or a general one for the conversions to integer).
     // Anything else - a memory destination above all, which would be a store - stays unknown.
+    if (op == 98) || (op == 99) {
+        n := o.k0.len() - 1;
+        if (o.k0[n] == 2) || (o.k1[n] == 2) {
+            last := o.op.len() - 1;
+            exchange(&mut o.op[last], 0);
+        }
+    }
     if is_float_op(op) {
         n := o.k0.len() - 1;
         if (o.k0[n] == 2) || (o.k1[n] == 2) || ((o.k1[n] != 1) && (o.k1[n] != 6)) {
             last := o.op.len() - 1;
             exchange(&mut o.op[last], 0);
+        }
+    }
+    // A call whose callee's arguments are known says which registers it reads (call_args): a drop
+    // helper reads rdi, not the six registers a call is otherwise assumed to, so what the caller left
+    // in %rcx is not kept alive for it. The mask rides in the call operand's register mask with bit
+    // 63 set (`reads`).
+    if (op == 15) & (comma == e) & (o.k0[o.k0.len() - 1] == 4) {
+        known := call_args(view(s), first, e);
+        if known != 0 {
+            n := o.m0.len() - 1;
+            exchange(&mut o.m0[n], known);
         }
     }
     // Calls to the leaf runtime accessors become pseudo-instructions expanded inline at emission:
@@ -1011,6 +1090,9 @@ pub fn reads<a>(o: (&a Body), i: u64) -> u64 {
     src := mask_of(o.k0[i], o.v0[i], o.m0[i]);
     dst := mask_of(o.k1[i], o.v1[i], o.m1[i]);
     if op == 15 {
+        if (o.m0[i] >> 63) != 0 {
+            return o.m0[i] & all_regs();
+        }
         return arg_regs() | src;
     }
     if op == 100 || op == 101 || op == 29 || op == 32 || is_jump(op) {
@@ -1064,6 +1146,14 @@ pub fn reads<a>(o: (&a Body), i: u64) -> u64 {
     if op == 42 {
         return 128;
     }
+    if (op == 98) || (op == 99) {
+        // movl / movb: the source, and the registers of a memory destination's address.
+        return src | dst_address(&o, i);
+    }
+    if is_desc_op(op) {
+        // The index in rsi and the hoisted data and len registers the operands name.
+        return 64 | src | dst;
+    }
     if is_float_op(op) {
         // movd, cvttsd2si, cvtsi2sdq: the destination is written, not read.
         if (op == 69) || (op == 70) || (op == 71) {
@@ -1102,6 +1192,12 @@ pub fn writes<a>(o: (&a Body), i: u64) -> u64 {
     }
     if (46 < op) & (op < 53) {
         return 1;
+    }
+    if is_desc_op(op) {
+        return 1;
+    }
+    if (op == 98) || (op == 99) {
+        return dst_writes(&o, i);
     }
     if is_float_op(op) {
         if (op == 69) || (op == 70) {
@@ -1374,6 +1470,14 @@ pub fn facts_digest<a, b, c>(ix: (&a FactIndex), facts: (&b llvm::Facts), name: 
     }
     return total;
 }
+// The type fact of the frame word `-8n(%rbp)` (n = N/8, as the optimiser numbers slots): the table
+// files it as slot n - 1, since its slot k covers [-8(k+1), -8k) (llvm.grl `slot_needle`).
+pub fn frame_fact<a, b, c>(ix: (&a FactIndex), facts: (&b llvm::Facts), name: &c [u8], n: u64) -> u64 {
+    if n == 0 {
+        return 0;
+    }
+    return slot_fact(ix, facts, name, n - 1);
+}
 // The slot's type fact from the index: `(what << 8) | width` in the table's own encodings, or 0.
 fn slot_fact<a, b, c>(ix: (&a FactIndex), facts: (&b llvm::Facts), name: &c [u8], slot: u64) -> u64 {
     if ix.count == 0 {
@@ -1590,9 +1694,7 @@ fn slot_ty<a, b, c, d>(o: (&a Body), facts: (&b llvm::Facts), ix: (&d FactIndex)
     mut t: u64 = 0;
     mut width: u64 = 1;
     if slot != 0 {
-        // The table files a slot under the same number the stream spells in `-N(%rbp)`: the
-        // `--verify-facts` dump reads `slot 4` for the `-32(%rbp)` frame word.
-        k := slot_fact(ix, facts, view(o.name), slot);
+        k := frame_fact(ix, facts, view(o.name), slot);
         if k != 0 {
             t = ty_of_what(k >> 8);
             width = width_of_what(k >> 8, 1);
