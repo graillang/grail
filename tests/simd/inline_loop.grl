@@ -1,0 +1,28 @@
+// A small SIMD function called in a loop (docs/design/simd.md, S1): with --backend=llvm the call is
+// inlined and the vectors stay in registers - tools/test-simd.mjs reads the loop and fails on any
+// stack access in it.
+fn madd(a: f32x4, b: f32x4, c: f32x4) -> f32x4 {
+    return a * b + c;
+}
+fn dot<a>(x: (&a [f32]), y: (&a [f32])) -> f32 {
+    mut acc = f32x4::splat(0.0);
+    mut n = x.len();
+    if y.len() < n {
+        n = y.len();
+    }
+    mut i = 0;
+    while i + 4 <= n {
+        acc = madd(f32x4::load(x, i), f32x4::load(y, i), acc);
+        i += 4;
+    }
+    return acc.sum();
+}
+fn main() {
+    mut xs = f32[];
+    mut ys = f32[];
+    for i in 64 {
+        xs.push(f32(i % 7));
+        ys.push(f32(i % 5) - 1.0);
+    }
+    println(dot(&xs[:], &ys[:]));
+}

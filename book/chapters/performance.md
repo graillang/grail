@@ -99,7 +99,8 @@ and Zig, written the way each language is usually written:
 - **`hashmap`: a bucket is a vector.** The standard map chains collisions through a `u64[]` per
   bucket and keeps its entries in insertion order in a second vector, so a lookup reads the
   bucket's own header, then an index, then the entry; growing the table rebuilds every bucket
-  vector. Rust's, Go's and Zig's maps are one open-addressed table.
+  vector. Rust's, Go's and Zig's maps are one open-addressed table. (Since replaced: the map is
+  now dense entries under one open-addressed index, hashed with SipHash-1-3 as Rust's is.)
 - **`ecs`: owned vectors re-read their headers.** The update loop stores through six vectors made
   in the same function, and after each store the next access reloads a length and a data pointer
   and checks the index, so the loop stays scalar where C, Rust and Zig vectorise it.
@@ -109,7 +110,9 @@ and Zig, written the way each language is usually written:
 - **`strings`: every piece is a new string.** `split` returns owned copies of every line and every
   field, and `format` builds a new string per record, where Rust's and Zig's splits hand out slices
   of the input. The standard library also has no float parser (the JSON module carries one
-  privately), so the Grail twin parses a two-decimal number as hundredths over 100.0.
+  privately), so the Grail twin parses a two-decimal number as hundredths over 100.0. (Since
+  replaced: `split` hands out views, `parse_f64` is shared with `json`, and `append_format` writes
+  into the output; a view is still a small allocation of its own.)
 - **`json`**: behind by a similar margin to the dynamic-value parsers of the other languages; where
   its instructions go has not been profiled yet.
 - **`bintrees`** is where Grail does best: its allocator's fast path makes it execute fewer

@@ -3,6 +3,85 @@
 - Fixed: `grail fmt` could break a long expression inside `<<` or `>>` (each is two `<`/`>` tokens),
   or start a continuation line with `<`, and the output then read as a generic argument list and no
   longer parsed. A wrapped line now never starts with `<` or `>`.
+- **Soundness: a callable bound's reference parameters are fresh on every call.** In
+  `F: FnMut((&mut T), C) -> R` the `&mut T` has a lifetime the bound names nowhere else, so - as in
+  Rust's `for<'a>` elision - the closure or function given for `F` must accept any lifetime there. One
+  whose signature ties it to another parameter, its result or a capture (`fn leak<a, b>(v: &a mut T,
+  out: &b mut Out<a>)`) could keep the reference past the call and is now refused: "its parameter N
+  is a reference the bound gives it fresh on every call". It was accepted since callable bounds
+  landed (through `vecs` callbacks and the typed iterator adapters too).
+- **Fix: default interface methods work across modules.** An interface's default method bodies were
+  not carried in its `.iface`, so an implementation in another module failed with
+  "missing interface method (it has no default body)" under separate compilation (a single run was
+  fine). The default's text now travels with the method record, as a generic template's does.
+- **Changed: `split`, `trim`, `lines` and `split_whitespace` return views, and live in `strings`.**
+  They were the compiler's own methods (and `strings` methods) returning owned copies; now they are
+  `strings` methods (`use strings;`) returning views of the text (`(&[u8])[]`, `&[u8]`), like
+  Rust's `&str` pieces, and `trim_start`/`trim_end` join them. A view keeps the text borrowed, so a
+  piece that must outlive it is `split_owned(sep)` or `piece.copy()`. `for x in v` over a vector of
+  views borrows each one in place, as `for x in &v` does. Views print and format as text.
+- **`parse_f64`** (`strings`): decimal text to the nearest double, ties to even, as Rust's and Go's
+  parsers: Clinger's exact path, then Eisel-Lemire over a 128-bit power-of-five table, then an exact
+  big-integer fallback; `inf`/`infinity`/`nan`, overflow to infinity (`"1e400"`) and underflow to
+  zero. It lives in the new module `float`, which `json` now uses too (its own bignum-only path is
+  gone).
+- **`out.append_format("{}:{};", a, b)`** writes `format`'s text onto the end of a `string` or byte
+  vector with no string of its own (Rust's `write!`); onto a string only the new tail is checked to
+  be UTF-8, and not at all when every argument is a number, bool, char or string.
+- Integers print without a buffer per number or a software division per digit (`rt_fmt_num` wrote
+  each number into a fresh allocation through a shift-and-subtract divide): two digits per division,
+  straight into the output. bench/strings.grl (now `split` views, `parse_f64`, `append_format`, as
+  its Rust twin): Grail-LLVM 11.65G -> 4.53G instructions (Rust 3.23G), Grail-native 35.7G -> 13.7G.
+- The LLVM backend no longer mistakes a static's storage between two functions for a function (a
+  module with a `static` and functions after it failed to assemble).
+- `grail check` is about a fifth cheaper again: a check files *check units* - what a function asks
+  of the build, without its assembly - and writes no assembly at all; a build does not take a check
+  unit for its own and compiles that function. The compiler is no longer hashed on every command
+  (its digest is kept in the store by path, size and time).
+
+- **The standard map is one open-addressed table** (`lib/hashmap.grl`). Keys, values and their
+  hashes are stored densely in insertion order (iteration order and `key_at`/`value_at` are
+  unchanged), indexed by one table of slot words (a 32-bit hash tag and the entry index) with
+  Robin Hood linear probing and backward-shift deletion, at most half full; the per-bucket vectors
+  are gone. `hash::hash` (what the maps use) is now SipHash-1-3, as Rust's and CPython's tables
+  are; `hash::hasher` stays SipHash-2-4. The hasher compresses a word at a time (`write_num`,
+  `write_bytes`) instead of byte by byte, and `hash::table_hasher`/`hash::hash_from` hash from a
+  prepared state. bench/hashmap.grl: Grail-LLVM 4.49G -> 1.10G instructions (Rust 0.64G),
+  Grail-native 28.3G -> 4.6G (best development rival 8.1G). The LLVM backend emits generic
+  specialisations `weak_odr` instead of `weak`, so LLVM may inline them, and pushing a record of
+  whole words copies words rather than calling the byte copier.
+- Fixed: a failed index check could be reported as `division by zero`. A `%` or `/` states its
+  failure kind before its own check; when the optimiser removed that check (a divisor it proved
+  non-zero), the kind stayed pending and named the next check in the function. A pending kind now
+  ends with its statement, and an inlined bounds check is recognised by its shape first.
+- **A foreign call that holds a worker for more than 10 ms is handed off.** Every `extern "C"`
+  call on x86-64 Linux counts itself in and out on its worker (about 1.2 ns a call, measured on
+  10M calls of `labs`), and a scheduler monitor thread looks every 5 ms: a worker inside one foreign
+  call for two looks while work is queued is given to a spare, as a `blocking` call would have
+  been at once. The runtime says so once, naming the function, so it can be declared `blocking`.
+  At most 10,000 threads may be blocked in foreign calls; the next one ends the program with a
+  message instead of exhausting the machine.
+
+- **SIMD vector types (S1).** `f32x4`, `f32x8`, `f64x2`, `f64x4`, `i32x4` and `i32x8`, with masks
+  `m32x4`, `m32x8`, `m64x2` and `m64x4`.
+  - They are plain values. Lane-wise `+ - * /` work on floats; wrapping `+ - *` and `& | ^` on
+    integers; `& | ^` on masks.
+  - Constructors are `splat`, `new` and `load` (from a slice or an array, one bounds check per
+    vector). Methods are `store`, `sum` (a fixed halving tree, bit-identical everywhere), `lane`,
+    `min`/`max` (the scalar NaN and tie rule) and the compares `eq ne lt le gt ge`, which give masks.
+    A mask has `select`, `any`, `all` and `not`.
+  - The LLVM backend lowers them to vector IR. A dot product runs within 5% of the same loop in C
+    with SSE2 intrinsics, its loop entirely in registers. The native backend computes the same
+    results lane by lane; packed SSE2 and NEON come later.
+  - Interfaces are format 10.
+- Fixed: an `Atomic<T>`'s element was not part of its type, so an `Atomic<u8>` could be passed where
+  an `Atomic<u64>` was expected.
+- Stack probes have a backstop: after the probe pass, any frame line (`subq $.F<n>[+K],%rsp`,
+  `framesub`, or a literal `subq`) whose frame is larger than a page without its probe is an
+  internal compiler error naming the function, so a new spelling of the frame line cannot drop the
+  probe silently again. Frames within 128 bytes of a page are probed when the saved-register area
+  carries them over it.
+
 - **Small runtime functions are inlined into every module.** A small runtime body (the scheduler's
   `rt_current`, `rt_list_set`, `rt_list_head`, ...) is now inlined where another module calls it,
   in every build shape: a per-module build carries the bodies in `runtime.facts`. A failure inside
@@ -12,6 +91,12 @@
   module defines `memcpy`/`memset`/`memmove` itself, and an `extern "C"` declaration of the same
   name added a second, conflicting one ("invalid redefinition of function 'memcpy'"); the stdmap DNS
   and IPv6 cases failed under `GRAIL_BACKEND=llvm`. Those names are no longer declared again.
+- `host::stack_left()`: the bytes left on the current green task's stack above its guard page (0 off
+  a task), for recursive code that wants to stop or fork before it overflows.
+- The scheduler's "enough stack left to help" check read the address of a helper's dead local,
+  which the LLVM build may fold to anything; it compares a live one now
+  (`sched-help-stops-when-the-stack-is-low` passes under both backends; its depth is now measured
+  with `host::stack_left()` instead of being tuned to native frame sizes).
 
 - **Typed iterator adapters: `iter::over(v).map(..).filter(..).fold(..)`.** `iter::VecIter<T>`,
   `iter::Map<I, U, F>` and `iter::Filter<I, F>` implement `Iterator` with each callback held by its
@@ -45,6 +130,11 @@
   landing on every target it covers, so Linux x86-64, AArch64 and RISC-V builds always use it and
   `GRAIL_ASSEMBLER` no longer overrides it there (it still names the C compiler and the assembler
   for release builds, macOS and Windows).
+- Arrays whose elements own data (`[string; 3]`, `[u64[]; 4]`) can be struct fields and vector
+  elements: held inline and flat like every array, dropped in place with their holder.
+- Fix: stack probes were skipped for every frame since frames also save callee-saved registers
+  (`subq $.F<n>+K,%rsp`); a frame over a page could step over the guard page again. The probe
+  matches that form, covers the K bytes, and the pinned case checks it on every target.
 
 - **C calls with floats are optimised in release builds (call ABI S8a).** A function that called a
   C function with `f64`/`f32` arguments or a float result had to stay unoptimised on the LLVM
@@ -133,8 +223,10 @@
 - **`extern "C" blocking fn`**: a foreign function declared `blocking` (a read, a wait, a present)
   does not take a worker with it. On a worker running a green task, the call hands the worker's
   queues to a spare thread for its duration and the calling thread keeps the task - C's frames and
-  thread-locals stay where they are - then becomes a spare itself. Spares are reused, there are at
-  most twice the worker count of them, and an idle one exits after a second. Off a worker the
+  thread-locals stay where they are - then becomes a spare itself. Spares are reused - a
+  thread is made only when none is idle - and an idle one exits after a second once more than the
+  worker count are waiting. `host::read_file`, `write_file` and `command` from a task work the same
+  way now, instead of starting a thread for every call. Off a worker the
   declaration changes nothing. x86-64 Linux for now; elsewhere `blocking` is a plain call. The old
   `rt_blocking_enter` warning ("a blocking foreign call is running on a green task's scheduler
   thread") is gone with the unsafe hook that produced it.
@@ -320,6 +412,15 @@
   comparison of two constants) is decided at compile time; an accumulator worked on in %rax
   (`movq %r12,%rax; xorq ...,%rax; imulq ...,%rax; movq %rax,%r12`) is worked on in its own
   register. fnv executes 15% fewer instructions, sieve 3%.
+- **Native backend: callee-saved registers are shared by variables whose lives do not overlap.** The
+  optimiser kept one register per promoted local for the whole function, so the variables of a
+  function's first loop held the registers its later loops needed. Locals are now coloured by
+  interference, as float locals already were. fnv executes 4% fewer instructions, nbody 3%.
+- **Native backend: a call to a Grail function keeps alive only the registers it takes.** The
+  signature fact (the argument words LLVM's `define` uses) is now recorded for native builds too,
+  and a direct call to a body with one reads only that many argument registers instead of all six,
+  so a value left in, say, `%rcx` before a one-argument call is no longer kept for it. fib(32):
+  112.8M -> 105.8M instructions (Go 102.9M).
 
 - **Native backend: a slice's `data` and `len` live in registers.** The type facts are recorded on
   the native path too, and the optimiser reads F1's slice-descriptor fact: a slice written once at

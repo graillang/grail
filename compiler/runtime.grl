@@ -2359,7 +2359,7 @@ fn rt_print_number(n: u64, newline: u64) -> u64 {
     }
     while 1 {
         raw_putbyte(buf + pos, 48 + remaining % 10);
-        remaining = rt_div(remaining, 10);
+        remaining = remaining / 10;
         if remaining == 0 {
             break;
         }
@@ -2649,8 +2649,12 @@ fn rt_command_run(args: u64, env: u64) -> u64 {
 }
 // Text is UTF-8 even when its source is binary I/O or a byte view.
 fn rt_utf8(s: u64) -> u64 {
+    return rt_utf8_from(s, 0);
+}
+// Checks the bytes from `start` (a character boundary) to the end.
+fn rt_utf8_from(s: u64, start: u64) -> u64 {
     n := rt_len(s);
-    mut i = 0;
+    mut i = start;
     while i < n {
         b := rt_atb(s, i);
         mut count = 0;
@@ -3251,6 +3255,16 @@ fn rt_held_push(p: u64) -> u64 {
 }
 fn rt_held_node(object: u64, count: u64, kind: u64) -> u64 {
     b := rt_block_fast();
+    // The first slot is the one a callback-scoped hold almost always finds free.
+    first := wrapping_add(b, 56);
+    if (raw_load(wrapping_add(b, 48)) != 0) & (raw_load(wrapping_add(first, 32)) == 0) {
+        raw_store(first, object);
+        raw_store(wrapping_add(first, 8), count);
+        raw_store(wrapping_add(first, 32), kind);
+        raw_store(wrapping_add(first, 16), raw_load(wrapping_add(b, 32)));
+        raw_store(wrapping_add(b, 32), first);
+        return first;
+    }
     slots := raw_load(wrapping_add(b, 48));
     mut n = 0;
     mut i = 0;
@@ -3305,6 +3319,13 @@ fn rt_held_unlink(b: u64, e: u64) -> u64 {
 // The newest node of `kind` on `object`, taken off the list and freed; its count is the answer.
 fn rt_held_drop(object: u64, kind: u64) -> u64 {
     b := rt_block_fast();
+    head := raw_load(wrapping_add(b, 32));
+    if (head == wrapping_add(b, 56)) & (raw_load(head) == object) & (raw_load(wrapping_add(head, 32)) == kind) {
+        // The newest hold, in the first slot: unlinked and freed in place.
+        raw_store(wrapping_add(b, 32), raw_load(wrapping_add(head, 16)));
+        raw_store(wrapping_add(head, 32), 0);
+        return raw_load(wrapping_add(head, 8));
+    }
     mut at = raw_load(wrapping_add(b, 32));
     while at != 0 {
         if (raw_load(wrapping_add(at, 32)) == kind) & (raw_load(at) == object) {
@@ -3664,8 +3685,9 @@ fn f_host_rw_lock(l: u64, mode: u64, until: u64, flags: u64) -> u64 {
         rt_rw_unlock_read(l);
         return rt_rw_poisoned(l);
     }
-    rt_held_node(l, 1, mode + 2);
-    return 0;
+    // The hold's node is the answer (an address, never 3 or 4): the release takes it back without
+    // looking for it (f_host_rw_release).
+    return rt_held_node(l, 1, mode + 2);
 }
 fn f_host_rw_try(l: u64, mode: u64) -> u64 {
     mut got = 0;
@@ -3685,8 +3707,7 @@ fn f_host_rw_try(l: u64, mode: u64) -> u64 {
         }
         return rt_rw_poisoned(l);
     }
-    rt_held_node(l, 1, mode + 2);
-    return 1;
+    return rt_held_node(l, 1, mode + 2);
 }
 fn rt_rw_unlock_read(l: u64) -> u64 {
     old := raw_atomic_fetch_sub(wrapping_add(l, 8), 4);
@@ -3707,6 +3728,21 @@ fn rt_rw_unlock_write(l: u64) -> u64 {
     rt_rw_dispatch(l);
     rt_q_unlock(l);
     return 0;
+}
+// Release the hold whose node f_host_rw_lock answered: mode 1 read, 2 write, 3 write that recovers.
+fn f_host_rw_release(e: u64, mode: u64) -> u64 {
+    l := raw_load(e);
+    b := rt_block_fast();
+    rt_held_unlink(b, e);
+    rt_held_free(b, e);
+    if mode == 1 {
+        return rt_rw_unlock_read(l);
+    }
+    if mode == 3 {
+        rt_q_flags(l, 4, 0);
+        raw_store(l + 24, 0);
+    }
+    return rt_rw_unlock_write(l);
 }
 // mode 1 read, 2 write, 3 write that recovers (clears the poison).
 fn f_host_rw_unlock(l: u64, mode: u64) -> u64 {
@@ -3802,8 +3838,8 @@ fn f_host_sem_acquire(m: u64, n: u64, until: u64, flags: u64) -> u64 {
             return rt_wait_answer(r, flags);
         }
     }
-    rt_held_node(m, n, 2);
-    return 0;
+    // The permits' node is the answer (an address, never 3 or 4).
+    return rt_held_node(m, n, 2);
 }
 // The node of the permits the last acquire on this execution took (a Permit keeps it).
 fn f_host_sem_node(m: u64) -> u64 {
@@ -5001,6 +5037,8 @@ fn rt_env_is(name: u64, value: u64) -> u64 {
 // 248 their count  264 help-depth high-water mark  272 steps taken (the fairness tick)
 // 280 1 while this worker is counted as searching (rt_worker_loop, rt_worker_run)
 // 296 link in the jobs block's list of blocks waiting for a thread (rt_block_give)
+// 304 the first foreign-call counter, 320 the counter the owner uses now (odd: inside a foreign
+// call), 328 the value the monitor saw last, 336 how many ticks it has stayed
 // 512..592 the Frame job deque, 640..720 the Background job deque (the Normal one is at 128)
 // 896..1024 the CPU mask a pinned worker hands the kernel
 //
@@ -5084,6 +5122,105 @@ fn rt_sched_start(s: u64) -> u64 {
     if raw_load(s + 40) != 0 {
         rt_thread_spawn_detached(rt_reactor, s);
     }
+    if rt_task_threads() == 0 {
+        rt_thread_spawn_detached(rt_sysmon, s);
+    }
+    return 0;
+}
+// The monitor: every 5 ms it looks at each worker's foreign-call counter. A worker whose counter
+// has stayed odd - inside one foreign call - for two looks (more than 10 ms) while work is queued
+// is given to a spare: the monitor marks the counter's top bit with a compare-and-swap (which fails
+// if the call returned meanwhile), gives the block a fresh counter and hands it to rt_block_give.
+// The thread in the call finds the bit when it counts out (ffi_marker_leave) and becomes
+// block-less (rt_foreign_lost). Declared `blocking` calls never get here; they hand off at once.
+fn rt_sysmon(s: u64) -> u64 {
+    j := raw_load(rt_state_jobs());
+    raw_store(j + 488, 0);
+    raw_store(j + 496, 5000000);
+    workers := raw_load(s + 32);
+    array := raw_load(s + 72);
+    while true {
+        rt_syscall(35, j + 488, 0, 0);
+        mut i = 0;
+        while i < workers {
+            w := raw_load(array + i * 8);
+            counter := raw_load(w + 320);
+            v := raw_atomic_load(counter);
+            if ((v & 1) == 1) & (v == raw_load(w + 328)) & ((v >> 63) == 0) {
+                raw_store(w + 336, raw_load(w + 336) + 1);
+            } else {
+                raw_store(w + 336, 0);
+            }
+            raw_store(w + 328, v);
+            if (2 <= raw_load(w + 336)) && (rt_work_queued(s) != 0) {
+                if raw_atomic_cas(counter, v, v | 9223372036854775808) == v {
+                    owner := raw_load(w + 48);
+                    if (owner != 0) && (raw_load(w + 224) == raw_load(owner + 16)) {
+                        raw_store(w + 224, 0);
+                    }
+                    rt_spin_lock(j + 24);
+                    fresh := rt_job_carve(j, 504, 64);
+                    rt_spin_unlock(j + 24);
+                    raw_store(fresh, 0);
+                    raw_store(w + 320, fresh);
+                    raw_store(w + 328, 0);
+                    raw_store(w + 336, 0);
+                    rt_block_give(w);
+                }
+            }
+            i += 1;
+        }
+    }
+    return 0;
+}
+fn rt_work_queued(s: u64) -> u64 {
+    workers := raw_load(s + 32);
+    array := raw_load(s + 72);
+    mut i = 0;
+    while i <= workers {
+        w := raw_load(array + i * 8);
+        if (raw_atomic_load(w + 8) < raw_atomic_load(w + 16)) | (raw_atomic_load(w + 136) < raw_atomic_load(w + 144)) | (raw_atomic_load(w + 520) < raw_atomic_load(w + 528)) {
+            return 1;
+        }
+        i += 1;
+    }
+    if raw_atomic_load(s + 8) != raw_atomic_load(s + 16) {
+        return 1;
+    }
+    jb := raw_load(rt_state_jobs());
+    mut c = 0;
+    while c < 3 {
+        ring := rt_job_ring_at(jb, c);
+        if raw_atomic_load(ring + 8) != raw_atomic_load(ring + 16) {
+            return 1;
+        }
+        c += 1;
+    }
+    return 0;
+}
+// A foreign call came back and found its worker given away (ffi_marker_leave): this thread holds no
+// block now, keeps running its task, and becomes a spare when the task stops. Said once per process,
+// naming the function, because declaring it `blocking` hands off at once instead of after 10 ms.
+fn rt_foreign_lost(symbol: u64) -> u64 {
+    tp := raw_tp_get();
+    raw_store(tp + 24, 0);
+    raw_store(tp + 32, 0);
+    j := raw_load(rt_state_jobs());
+    if raw_atomic_cas(j + 512, 0, 1) == 0 {
+        mut n = 0;
+        while raw_byte(symbol + n) != 0 {
+            n += 1;
+        }
+        head := view("grail: the foreign call `");
+        p := rt_pack(head);
+        rt_write_all(2, p, rt_len(head));
+        rt_free(p);
+        rt_write_all(2, symbol, n);
+        tail := view("` held a worker for more than 10 ms, so the worker was given to another thread; declare it `extern \"C\" blocking` to hand off at once\n");
+        q := rt_pack(tail);
+        rt_write_all(2, q, rt_len(tail));
+        rt_free(q);
+    }
     return 0;
 }
 // The decimal value of the environment entry that starts with `name` (which ends in `=`), or 0.
@@ -5142,6 +5279,9 @@ fn rt_sched_worker_new(s: u64, index: u64) -> u64 {
         // A fixed seed fixes every worker's victim order (sched::Config.seed).
         raw_store(w + 72, wrapping_add(wrapping_mul(seed, index + 1), 2654435761) | 1);
     }
+    // The foreign-call counter this block's owner counts in and out (word 320 names it; ffi_marker_*
+    // in native.grl, rt_sysmon). It starts as word 304.
+    raw_store(w + 320, w + 304);
     jobs := raw_map(rt_job_deque_capacity() * 8);
     if rt_error(jobs) {
         rt_abort();
@@ -5356,8 +5496,9 @@ fn rt_worker_loop(worker: u64) -> u64 {
     raw_store(tp + 24, 2); // runtime worker with a deque: rt_abort_signals, rt_worker_self
     raw_store(tp + 32, worker);
     raw_store(worker + 48, tp);
-    // Give this scheduler thread whatever it needs to switch onto a task's stack (nothing on a
-    // platform whose switch is a stack swap, a fiber conversion on Windows).
+    // What this thread needs to switch onto a task's stack with this block: the fault handler's
+    // alternate stack is the block's (Linux, macOS), the fiber conversion is the thread's and done
+    // once (Windows) - so a thread that adopts another block calls this again.
     rt_os_sched_prepare();
     if rt_sched_setting(24) != 0 {
         // Worker i on CPU i; more workers than CPUs get EINVAL and stay unpinned.
@@ -6057,12 +6198,6 @@ fn rt_job_help(w: u64, r: u64) -> u64 {
     raw_store(t + 152, raw_load(t + 152) - 281474976710656);
     return 0;
 }
-// An address inside the calling frame, which is where the stack is now.
-fn rt_frame() -> u64 {
-    mut here = 0;
-    p := &mut here;
-    return p;
-}
 // May this waiter run another job on top of its own frames? This is the one place that decides.
 //   - Only on a worker: a thread that is not one takes back its own forks and nothing else.
 //   - Only with room: at least an eighth of the stack left above the guard page. The job that would
@@ -6080,7 +6215,12 @@ fn rt_job_may_help(w: u64) -> u64 {
     }
     base := raw_load(t + 8);
     if base != 0 {
-        if rt_frame() < base + 4096 + raw_load(t + 16) / 8 {
+        // Where the stack is now: the address of a word of this frame, compared while the word is
+        // live. (A helper returning the address of its own local hands back a dead pointer, which
+        // the LLVM build may fold to anything - and did, so the guard never refused.)
+        mut probe = base;
+        at := &mut probe;
+        if at < raw_load(at) + 4096 + raw_load(t + 16) / 8 {
             return 0;
         }
     }
@@ -6666,6 +6806,25 @@ fn rt_background_wait_us() -> u64 {
         i += 1;
     }
     return oldest;
+}
+// host::stack_left(): how many bytes of the current green task's stack are left below the caller
+// (above the guard page), or 0 off a task. For code that recurses deeply and wants to stop, or to
+// fork instead, before it runs into the guard page.
+fn f_host_stack_left() -> u64 {
+    t := rt_current();
+    if t == 0 {
+        return 0;
+    }
+    base := raw_load(t + 8);
+    if base == 0 {
+        return 0;
+    }
+    mut probe = base + 4096;
+    at := &mut probe;
+    if at < raw_load(at) {
+        return 0;
+    }
+    return at - raw_load(at);
 }
 fn f_host_background_wait_us() -> u64 {
     return rt_background_wait_us();
@@ -7394,14 +7553,17 @@ fn f_host_close(fd: u64) -> u64 {
 // On a worker that is running a green task, enter gives the block to a spare thread - woken, or
 // made if fewer than twice the worker count exist - and this thread becomes block-less: it makes
 // the C call, and afterwards keeps running its task (forks and spawns go to the injection rings,
-// as from any thread that is not a worker) until the task parks or ends. Then its scheduler loop
+// as from any thread that is not a worker) until the task parks or ends. Threads are reused, so a
+// program that makes a blocking call at a time pays for a thread once, not per call. Then its scheduler loop
 // sees it holds no block and it becomes a spare itself (rt_worker_thread). Nothing moves the task:
 // C's frames and C's thread-locals stay on this thread. A blocking call off a worker - main, a
 // plain thread, a callback (pinned, word 120) - is a plain call.
 //
 // Jobs block words: 432 lock of the list of blocks waiting for a thread (linked through block word
 // 296), 440 its head, 448 idle spares, 456 threads made beyond the workers, 464 the spares' futex
-// sequence, 472..480 a timespec of one second (how long an idle spare waits).
+// sequence, 472..480 a timespec of one second (how long an idle spare waits), 488..496 the
+// monitor's 5 ms tick, 504 free list of retired foreign-call counters (rt_job_carve), 512 "the
+// monitor's warning was printed".
 fn rt_blocking_enter() -> u64 {
     tp := raw_tp_get();
     if tp == 0 {
@@ -7430,9 +7592,7 @@ fn rt_blocking_enter() -> u64 {
 fn rt_blocking_leave() -> u64 {
     return 0;
 }
-// Hand block `w` to a thread: queue it, then wake an idle spare or make one (up to twice the
-// worker count beyond the workers). With the cap reached it waits in the list for the next thread
-// that comes free - one returning from its own blocking call.
+// Hand block `w` to a thread: queue it, then wake an idle spare or make one.
 fn rt_block_give(w: u64) -> u64 {
     j := raw_load(rt_state_jobs());
     rt_spin_lock(j + 432);
@@ -7444,13 +7604,20 @@ fn rt_block_give(w: u64) -> u64 {
         rt_syscall(202, j + 464, 129, 1);
         return 0;
     }
-    s := raw_atomic_load(raw_state() + 72);
-    made := raw_atomic_load(j + 456);
-    if made < raw_load(s + 32) * 2 {
-        if raw_atomic_cas(j + 456, made, made + 1) == made {
-            rt_thread_spawn_detached(rt_worker_thread, 0);
-        }
+    // No idle spare: make one. There is no hard cap on how many - every blocked call holds a
+    // thread, and a block left waiting for a thread while every thread is blocked would deadlock a
+    // program whose blocked calls wait for a task that cannot run (100 FIFO readers and their
+    // writer: colourless-io-suspension-cancel-blocking). Idle spares are what is bounded: one idle
+    // for a second exits when more than the worker count of them are waiting (rt_worker_thread).
+    // One safety limit, as Go has: a program with this many threads blocked in foreign calls is
+    // stuck, and making more would only exhaust the machine. It fails loudly instead.
+    if 10000 <= raw_atomic_fetch_add(j + 456, 1) {
+        text := view("error: 10000 threads are blocked in foreign calls; making more would exhaust the machine (does a blocking call wait for something that cannot run?)\n");
+        packed := rt_pack(text);
+        rt_write_all(2, packed, rt_len(text));
+        rt_abort();
     }
+    rt_thread_spawn_detached(rt_worker_thread, 0);
     return 0;
 }
 fn rt_block_take() -> u64 {
@@ -7472,6 +7639,7 @@ fn rt_block_take() -> u64 {
 fn rt_worker_thread(first: u64) -> u64 {
     j := raw_load(rt_state_jobs());
     s := raw_atomic_load(raw_state() + 72);
+
     mut w = first;
     while true {
         if w != 0 {
@@ -7500,8 +7668,8 @@ fn rt_worker_thread(first: u64) -> u64 {
     }
     return 0;
 }
-// The only way a green task runs a blocking operation: hand it to a dedicated OS thread and suspend.
-// A plain OS thread already has its own thread, so it runs the call directly.
+// A green task runs a blocking operation on its own thread, having given its worker to a spare for
+// the call (rt_offload). A plain OS thread runs it directly.
 fn rt_blocking_call(f: u64, a: u64, b: u64) -> u64 {
     if rt_current() == 0 {
         return raw_call2(f, a, b);
@@ -7511,8 +7679,8 @@ fn rt_blocking_call(f: u64, a: u64, b: u64) -> u64 {
 
 // A read or write that may block. With a readiness reactor the descriptor is non-blocking and the
 // task parks in rt_wait_fd; on a platform with no readiness source (Windows) the call itself runs
-// on a helper thread and the task parks, so a task inside host::read_fd or host::write_fd does not
-// stall the scheduler. The observable behaviour is the same on both; only the mechanism differs.
+// on the task's own thread with its worker given to a spare (rt_offload), so a task inside
+// host::read_fd or host::write_fd does not stall the scheduler. The observable behaviour is the same on both; only the mechanism differs.
 fn rt_read_now(fd: u64, buf: u64, max: u64) -> u64 {
     return rt_syscall(0, fd, buf, max);
 }
@@ -7526,33 +7694,13 @@ fn rt_io(f: u64, a: u64, b: u64, c: u64) -> u64 {
     return rt_offload(f, a, b, c);
 }
 
-// Blocking-call boundary: a green task hands a blocking operation to a dedicated OS thread and
-// suspends; its worker keeps running other tasks. Job words: 0 function, 8/16/24 arguments,
-// 32 result, 40 done, 48 suspended task.
-fn rt_offload_main(job: u64) -> u64 {
-    r := raw_call3(raw_load(job), raw_load(job + 8), raw_load(job + 16), raw_load(job + 24));
-    raw_store(job + 32, r);
-    raw_atomic_store(job + 40, 1);
-    // The completion reaches the reactor on a platform with a completion port, and wakes the task
-    // directly otherwise.
-    rt_os_complete(raw_load(job + 48));
-    return 0;
-}
+// Blocking-call boundary: a blocking host operation on a green task gives the task's worker to a
+// spare thread for the call (rt_blocking_enter), exactly as an `extern "C" blocking` call does, and
+// runs it right here on this thread - no thread per call, no switch, no completion to deliver.
 fn rt_offload(f: u64, a: u64, b: u64, c: u64) -> u64 {
-    t := rt_current();
-    job := rt_alloc(56);
-    raw_store(job, f);
-    raw_store(job + 8, a);
-    raw_store(job + 16, b);
-    raw_store(job + 24, c);
-    raw_store(job + 48, t);
-    thread := rt_thread_spawn(rt_offload_main, job);
-    while raw_atomic_load(job + 40) == 0 {
-        rt_suspend(t);
-    }
-    rt_thread_join(thread);
-    r := raw_load(job + 32);
-    rt_free(job);
+    rt_blocking_enter();
+    r := raw_call3(f, a, b, c);
+    rt_blocking_leave();
     return r;
 }
 
@@ -8110,27 +8258,41 @@ fn rt_print_raw(p: u64, n: u64) -> u64 {
 
 // ---- format(...) helpers: append to a byte accumulator, then validate it as text ----
 fn rt_fmt_raw(acc: u64, p: u64, n: u64) -> u64 {
-    mut i = 0;
-    while i < n {
-        rt_pushb(acc, raw_byte(p + i));
-        i += 1;
-    }
+    have := raw_load(acc + 8);
+    rt_reserveb(acc, have + n);
+    rt_copy_bytes(raw_load(acc) + have, p, n);
+    raw_store(acc + 8, have + n);
     return 0;
 }
+// The decimal digits of v, written straight onto the end of acc: one reservation, no buffer, the
+// length found by comparison and two digits per division.
 fn rt_fmt_num(acc: u64, v: u64) -> u64 {
-    buf := rt_alloc(24);
-    mut pos = 24;
-    mut r = v;
-    while true {
-        pos = pos - 1;
-        raw_putbyte(buf + pos, 48 + r % 10);
-        r = rt_div(r, 10);
-        if r == 0 {
-            break;
+    mut n = 1;
+    mut p = 10;
+    while (n < 20) & (p - 1 < v) {
+        n += 1;
+        if n < 20 {
+            p = p * 10;
         }
     }
-    rt_fmt_raw(acc, buf + pos, 24 - pos);
-    rt_free(buf);
+    have := raw_load(acc + 8);
+    rt_reserveb(acc, have + n);
+    base := raw_load(acc) + have;
+    mut r = v;
+    mut k = n;
+    while 1 < k {
+        q := r / 100;
+        d := r - q * 100;
+        t := d / 10;
+        raw_putbyte(base + k - 1, 48 + d - t * 10);
+        raw_putbyte(base + k - 2, 48 + t);
+        r = q;
+        k -= 2;
+    }
+    if k == 1 {
+        raw_putbyte(base, 48 + r);
+    }
+    raw_store(acc + 8, have + n);
     return 0;
 }
 fn rt_fmt_int(acc: u64, v: u64, code: u64) -> u64 {
@@ -9772,29 +9934,6 @@ fn rt_seq_lower(a: u64) -> u64 {
 fn rt_space(b: u64) -> u64 {
     return (b == 32) + (b == 9) + (b == 10) + (b == 13);
 }
-fn rt_seq_trim(a: u64) -> u64 {
-    mut start = 0;
-    mut end = rt_len(a);
-    while start < end {
-        if rt_space(rt_atb(a, start)) == 0 {
-            break;
-        }
-        start += 1;
-    }
-    while start < end {
-        if rt_space(rt_atb(a, end - 1)) == 0 {
-            break;
-        }
-        end -= 1;
-    }
-    out := rt_new();
-    mut i = start;
-    while i < end {
-        rt_pushb(out, rt_atb(a, i));
-        i += 1;
-    }
-    return out;
-}
 fn rt_seq_replace(a: u64, from: u64, to: u64, valid: u64) -> u64 {
     out := rt_new();
     n := rt_len(a);
@@ -9834,30 +9973,6 @@ fn rt_seq_repeat(a: u64, count: u64) -> u64 {
     return out;
 }
 // Splits on one byte; every field is kept (empty ones too), like Rust's split(char).
-fn rt_seq_split(a: u64, sep: u64, valid: u64) -> u64 {
-    parts := rt_new();
-    mut cur = rt_new();
-    n := rt_len(a);
-    mut i = 0;
-    while i < n {
-        b := rt_atb(a, i);
-        if b == sep {
-            if valid {
-                rt_utf8(cur);
-            }
-            rt_push(parts, cur);
-            cur = rt_new();
-        } else {
-            rt_pushb(cur, b);
-        }
-        i += 1;
-    }
-    if valid {
-        rt_utf8(cur);
-    }
-    rt_push(parts, cur);
-    return parts;
-}
 
 // ---- narrow vectors: f32[], u32[], i32[] store 4-byte elements ----
 // Each element is one 32-bit little-endian unit, reached with a single raw_load32/raw_store32 (a
@@ -10072,7 +10187,17 @@ fn rt_pushwk(s: u64, src: u64, w: u64) -> u64 {
         raw_store(s, ptr);
         raw_store(wrapping_add(s, 16), capacity);
     }
-    rt_copy_bytes(wrapping_add(raw_load(s), wrapping_mul(n, w)), src, w);
+    dst := wrapping_add(raw_load(s), wrapping_mul(n, w));
+    // Records are whole words: copy them as such, without the byte copier's call and tail loop.
+    if (w & 7) == 0 {
+        mut i = 0;
+        while i < w {
+            raw_store(wrapping_add(dst, i), raw_load(wrapping_add(src, i)));
+            i = i + 8;
+        }
+    } else {
+        rt_copy_bytes(dst, src, w);
+    }
     raw_store(wrapping_add(s, 8), n + 1);
     return 0;
 }
@@ -10097,6 +10222,38 @@ fn rt_popw(s: u64, w: u64) -> u64 {
     }
     raw_store(wrapping_add(s, 8), n - 1);
     return rt_flat_box(wrapping_add(raw_load(s), wrapping_mul(n - 1, w)), w);
+}
+// rt_popw into `dst` (the caller's frame words) instead of a fresh box.
+fn rt_popw_into(s: u64, w: u64, dst: u64) -> u64 {
+    n := raw_load(wrapping_add(s, 8));
+    if n == 0 {
+        rt_fail(8, 0, 0);
+    }
+    raw_store(wrapping_add(s, 8), n - 1);
+    rt_copy_bytes(dst, wrapping_add(raw_load(s), wrapping_mul(n - 1, w)), w);
+    return dst;
+}
+// The quiet form: 1 and the element copied to `dst` when there was one, 0 when the vector was empty.
+fn rt_popw_quiet_into(s: u64, w: u64, dst: u64) -> u64 {
+    if raw_load(wrapping_add(s, 8)) == 0 {
+        return 0;
+    }
+    rt_popw_into(s, w, dst);
+    return 1;
+}
+fn rt_vec_removew_into(s: u64, index: u64, w: u64, dst: u64) -> u64 {
+    n := rt_len(s);
+    if (index < n) == 0 {
+        rt_abort();
+    }
+    rt_copy_bytes(dst, rt_slotw(s, index, w), w);
+    mut i = index;
+    while i + 1 < n {
+        rt_copy_bytes(rt_slotw(s, i, w), rt_slotw(s, i + 1, w), w);
+        i += 1;
+    }
+    raw_store(wrapping_add(s, 8), n - 1);
+    return dst;
 }
 fn rt_popw_quiet(s: u64, w: u64) -> u64 {
     if raw_load(wrapping_add(s, 8)) == 0 {

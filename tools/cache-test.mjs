@@ -979,12 +979,20 @@ function proveCheck() {
   const leaf = check();
   assert.equal(leaf.status, 1, `an error in main fails the check\n${leaf.out}`);
   assert.doesNotMatch(leaf.out, /not checked/, `nothing reads main\n${leaf.out}`);
-  // A build after checks reuses their units: every body of the edited module and the rest replay.
+  // A build after checks finds only check units - registrations, no text - and compiles every body,
+  // as a cold build does (cargo's metadata against its rlib); a check after that build reuses the
+  // build's full units.
   writeFileSync(join(dir, 'src/main.grl'), 'use a;\nuse b;\nuse c;\n\nfn main() {\n    println(a::fa(1) + b::fb(2) + c::fc(3));\n}\n');
   const built = spawnSync(compiler, ['build', '--cache'], { cwd: dir, encoding: 'utf8', env, timeout: 900_000 });
   assert.equal(built.status, 0, `the build after the checks failed\n${built.stdout}${built.stderr}`);
   const bodies = sum(unitLines(`${built.stdout}${built.stderr}`));
-  assert.ok(bodies.hits > 0, `a build replays the units a check filed\n${built.stdout}`);
+  assert.equal(bodies.hits, 0, `a build must not replay a check unit, which has no text\n${built.stdout}`);
+  mod('b', 'x + 3');
+  const afterBuild = check();
+  assert.equal(afterBuild.status, 0, `the check after the build failed\n${afterBuild.out}`);
+  // b is checked again; a and c, which do not read b, come from the build's records. (main reads b,
+  // whose facts a build writes differently from a check, so main may be checked again: a miss.)
+  assert.ok(afterBuild.line.names.includes('b') && !afterBuild.line.names.includes('a') && !afterBuild.line.names.includes('c'), `the check after the build reuses the build's records\n${afterBuild.out}`);
   return { cold, edited, broken };
 }
 
