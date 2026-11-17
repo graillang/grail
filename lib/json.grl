@@ -70,7 +70,9 @@ pub fn parse_with<a>(text: &a [u8], options: Options) -> Value |? Error {
         allow_duplicate_keys: options.allow_duplicate_keys,
     };
     value := parse_value(&text, &mut cur)?;
-    skip_ws(&text, &mut cur);
+    if (cur.pos < text.len()) && (text[cur.pos] <= 32) {
+        skip_ws(&text, &mut cur);
+    }
     if cur.pos < text.len() {
         return Error { kind: ErrorKind::TrailingData, offset: cur.pos };
     }
@@ -132,6 +134,8 @@ fn wrong<a>(text: &a [u8], at: u64) -> Error {
     }
     return error(ErrorKind::UnexpectedByte, at);
 }
+// Callers test the next byte first (whitespace is <= 32), so a document without spaces costs no
+// call per token.
 fn skip_ws<a, b>(text: &a [u8], cur: (&b mut Cursor)) {
     n := text.len();
     while cur.pos < n {
@@ -156,7 +160,9 @@ fn literal<a, b, d>(text: &a [u8], cur: (&b mut Cursor), word: &d [u8]) -> unit 
     return ();
 }
 fn parse_value<a, b>(text: &a [u8], cur: (&b mut Cursor)) -> Value |? Error {
-    skip_ws(&text, &mut cur);
+    if (cur.pos < text.len()) && (text[cur.pos] <= 32) {
+        skip_ws(&text, &mut cur);
+    }
     if cur.pos >= text.len() {
         return error(ErrorKind::UnexpectedEnd, cur.pos);
     }
@@ -199,7 +205,9 @@ fn enter<b>(cur: (&b mut Cursor)) -> unit |? Error {
 fn parse_array<a, b>(text: &a [u8], cur: (&b mut Cursor)) -> Value |? Error {
     enter(&mut cur)?;
     mut items = Value[];
-    skip_ws(&text, &mut cur);
+    if (cur.pos < text.len()) && (text[cur.pos] <= 32) {
+        skip_ws(&text, &mut cur);
+    }
     if (cur.pos < text.len()) && (text[cur.pos] == ']') {
         cur.pos += 1;
         cur.depth -= 1;
@@ -208,7 +216,9 @@ fn parse_array<a, b>(text: &a [u8], cur: (&b mut Cursor)) -> Value |? Error {
     while true {
         item := parse_value(&text, &mut cur)?;
         items.push(item);
-        skip_ws(&text, &mut cur);
+        if (cur.pos < text.len()) && (text[cur.pos] <= 32) {
+            skip_ws(&text, &mut cur);
+        }
         if cur.pos >= text.len() {
             return error(ErrorKind::UnexpectedEnd, cur.pos);
         }
@@ -226,12 +236,16 @@ fn parse_array<a, b>(text: &a [u8], cur: (&b mut Cursor)) -> Value |? Error {
 }
 // Parses `"key" : value` after optional whitespace; the key's offset is returned for errors.
 fn parse_member<a, b>(text: &a [u8], cur: (&b mut Cursor)) -> Member |? Error {
-    skip_ws(&text, &mut cur);
+    if (cur.pos < text.len()) && (text[cur.pos] <= 32) {
+        skip_ws(&text, &mut cur);
+    }
     if (cur.pos >= text.len()) || (text[cur.pos] != '"') {
         return wrong(&text, cur.pos);
     }
     key := parse_string(&text, &mut cur)?;
-    skip_ws(&text, &mut cur);
+    if (cur.pos < text.len()) && (text[cur.pos] <= 32) {
+        skip_ws(&text, &mut cur);
+    }
     if (cur.pos >= text.len()) || (text[cur.pos] != ':') {
         return wrong(&text, cur.pos);
     }
@@ -241,7 +255,9 @@ fn parse_member<a, b>(text: &a [u8], cur: (&b mut Cursor)) -> Member |? Error {
 }
 // After a member: true when another follows (`,`), false at `}`.
 fn member_separator<a, b>(text: &a [u8], cur: (&b mut Cursor)) -> bool |? Error {
-    skip_ws(&text, &mut cur);
+    if (cur.pos < text.len()) && (text[cur.pos] <= 32) {
+        skip_ws(&text, &mut cur);
+    }
     if cur.pos >= text.len() {
         return error(ErrorKind::UnexpectedEnd, cur.pos);
     }
@@ -289,14 +305,18 @@ fn add_member<a, b, d>(
 fn parse_object<a, b>(text: &a [u8], cur: (&b mut Cursor)) -> Value |? Error {
     enter(&mut cur)?;
     mut members = Member[];
-    skip_ws(&text, &mut cur);
+    if (cur.pos < text.len()) && (text[cur.pos] <= 32) {
+        skip_ws(&text, &mut cur);
+    }
     if (cur.pos < text.len()) && (text[cur.pos] == '}') {
         cur.pos += 1;
         cur.depth -= 1;
         return Value::Object(members);
     }
     while true {
-        skip_ws(&text, &mut cur);
+        if (cur.pos < text.len()) && (text[cur.pos] <= 32) {
+            skip_ws(&text, &mut cur);
+        }
         at := cur.pos;
         member := parse_member(&text, &mut cur)?;
         index := find_key(&members, &member.key);
@@ -317,7 +337,9 @@ fn parse_object<a, b>(text: &a [u8], cur: (&b mut Cursor)) -> Value |? Error {
         keys.insert(m.key.text(), i);
     }
     while true {
-        skip_ws(&text, &mut cur);
+        if (cur.pos < text.len()) && (text[cur.pos] <= 32) {
+            skip_ws(&text, &mut cur);
+        }
         at := cur.pos;
         member := parse_member(&text, &mut cur)?;
         mut index = members.len();
@@ -461,7 +483,17 @@ fn simple_escape(e: u64) -> u64 {
 fn parse_string<a, b>(text: &a [u8], cur: (&b mut Cursor)) -> string |? Error {
     n := text.len();
     mut i = cur.pos + 1;
+    // Most strings are plain ASCII with no escape: copy the run in one step.
+    start := i;
+    while (i < n) && (text[i] != '"') && (text[i] != '\\') && (text[i] >= 32) && (text[i] < 128) {
+        i += 1;
+    }
+    if (i < n) && (text[i] == '"') {
+        cur.pos = i + 1;
+        return text[start: i].text();
+    }
     mut out = u8[];
+    out.append(text[start: i]);
     while true {
         if i >= n {
             return error(ErrorKind::UnexpectedEnd, n);
@@ -643,9 +675,7 @@ pub fn to_pretty<a>(value: (&a Value)) -> string {
     return out.text();
 }
 fn push_all<a, b>(out: (&a mut u8[]), bytes: &b [u8]) {
-    for b in bytes {
-        out.push(b);
-    }
+    out.append(bytes);
 }
 fn newline<a>(out: (&a mut u8[]), indent: u64, level: u64) {
     if indent == 0 {
@@ -715,46 +745,51 @@ fn write_value<a, b>(out: (&a mut u8[]), value: (&b Value), indent: u64, level: 
     }
 }
 fn write_string<a, b>(out: (&a mut u8[]), text: &b [u8]) {
-    hex := "0123456789abcdef";
     out.push('"');
+    // Most strings need no escape: one scan, then one copy.
+    mut plain = true;
+    for b in text {
+        if (b == '"') || (b == '\\') || (b < 32) {
+            plain = false;
+            break;
+        }
+    }
+    if plain {
+        out.append(text);
+        out.push('"');
+        return ();
+    }
     for b in text {
         if b == '"' {
-            push_all(&mut out, "\\\"");
+            out.append("\\\"");
+        } else if b == '\\' {
+            out.append("\\\\");
+        } else if b == 10 {
+            out.append("\\n");
+        } else if b == 13 {
+            out.append("\\r");
+        } else if b == 9 {
+            out.append("\\t");
+        } else if b == 8 {
+            out.append("\\b");
+        } else if b == 12 {
+            out.append("\\f");
+        } else if b < 32 {
+            out.append("\\u00");
+            out.push(hex_char(b >> 4));
+            out.push(hex_char(b & 15));
         } else {
-            if b == '\\' {
-                push_all(&mut out, "\\\\");
-            } else {
-                if b == 10 {
-                    push_all(&mut out, "\\n");
-                } else {
-                    if b == 13 {
-                        push_all(&mut out, "\\r");
-                    } else {
-                        if b == 9 {
-                            push_all(&mut out, "\\t");
-                        } else {
-                            if b == 8 {
-                                push_all(&mut out, "\\b");
-                            } else {
-                                if b == 12 {
-                                    push_all(&mut out, "\\f");
-                                } else {
-                                    if b < 32 {
-                                        push_all(&mut out, "\\u00");
-                                        out.push(hex[b >> 4]);
-                                        out.push(hex[b & 15]);
-                                    } else {
-                                        out.push(b);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            out.push(b);
         }
     }
     out.push('"');
+}
+// The lowercase hex digit for 0..15.
+fn hex_char(d: u64) -> u64 {
+    if d < 10 {
+        return 48 + d;
+    }
+    return 87 + d;
 }
 fn write_float<a>(out: (&a mut u8[]), x: f64) {
     if x.is_nan() | (x - x != 0.0) {
