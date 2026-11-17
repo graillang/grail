@@ -7027,6 +7027,10 @@ fn drop_name<a>(c: (&a mut C), ty: u64) -> unit {
         push_bytes(&mut c.out, view("rt_free"));
         return ();
     }
+    if array_owned(&mut c, ty) {
+        // Its helper drops in place and frees no box, so it cannot be a box's dropper.
+        array_stage_fail(&mut c, view("a value a runtime holder drops (a dyn value, a task's result, a vector's truncation), when its elements own data,"));
+    }
     name := drop_ref_name(&mut c, ty);
     push_bytes(&mut c.out, view(name));
     return ();
@@ -15175,9 +15179,6 @@ fn type_suffixes<a>(c: (&a mut C), base: u64) -> u64 {
     while is(&mut c, view("[")) {
         advance(&mut c);
         expect(&mut c, view("]"));
-        if array_owned(&mut c, out) {
-            array_stage_fail(&mut c, view("a vector's element, when its elements own data,"));
-        }
         out = vec_of(&mut c, out);
     }
     return out;
@@ -16228,9 +16229,6 @@ fn decl<a>(c: (&a mut C), pass: u64) -> unit {
             }
             if (is_enum != 0) && is_array(&mut c, ty) {
                 array_stage_fail(&mut c, view("a variant's payload"));
-            }
-            if array_owned(&mut c, ty) {
-                array_stage_fail(&mut c, view("a field, when its elements own data,"));
             }
             spots.push(at_field);
             pending.push(Field { name: f, ty: ty, pred: fp });
@@ -28299,6 +28297,14 @@ fn unbox_into_frame<a>(c: (&a mut C), slot: u64, ty: u64) -> unit {
 // The drop of a holder's word that holds `ty`: for a framed record it is the holder's box, freed;
 // for anything else the type's drop.
 fn holder_drop<a>(c: (&a mut C), ty: u64) -> unit {
+    if array_owned(&mut c, ty) {
+        // An array has no boxed helper: its elements dropped in place, then the holder's box freed.
+        o(&mut c, view("pushq %rdi\npushq %rdi\n"));
+        call_out(&mut c, view(drop_in_place_ref(&mut c, ty)));
+        o(&mut c, view("popq %rdi\npopq %rdi\n"));
+        call_out(&mut c, view("rt_free"));
+        return ();
+    }
     if framed(&mut c, ty) && !frame_drops(&mut c, ty) {
         call_out(&mut c, view("rt_free"));
         return ();
@@ -41699,7 +41705,8 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
             }
             expect(&mut c, view(")"));
             mut dropper = imm(&mut c, 0);
-            if needs_drop(&mut c, elem) {
+            // A word element's dropper (an inline element is dropped in place below).
+            if needs_drop(&mut c, elem) && (width == 0) {
                 o(&mut c, view("leaq "));
                 drop_name(&mut c, elem);
                 o(&mut c, view("(%rip),%rax\n"));

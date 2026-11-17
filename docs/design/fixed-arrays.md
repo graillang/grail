@@ -341,3 +341,14 @@ binds the parameter from the argument's length. In a template the compile-time c
 `N` (literal count, literal index) wait for the specialisation (`array_parametric`). The interface
 spelling of kind 32 carries the length argument. `[T; 0]` stays refused: a specialisation that
 binds 0 is refused at the use, as a literal 0 is.
+
+## A-next as built: owned arrays as fields and elements (after unboxed stage 4)
+
+With every struct inline (unboxed-values.md, stage 4), an array of owners is laid out like any
+array: inline in a struct (`field_layout`: arrays are framable) and flat in a vector (`flat_bytes`).
+The struct's in-place drop calls the array's helper at the field's address; a flat vector's drop and
+`truncate`/`clear` call it at each element's address (`rt_vec_truncatew`). A holder that boxes one
+(`Mutex::new`, the box-on-store holders) drops it with `holder_drop`: the array's helper on the box,
+then `rt_free`. Still refused: a runtime holder that needs a dropper function for it (`drop_name`:
+a `dyn` value, a task's result), since an array has no boxed helper; enum payloads and captures as
+before. The two refusal cases became `array-owned-in-records-and-vectors`.

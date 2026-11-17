@@ -42,6 +42,11 @@
   landing on every target it covers, so Linux x86-64, AArch64 and RISC-V builds always use it and
   `GRAIL_ASSEMBLER` no longer overrides it there (it still names the C compiler and the assembler
   for release builds, macOS and Windows).
+- Arrays whose elements own data (`[string; 3]`, `[u64[]; 4]`) can be struct fields and vector
+  elements: held inline and flat like every array, dropped in place with their holder.
+- Fix: stack probes were skipped for every frame since frames also save callee-saved registers
+  (`subq $.F<n>+K,%rsp`); a frame over a page could step over the guard page again. The probe
+  matches that form, covers the K bytes, and the pinned case checks it on every target.
 
 - **C calls with floats are optimised in release builds (call ABI S8a).** A function that called a
   C function with `f64`/`f32` arguments or a float result had to stay unoptimised on the LLVM
