@@ -652,17 +652,17 @@ pub fn twice(x: u64) -> u64 {
   const version = compile(files, join(directory, 'version'), ['--interface', ifaces]);
   assert.equal(version.status, 1, 'an interface written by another compiler must be refused');
   assert.match(version.output, /was written in interface format 3/, `the version refusal must name the version it found: ${version.output}`);
-  assert.match(version.output, /this compiler reads format 7/, 'the version refusal must name the version this compiler reads');
+  assert.match(version.output, /this compiler reads format 8/, 'the version refusal must name the version this compiler reads');
 
   // ... and a file from a *newer* compiler is refused by name as well: a version this compiler
   // does not know is never half-read.
   const future = Buffer.from(original);
-  future[4] = 8;
+  future[4] = 9;
   repin(future);
   const ahead = compile(files, join(directory, 'future'), ['--interface', ifaces]);
   assert.equal(ahead.status, 1, 'an interface written by a newer compiler must be refused');
-  assert.match(ahead.output, /was written in interface format 8 by a newer compiler/, `the future-version refusal must name the version it found: ${ahead.output}`);
-  assert.match(ahead.output, /this one reads format 7/, 'the future-version refusal must name the version this compiler reads');
+  assert.match(ahead.output, /was written in interface format 9 by a newer compiler/, `the future-version refusal must name the version it found: ${ahead.output}`);
+  assert.match(ahead.output, /this one reads format 8/, 'the future-version refusal must name the version this compiler reads');
 
   // ... a truncated file is refused as truncated.
   repin(Buffer.from(original.subarray(0, Math.floor(original.length * 0.6))));
@@ -826,7 +826,9 @@ function proveCorpus() {
     }
     files = [...files, runtime, platform];
     if (test.reject) proveRejected(test.name, files, directory);
-    else if (test.compileOnly) {
+    // A case whose verdict is a wall-clock measurement (`timing`) proves nothing about interfaces when
+    // it runs on a loaded machine, so its builds are compared but not run.
+    else if (test.compileOnly || test.timing) {
       const source = compile(files, join(directory, 'source'));
       assert.equal(source.status, 0, `${test.name}: source build failed\n${source.output}`);
       const ifaces = emit(files, join(directory, 'emit'));
@@ -967,7 +969,7 @@ function proveGenericBodies() {
   const ifaces = emit(all, directory);
   const generic = join(ifaces, 'generic.iface');
   const text = dump(generic);
-  assert.match(text, /^grail-interface 7$/m, 'generics: the interface does not carry the current format version');
+  assert.match(text, /^grail-interface 8$/m, 'generics: the interface does not carry the current format version');
   assert.match(text, /^fn generic::twice <1> /m, 'generics: generic.iface does not declare the template');
   assert.match(text, /^\s*body$/m, 'generics: generic.iface carries no body section');
   // The body is the template's own source text, one `|` row per line, readable in a diff.

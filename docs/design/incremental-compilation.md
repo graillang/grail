@@ -178,6 +178,7 @@ first of the run. A body that trips one stays as emitted and is never filed. The
 | **synthesises a declaration** (the first tuple of a size, the first result union, a closure environment) | a replay synthesises nothing, so the bodies after it would start with a different declaration count than the run that filed them, and their keys carry it |
 | names a type with **no interface spelling**, in its signature or in a registration | a key or a registration that cannot say the type would be a guess |
 | records an **effect** | a run with effect records files no units at all |
+| is the **first body of a part** | `part()` writes the `.grail_part`/`.text` marker inside that body's bytes |
 
 Also outside this layer, as before: a generic template (it is replayed per specialisation), a
 specialisation replay, and whole runs of the shapes `fn_on` refuses - `--debug`, `--backend=llvm`,

@@ -708,20 +708,246 @@ fn arithmetic<a, b, c, d>(o: (&a mut Out), op: &b [u8], src: &c [u8], dst: &d [u
     store(&mut o, view((dst)), 0);
     return ();
 }
-fn atomic_instruction<a, b, c>(o: (&a mut Out), op: &b [u8], rest: &c [u8]) -> bool {
-    target := o.target;
-    if eq(view(op), view("mfence")) || eq(view(op), view("lfence")) || eq(view(op), view("sfence")) {
-        if target == 1 {
-            if eq(view(op), view("lfence")) {
+// ---- atomics: the `atom.*` stream ops (docs/design/concurrency-stages-5-7.md, "Stage 7") ----------
+// native.grl writes one line per atomic operation, with fixed registers: the cell's address in %rdi,
+// the operand (or the expected value) in %rax, the new value of a compare-exchange in %rcx, and the
+// result in %rax. Every other register the expansion needs is scratch the front end never keeps a
+// value in across the line (x10-x12, t1/t2/t5; %rcx/%rsi on x86-64).
+//   atom.load ORDER WIDTH        atom.store ORDER WIDTH        atom.rmw OP ORDER WIDTH
+//   atom.cas ORDER WIDTH         atom.casw ORDER WIDTH         atom.fence ORDER        atom.spin
+// ORDER is relaxed, acquire, release, acqrel or seqcst; WIDTH is u8..u64, i8..i64 or bool; OP is
+// xchg, add, sub, and, or, xor, min or max. An `Atomic<T>` is an 8-byte cell holding its value
+// zero- or sign-extended (as a register holds a `T`), so every access is 64 bits wide and only a
+// narrow add/sub has to cut its result back to the width before storing it. `atom.casw` is the weak
+// form: it may fail spuriously and answers 1 (stored) or 0, because a value seen equal to the
+// expected one cannot tell a spurious failure from success.
+pub struct Atom {
+    // 1 load, 2 store, 3 rmw, 4 cas, 5 weak cas, 6 fence, 7 spin hint.
+    kind: u64,
+    // 1 xchg, 2 add, 3 sub, 4 and, 5 or, 6 xor, 7 min, 8 max.
+    op: u64,
+    // 0 relaxed, 1 acquire, 2 release, 3 acqrel, 4 seqcst.
+    order: u64,
+    // 8, 16, 32 or 64; a bool is 8 bits wide.
+    bits: u64,
+    signed: u64
+}
+// The parsed line, or kind 0 when `line` is not an atomic op. A malformed one is a compiler bug.
+pub fn atom_parse<a>(line: &a [u8]) -> Atom {
+    mut a = Atom { kind: 0, op: 0, order: 4, bits: 64, signed: 0 };
+    if !starts(view(line), view("atom.")) {
+        return a;
+    }
+    words := split(view(line), 32);
+    mut at = 1;
+    name := words[0].copy();
+    mut kind = 0;
+    if eq(view(name), view("atom.load")) {
+        kind = 1;
+    }
+    if eq(view(name), view("atom.store")) {
+        kind = 2;
+    }
+    if eq(view(name), view("atom.rmw")) {
+        kind = 3;
+    }
+    if eq(view(name), view("atom.cas")) {
+        kind = 4;
+    }
+    if eq(view(name), view("atom.casw")) {
+        kind = 5;
+    }
+    if eq(view(name), view("atom.fence")) {
+        kind = 6;
+    }
+    if eq(view(name), view("atom.spin")) {
+        kind = 7;
+    }
+    if kind == 0 {
+        bad(view(line));
+    }
+    a.kind = kind;
+    if kind == 7 {
+        return a;
+    }
+    if kind == 3 {
+        if words.len() <= at {
+            bad(view(line));
+        }
+        w := words[at].copy();
+        at += 1;
+        ops := u8[][copy_bytes(view("xchg")), copy_bytes(view("add")), copy_bytes(view("sub")), copy_bytes(view("and")), copy_bytes(view("or")), copy_bytes(view("xor")), copy_bytes(view("min")), copy_bytes(view("max"))];
+        for i in ops.len() {
+            if eq(view(w), view(ops[i])) {
+                a.op = i + 1;
+            }
+        }
+        if a.op == 0 {
+            bad(view(line));
+        }
+    }
+    if words.len() <= at {
+        bad(view(line));
+    }
+    ow := words[at].copy();
+    at += 1;
+    orders := u8[][copy_bytes(view("relaxed")), copy_bytes(view("acquire")), copy_bytes(view("release")), copy_bytes(view("acqrel")), copy_bytes(view("seqcst"))];
+    mut found = 0;
+    for i in orders.len() {
+        if eq(view(ow), view(orders[i])) {
+            a.order = i;
+            found = 1;
+        }
+    }
+    if found == 0 {
+        bad(view(line));
+    }
+    if kind == 6 {
+        return a;
+    }
+    if words.len() != at + 1 {
+        bad(view(line));
+    }
+    ww := words[at].copy();
+    if eq(view(ww), view("bool")) {
+        a.bits = 8;
+    } else {
+        if ww.len() < 2 || ((ww[0] != 117) & (ww[0] != 105)) {
+            bad(view(line));
+        }
+        mut n = 0;
+        for i in ww.len() - 1 {
+            n = n * 10 + ww[i + 1] - 48;
+        }
+        if (n != 8) & (n != 16) & (n != 32) & (n != 64) {
+            bad(view(line));
+        }
+        a.bits = n;
+        if ww[0] == 105 {
+            a.signed = 1;
+        }
+    }
+    return a;
+}
+fn copy_bytes<a>(s: &a [u8]) -> u8[] {
+    return s.copy();
+}
+// Whether `o.order` makes the load half of a read-modify-write an acquire / the store half a release.
+fn atom_acquires(order: u64) -> bool {
+    return (order == 1) || (order == 3) || (order == 4);
+}
+fn atom_releases(order: u64) -> bool {
+    return (order == 2) || (order == 3) || (order == 4);
+}
+// Cut the 64-bit result in `r` back to the atomic's width, extended as the type is.
+fn atom_normalize<a, b>(o: (&a mut Out), a: (&Atom), r: &b [u8]) -> unit {
+    if a.bits == 64 {
+        return ();
+    }
+    if o.target == 1 {
+        w := armword(view(r));
+        if a.signed != 0 {
+            if a.bits == 8 {
+                put(&mut o, view("sxtb "));
+            }
+            if a.bits == 16 {
+                put(&mut o, view("sxth "));
+            }
+            if a.bits == 32 {
+                put(&mut o, view("sxtw "));
+            }
+            put(&mut o, view(r));
+            put(&mut o, view(","));
+            put(&mut o, view(w));
+            put(&mut o, view("\n"));
+        } else {
+            if a.bits == 32 {
+                put(&mut o, view("mov "));
+                put(&mut o, view(w));
+                put(&mut o, view(","));
+                put(&mut o, view(w));
+                put(&mut o, view("\n"));
+            } else {
+                put(&mut o, view("and "));
+                put(&mut o, view(r));
+                put(&mut o, view(","));
+                put(&mut o, view(r));
+                if a.bits == 8 {
+                    put(&mut o, view(",#255\n"));
+                } else {
+                    put(&mut o, view(",#65535\n"));
+                }
+            }
+        }
+        return ();
+    }
+    if (a.signed != 0) & (a.bits == 32) {
+        put(&mut o, view("sext.w "));
+        put(&mut o, view(r));
+        put(&mut o, view(","));
+        put(&mut o, view(r));
+        put(&mut o, view("\n"));
+        return ();
+    }
+    if (a.signed == 0) & (a.bits == 8) {
+        put(&mut o, view("andi "));
+        put(&mut o, view(r));
+        put(&mut o, view(","));
+        put(&mut o, view(r));
+        put(&mut o, view(",255\n"));
+        return ();
+    }
+    shift := 64 - a.bits;
+    put(&mut o, view("slli "));
+    put(&mut o, view(r));
+    put(&mut o, view(","));
+    put(&mut o, view(r));
+    put(&mut o, view(","));
+    u64(&mut o, shift);
+    if a.signed != 0 {
+        put(&mut o, view("\nsrai "));
+    } else {
+        put(&mut o, view("\nsrli "));
+    }
+    put(&mut o, view(r));
+    put(&mut o, view(","));
+    put(&mut o, view(r));
+    put(&mut o, view(","));
+    u64(&mut o, shift);
+    put(&mut o, view("\n"));
+    return ();
+}
+// AArch64 (v8.0: ldar/stlr and exclusive-pair loops; LSE is a later option) and RV64 (AMOs, LR/SC),
+// following the C/C++11 mappings: ARMv8 with ldar/stlr for sequential consistency, and RISC-V's
+// table A.6. x86-64 is `atomics_x86` below.
+fn atomic_instruction<a, b>(o: (&a mut Out), line: &b [u8]) -> bool {
+    a := atom_parse(view(line));
+    if a.kind == 0 {
+        return false;
+    }
+    arm := o.target == 1;
+    if a.kind == 7 {
+        if arm {
+            put(&mut o, view("yield\n"));
+        } else {
+            // `pause` (Zihintpause) is a FENCE encoding with no successor set: a no-op hint on a core
+            // without the extension.
+            put(&mut o, view(".4byte 0x0100000f\n"));
+        }
+        return true;
+    }
+    if a.kind == 6 {
+        if arm {
+            if a.order == 1 {
                 put(&mut o, view("dmb ishld\n"));
             } else {
                 put(&mut o, view("dmb ish\n"));
             }
         } else {
-            if eq(view(op), view("lfence")) {
+            if a.order == 1 {
                 put(&mut o, view("fence r,rw\n"));
             } else {
-                if eq(view(op), view("sfence")) {
+                if a.order == 2 {
                     put(&mut o, view("fence rw,w\n"));
                 } else {
                     put(&mut o, view("fence rw,rw\n"));
@@ -730,69 +956,382 @@ fn atomic_instruction<a, b, c>(o: (&a mut Out), op: &b [u8], rest: &c [u8]) -> b
         }
         return true;
     }
-    if eq(view(op), view("xchgq")) {
-        args := split(view(rest), 44);
-        if args.len() != 2 {
-            bad(view(rest));
-        }
-        source := args[0].copy();
-        destination := args[1].copy();
-        if !eq(view(source), view("%rax")) {
-            bad(view(rest));
-        }
-        address(&mut o, view(destination));
-        if target == 1 {
-            n := fresh(&mut o);
-            put(&mut o, view("dmb ish\nmov x11,x9\n"));
-            mark(&mut o, n);
-            put(&mut o, view("ldaxr x10,[x13]\nstlxr w12,x11,[x13]\ncbnz w12,"));
-            label(&mut o, n);
-            put(&mut o, view("\nmov x9,x10\ndmb ish\n"));
+    if a.kind == 1 {
+        if arm {
+            if a.order == 0 {
+                put(&mut o, view("ldr x9,[x0]\n"));
+            } else {
+                put(&mut o, view("ldar x9,[x0]\n"));
+            }
         } else {
-            put(&mut o, view("fence rw,rw\namoswap.d.aqrl t0,t0,(t3)\nfence rw,rw\n"));
+            if a.order == 4 {
+                put(&mut o, view("fence rw,rw\n"));
+            }
+            put(&mut o, view("ld t0,0(a0)\n"));
+            if a.order != 0 {
+                put(&mut o, view("fence r,rw\n"));
+            }
         }
         return true;
     }
-    if eq(view(op), view("lock")) {
-        if !starts(view(rest), view("cmpxchgq ")) {
-            bad(view(rest));
+    if a.kind == 2 {
+        if arm {
+            if a.order == 0 {
+                put(&mut o, view("str x9,[x0]\n"));
+            } else {
+                put(&mut o, view("stlr x9,[x0]\n"));
+            }
+        } else {
+            if a.order != 0 {
+                put(&mut o, view("fence rw,w\n"));
+            }
+            put(&mut o, view("sd t0,0(a0)\n"));
         }
-        args := split(rest[9:], 44);
-        if args.len() != 2 {
-            bad(view(rest));
+        return true;
+    }
+    acq := atom_acquires(a.order);
+    rel := atom_releases(a.order);
+    if arm {
+        mut ld = "ldxr";
+        if acq {
+            ld = "ldaxr";
         }
-        source := args[0].copy();
-        destination := args[1].copy();
-        if !eq(view(source), view("%rcx")) {
-            bad(view(rest));
+        mut st = "stxr";
+        if rel {
+            st = "stlxr";
         }
-        address(&mut o, view(destination));
         again := fresh(&mut o);
         done := fresh(&mut o);
-        if target == 1 {
-            put(&mut o, view("dmb ish\nmov x14,x9\nmov x11,x3\n"));
+        if a.kind == 3 {
             mark(&mut o, again);
-            put(&mut o, view("ldaxr x10,[x13]\ncmp x10,x14\nb.ne "));
-            label(&mut o, done);
-            put(&mut o, view("\nstlxr w12,x11,[x13]\ncbnz w12,"));
+            put(&mut o, view(ld));
+            put(&mut o, view(" x10,[x0]\n"));
+            mut value = "x11";
+            if a.op == 1 {
+                value = "x9";
+            }
+            if a.op == 2 {
+                put(&mut o, view("add x11,x10,x9\n"));
+            }
+            if a.op == 3 {
+                put(&mut o, view("sub x11,x10,x9\n"));
+            }
+            if a.op == 4 {
+                put(&mut o, view("and x11,x10,x9\n"));
+            }
+            if a.op == 5 {
+                put(&mut o, view("orr x11,x10,x9\n"));
+            }
+            if a.op == 6 {
+                put(&mut o, view("eor x11,x10,x9\n"));
+            }
+            if (a.op == 7) || (a.op == 8) {
+                put(&mut o, view("cmp x10,x9\ncsel x11,x10,x9,"));
+                if a.signed != 0 {
+                    if a.op == 7 {
+                        put(&mut o, view("lt\n"));
+                    } else {
+                        put(&mut o, view("gt\n"));
+                    }
+                } else {
+                    if a.op == 7 {
+                        put(&mut o, view("lo\n"));
+                    } else {
+                        put(&mut o, view("hi\n"));
+                    }
+                }
+            }
+            if (a.op == 2) || (a.op == 3) {
+                atom_normalize(&mut o, &a, view("x11"));
+            }
+            put(&mut o, view(st));
+            put(&mut o, view(" w12,"));
+            put(&mut o, view(value));
+            put(&mut o, view(",[x0]\ncbnz w12,"));
             label(&mut o, again);
-            put(&mut o, view("\n"));
-            mark(&mut o, done);
-            put(&mut o, view("clrex\nmov x9,x10\ncmp x14,x10\ncset x15,cc\ndmb ish\n"));
-        } else {
-            put(&mut o, view("fence rw,rw\nmv t2,t0\n"));
-            mark(&mut o, again);
-            put(&mut o, view("lr.d.aq t0,(t3)\nbne t0,t2,"));
-            label(&mut o, done);
-            put(&mut o, view("\nsc.d.rl t5,a3,(t3)\nbnez t5,"));
-            label(&mut o, again);
-            put(&mut o, view("\n"));
-            mark(&mut o, done);
-            put(&mut o, view("xor t4,t2,t0\nseqz t4,t4\nsltu t6,t2,t0\nfence rw,rw\n"));
+            put(&mut o, view("\nmov x9,x10\n"));
+            return true;
         }
+        if a.kind == 4 {
+            mark(&mut o, again);
+            put(&mut o, view(ld));
+            put(&mut o, view(" x10,[x0]\ncmp x10,x9\nb.ne "));
+            label(&mut o, done);
+            put(&mut o, view("\n"));
+            put(&mut o, view(st));
+            put(&mut o, view(" w12,x3,[x0]\ncbnz w12,"));
+            label(&mut o, again);
+            put(&mut o, view("\n"));
+            mark(&mut o, done);
+            put(&mut o, view("clrex\nmov x9,x10\n"));
+            return true;
+        }
+        put(&mut o, view("mov x11,#0\n"));
+        put(&mut o, view(ld));
+        put(&mut o, view(" x10,[x0]\ncmp x10,x9\nb.ne "));
+        label(&mut o, done);
+        put(&mut o, view("\n"));
+        put(&mut o, view(st));
+        put(&mut o, view(" w12,x3,[x0]\ncmp w12,#0\ncset x11,eq\n"));
+        mark(&mut o, done);
+        put(&mut o, view("clrex\nmov x9,x11\n"));
         return true;
     }
+    // RV64. AMO suffix and the LR/SC pair: table A.6 puts .aqrl on the load-reserved of a
+    // sequentially consistent loop.
+    mut amo = "";
+    if acq & rel {
+        amo = ".aqrl";
+    } else {
+        if acq {
+            amo = ".aq";
+        }
+        if rel {
+            amo = ".rl";
+        }
+    }
+    mut lr = "lr.d";
+    if a.order == 4 {
+        lr = "lr.d.aqrl";
+    } else {
+        if acq {
+            lr = "lr.d.aq";
+        }
+    }
+    mut sc = "sc.d";
+    if rel {
+        sc = "sc.d.rl";
+    }
+    if a.kind == 3 {
+        narrow := (a.bits != 64) & ((a.op == 2) || (a.op == 3));
+        if !narrow {
+            mut name = "amoswap.d";
+            if a.op == 2 {
+                name = "amoadd.d";
+            }
+            if a.op == 3 {
+                put(&mut o, view("neg t0,t0\n"));
+                name = "amoadd.d";
+            }
+            if a.op == 4 {
+                name = "amoand.d";
+            }
+            if a.op == 5 {
+                name = "amoor.d";
+            }
+            if a.op == 6 {
+                name = "amoxor.d";
+            }
+            if a.op == 7 {
+                if a.signed != 0 {
+                    name = "amomin.d";
+                } else {
+                    name = "amominu.d";
+                }
+            }
+            if a.op == 8 {
+                if a.signed != 0 {
+                    name = "amomax.d";
+                } else {
+                    name = "amomaxu.d";
+                }
+            }
+            put(&mut o, view(name));
+            put(&mut o, view(amo));
+            put(&mut o, view(" t0,t0,(a0)\n"));
+            return true;
+        }
+        again := fresh(&mut o);
+        mark(&mut o, again);
+        put(&mut o, view(lr));
+        put(&mut o, view(" t1,(a0)\n"));
+        if a.op == 2 {
+            put(&mut o, view("add t2,t1,t0\n"));
+        } else {
+            put(&mut o, view("sub t2,t1,t0\n"));
+        }
+        atom_normalize(&mut o, &a, view("t2"));
+        put(&mut o, view(sc));
+        put(&mut o, view(" t5,t2,(a0)\nbnez t5,"));
+        label(&mut o, again);
+        put(&mut o, view("\nmv t0,t1\n"));
+        return true;
+    }
+    again := fresh(&mut o);
+    done := fresh(&mut o);
+    if a.kind == 4 {
+        mark(&mut o, again);
+        put(&mut o, view(lr));
+        put(&mut o, view(" t1,(a0)\nbne t1,t0,"));
+        label(&mut o, done);
+        put(&mut o, view("\n"));
+        put(&mut o, view(sc));
+        put(&mut o, view(" t5,a3,(a0)\nbnez t5,"));
+        label(&mut o, again);
+        put(&mut o, view("\n"));
+        mark(&mut o, done);
+        put(&mut o, view("mv t0,t1\n"));
+        return true;
+    }
+    put(&mut o, view("li t2,0\n"));
+    put(&mut o, view(lr));
+    put(&mut o, view(" t1,(a0)\nbne t1,t0,"));
+    label(&mut o, done);
+    put(&mut o, view("\n"));
+    put(&mut o, view(sc));
+    put(&mut o, view(" t5,a3,(a0)\nseqz t2,t5\n"));
+    mark(&mut o, done);
+    put(&mut o, view("mv t0,t2\n"));
+    return true;
+}
+// x86-64 (ELF and PE): TSO gives acquire loads and release stores for free, so only a sequentially
+// consistent store (`xchg`) and a sequentially consistent fence (`mfence`) cost anything beyond the
+// access. A 64-bit add/sub is one `lock xadd`; everything that has to compute the new value from the
+// old one (and/or/xor with their result, min/max, a narrow add/sub that wraps at its width) is a
+// `lock cmpxchg` loop. Each expansion is preceded by its op as a comment, so the assembly says
+// which instructions are the atomic and with what order.
+pub fn has_atomics<a>(input: &a [u8]) -> bool {
+    for i in input.len() {
+        if (input[i] == 97) && ((i == 0) || (input[i - 1] == 10)) {
+            if starts(view(input[i:]), view("atom.")) {
+                return true;
+            }
+        }
+    }
     return false;
+}
+pub fn atomics_x86<a>(input: &a [u8]) -> u8[] {
+    mut o = Out { text: u8[], target: 0, win: 0, plat: 0, next: 1 };
+    mut start = 0;
+    for i in input.len() {
+        if input[i] == 10 {
+            line := input[start: i];
+            start = i + 1;
+            a := atom_parse(view(line));
+            if a.kind == 0 {
+                put(&mut o, view(line));
+                put(&mut o, view("\n"));
+            } else {
+                put(&mut o, view("# "));
+                put(&mut o, view(line));
+                put(&mut o, view("\n"));
+                atom_x86(&mut o, &a);
+            }
+        }
+    }
+    put(&mut o, view(input[start:]));
+    return o.text;
+}
+fn atom_x86_label<a>(o: (&a mut Out), n: u64) -> unit {
+    put(&mut o, view(".Latom"));
+    u64(&mut o, n);
+    return ();
+}
+fn atom_x86<a>(o: (&a mut Out), a: (&Atom)) -> unit {
+    if a.kind == 7 {
+        put(&mut o, view("pause\n"));
+        return ();
+    }
+    if a.kind == 6 {
+        if a.order == 4 {
+            put(&mut o, view("mfence\n"));
+        }
+        return ();
+    }
+    if a.kind == 1 {
+        put(&mut o, view("movq (%rdi),%rax\n"));
+        return ();
+    }
+    if a.kind == 2 {
+        if a.order == 4 {
+            put(&mut o, view("xchgq %rax,(%rdi)\n"));
+        } else {
+            put(&mut o, view("movq %rax,(%rdi)\n"));
+        }
+        return ();
+    }
+    if a.kind == 4 {
+        put(&mut o, view("lock cmpxchgq %rcx,(%rdi)\n"));
+        return ();
+    }
+    if a.kind == 5 {
+        put(&mut o, view("lock cmpxchgq %rcx,(%rdi)\nsete %al\nmovzbl %al,%eax\n"));
+        return ();
+    }
+    if a.op == 1 {
+        put(&mut o, view("xchgq %rax,(%rdi)\n"));
+        return ();
+    }
+    if (a.bits == 64) & ((a.op == 2) || (a.op == 3)) {
+        if a.op == 3 {
+            put(&mut o, view("negq %rax\n"));
+        }
+        put(&mut o, view("lock xaddq %rax,(%rdi)\n"));
+        return ();
+    }
+    n := fresh(&mut o);
+    put(&mut o, view("movq %rax,%rsi\nmovq (%rdi),%rax\n"));
+    atom_x86_label(&mut o, n);
+    put(&mut o, view(":\nmovq %rax,%rcx\n"));
+    if a.op == 2 {
+        put(&mut o, view("addq %rsi,%rcx\n"));
+    }
+    if a.op == 3 {
+        put(&mut o, view("subq %rsi,%rcx\n"));
+    }
+    if a.op == 4 {
+        put(&mut o, view("andq %rsi,%rcx\n"));
+    }
+    if a.op == 5 {
+        put(&mut o, view("orq %rsi,%rcx\n"));
+    }
+    if a.op == 6 {
+        put(&mut o, view("xorq %rsi,%rcx\n"));
+    }
+    if (a.op == 7) || (a.op == 8) {
+        // Keep the old value unless the operand wins.
+        put(&mut o, view("cmpq %rsi,%rcx\n"));
+        if a.signed != 0 {
+            if a.op == 7 {
+                put(&mut o, view("cmovgq %rsi,%rcx\n"));
+            } else {
+                put(&mut o, view("cmovlq %rsi,%rcx\n"));
+            }
+        } else {
+            if a.op == 7 {
+                put(&mut o, view("cmovaq %rsi,%rcx\n"));
+            } else {
+                put(&mut o, view("cmovbq %rsi,%rcx\n"));
+            }
+        }
+    }
+    if ((a.op == 2) || (a.op == 3)) & (a.bits != 64) {
+        if a.signed != 0 {
+            if a.bits == 8 {
+                put(&mut o, view("movsbq %cl,%rcx\n"));
+            }
+            if a.bits == 16 {
+                put(&mut o, view("movswq %cx,%rcx\n"));
+            }
+            if a.bits == 32 {
+                put(&mut o, view("movslq %ecx,%rcx\n"));
+            }
+        } else {
+            if a.bits == 8 {
+                put(&mut o, view("movzbl %cl,%ecx\n"));
+            }
+            if a.bits == 16 {
+                put(&mut o, view("movzwl %cx,%ecx\n"));
+            }
+            if a.bits == 32 {
+                put(&mut o, view("movl %ecx,%ecx\n"));
+            }
+        }
+    }
+    put(&mut o, view("lock cmpxchgq %rcx,(%rdi)\njne "));
+    atom_x86_label(&mut o, n);
+    put(&mut o, view("\n"));
+    return ();
 }
 // ---- Windows ARM64 imports ----------------------------------------------------------------
 // The internal argument registers map to x0..x7, which is exactly the Win64 ARM64 order, so an
@@ -1290,7 +1829,7 @@ fn instruction<a, b>(o: (&a mut Out), line: &b [u8]) -> unit {
             return ();
         }
     }
-    if atomic_instruction(&mut o, view(op), view(rest)) {
+    if atomic_instruction(&mut o, view(line)) {
         return ();
     }
     if starts(view((op)), view("j")) {

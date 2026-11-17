@@ -1,5 +1,3 @@
-# Changelog
-
 ## Unreleased
 
 - **`grail check` grows linearly with function length.** The borrow checker answered "is any
@@ -13,11 +11,132 @@
   verdicts are the same: `tools/check-diff.mjs` compiles every corpus
   source and example with two compilers and compares their output byte for byte (with `--build`,
   the assembly too).
+- **Fixed: an LLVM-backend miscompile of a vector grown through its address.** A call handed `&mut v`
+  receives the slot's address, not the header word, so the lifter did not count it as a call that
+  can grow `v`, and the `len`/`data` it had read before the call were used after it: `pad(&mut out,
+  4); out.len()` read the old length (65 / 73 / 0 instead of 72 / 73 / 7). Now any call that is not
+  known to leave headers alone makes the cached fields of every vector whose address the function
+  takes stale, and they are read again. `vector-grown-through-its-address-is-reread` covers the
+  direct call, a loop, a method on a record holding the vector and a record passed by `&mut`.
+
+- Fixed: an error inside a closure made the compiler re-run itself up to 20 times. To report the
+  next error it re-runs with the failing body skipped, and for a closure it skipped the wrong body,
+  met the same error again and chained to the cap: an eight-line program took 14 s to reject
+  (30 s with a second error), now under 2 s with the same diagnostics. Found as two "hangs" of the
+  front-end fuzzer.
+- A `use` naming a module no root holds is an ordinary diagnostic: `error: cannot resolve module
+  ...` with the `use` line's location and the name underlined, instead of a bare `grail:` line.
+- `tools/fuzz-frontend.mjs` names its five slowest cases in the summary and in `report.json`.
+- **The atomics family.** `Atomic<T>` now holds `u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`,
+  `i64` or `bool`. Each width wraps at its own size, and `fetch_min`/`fetch_max` are signed for
+  `i*` types.
+  - Every operation names its ordering:
+    - `load` with `_relaxed` or `_acquire`; `store` with `_relaxed` or `_release`.
+    - `swap` and `fetch_add`, `fetch_sub`, `fetch_and`, `fetch_or`, `fetch_xor`, `fetch_min`,
+      `fetch_max`, each with `_relaxed`, `_acquire`, `_release` or `_acqrel`.
+    - `compare_exchange` (returns the value it saw) and the new `compare_exchange_weak` (returns
+      whether it stored), each with the same suffixes.
+    - The bare name is sequentially consistent, and a pair that makes no sense (`load_release`) is
+      an error that lists the valid names.
+    - `fence()`, `fence_acquire()`, `fence_release()` and `spin_hint()` are new.
+  - The methods compile to instructions at the call site, not runtime calls, so they are allowed in
+    `@no_alloc @no_panic` code. Each ordering is lowered as itself: x86-64 SC loads lose their
+    `mfence`, `fetch_add` is one `lock xadd`, AArch64 uses `ldar`/`stlr` and exclusive pairs, RISC-V
+    uses AMOs, and the LLVM backend emits `load atomic ... acquire` and so on instead of
+    `fence seq_cst`.
+  - Measured on x86-64: an uncontended `load` went from 15.4 ns to 1.4 ns, `fetch_add` from 18.5
+    ns to 1.8 ns, and a Mutex round trip from 42.7 ns to 11.4 ns. The runtime's own atomics
+    (scheduler, jobs, mutex) use the same instructions.
+  - `Atomic<u64>` programs are unchanged.
+  - Interfaces are format 8: an `Atomic<T>` records its element (format 7, from the effects
+    work, added the summary rows of every listed function).
+  - `bun tools/test-atomics-litmus.mjs` runs the litmus suite on every target and both backends.
+    `bun tools/test-optimiser-atomics.mjs` checks that the optimiser moves nothing across an
+    atomic.
+- **`concurrent_map` lookups run side by side.** Its shards are `sync::RwLock`s now, so `contains`
+  and `len` on one shard no longer queue behind each other (about 1.6x faster under a read-mostly
+  load, `bench/shard_read.grl`). Keys and values must therefore be `Share` as well as `Send` -
+  DashMap's rule - and a value also `Owned`, since `insert` and `remove` hand the old one back. A
+  map of a type that is transferable but not shareable is refused with
+  `type does not satisfy Share`, naming the type.
+- Fixed (statics, after the merge with unboxed records and the prover rework): a static's
+  initialiser is evaluated in its own module's scope whoever asks for it first, so `PAGE - 1` finds
+  `PAGE` when the interface writer asks at the end of the compile; a baked record is laid out as the
+  record layout now has it (a plain record held in a field inline, a vector of plain records flat)
+  and read through the record's address, which is what a record reference now is.
+
+- **A compile-time probe never starts another probe** (comptime-speed R1). Inside a probe a read of
+  a run-tier value calls a value function the probe defines - a static is computed once on first
+  read behind a guard, a module binding at each read - so N values cost N flat compiles instead of
+  a chain N deep (12 values: 7.6 s; before, never finished). A cycle is a compile error naming every
+  value on it and the path (`main::A -> main::B -> main::A`).
+- **Proved calls cost nothing again, on every target and on the LLVM backend.** A function with
+  refined parameters is two ordinary functions: the body, `<symbol>.proved`, with no checks, and
+  `<symbol>`, a wrapper that checks the parameters and calls it. A proved call calls the body
+  directly - the same instructions as a call to a function with no predicate (measured on
+  x86_64, aarch64 and riscv64: identical bodies, identical call sites). An unproved call pays one
+  call/return on top of its checks. The LLVM backend now uses proofs too (it skipped the prover
+  while the second entry was a prologue copy it could not lift).
+
+- A call whose constant arguments break the callee's predicate (`split(v, 0, f)` with
+  `grain: u64 where grain > 0`) is a compile error in every mode; it used to compile and fail at
+  run time. Only constants, and names the facts equate with one, are judged false.
+
+    atomic. Both are gate legs.
+  - The aarch64 tests run under the repository's own qemu-aarch64: `tools/qemu/build.sh` builds
+    QEMU 11.1.3 with `tools/qemu/stlr-rcsc.patch` into `.work/architectures/toolchain`. Stock
+    11.1.3 on an x86 host lets a store-release pass a later load-acquire, which ARMv8 forbids;
+    the store-buffering test saw up to 7,458 forbidden outcomes in 200,000 rounds there, and none
+    under the patched build. The gate builds it and prints its version (`docs/testing.md`, "The
+    aarch64 emulator").
 - **`thread::scope`: threads that borrow.** `thread::scope(|t| { a := t.spawn(|| ..); ..; a.join() })`
   starts OS threads whose closures may borrow from the caller - shared or exclusive - because the
   scope waits for every one of them before it returns. The compiler refuses two threads taking one
   `&mut`, the body touching what a thread borrowed, and a handle leaving the scope. A failure in
   one thread lets its siblings finish and is re-raised when the scope ends.
+- **A function may return a reference to an element of a slice it was given.**
+  `fn first<a, K>(v: (&a [K])) -> (&a K) { return &v[0]; }` (and `&mut v[i]` from `(&a mut [K])`)
+  was "returned borrow escapes its declared input lifetime": the element reference was a borrow of
+  the slice variable. It is now a re-borrow through the slice's own loan, with the slice's region;
+  the slice is suspended while an exclusive element reference lives.
+- **`&v` of a vector is accepted where a typed slice `&[T]` is expected**, generic or not, and
+  `&mut v` for `&mut [T]`: the slice over the whole vector, as `&v[:]` is. A generic `&[K]`
+  parameter infers `K` from the vector's elements (it was `generic argument shape mismatch`; the
+  non-generic call was a type mismatch).
+- **A closure may take a reference where a type argument stands for one, and pass a captured
+  reference on.** `lock.read_with(key, |v: (&u64[]), k: (&a u64)| -> bool ..)` was a type mismatch
+  when the context parameter `C` was bound to a reference (a type argument carries no lifetime; a
+  closure parameter has a fresh one); it is accepted, and a parameter type left to inference there
+  asks for the annotation. A captured shared reference read as a value (`find(v, key)` inside a
+  closure) is re-borrowed instead of moved out of the closure, which was "move of unavailable or
+  borrowed value"; the borrow is kept as before.
+ Unreleased- Fixed: a small leaf that takes the address of its own local (runtime.grl's `rt_frame`) was
+- **An effect claim no longer makes a program one compiler run.** `@no_alloc` and `@no_panic` are
+  proved per module against per-function *summaries*: every run that emits code records every body,
+  and the facts it solves - whether a function can allocate, can fail, runs an entry check, and the
+  call each fact came through - travel in a `facts` record of every interface (format 7; interfaces
+  of format 6 are refused: re-emit them), in `runtime.facts` beside the interfaces for the runtime,
+  and in function units, which are filed and replayed in claiming programs again. A claiming program
+  builds through the module store like any other, and a refusal names the same chain across modules
+  that the whole-program build names (`loud -> push_one -> grow -> rt_push -> rt_grow`).
+  (`docs/design/effects.md`, *Summaries*.)
+  - **What changes:** dropping a `dyn I` value of a **public** interface is refused under `@no_alloc`
+    and `@no_panic` in every build shape ("the drop of a `dyn I` value, whose implementations this
+    module cannot see"): an implementation in another module may be the one dropped. Claim the
+    implementing types' `Drop` instead, or do the drop where `I` is private.
+  - Methods in `impl` blocks take `@no_alloc` and `@no_panic`.
+  - The standard library claims `@no_alloc` on `hash::write_byte`, `write_num` and `finish`,
+    `u64[].sum` and `[u8].is_char_boundary`, and `@no_alloc @no_panic` on `strings::utf8_width`.
+    Functions that return an option, a tuple or a record allocate it, so `find` and the parsers do
+    not claim.
+  - Fixed: a closure whose result type was inferred by a trial emission left that emission's calls
+    in the effect record.  inlined with that local turned into a scratch register, so split and cached builds of programs
+- `tools/land.sh BRANCH` (`just land`) lands a branch on main through one queue: the branch must already contain main, the fast gate runs on exactly its tree, and green fast-forwards main. Emulated targets run after the landing on the build host.
+- Fixed: the native optimiser took an `f32` constant whose 64-bit immediate it cannot read (2.0 is
+  `$4611686018427387904`, more than 18 digits) for zero, held the variable as binary32 and read 2.0
+  back as 0.0. It changed Abundance's abgeo mesh digests (meshopt's `quadric_error_attr`);
+  `f32-constant-wide-immediate-not-narrowed` pins it.
+
 - Fixed: a small leaf that takes the address of its own local (runtime.grl's `rt_frame`) was
   inlined with that local turned into a scratch register, so split and cached builds of programs
   that reach it emitted `leaq %r8,%rax` and did not assemble. Such a leaf is no longer an inline
