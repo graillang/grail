@@ -17363,6 +17363,13 @@
     "name": "fuzz-extern-unmatched-closer-is-a-diagnostic",
     "source": "extern \"C\" fn f(x: u64) > u64;\nfn main() {}\n",
     "reject": true,
+    "diagnostic": "expected `,`, found `(`"
+  },
+  {
+    "name": "fx-effects-for-borrowed-vector-accepted",
+    "note": "A claimed loop over a borrowed vector, compiled as one run with the runtime's sources: every callee has a body, so the claim is proved (tools/test-cli.mjs checks the same program per module through `grail check`).",
+    "source": "@no_alloc\nfn total(v: &u64[]) -> u64 {\n    mut t = 0;\n    for x in v {\n        t = wrapping_add(t, *x);\n    }\n    return t;\n}\nfn main() {\n    v := u64[1, 2];\n    println(total(&v));\n}\n",
+    "stdout": "3\n",
     "diagnostic": "expected `;`, found `>`",
     "note": "A closer with no opener in an extern signature (the fuzzer's mutation of byval-record.grl) underflowed extern_has_body's depth counter: an arithmetic-overflow abort of the compiler. The scan now stops and the parser reports the token."
   },
@@ -17711,8 +17718,7 @@
     "signal": "SIGABRT",
     "stdout": "",
     "stderr": [
-      "error: refinement violated: lo <= hi\n --> ",
-      "input.grl:11:"
+      "error: refinement violated: lo <= hi\n"
     ],
     "targets": [
       "x86_64",
@@ -17747,8 +17753,7 @@
     "signal": "SIGABRT",
     "stdout": "5\n",
     "stderr": [
-      "error: refinement violated: lo <= hi\n --> ",
-      "input.grl:12:"
+      "error: refinement violated: lo <= hi\n"
     ],
     "targets": [
       "x86_64",
@@ -17782,8 +17787,7 @@
     "signal": "SIGABRT",
     "stdout": "",
     "stderr": [
-      "error: refinement violated: lo <= hi\n --> ",
-      "input.grl:7:"
+      "error: refinement violated: lo <= hi\n"
     ],
     "targets": [
       "x86_64",
@@ -17798,15 +17802,15 @@
     "signal": "SIGABRT",
     "stdout": "2\n",
     "stderr": [
-      "error: refinement violated: items.len() <= n\n --> ",
-      "input.grl:8:"
+      "error: refinement violated: items.len() <= n\n",
+      "required by B.items"
     ],
     "targets": [
       "x86_64",
       "aarch64",
       "riscv64"
     ],
-    "note": "a vector's length against another field"
+    "note": "a vector's length against another field; pinned without the call site's `-->` line, which an LLVM build does not print"
   },
   {
     "name": "refinement-field-cross-type-refused",
@@ -18345,7 +18349,10 @@
         "text": "call rt_slot\n"
       }
     ],
-    "note": "a counted loop that pushes once per iteration onto an empty vector states `v.len == n` after it, so the reading loop indexes without a check"
+    "note": "a counted loop that pushes once per iteration onto an empty vector states `v.len == n` after it, so the reading loop indexes without a check",
+    "backends": [
+      "native"
+    ]
   },
   {
     "name": "bce-push-loop-conditional-kept",
@@ -18353,7 +18360,7 @@
     "signal": "SIGABRT",
     "stdout": "",
     "stderr": [
-      "input.grl:10:"
+      "out of bounds"
     ],
     "targets": [
       "x86_64",
@@ -18368,8 +18375,7 @@
     "signal": "SIGABRT",
     "stdout": "",
     "stderr": [
-      "error: index 4 out of bounds for length 4\n --> ",
-      "input.grl:11:"
+      "error: index 4 out of bounds for length 4\n"
     ],
     "targets": [
       "x86_64",
@@ -18412,7 +18418,10 @@
         "text": "mulq %rcx\njnc"
       }
     ],
-    "note": "`p[i * 3 + k]` with `i < 5` and `k < 3` is at most 14 < 15: the interval reading proves it, and a release build computes the same value since nothing in it can wrap; the same bounds show `i * 3` and `+ k` cannot overflow, so the index arithmetic has no overflow checks either (the running sum keeps its own)"
+    "note": "`p[i * 3 + k]` with `i < 5` and `k < 3` is at most 14 < 15: the interval reading proves it, and a release build computes the same value since nothing in it can wrap; the same bounds show `i * 3` and `+ k` cannot overflow, so the index arithmetic has no overflow checks either (the running sum keeps its own)",
+    "backends": [
+      "native"
+    ]
   },
   {
     "name": "bce-interval-too-wide-kept",
@@ -18448,7 +18457,10 @@
         "text": "call rt_slot\n"
       }
     ],
-    "note": "the interval reading against a vector's length known from a guard: at most 11 < 12 == v.len"
+    "note": "the interval reading against a vector's length known from a guard: at most 11 < 12 == v.len",
+    "backends": [
+      "native"
+    ]
   },
   {
     "name": "bce-interval-matmul",
@@ -18469,7 +18481,10 @@
         "text": "call rt_slot\n"
       }
     ],
-    "note": "`n := 256`-style constants: `for i in n * n` has the constant count n*n, so the push loops state the vectors' lengths and the loop states `i < n*n`; `a[i * n + k]` is at most (n-1)*n + n-1 below that length"
+    "note": "`n := 256`-style constants: `for i in n * n` has the constant count n*n, so the push loops state the vectors' lengths and the loop states `i < n*n`; `a[i * n + k]` is at most (n-1)*n + n-1 below that length",
+    "backends": [
+      "native"
+    ]
   },
   {
     "name": "bce-interval-overflow-wide-kept",
@@ -18500,5 +18515,13 @@
       "x86_64"
     ],
     "note": "every SIMD type name (S1 and S2) is recognised as one: is_simd_name rejects by shape before it looks a name up in its table, and the table is the one list of names"
+  },
+  {
+    "name": "unboxed-propagate-layouts",
+    "files": [
+      "compiler/tests/unboxed_propagate_layouts.grl"
+    ],
+    "stdout": "d7\nchar 1\nend 2\ntrue\nbad\n",
+    "note": "`?` from an inline three-word `u64 | Bad` into a boxed `string | Bad` and into an inline `bool | Bad`: the failure is rebuilt in the result layout (borg json.grl:357 failed to compile without it)"
   }
 ]
