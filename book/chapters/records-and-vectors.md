@@ -7,6 +7,15 @@ are still released when the record ends.
 
 {{example:records}}
 
+A record is held as its words wherever it is held: in the function's frame, inline in the record
+that contains it, and back to back in a vector (`Person[]` stores each `Person`'s words in its
+buffer). Only what a record owns - its strings, vectors and other heap data - is on the heap, never
+the record itself, whether or not it owns anything or implements `Drop`. When a record ends, its
+fields are dropped in place, in declaration order, after its own `drop` if it has one; a vector
+drops its elements in index order. Moving a field out leaves that field empty, so only the rest is
+dropped. A record held in an enum, a closure, a `Mutex`, a `dyn` value or a task result is boxed
+there, and freed with it.
+
 `[10, 20, 30]` is a vector: the first element fixes the element type, and every other element is
 checked against it. Where the context already names a vector type - a typed binding, a parameter, a
 field, a return type, an enclosing literal - the literal takes that type instead, so
@@ -97,7 +106,7 @@ numbers.
 - **Where arrays live.** In locals, as fields of structs, tuples and generic records (inline, as a
   plain record's fields are), and as the elements of a vector: `[f32; 4][]` stores its elements
   back to back, a C `float[n][4]`, with `push`, `insert`, `remove`, `pop()!`, indexing and
-  iteration. Elements are numbers, C handles and pointers, plain or extern records, or arrays.
+  iteration. Elements are numbers, C handles and pointers, records, owners or arrays.
 - **C structs.** An `extern "C" record` field `[T; N]` is an array: `d.ids[3]` and `d.ids[3] = 7`
   work in place, `&d.name` is a `&[u8]`, `d.ids = [1, 2, 3, 4]` assigns it whole, and reading the
   whole field (`ids := d.ids`) copies it, as reading an embedded C struct does.
@@ -115,8 +124,9 @@ numbers.
   (`zeros<4>()`), or a record's own (`struct Mat<@R: u64, @C: u64> { m: [[f32; C]; R] }`). Each
   length is a specialisation of its own, so `n` is a constant inside the body.
 - **Not yet.** An array cannot be an enum payload or an option (so `pop()` without `!` on a
-  vector of arrays is refused) or a closure's capture, and an array whose elements own data
-  cannot be a struct field or a vector element. Those come next (docs/design/fixed-arrays.md).
+  vector of arrays is refused) or a closure's capture, and an array whose elements own data cannot
+  be a `dyn` value or a task's result (docs/design/fixed-arrays.md). It can be a struct field and a
+  vector element like any array.
 - **Large arrays** live in the frame, as in C. A frame larger than a page is touched a page at a
   time from the top as the function starts, so running out of stack is always reported as
   `stack overflow` and never steps over the guard page; a frame larger than the 1 MiB stack a task

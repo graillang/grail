@@ -111,6 +111,13 @@ pub fn fact_signature<a>(facts: (&a mut Facts), name: u8[], words: u64) -> unit 
     facts.items.push(Fact { kind: 5, fn: name, a: words, b: 0, callee: u8[], what: 0, width: 0 });
     return ();
 }
+// The C function `name` takes `ints` integer words and `floats` float arguments (bit k of `mask`
+// set when the k-th is an f32) and returns `result` (0 a word or nothing, 1 f64, 2 f32): native.grl
+// `ffi_signature_fact`. A lifted call to it is typed accordingly (lower_call, call ABI S8a).
+pub fn fact_ffi<a>(facts: (&a mut Facts), name: u8[], ints: u64, floats: u64, mask: u64, result: u64) -> unit {
+    facts.items.push(Fact { kind: 6, fn: name, a: ints, b: floats, callee: u8[], what: mask, width: result });
+    return ();
+}
 // `slot` holds an f32 when `f32` is 1, and an untyped word otherwise.
 pub fn fact_slot<a>(facts: (&a mut Facts), name: u8[], slot: u64, f32: u64) -> unit {
     mut width: u64 = 8;
@@ -413,6 +420,8 @@ struct L {
     // The outgoing argument area of the call being set up (area_instruction).
     area: u8[][],
     areaopen: u64,
+    // The FFI facts (ffi_signatures).
+    ffis: Set,
     // Vector registers written and not read since (a pending float argument), and ones not written
     // since the entry or the last call (xmm_read).
     xpend: u64,
@@ -2494,7 +2503,11 @@ fn array_element<a, b>(l: (&a mut L), target: &b [u8]) -> unit {
 fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> unit {
     // A call hands the argument registers on; passing a stale %rdx is not reading a result.
     l.rdxdead = 0;
-    xmm_call(&mut l);
+    fcode := set_get(&l.ffis, target);
+    typed_ffi := (fcode > 1) && (set_get(&l.sigs, target) == 0) && (l.target == 0) && (l.areaopen == 0);
+    if !typed_ffi {
+        xmm_call(&mut l);
+    }
     if l.areaopen != 0 {
         // Words on the stack: only a callee whose signature fact says it takes them.
         code := set_get(&l.sigs, target);
@@ -2522,6 +2535,23 @@ fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> uni
     }
     if eq(target, view("rt_aslot")) || eq(target, view("rt_aslotu")) {
         array_element(&mut l, target);
+        return ();
+    }
+    if eq(target, view("rt_f32_from_int")) {
+        // An integer to the nearest f32, rounded once (ties to even), held widened: `sitofp` for a
+        // signed source and `uitofp` for an unsigned one, chosen by the type code's signed bit as
+        // the runtime's body chooses. The body halves the value in a loop and calls rt_f32_round;
+        // this is the one instruction it computes.
+        x := get_reg(&mut l, view("rdi"));
+        code := get_reg(&mut l, view("rsi"));
+        bit := def(&mut l, view("and i64 {}, 256"), &u8[][copy(view(code))]);
+        signed := def(&mut l, view("icmp ne i64 {}, 0"), &u8[][bit]);
+        sf := def(&mut l, view("sitofp i64 {} to float"), &u8[][copy(view(x))]);
+        uf := def(&mut l, view("uitofp i64 {} to float"), &u8[][copy(view(x))]);
+        n := def(&mut l, view("select i1 {}, float {}, float {}"), &u8[][signed, sf, uf]);
+        w := def(&mut l, view("fpext float {} to double"), &u8[][n]);
+        word := as_word(&mut l, view(w));
+        set_reg(&mut l, view("rax"), view(word));
         return ();
     }
     if eq(target, view("rt_f32_round")) {
@@ -2646,6 +2676,10 @@ fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> uni
         nwords = callee_sig / 4;
         rwords = callee_sig % 4;
     }
+    if typed_ffi {
+        lower_ffi_call(&mut l, target, fcode - 2);
+        return ();
+    }
     args := call_args_n(&mut l, nwords);
     mut c = u8[];
     put(&mut c, view("call "));
@@ -2690,13 +2724,6 @@ fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> uni
 // AArch64 and RV64 a code pointer names the native-convention entry, which an IR call cannot reach
 // without a thunk, so those bodies stay native.
 fn lower_indirect_call<a, b>(l: (&a mut L), reg: &b [u8]) -> unit {
-    // The runtime's own callers through a pointer are the job, task and thread machinery: stacks
-    // that are switched away from and resumed, and failures that abandon a stack. They stay the
-    // native text they were, whose frame slots survive that; program and library code is lifted.
-    if starts(view(l.fname), view("rt_")) {
-        bad(&mut l);
-        return ();
-    }
     if l.areaopen != 0 {
         bad(&mut l);
         return ();
@@ -3620,6 +3647,125 @@ fn rip_symbols<a, b>(out: (&a mut Set), line: &b [u8]) -> unit {
         }
         i += 1;
     }
+    return ();
+}
+// The FFI facts as a map from C symbol to `ffi_code + 1`; two call sites that disagree (a variadic
+// function seen with different argument lists) leave the symbol untyped (value 1).
+fn ffi_signatures<a>(facts: (&a Facts)) -> Set {
+    mut n = 0;
+    for i in facts.items.len() {
+        if facts.items[i].kind == 6 {
+            n += 1;
+        }
+    }
+    mut out = set_new(n + 1);
+    for i in facts.items.len() {
+        f := &facts.items[i];
+        if f.kind == 6 {
+            code := f.a + (f.b << 3) + (f.what << 7) + (f.width << 15) + 2;
+            was := set_get(&out, view(f.fn));
+            if (was != 0) && (was != code) {
+                set_put(&mut out, view(f.fn), 1);
+            } else {
+                set_put(&mut out, view(f.fn), code);
+            }
+        }
+    }
+    return out;
+}
+// The LLVM type of float argument `k` of an FFI code, or of its result.
+fn ffi_arg_type(code: u64, k: u64) -> u8[] {
+    if (((code >> 7) >> k) & 1) != 0 {
+        return copy(view("float"));
+    }
+    return copy(view("double"));
+}
+fn ffi_ret_type(code: u64) -> u8[] {
+    r := (code >> 15) & 3;
+    if r == 1 {
+        return copy(view("double"));
+    }
+    if r == 2 {
+        return copy(view("float"));
+    }
+    return copy(view("i64"));
+}
+// `(i64, i64, double)`: an FFI code's parameter list, typed or (`names` set) with the values.
+fn ffi_params(code: u64) -> u8[] {
+    ints := code & 7;
+    floats := (code >> 3) & 15;
+    mut out = u8[];
+    for i in ints {
+        if i != 0 {
+            put(&mut out, view(", "));
+        }
+        put(&mut out, view("i64"));
+    }
+    for k in floats {
+        if (ints != 0) || (k != 0) {
+            put(&mut out, view(", "));
+        }
+        put(&mut out, view(ffi_arg_type(code, k)));
+    }
+    return out;
+}
+// A call to a C function with an FFI fact (call ABI S8a): integer words from the argument
+// registers, float arguments from the vector registers the ABI puts them in, the result back in
+// %rax or %xmm0 as the word machine expects to read it.
+fn lower_ffi_call<a, b>(l: (&a mut L), target: &b [u8], code: u64) -> unit {
+    ints := code & 7;
+    floats := (code >> 3) & 15;
+    names := u8[][copy(view("rdi")), copy(view("rsi")), copy(view("rdx")), copy(view("rcx")), copy(view("r8")), copy(view("r9"))];
+    mut args = u8[];
+    for i in ints {
+        if i != 0 {
+            put(&mut args, view(", "));
+        }
+        put(&mut args, view("i64 "));
+        put(&mut args, view(get_reg(&mut l, view(names[i]))));
+    }
+    for k in floats {
+        mut xn = copy(view("xmm"));
+        num(&mut xn, k);
+        w := def(&mut l, view("load i64, ptr {}"), &u8[][slot_of(view("%x."), view(xn))]);
+        l.xpend = l.xpend & (18446744073709551615 - (1 << k));
+        if (ints != 0) || (k != 0) {
+            put(&mut args, view(", "));
+        }
+        t := ffi_arg_type(code, k);
+        put(&mut args, view(t));
+        args.push(32);
+        if eq(view(t), view("float")) {
+            n := def(&mut l, view("trunc i64 {} to i32"), &u8[][w]);
+            put(&mut args, view(def(&mut l, view("bitcast i32 {} to float"), &u8[][n])));
+        } else {
+            put(&mut args, view(def(&mut l, view("bitcast i64 {} to double"), &u8[][w])));
+        }
+    }
+    xmm_call(&mut l);
+    rt := ffi_ret_type(code);
+    mut c = copy(view("call "));
+    put(&mut c, view(rt));
+    put(&mut c, view(" @\""));
+    put(&mut c, target);
+    put(&mut c, view("\"({})"));
+    r := def(&mut l, view(c), &u8[][args]);
+    if eq(view(rt), view("i64")) {
+        set_reg(&mut l, view("rax"), view(r));
+    } else {
+        mut word = copy(view(""));
+        if eq(view(rt), view("double")) {
+            word = def(&mut l, view("bitcast double {} to i64"), &u8[][r]);
+        } else {
+            b := def(&mut l, view("bitcast float {} to i32"), &u8[][r]);
+            word = def(&mut l, view("zext i32 {} to i64"), &u8[][b]);
+        }
+        emit(&mut l, view("store i64 {}, ptr {}"), &u8[][word, slot_of(view("%x."), view("xmm0"))]);
+        l.xstale = l.xstale & (18446744073709551615 - 1);
+    }
+    set_chain(&mut l, reg_index(view("rax")) + 1, 0, 0, 0);
+    clear_args(&mut l);
+    refresh(&mut l);
     return ();
 }
 // `{i64, i64}` for a two-word result, `i64` for one.
@@ -7398,7 +7544,7 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
             set_add(&mut weak, view(sub(wl, 6, wl.len())));
         }
     }
-    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, pairs: u64[], pair_widths: u64[], fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], edptr: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], hstable: u64[], hesc: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, body_blk: 0, dnames: u8[][], dmap: map_new(16), hmap: map_new(16), cmap: map_new(16), sl_start: u64[], sl_lines: u64[], proof: u64[], rline: 0, ranges: ranges, sigs: set_new(16), nargs: 6, retw: 2, rdxdead: 0, rdxcallee: u8[], curline: u8[], sigerr: u8[], wrong: u8[][], area: u8[][], areaopen: 0, xpend: 0, xstale: 18446744073709551615 };
+    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, pairs: u64[], pair_widths: u64[], fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], edptr: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], hstable: u64[], hesc: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, body_blk: 0, dnames: u8[][], dmap: map_new(16), hmap: map_new(16), cmap: map_new(16), sl_start: u64[], sl_lines: u64[], proof: u64[], rline: 0, ranges: ranges, sigs: set_new(16), nargs: 6, retw: 2, rdxdead: 0, rdxcallee: u8[], curline: u8[], sigerr: u8[], wrong: u8[][], area: u8[][], areaopen: 0, ffis: set_new(16), xpend: 0, xstale: 18446744073709551615 };
     // A function whose address is taken (`NAME(%rip)`, or named by data such as a vtable) is
     // called through a pointer by code that does not know its signature, so it keeps the six-word
     // form: an indirect call passes six words and reads rax:rdx, and LLVM must never see a call
@@ -7416,6 +7562,7 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
         set_add(&mut taken, view(excluded[i]));
     }
     l.sigs = signatures(facts, &taken);
+    l.ffis = ffi_signatures(facts);
     // A wrong signature fact under --verify-facts: the compile fails with these lines.
     mut sigerrors = u8[];
     mut funcs = Func[];
@@ -7597,6 +7744,12 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
             name = pool_name(r);
         }
         set_add(&mut exported, r);
+        // The module defines these itself (weak, beside the intrinsics it lowers to them), so a
+        // C declaration of the same name - an `extern "C"` memcpy a program calls - must not
+        // declare them again: with opaque pointers the call needs no matching declaration.
+        if (target == 0) && (eq(r, view("memcpy")) || eq(r, view("memset")) || eq(r, view("memmove"))) {
+            continue;
+        }
         if set_has(&callset, r) {
             // A native body with a signature fact is called with exactly its words (lower_call).
             mut dn = 6;
@@ -7605,6 +7758,17 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
             if dcode != 0 {
                 dn = dcode / 4;
                 dw = dcode % 4;
+            }
+            fdecl := set_get(&l.ffis, r);
+            if (dcode == 0) && (fdecl > 1) && (target == 0) {
+                put(&mut ir, view("declare "));
+                put(&mut ir, view(ffi_ret_type(fdecl - 2)));
+                put(&mut ir, view(" @\""));
+                put(&mut ir, view(name));
+                put(&mut ir, view("\"("));
+                put(&mut ir, view(ffi_params(fdecl - 2)));
+                put(&mut ir, view(")\n"));
+                continue;
             }
             put(&mut ir, view("declare "));
             put(&mut ir, view(result_type(dw)));

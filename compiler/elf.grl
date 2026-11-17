@@ -13,6 +13,8 @@ module elf;
 
 pub struct Obj {
     machine: u64,
+    // e_flags (RISC-V: the float ABI).
+    flags: u64,
     sec_name: u8[][],
     sec_type: u64[],
     sec_flags: u64[],
@@ -54,6 +56,7 @@ pub fn common() -> u64 {
 pub fn new(machine: u64) -> Obj {
     return Obj {
         machine: machine,
+        flags: 0,
         sec_name: u8[][],
         sec_type: u64[],
         sec_flags: u64[],
@@ -72,7 +75,7 @@ pub fn new(machine: u64) -> Obj {
         sym_sec: u64[],
         sym_value: u64[],
         sym_size: u64[],
-        nlocal: 0
+        nlocal: 0,
     };
 }
 
@@ -232,9 +235,31 @@ pub fn write<a>(o: (&a Obj)) -> u8[] {
         if o.sec_type[k] != 8 {
             size = o.sec_data[k].len();
         }
-        header(&mut out, sname[k], o.sec_type[k], o.sec_flags[k], off[k], size, 0, 0, o.sec_align[k], o.sec_entsize[k]);
+        header(
+            &mut out,
+            sname[k],
+            o.sec_type[k],
+            o.sec_flags[k],
+            off[k],
+            size,
+            0,
+            0,
+            o.sec_align[k],
+            o.sec_entsize[k]
+        );
         if nrel[k] != 0 {
-            header(&mut out, rname[k], 4, 0x40, roff[k], nrel[k] * 24, symtab_index, index[k], 8, 24);
+            header(
+                &mut out,
+                rname[k],
+                4,
+                0x40,
+                roff[k],
+                nrel[k] * 24,
+                symtab_index,
+                index[k],
+                8,
+                24
+            );
         }
     }
     header(&mut out, symtab_name, 2, 0, symtab_off, symtab_size, 1, o.nlocal + 1, 8, 24);
@@ -256,7 +281,7 @@ pub fn write<a>(o: (&a Obj)) -> u8[] {
     w64(&mut h, 0);
     w64(&mut h, 0);
     w64(&mut h, shoff);
-    w32(&mut h, 0);
+    w32(&mut h, o.flags);
     w16(&mut h, 64);
     w16(&mut h, 0);
     w16(&mut h, 0);
@@ -269,7 +294,18 @@ pub fn write<a>(o: (&a Obj)) -> u8[] {
     return out;
 }
 
-fn header<a>(out: (&a mut u8[]), nm: u64, ty: u64, flags: u64, off: u64, size: u64, link: u64, info: u64, align: u64, entsize: u64) {
+fn header<a>(
+    out: (&a mut u8[]),
+    nm: u64,
+    ty: u64,
+    flags: u64,
+    off: u64,
+    size: u64,
+    link: u64,
+    info: u64,
+    align: u64,
+    entsize: u64
+) {
     w32(&mut out, nm);
     w32(&mut out, ty);
     w64(&mut out, flags);
