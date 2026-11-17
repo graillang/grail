@@ -1,0 +1,41 @@
+// An undeclared foreign call that holds its worker for long is handed off anyway. With one worker,
+// `blocker` calls usleep for 120 ms - not declared `blocking` - and `spinner`, queued behind it,
+// still runs: the scheduler's monitor saw the worker inside one foreign call for more than 10 ms
+// with work queued and gave the worker to a spare. The runtime says so once, naming `usleep`.
+unsafe module runtime;
+use host;
+extern "C" lib "c" fn usleep(us: u32) -> i32;
+fn blocker(n: u64, word: u64) -> u64 {
+    started := host::now_ms();
+    unsafe {
+        usleep(120000);
+    }
+    raw_store(word + 16, host::now_ms() - started);
+    raw_atomic_store(word, 1);
+    return n;
+}
+fn spinner(n: u64, word: u64) -> u64 {
+    mut i = 0;
+    while raw_atomic_load(word) == 0 {
+        raw_atomic_fetch_add(word + 8, 1);
+        i += 1;
+    }
+    return i;
+}
+fn body<s>(sc: (&s Scope<u64>), word: u64) -> u64 {
+    first := spawn(sc, 1, blocker);
+    second := spawn(sc, 2, spinner);
+    return join(first) + join(second);
+}
+fn main() {
+    word := rt_alloc(24);
+    raw_store(word, 0);
+    raw_store(word + 8, 0);
+    raw_store(word + 16, 0);
+    total := task_scope(word, body);
+    assert(raw_atomic_load(word + 8) > 0);
+    assert(raw_load(word + 16) >= 100);
+    assert(total > 2);
+    rt_free(word);
+    println(42);
+}

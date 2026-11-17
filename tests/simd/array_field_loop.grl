@@ -1,0 +1,27 @@
+// SIMD loads straight from a fixed-size array field (docs/design/fixed-arrays.md section 6,
+// docs/design/simd.md): `[f32; 16]` held inline in a struct, the structs flat in a vector. Each
+// `f32x4::load(&m.m, i)` is one unaligned vector load from the element's words - no copy of the
+// array - and tools/test-simd.mjs checks the summing loop touches no stack slot.
+struct Mat {
+    m: [f32; 16]
+}
+fn total(x: &Mat) -> f32x4 {
+    mut acc = f32x4::load(&x.m, 0);
+    acc = acc + f32x4::load(&x.m, 4);
+    acc = acc + f32x4::load(&x.m, 8);
+    acc = acc + f32x4::load(&x.m, 12);
+    return acc;
+}
+fn main() {
+    mut ms: Mat[] = [];
+    for k in 37 {
+        mut m = Mat { m: [1.0; 16] };
+        m.m[k % 16] = 2.0;
+        ms.push(m);
+    }
+    mut acc = f32x4::splat(0.0);
+    for k in ms.len() {
+        acc = acc + total(&ms[k]);
+    }
+    println(acc.sum());
+}

@@ -905,6 +905,8 @@ pub fn parse<a, b>(o: (&a mut Body), s: &b [u8], a: u64, e: u64) {
                     if op == 0 {
                         op = float_opcode(view(s), a, space);
                     }
+                    // A SIMD op (`simd.*`, machine.grl "SIMD") is one too, for the same reasons: its
+                    // memory operands are named only through registers.
                     // An atomic op (`atom.*`, machine.grl "atomics") is an unknown instruction to
                     // every pass, whatever its order, and that is the barrier: no slot or register
                     // fact survives it (forward), every register is live across it and it is never
@@ -913,7 +915,7 @@ pub fn parse<a, b>(o: (&a mut Body), s: &b [u8], a: u64, e: u64) {
                     // dropped across an acquire, a release or a sequentially consistent op, and a
                     // relaxed one is neither eliminated nor merged with its neighbour.
                     // tools/test-optimiser-atomics.mjs holds this.
-                    if at(view(s), a, view("atom.")) {
+                    if at(view(s), a, view("atom.")) || at(view(s), a, view("simd.")) {
                         op = 0;
                     }
                 }
@@ -1594,7 +1596,53 @@ pub fn type_symbol<a>(s: &a [u8], a: u64, e: u64) -> u8[] {
 // A value is minted per definition. Reads bind to the last definition of that location in the block;
 // a label starts a block, so a read across it keeps its slot (value 0) rather than claiming one
 // definition where a slot may hold several.
+// A direct call to a body whose signature fact gives its argument words reads only those argument
+// registers (rdi, rsi, rdx, rcx, r8, r9 in order), not all six: what the caller left in the others
+// is not kept alive for it. The mask rides in the call operand as `call_args` masks do (bit 63).
+fn exact_calls<a, b, c, d>(o: (&a mut Body), s: &b [u8], facts: (&c llvm::Facts), ix: (&d FactIndex)) {
+    if ix.count == 0 {
+        return ();
+    }
+    order := u64[7, 6, 2, 1, 8, 9];
+    for i in o.op.len() {
+        if (o.op[i] != 15) || (o.k0[i] != 4) || ((o.m0[i] >> 63) != 0) {
+            continue;
+        }
+        a := o.s0[i];
+        e := o.e0[i];
+        mut h: u64 = 2166136261;
+        for j in e - a {
+            h = wrapping_mul(h ^ s[a + j], 16777619);
+        }
+        mut at = ix.head[h % 4096];
+        while at != 0 {
+            f := at - 1;
+            if (llvm::fact_kind(facts, f) == 5) && (llvm::fact_name_len(facts, f) == e - a) {
+                mut same = true;
+                for j in e - a {
+                    if llvm::fact_name_byte(facts, f, j) != s[a + j] {
+                        same = false;
+                        break;
+                    }
+                }
+                if same {
+                    words := llvm::fact_slot_at(facts, f);
+                    mut m = 9223372036854775808;
+                    for k in 6 {
+                        if k < words {
+                            m = m | (1 << order[k]);
+                        }
+                    }
+                    exchange(&mut o.m0[i], m);
+                    break;
+                }
+            }
+            at = ix.next[f];
+        }
+    }
+}
 pub fn build<a, b, c, d>(o: (&a mut Body), s: &b [u8], facts: (&c llvm::Facts), ix: (&d FactIndex)) {
+    exact_calls(&mut o, view(s), facts, ix);
     // The `DynPair`s this body builds, and whether it returns one, are typed-IR facts keyed by the
     // body symbol (docs/design/fat-dyn.md): one read, here, so every consumer of the width sees the
     // same list. The fact names word 0 by the front end's slot index (slot k at `-8(k+1)`); this

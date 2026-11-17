@@ -571,19 +571,6 @@
     "signal": "SIGABRT"
   },
   {
-    "name": "raw-overflow-follows-build-mode-wrap",
-    "source": "unsafe module runtime;\nfn main() {\n    mut a: u64 = 18446744073709551615;\n    a = a + 2;\n    println(a);\n}\n",
-    "overflow": "wrap",
-    "stdout": "1\n",
-    "note": "Raw (`unsafe module`) code follows the build's overflow mode like all other code: under wrap (and so under --release) an overflowing add wraps. Code that must check uses explicit checked operations."
-  },
-  {
-    "name": "raw-overflow-follows-build-mode-checked",
-    "source": "unsafe module runtime;\nfn main() {\n    mut a: u64 = 18446744073709551615;\n    a = a + 2;\n    println(a);\n}\n",
-    "signal": "SIGABRT",
-    "note": "The same raw add traps in a checked (development) build."
-  },
-  {
     "name": "abort-in-c-callback-arithmetic",
     "files": [
       "tests/abort/callback_abort.grl"
@@ -2078,6 +2065,40 @@
     "stdout": "42\n"
   },
   {
+    "name": "strings-parse-f64-rounding-and-grammar",
+    "files": [
+      "compiler/tests/parse_f64.grl",
+      "lib/strings.grl",
+      "lib/float.grl",
+      "lib/core.grl",
+      "lib/iter.grl"
+    ],
+    "stdout": "parse_f64: 2068 cases, 0 wrong\n"
+  },
+  {
+    "name": "strings-views-split-trim-lines-append-format",
+    "files": [
+      "compiler/tests/text_views.grl",
+      "lib/strings.grl",
+      "lib/float.grl",
+      "lib/core.grl",
+      "lib/iter.grl"
+    ],
+    "stdout": "4 [x] [] [y] []\n1\n<7><8>\n[hi] [hi ] [  hi]\n4 [one] [two] [] [three]\n3 a+bc+d\n3 [a] [b]\ns:2+3=5;étrue\n4 [42]\n"
+  },
+  {
+    "name": "strings-reject-view-outlives-text",
+    "source": "use strings;\nfn first() -> u64 {\n    text := \"a,b\".copy();\n    parts := text.split(44);\n    drop(text);\n    return parts[0].len();\n}\nfn main() { println(first()); }\n",
+    "reject": true,
+    "diagnostic": "drop of moved or unavailable value"
+  },
+  {
+    "name": "strings-reject-mutate-text-under-view",
+    "source": "use strings;\nfn main() {\n    mut text = \"a,b\".copy();\n    parts := text.split(44);\n    text.push(99);\n    println(parts.len());\n}\n",
+    "reject": true,
+    "diagnostic": "borrow"
+  },
+  {
     "name": "strings-library",
     "files": [
       "compiler/tests/strings.grl",
@@ -2366,6 +2387,16 @@
     "source": "fn main(){mut k=0u8;k=-1;}",
     "reject": true,
     "diagnostic": "out of range"
+  },
+  {
+    "name": "hashmap-probing-collisions-churn-and-growth",
+    "files": [
+      "compiler/tests/hashmap_probing.grl",
+      "lib/hashmap.grl",
+      "lib/hash.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "true true true 50000\n"
   },
   {
     "name": "hashmap-iteration-order-and-model-3000",
@@ -2658,7 +2689,7 @@
   },
   {
     "name": "builtin-text-methods",
-    "source": "fn main(){s:=\"  Hello, World  \".text();t:=s.trim();println(t);println(t.to_upper());println(t.to_lower());println(t.contains(\"lo, W\"));println(t.starts_with(\"Hell\"));println(t.ends_with(\"x\"));\n println(t.replace(\"World\",\"Grail\"));println(\"ab\".repeat(3));parts:=\"a,b,,c\".text().split(',');println(parts);println(parts.len());e:=\"\".text();println(e.is_empty());\n b:=u8[104,105];println(b.to_upper());println(u64[].is_empty());}\n",
+    "source": "use strings;\nfn main(){s:=\"  Hello, World  \".text();t:=s.trim();println(t);println(t.to_upper());println(t.to_lower());println(t.contains(\"lo, W\"));println(t.starts_with(\"Hell\"));println(t.ends_with(\"x\"));\n println(t.replace(\"World\",\"Grail\"));println(\"ab\".repeat(3));parts:=\"a,b,,c\".text().split(',');println(parts);println(parts.len());e:=\"\".text();println(e.is_empty());\n b:=u8[104,105];println(b.to_upper());println(u64[].is_empty());}\n",
     "stdout": "Hello, World\nHELLO, WORLD\nhello, world\ntrue\ntrue\nfalse\nHello, Grail\nababab\n[\"a\", \"b\", \"\", \"c\"]\n4\ntrue\nHI\ntrue\n"
   },
   {
@@ -3108,6 +3139,51 @@
     "source": "// f32 narrowing (optimize.grl `xmm_narrow`) holds a promoted slot as binary32 only when every store\n// into it is a widened f32 or zero. `two: f32 := 2.0` is stored from the immediate\n// $4611686018427387904 (19 digits), which the optimiser's immediate reader cannot read and reports\n// as 0 - once taken for zero, so the slot was narrowed and 2.0 read back as 0.0 (meshopt's\n// quadric_error_attr, which changed Abundance's abgeo mesh digests). 387 with the bug.\nstruct Q {\n    positions: f32[],\n    attributes: f32[],\n    gradients: f32[],\n    attribute: f32[],\n    count: u64\n}\nfn eval(q: (&f32[]), at: u64, x: f32, y: f32, z: f32) -> f32 {\n    return q[at] * x + q[at + 1] * y + q[at + 2] * z;\n}\nfn error_attr<a>(st: (&a Q), v: u64, t: u64) -> f32 {\n    acount := st.count;\n    qa := v * 11;\n    x := st.positions[t * 3];\n    y := st.positions[t * 3 + 1];\n    z := st.positions[t * 3 + 2];\n    mut r = eval(&st.attribute, qa, x, y, z);\n    two: f32 := 2.0;\n    for k in acount {\n        a := st.attributes[t * acount + k];\n        g0 := (v * acount + k) * 4;\n        gx := st.gradients[g0];\n        gy := st.gradients[g0 + 1];\n        gz := st.gradients[g0 + 2];\n        gw := st.gradients[g0 + 3];\n        g: f32 := x * gx + y * gy + z * gz + gw;\n        r = r + a * (a * st.attribute[qa + 10] - two * g);\n    }\n    return r.abs();\n}\nfn main() {\n    mut st = Q { positions: f32[], attributes: f32[], gradients: f32[], attribute: f32[], count: 3 };\n    for i in 24 {\n        st.positions.push(f32(i64(i)) * 0.25);\n        st.attributes.push(f32(i64(i)) * 0.5 + 1.0);\n        st.attribute.push(f32(i64(i)) * 0.125);\n    }\n    for i in 48 {\n        st.gradients.push(f32(i64(i % 7)) * 0.75 - 1.0);\n    }\n    mut total: f32 = 0.0;\n    for v in 2 {\n        for t in 3 {\n            total = total + error_attr(&st, v, t);\n        }\n    }\n    println(total);\n}\n",
     "stdout": "178.1875\n",
     "note": "a 19-digit f32 constant immediate is not zero: the narrowing pass took imm_value's 'cannot read' (0) for the value 0"
+  },
+  {
+    "name": "raw-address-offset-folded-size-checked",
+    "source": "unsafe module runtime;\n// The address operand of a raw load or store written as `p + k` with a literal k is address\n// formation: no overflow check, and a field load is one instruction (`movq 16(%rax),%rax`). Integer\n// arithmetic in the same unsafe module still follows the build's overflow mode: the size `n * 8`\n// overflows and aborts in a checked build.\nfn field(p: u64) -> u64 {\n    return raw_load(p + 16);\n}\nfn size(n: u64) -> u64 {\n    return n * 8;\n}\nfn main() {\n    p := raw_map(4096);\n    raw_store(p + 16, 42);\n    println(field(p));\n    println(size(3));\n    println(size(4611686018427387904));\n}\n",
+    "stdout": "42\n24\n",
+    "signal": "SIGABRT",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "asm": [
+      {
+        "in": "field",
+        "text": "movq 16(%rax),%rax"
+      },
+      {
+        "in": "size",
+        "text": "jnc"
+      }
+    ],
+    "asmAbsent": [
+      {
+        "in": "field",
+        "text": "rt_abort"
+      },
+      {
+        "in": "field",
+        "text": "addq"
+      }
+    ],
+    "note": "docs/design/decisions 'raw address offsets': raw_load(p + 16) is address formation (no check, folded); n * 8 in the same unsafe module is checked"
+  },
+  {
+    "name": "raw-address-offset-behaviour",
+    "source": "unsafe module runtime;\n// The address operand of a raw load or store written as `p + k` with a literal k is address\n// formation: no overflow check, and a field load is one instruction (`movq 16(%rax),%rax`). Integer\n// arithmetic in the same unsafe module still follows the build's overflow mode: the size `n * 8`\n// overflows and aborts in a checked build.\nfn field(p: u64) -> u64 {\n    return raw_load(p + 16);\n}\nfn size(n: u64) -> u64 {\n    return n * 8;\n}\nfn main() {\n    p := raw_map(4096);\n    raw_store(p + 16, 42);\n    println(field(p));\n    println(size(3));\n    println(size(4611686018427387904));\n}\n",
+    "stdout": "42\n24\n",
+    "signal": "SIGABRT",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "the raw address offset rule on every target and backend: the field reads 42, the overflowing size aborts"
   },
   {
     "name": "raw-module-sized-integer-arithmetic",
@@ -11541,6 +11617,34 @@
         "in": "f_main_small",
         "text": ".Lgrail_probe_"
       }
+    ],
+    "note": "the frame line with a saved-register area (`subq $.F<n>+K,%rsp`): the probe covers the frame and the K bytes; a frame line the probe misses is an internal compiler error (optimize::probe_backstop)"
+  },
+  {
+    "name": "array-frame-probe-plain-frame-line",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "flags": [
+      "--debug"
+    ],
+    "note": "the plain frame line (`subq $.F<n>,%rsp`, as --debug lays a frame out with no saved registers) is probed too",
+    "source": "fn fill(depth: u64) -> u64 {\n    mut buf: [u64; 8192] = [0; 8192];\n    buf[depth % 8192] = depth;\n    return buf[depth % 8192];\n}\nfn small(x: u64) -> u64 {\n    a: [u64; 4] = [x; 4];\n    return a[3];\n}\nfn main() {\n    println(fill(10) + small(1));\n}\n",
+    "stdout": "11\n",
+    "asm": [
+      {
+        "in": "f_main_fill",
+        "text": "movq $0,(%rsp)"
+      }
+    ],
+    "asmAbsent": [
+      {
+        "in": "f_main_small",
+        "text": ".Lgrail_probe_"
+      }
     ]
   },
   {
@@ -15256,7 +15360,7 @@
   },
   {
     "name": "thread-join-parks-without-helper-threads",
-    "source": "use thread;\nuse host;\nfn threads_now() -> u64 {\n    text := host::read_file(\"/proc/self/status\");\n    mut i = 0;\n    // \"Threads:\\t\" then the count.\n    while i + 8 < text.len() {\n        if (text[i] == 84) && (text[i + 1] == 104) && (text[i + 2] == 114) && (text[i + 7] == 58) {\n            mut n = 0;\n            mut j = i + 8;\n            while (j < text.len()) && (text[j] != 10) {\n                if (text[j] >= 48) && (text[j] <= 57) {\n                    n = n * 10 + u64(text[j] - 48);\n                }\n                j += 1;\n            }\n            return n;\n        }\n        i += 1;\n    }\n    return 0;\n}\nfn joiner(n: u64, unused: u64) -> u64 {\n    t := thread::spawn<u64>(thread::config(), |ctx: (&thread::Ctx)| -> u64 { host::sleep_ms(300); return 1; })!;\n    return thread::join(t);\n}\nfn body<s>(sc: (&s Scope<u64>), unused: u64) -> u64 {\n    mut many = Task<u64>[];\n    for i in 16 {\n        many.push(spawn(sc, 0, joiner));\n    }\n    mut total = 0;\n    while let Some(t) = many.pop() {\n        total += join(t);\n    }\n    return total;\n}\nfn main() {\n    // Counted from a thread of its own: a task's host::read_file would itself start a helper.\n    probe := thread::spawn<u64>(thread::config(), |ctx: (&thread::Ctx)| -> u64 { host::sleep_ms(150); return threads_now(); })!;\n    println(task_scope(0, body));\n    seen := thread::join(probe);\n    // Sixteen joins in flight: the joiners park, so the process holds the workers, the reactor and\n    // the sixteen threads - not a helper thread per join on top.\n    // main, the workers, the reactor, the probe and the sixteen threads.\n    println(seen <= 1 + host::workers() + 1 + 1 + 16);\n}\n",
+    "source": "use thread;\nuse host;\nfn threads_now() -> u64 {\n    text := host::read_file(\"/proc/self/status\");\n    mut i = 0;\n    // \"Threads:\\t\" then the count.\n    while i + 8 < text.len() {\n        if (text[i] == 84) && (text[i + 1] == 104) && (text[i + 2] == 114) && (text[i + 7] == 58) {\n            mut n = 0;\n            mut j = i + 8;\n            while (j < text.len()) && (text[j] != 10) {\n                if (text[j] >= 48) && (text[j] <= 57) {\n                    n = n * 10 + u64(text[j] - 48);\n                }\n                j += 1;\n            }\n            return n;\n        }\n        i += 1;\n    }\n    return 0;\n}\nfn joiner(n: u64, unused: u64) -> u64 {\n    t := thread::spawn<u64>(thread::config(), |ctx: (&thread::Ctx)| -> u64 { host::sleep_ms(300); return 1; })!;\n    return thread::join(t);\n}\nfn body<s>(sc: (&s Scope<u64>), unused: u64) -> u64 {\n    mut many = Task<u64>[];\n    for i in 16 {\n        many.push(spawn(sc, 0, joiner));\n    }\n    mut total = 0;\n    while let Some(t) = many.pop() {\n        total += join(t);\n    }\n    return total;\n}\nfn main() {\n    // Counted from a thread of its own: a task's host::read_file would itself start a helper.\n    probe := thread::spawn<u64>(thread::config(), |ctx: (&thread::Ctx)| -> u64 { host::sleep_ms(150); return threads_now(); })!;\n    println(task_scope(0, body));\n    seen := thread::join(probe);\n    // Sixteen joins in flight: the joiners park, so the process holds the workers, the reactor and\n    // the sixteen threads - not a helper thread per join on top.\n    // main, the workers, the reactor, the scheduler's monitor, the probe and the sixteen threads.\n    println(seen <= 1 + host::workers() + 1 + 1 + 1 + 16);\n}\n",
     "modules": [
       "lib/thread.grl",
       "lib/time.grl"
@@ -16980,44 +17084,6 @@
     ]
   },
   {
-    "name": "iter-typed-chain-fold",
-    "note": "typed adapters (docs/design/dyn-and-callable-bounds.md 2c): `iter::over(v).map(..).filter(..).fold(..)` is one nested type, each callback its own closure type, every call direct",
-    "source": "use iter;\nfn main() { v := u64[1, 2, 3, 4]; t := iter::over(v.copy()).map(|x: u64| -> u64 x * 2).filter(|x: &u64| -> bool *x % 3 == 0).fold(0, |s: u64, x: u64| -> u64 s + x); println(t); }\n",
-    "stdout": "6\n",
-    "modules": [
-      "lib/iter.grl",
-      "lib/core.grl"
-    ]
-  },
-  {
-    "name": "iter-typed-for-loop",
-    "note": "a `for` loop over a typed adapter (inherent `next`)",
-    "source": "use iter;\nfn main() { mut t = 0; for x in iter::over(u64[1, 2, 3]).map(|x: u64| -> u64 x + 1) { t += x; } println(t); }\n",
-    "stdout": "9\n",
-    "modules": [
-      "lib/iter.grl",
-      "lib/core.grl"
-    ]
-  },
-  {
-    "name": "callable-bound-impl-parameter",
-    "note": "a callable bound on an impl's parameter (`impl<U, F: FnMut(u64) -> U> W<U, F>`): the impl's own type and its field `f: F` carry the bound, so `self.f` is callable",
-    "source": "pub struct W<U, F> { f: F, u: U }\nimpl<U, F: FnMut(u64) -> U> W<U, F> {\n    pub fn run(self: &mut Self, x: u64) -> U { g := &mut self.f; return g(x); }\n}\nfn main() { mut w = W { f: |x: u64| -> u64 x + 1, u: 0 }; println(w.run(4)); }\n",
-    "stdout": "5\n"
-  },
-  {
-    "name": "callable-bound-impl-parameter-interface",
-    "files": [
-      "tests/callable/holder_user.grl"
-    ],
-    "modules": [
-      "tests/callable/holder.grl"
-    ],
-    "interfaces": true,
-    "stdout": "5\n",
-    "note": "...and through an interface file: the impl's callable bound travels with its parameter record"
-  },
-  {
     "name": "unboxed-task-items",
     "files": [
       "compiler/tests/unboxed_task_items.grl"
@@ -17437,6 +17503,154 @@
     "stdout": "contained\n0\n"
   },
   {
+    "name": "interface-default-methods-across-modules",
+    "files": [
+      "tests/defaults/shapes_user.grl"
+    ],
+    "modules": [
+      "tests/defaults/shapes.grl"
+    ],
+    "interfaces": true,
+    "stdout": "18\n9\n27\n7\n17\n",
+    "note": "default interface method bodies travel in the interface (as their text, like a generic template's), so an implementation in another module gets them: a default used, a default overridden, a default calling a required method and a default calling another default, also through a generic function of the interface's module (was: `missing interface method (it has no default body)`)"
+  },
+  {
+    "name": "callable-bound-fresh-ref-function-refused",
+    "note": "a callable bound's reference parameter with a lifetime the bound names nowhere else is fresh on every call (higher-ranked): a named function that ties it to the context's lifetime (`C = &mut Out<'a>`) could store the guarded `&mut T` past the lock (found by /root/thread_alloc moving lib/sync.grl to callable bounds)",
+    "source": "struct Box1<T> { v: T }\nfn with_lock<a, T, C, R: Owned, F: FnMut((&mut T), C) -> R>(m: (&a mut Box1<T>), ctx: C, f: F) -> R { mut g = f; return g(&mut m.v, ctx); }\nstruct Out<a> { slot: (&a mut u64[])[] }\nfn leak<a, b>(v: (&a mut u64[]), out: (&b mut Out<a>)) -> u64 { out.slot.push(v); return 0; }\nfn main() { mut m = Box1 { v: u64[1] }; mut other = u64[9]; mut out = Out { slot: [] }; with_lock(&mut m, &mut out, leak); println(out.slot.len()); }\n",
+    "reject": true,
+    "diagnostic": "its parameter 1 is a reference the bound gives it fresh on every call"
+  },
+  {
+    "name": "callable-bound-fresh-ref-closure-refused",
+    "note": "...a closure that names the outer lifetime for that parameter and captures storage labelled with it is refused the same way",
+    "source": "struct Box1<T> { v: T }\nfn with_lock<a, T, C, R: Owned, F: FnMut((&mut T), C) -> R>(m: (&a mut Box1<T>), ctx: C, f: F) -> R { mut g = f; return g(&mut m.v, ctx); }\nstruct Out<a> { slot: (&a mut u64[])[] }\nfn stash<a, b>(m: (&a mut Box1<u64[]>), out: (&b mut Out<a>)) -> u64 {\n    return with_lock(&mut m, 0, |v: (&a mut u64[]), k: u64| -> u64 { out.slot.push(v); return 0; });\n}\nfn main() { mut m = Box1 { v: u64[1] }; mut out = Out { slot: [] }; println(stash(&mut m, &mut out)); }\n",
+    "reject": true,
+    "diagnostic": "its parameter 1 is a reference the bound gives it fresh on every call"
+  },
+  {
+    "name": "callable-bound-fresh-ref-function-independent",
+    "note": "...a function whose lifetimes are independent is accepted",
+    "source": "struct Box1<T> { v: T }\nfn with_lock<a, T, C, R: Owned, F: FnMut((&mut T), C) -> R>(m: (&a mut Box1<T>), ctx: C, f: F) -> R { mut g = f; return g(&mut m.v, ctx); }\nfn count<a, b>(v: (&a mut u64[]), extra: (&b u64)) -> u64 { v.push(*extra); return v.len(); }\nfn main() { mut m = Box1 { v: u64[1] }; k := 5; println(with_lock(&mut m, &k, count)); }\n",
+    "stdout": "2\n"
+  },
+  {
+    "name": "callable-bound-fresh-ref-closure",
+    "note": "...and so is a closure with elided reference parameters",
+    "source": "struct Box1<T> { v: T }\nfn with_lock<a, T, C, R: Owned, F: FnMut((&mut T), C) -> R>(m: (&a mut Box1<T>), ctx: C, f: F) -> R { mut g = f; return g(&mut m.v, ctx); }\nfn main() { mut m = Box1 { v: u64[1] }; println(with_lock(&mut m, 3, |v: (&mut u64[]), k: u64| -> u64 { v.push(k); return v.len(); })); }\n",
+    "stdout": "2\n"
+  },
+  {
+    "name": "callable-bound-fresh-ref-vecs-any-refused",
+    "note": "the same hole through a vecs callback on main: `any`'s `FnMut((&T)) -> bool` given a closure that keeps each element reference in captured storage",
+    "source": "use vecs;\nfn keep_refs<a, b>(v: (&a u64[]), out: (&b mut (&a u64)[])) -> bool { return v.any(|x: (&a u64)| -> bool { out.push(x); return false; }); }\nfn main() { v := u64[1, 2]; mut out = (&u64)[]; println(keep_refs(&v, &mut out)); }\n",
+    "reject": true,
+    "diagnostic": "is a reference the bound gives it fresh on every call"
+  },
+  {
+    "name": "callable-bound-fresh-ref-filter-adapter-refused",
+    "note": "...through the typed Filter adapter",
+    "source": "use iter;\nfn keep_refs<a, b>(v: (&a u64[]), out: (&b mut (&a u64)[])) -> u64 {\n    return iter::over(v.copy()).filter(|x: (&a u64)| -> bool { out.push(x); return true; }).fold(0, |s: u64, x: u64| -> u64 s + x);\n}\nfn main() { v := u64[1, 2]; mut out = (&u64)[]; println(keep_refs(&v, &mut out)); }\n",
+    "reject": true,
+    "diagnostic": "is a reference the bound gives it fresh on every call"
+  },
+  {
+    "name": "callable-bound-fresh-ref-returned-refused",
+    "note": "...and a function returning the fresh reference (`fn grab<b>(v: &b mut u64[]) -> &b mut u64[]` for `F: FnMut((&mut T)) -> R`)",
+    "source": "fn apply<a, T, R, F: FnMut((&mut T)) -> R>(x: (&a mut T), f: F) -> R { mut g = f; return g(&mut x); }\nfn grab<b>(v: (&b mut u64[])) -> (&b mut u64[]) { return v; }\nfn get<a>(v: (&a mut u64[])) -> u64 { r := apply(&mut v, grab); return r.len(); }\nfn main() { mut v = u64[1]; println(get(&mut v)); }\n",
+    "reject": true,
+    "diagnostic": "is a reference the bound gives it fresh on every call"
+  },
+  {
+    "name": "callable-bound-fresh-ref-vecs-plain",
+    "note": "plain reference callbacks of vecs are unaffected",
+    "source": "use vecs;\nfn main() { v := u64[3, 1, 2]; mut w = v.copy(); w.sort_by(|a: &u64, b: &u64| -> bool *a < *b); println(w[0]); println(v.any(|x: &u64| -> bool *x > 2)); }\n",
+    "stdout": "1\ntrue\n"
+  },
+  {
+    "name": "unboxed-layout-guards",
+    "files": [
+      "compiler/tests/unboxed_layout_guards.grl"
+    ],
+    "stdout": "60\n20\n0\n1\n2\n3\n3 6 10\n21\n1 5\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "asmAbsent": [
+      {
+        "in": "f_main_main",
+        "text": "call f_core_some"
+      },
+      {
+        "in": "f_main_main",
+        "text": "call rt_enum\n"
+      },
+      {
+        "in": "f_main_main",
+        "text": "call rt_popw\n"
+      },
+      {
+        "in": "f_main_main",
+        "text": "call rt_flat_box"
+      }
+    ],
+    "note": "small enums in a framed record and through btree iteration stay frame words (no rt_enum: a layout-bit change re-boxed them once), struct literals are bound in place, pop and remove land in the caller's frame (no rt_popw box)"
+  },
+  {
+    "name": "raw-overflow-follows-build-mode-wrap",
+    "source": "unsafe module runtime;\nfn main() {\n    mut a: u64 = 18446744073709551615;\n    a = a + 2;\n    println(a);\n}\n",
+    "overflow": "wrap",
+    "stdout": "1\n",
+    "note": "Raw (`unsafe module`) code follows the build's overflow mode like all other code: under wrap (and so under --release) an overflowing add wraps. Code that must check uses explicit checked operations."
+  },
+  {
+    "name": "raw-overflow-follows-build-mode-checked",
+    "source": "unsafe module runtime;\nfn main() {\n    mut a: u64 = 18446744073709551615;\n    a = a + 2;\n    println(a);\n}\n",
+    "signal": "SIGABRT",
+    "note": "The same raw add traps in a checked (development) build."
+  },
+  {
+    "name": "iter-typed-chain-fold",
+    "note": "typed adapters (docs/design/dyn-and-callable-bounds.md 2c): `iter::over(v).map(..).filter(..).fold(..)` is one nested type, each callback its own closure type, every call direct",
+    "source": "use iter;\nfn main() { v := u64[1, 2, 3, 4]; t := iter::over(v.copy()).map(|x: u64| -> u64 x * 2).filter(|x: &u64| -> bool *x % 3 == 0).fold(0, |s: u64, x: u64| -> u64 s + x); println(t); }\n",
+    "stdout": "6\n",
+    "modules": [
+      "lib/iter.grl",
+      "lib/core.grl"
+    ]
+  },
+  {
+    "name": "iter-typed-for-loop",
+    "note": "a `for` loop over a typed adapter (inherent `next`)",
+    "source": "use iter;\nfn main() { mut t = 0; for x in iter::over(u64[1, 2, 3]).map(|x: u64| -> u64 x + 1) { t += x; } println(t); }\n",
+    "stdout": "9\n",
+    "modules": [
+      "lib/iter.grl",
+      "lib/core.grl"
+    ]
+  },
+  {
+    "name": "callable-bound-impl-parameter",
+    "note": "a callable bound on an impl's parameter (`impl<U, F: FnMut(u64) -> U> W<U, F>`): the impl's own type and its field `f: F` carry the bound, so `self.f` is callable",
+    "source": "pub struct W<U, F> { f: F, u: U }\nimpl<U, F: FnMut(u64) -> U> W<U, F> {\n    pub fn run(self: &mut Self, x: u64) -> U { g := &mut self.f; return g(x); }\n}\nfn main() { mut w = W { f: |x: u64| -> u64 x + 1, u: 0 }; println(w.run(4)); }\n",
+    "stdout": "5\n"
+  },
+  {
+    "name": "callable-bound-impl-parameter-interface",
+    "files": [
+      "tests/callable/holder_user.grl"
+    ],
+    "modules": [
+      "tests/callable/holder.grl"
+    ],
+    "interfaces": true,
+    "stdout": "5\n",
+    "note": "...and through an interface file: the impl's callable bound travels with its parameter record"
+  },
+  {
     "name": "refinement-field-cross-literal-checked",
     "source": "struct P {\n    lo: u64,\n    hi: u64 where lo <= hi\n}\nfn seven() -> u64 {\n    return 7;\n}\nfn main() {\n    p := P { lo: 1, hi: 3 };\n    println(p.hi - p.lo);\n    x := seven();\n    q := P { lo: x, hi: 3 };\n    println(q.hi);\n}\n",
     "targets": [
@@ -17582,5 +17796,154 @@
       "llvm"
     ],
     "note": "address-taken two- and three-word frame values (an Option from pop(), a record built in a loop) inside lifted functions at different frame layouts: a lifter that gave such a value one-word allocas would write into a neighbour (18e6943's pool::split SIGSEGV); llvm.grl escaped_overreach keeps any body that would, native"
+  },
+  {
+    "name": "runtime-error-index-after-proved-divide",
+    "source": "fn total(n: u64) -> u64 {\n    mut v = u64[];\n    for i in n {\n        if i % 2 == 0 {\n            v.push(i);\n        }\n    }\n    mut s: u64 = 0;\n    for i in n {\n        s = s ^ v[i];\n    }\n    return s;\n}\nfn main() {\n    println(total(10));\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "",
+    "stderr": [
+      "error: index 5 out of bounds for length 5\n --> ",
+      "input.grl:10:9"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "the `%` by a constant 2 loses its check to the optimiser but its failure kind was still pending, and the next check in the function - an index - was reported as `division by zero`; a kind no longer outlives its statement, and an inlined bounds check is recognised by its shape first"
+  },
+  {
+    "name": "sched-help-declines-with-little-stack",
+    "note": "rt_job_may_help asked from a green task on a fresh stack answers 1, and with less than a tenth of the stack left answers 0: the room check, tested directly. Without it the second answer is 1.",
+    "files": [
+      "tests/sched/help_declines_low_stack.grl"
+    ],
+    "stdout": "10\n",
+    "targets": [
+      "x86_64"
+    ]
+  },
+  {
+    "name": "foreign-call-stuck-is-handed-off",
+    "note": "One worker: an undeclared 120 ms usleep holds it, and a second task queued behind it still runs - the monitor gave the worker to a spare after 10 ms - and stderr names `usleep` once.",
+    "files": [
+      "tests/concurrency/blocking_undeclared.grl"
+    ],
+    "env": {
+      "GRAIL_WORKERS": "1"
+    },
+    "stdout": "42\n",
+    "stderr": "the foreign call `usleep` held a worker for more than 10 ms",
+    "stderrCount": 1,
+    "targets": [
+      "x86_64"
+    ]
+  },
+  {
+    "name": "simd-basics",
+    "note": "The S1 SIMD types by value (docs/design/simd.md): lane arithmetic, sum and lane reads, min/max with NaN and signed zeros, compares to masks and select, mask splat/any/all/not, loads and stores through slices and arrays. Identical on every target and backend.",
+    "files": [
+      "tests/simd/basics.grl"
+    ],
+    "stdout": "1.5\n6\n15\n-6\n-2147483648\n-2147483642\ntrue\nfalse\n4\n3\n1\n0\n-0\n62\n3\n15\ntrue\nfalse\n18\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ]
+  },
+  {
+    "name": "simd-oracle-every-op-every-lane",
+    "note": "Every S1 SIMD operation on f32x8, f32x4, f64x4, f64x2, i32x8 lane by lane against the scalar operation on edge values (signed zeros, infinities, NaN, subnormals, the largest finite values, i32 wraparound): 0 lanes differ, and the checksum of every lane's bits is the same on every target and backend.",
+    "files": [
+      "tests/simd/oracle.grl"
+    ],
+    "stdout": "0\n9290390926636514803\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ]
+  },
+  {
+    "name": "simd-inline-loop",
+    "note": "A small SIMD function called in a loop; with --backend=llvm the call is inlined and the loop is in registers (tools/test-simd.mjs holds the instructions).",
+    "files": [
+      "tests/simd/inline_loop.grl"
+    ],
+    "stdout": "177\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ]
+  },
+  {
+    "name": "simd-compare-operator-is-refused",
+    "source": "fn main() {\n    a := f32x4::splat(1.0);\n    println(a < a);\n}\n",
+    "reject": true,
+    "diagnostic": "a SIMD comparison is lane-wise and gives a mask: write `a.eq(b)`, `a.lt(b)` and so on"
+  },
+  {
+    "name": "simd-shapes-must-match",
+    "source": "fn main() {\n    a := f32x4::splat(1.0);\n    b := f64x2::splat(1.0);\n    println((a + b).sum());\n}\n",
+    "reject": true,
+    "diagnostic": "expected `f32x4`, found `f64x2`"
+  },
+  {
+    "name": "simd-lane-past-the-end",
+    "source": "fn main() {\n    a := f32x4::splat(1.0);\n    println(a.lane(4));\n}\n",
+    "reject": true,
+    "diagnostic": "the lane index is past the vector's last lane"
+  },
+  {
+    "name": "simd-store-needs-a-mutable-place",
+    "source": "fn put<a>(s: &a [f32]) {\n    f32x4::splat(1.0).store(s, 0);\n}\nfn main() {\n    v := f32[0.0, 0.0, 0.0, 0.0];\n    put(&v[:]);\n}\n",
+    "reject": true,
+    "diagnostic": "a SIMD store needs a mutable place"
+  },
+  {
+    "name": "simd-mask-has-no-arithmetic-methods",
+    "source": "fn main() {\n    m := m32x4::splat(true);\n    println(m.sum());\n}\n",
+    "reject": true,
+    "diagnostic": "`m32x4` has no method `sum`; a mask's methods are select, any, all and not"
+  },
+  {
+    "name": "simd-load-is-bounds-checked",
+    "source": "fn main() {\n    v := f32[1.0, 2.0, 3.0, 4.0, 5.0];\n    s := &v[:];\n    println(f32x4::load(s, 2).sum());\n}\n",
+    "signal": "SIGABRT",
+    "stderr": "index 5 out of bounds for length 5",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ]
+  },
+  {
+    "name": "atomic-element-is-part-of-the-type",
+    "source": "fn take(a: Atomic<u64>) -> u64 {\n    return a.load();\n}\nfn main() {\n    println(take(Atomic::new(u8(1))));\n}\n",
+    "reject": true,
+    "diagnostic": "expected `Atomic<u64>`, found `Atomic<u8>`",
+    "note": "An Atomic<T>'s element is part of its type: same_type compared only the kind, so an Atomic<u8> passed where an Atomic<u64> was wanted, and its 8-byte cell was read as the other width."
+  },
+  {
+    "name": "simd-vector-parameters",
+    "note": "Vectors as parameters (the first is frame slot 0) and results, through calls on every target and backend.",
+    "files": [
+      "tests/simd/params.grl"
+    ],
+    "stdout": "10\n10\n20\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ]
+  },
+  {
+    "name": "array-simd-loads-from-fields",
+    "note": "f32x4::load takes a fixed-size array reference: a `[f32; 16]` field and the `[f32; 4]` rows of a `[[f32; 4]; 4]` field are loaded in place, no copy (fixed-arrays.md section 6; simd.md); an out-of-range lane is the load's one bounds check",
+    "source": "struct Mat {\n    m: [f32; 16],\n    rows: [[f32; 4]; 4]\n}\nfn total(x: &Mat) -> f32 {\n    mut acc = f32x4::splat(0.0);\n    for i in 4 {\n        acc = acc + f32x4::load(&x.m, i * 4);\n    }\n    return acc.sum();\n}\nfn rowsum(x: &Mat) -> f32 {\n    mut acc = f32x4::splat(0.0);\n    for r in 4 {\n        acc = acc + f32x4::load(&x.rows[r], 0);\n    }\n    return acc.sum();\n}\nfn main() {\n    mut m = Mat { m: [1.0; 16], rows: [[2.0; 4]; 4] };\n    m.m[5] = 3.0;\n    println(\"{} {}\", total(&m), rowsum(&m));\n}\n",
+    "stdout": "18 32\n"
   }
 ]

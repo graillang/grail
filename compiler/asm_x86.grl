@@ -82,6 +82,8 @@ pub struct A {
     sec_sym: u64[],
     sec_entsize: u64[],
     cur: u64,
+    // The section before the last change, for `.previous`.
+    prev_sec: u64,
     nobits: u64,
     buf: u8[],
     stack: u64[],
@@ -352,6 +354,7 @@ fn directives<a>(o: (&a mut A)) {
     def(&mut o, view(".internal"), 27);
     def(&mut o, view(".comm"), 28);
     def(&mut o, view(".4byte"), 29);
+    def(&mut o, view(".previous"), 31);
     def(&mut o, view(".8byte"), 30);
 }
 
@@ -410,6 +413,7 @@ pub fn new() -> A {
         sec_sym: u64[],
         sec_entsize: u64[],
         cur: 0,
+        prev_sec: 0,
         nobits: 0,
         buf: u8[],
         stack: u64[],
@@ -668,6 +672,7 @@ fn switch_to<a>(o: (&a mut A), k: u64) {
     old := exchange(&mut o.buf, u8[]);
     exchange(&mut o.sec_data[o.cur], old);
     o.buf = exchange(&mut o.sec_data[k], u8[]);
+    o.prev_sec = o.cur;
     o.cur = k;
     if o.sec_type[k] == 8 {
         o.nobits = 1;
@@ -1337,6 +1342,11 @@ fn directive<a>(o: (&a mut A), id: u64) {
             fail(&mut o, view("unsupported `.option`"));
         }
         o.at = e;
+    } else if id == 31 {
+        // `.previous`: back to the section before the last change (MCStreamer's previous
+        // section; a `.pushsection` entry's own after a pop).
+        p := o.prev_sec;
+        switch_to(&mut o, p);
     } else if id == 29 {
         // `.4byte`: a raw word, written into code for an instruction the lowering names by its
         // encoding (RISC-V fence.tso) - data to the mapping symbols.
@@ -1534,9 +1544,10 @@ fn read_line<a>(o: (&a mut A)) {
             i += 1;
         }
     }
-    // A portable atomic operation (`atom.load ...`): the x86 sequence machine.grl lowers it to,
-    // assembled in place, so the text needs no whole-stream lowering pass before it gets here.
-    if (i - o.at > 5) && at_src(&o, o.at, o.at + 5, view("atom.")) {
+    // A portable atomic operation (`atom.load ...`) or SIMD operation (`simd.add f32x4`): the x86
+    // sequence machine.grl lowers it to, assembled in place, so the text needs no whole-stream
+    // lowering pass before it gets here.
+    if (i - o.at > 5) && (at_src(&o, o.at, o.at + 5, view("atom.")) || at_src(&o, o.at, o.at + 5, view("simd."))) {
         atom_line(&mut o);
         return ();
     }

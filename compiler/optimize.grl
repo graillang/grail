@@ -1425,7 +1425,9 @@ pub fn probe_frames<a>(s: &a [u8], after: u64) -> u8[] {
                     n = n * 10 + u64(s[x] - 48);
                 }
             }
-            if 4096 < n {
+            // Every frame: the saved-register area a frame line adds (`+K`) can carry one just under
+            // a page over it.
+            if 4096 < n + 128 {
                 names.push(s[a + 5: comma].copy());
                 sizes.push(n);
             }
@@ -1433,6 +1435,7 @@ pub fn probe_frames<a>(s: &a [u8], after: u64) -> u8[] {
         a = e + 1;
     }
     if names.len() == 0 {
+        probe_backstop(view(s));
         return s.copy();
     }
     mut out = u8[];
@@ -1489,7 +1492,7 @@ pub fn probe_frames<a>(s: &a [u8], after: u64) -> u8[] {
                             same = false;
                         }
                     }
-                    if same {
+                    if same && (4096 < sizes[i] + extra) {
                         pages := (sizes[i] + extra + 4095) / 4096;
                         if after != 0 {
                             out.append(view("movq %rbp,%rax\nmovq $"));
@@ -1522,7 +1525,122 @@ pub fn probe_frames<a>(s: &a [u8], after: u64) -> u8[] {
         }
         a = e + 1;
     }
+    probe_backstop(view(out));
     return out;
+}
+// The backstop for the probes (the stack's guard page is a safety property, so it must not rest on
+// one spelling of the frame line): every frame line - a line that moves %rsp down by a `.F`
+// constant (`subq $.F<n>...,%rsp`, `framesub .F<n>...`) or by a literal - whose frame, with what the
+// line adds (`+K`), is larger than a page must be followed by its probe (`.Lgrail_probe_<n>`), or
+// the compiler stops with an internal error naming the function. One pass over the text.
+pub fn probe_backstop<a>(s: &a [u8]) {
+    mut names = u8[][];
+    mut sizes = u64[];
+    mut probed = u8[][];
+    mut a = 0;
+    while a < s.len() {
+        mut e = a;
+        while (e < s.len()) && (s[e] != 10) {
+            e += 1;
+        }
+        if (e - a > 8) && ir::at(view(s), a, view(".set .F")) {
+            mut comma = a;
+            while (comma < e) && (s[comma] != 44) {
+                comma += 1;
+            }
+            mut n: u64 = 0;
+            for x in comma + 1..e {
+                if (48 <= s[x]) & (s[x] <= 57) {
+                    n = n * 10 + u64(s[x] - 48);
+                }
+            }
+            // Only a frame that can reach a page with its saved-register area (well under 128 bytes).
+            if 4096 < n + 128 {
+                names.push(s[a + 5: comma].copy());
+                sizes.push(n);
+            }
+        }
+        if (e - a > 15) && ir::at(view(s), a, view(".Lgrail_probe_")) && (s[e - 1] == 58) {
+            mut p = u8[];
+            p.push(46);
+            p.append(s[a + 14: e - 1]);
+            probed.push(p);
+        }
+        a = e + 1;
+    }
+    mut function = u8[];
+    a = 0;
+    while a < s.len() {
+        mut e = a;
+        while (e < s.len()) && (s[e] != 10) {
+            e += 1;
+        }
+        if (e > a) && (s[e - 1] == 58) && (s[a] != 46) {
+            function = s[a: e - 1].copy();
+        }
+        line := s[a: e].copy();
+        mut down = ir::at(view(s), a, view("framesub "));
+        if ir::at(view(s), a, view("subq $")) && (6 < e - a) && ir::at(view(s), e - 5, view(",%rsp")) {
+            down = true;
+        }
+        if down {
+            // The constant the line names, and the bytes it adds.
+            mut at = 0;
+            while (at + 1 < line.len()) && !((line[at] == 46) && (line[at + 1] == 70)) {
+                at += 1;
+            }
+            mut bytes: u64 = 0;
+            mut name = u8[];
+            if at + 1 < line.len() {
+                mut stop = at;
+                while (stop < line.len()) && (line[stop] != 43) && (line[stop] != 44) && (line[stop] != 32) {
+                    stop += 1;
+                }
+                name = line[at: stop].copy();
+                for i in names.len() {
+                    if ir::same_range(view(names[i]), 0, names[i].len(), view(name)) {
+                        bytes = sizes[i];
+                    }
+                }
+                if (stop < line.len()) && (line[stop] == 43) {
+                    mut k: u64 = 0;
+                    mut x = stop + 1;
+                    while (x < line.len()) && (48 <= line[x]) & (line[x] <= 57) {
+                        k = k * 10 + u64(line[x] - 48);
+                        x += 1;
+                    }
+                    bytes = bytes + k;
+                }
+            } else {
+                // A literal frame: the immediate itself.
+                mut x = 6;
+                while (x < line.len()) && (48 <= line[x]) & (line[x] <= 57) {
+                    bytes = bytes * 10 + u64(line[x] - 48);
+                    x += 1;
+                }
+            }
+            if 4096 < bytes {
+                mut ok = false;
+                if name.len() != 0 {
+                    for i in probed.len() {
+                        if ir::same_range(view(probed[i]), 0, probed[i].len(), view(name)) {
+                            ok = true;
+                        }
+                    }
+                }
+                if !ok {
+                    host::print(view("grail: internal compiler error: "));
+                    host::print(view(function));
+                    host::print(view("'s frame is larger than a page and has no stack probe ("));
+                    host::print(view(line));
+                    host::print(view(")\n"));
+                    host::exit(70);
+                }
+            }
+        }
+        a = e + 1;
+    }
+    return ();
 }
 pub fn lower_leaf_calls<a>(s: &a [u8]) -> u8[] {
     mut out = u8[];
@@ -1861,6 +1979,9 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
     // frame.
     mut chosen = u64[];
     mut slots = u64[];
+    // Which register each promoted single slot lives in (several slots may share one).
+    mut mslot = u64[];
+    mut mreg = u64[];
     // Per chosen register, 1 when it must be cleared after the saves (slots_live_in).
     mut zchosen = u64[];
     mut xchosen = u64[];
@@ -2025,6 +2146,17 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
                 break;
             }
         }
+        // The registers the greedy gave single slots are reassigned by live range.
+        mut pal = u64[];
+        for c in chosen.len() {
+            if slots[c] != 0 {
+                pal.push(chosen[c]);
+                ir::put(&mut f.bad, slots[c], 0);
+            }
+        }
+        if pal.len() != 0 {
+            gpr_colour(&o, &mut f, &own, ns, &pal, &mut mslot, &mut mreg);
+        }
         // The accessors of a slice with registers read them: `x.len()` is a move of the length, the
         // others become their 90..97 forms.
         for i in last {
@@ -2080,21 +2212,18 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
         }
         // Rule 2 (call ABI S4): a promoted register is cleared after the saves only when its slot
         // may be read before it is written; a slice's registers are loaded where they are stored.
-        mut real = u64[];
+        // A register several slots share (live-range allocation) is cleared when any of them may be.
+        rlive := slots_live_in(&o, view(s), &mslot, prologue);
         for c in slots.len() {
+            mut z = 0;
             if slots[c] != 0 {
-                real.push(slots[c]);
+                for x in mslot.len() {
+                    if (mreg[x] == chosen[c]) && (rlive[x] != 0) {
+                        z = 1;
+                    }
+                }
             }
-        }
-        rlive := slots_live_in(&o, view(s), &real, prologue);
-        mut q = 0;
-        for c in slots.len() {
-            if slots[c] != 0 {
-                zchosen.push(rlive[q]);
-                q += 1;
-            } else {
-                zchosen.push(0);
-            }
+            zchosen.push(z);
         }
         // Which promoted slot each rewritten line reads (lsrc) and writes (ldst), +1: the f32
         // narrowing needs the slot behind a register that several slots share.
@@ -2115,9 +2244,9 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
                             v = o.v1[i];
                         }
                         if k == 2 {
-                            for c in slots.len() {
-                                if slots[c] * 8 == v {
-                                    set_operand(&mut o, i, j, 1, chosen[c]);
+                            for c in mslot.len() {
+                                if mslot[c] * 8 == v {
+                                    set_operand(&mut o, i, j, 1, mreg[c]);
                                 }
                             }
                             for c in xslots.len() {
@@ -2152,6 +2281,7 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
     peephole(&mut o, view(s), first, last);
     dead_defs(&mut o, view(s), first, last);
     retarget(&mut o, view(s), last);
+    offset_loads(&mut o, view(s), last);
     newframe := compact(&mut o, view(s), prologue, ns);
     // Rule 3 (call ABI S4): of the cleared range, only the slots that may be read before written.
     mut zkeep = u64[];
@@ -2899,6 +3029,16 @@ fn xmm_choose<a, b, c>(o: (&a ir::Body), s: &b [u8], f: (&c mut F), ns: u64, pro
         callive.push(0);
     }
     xmm_live(&o, view(s), &cands, &mut lin, prologue, &mut out, &mut interf, &mut callive);
+    // Interference is mutual: a slot written but never read records the ones live across its
+    // write, and they must record it, or the later-coloured one could share its register.
+    for c in cands.len() {
+        for d in cands.len() {
+            if ((interf[c] >> d) & 1) != 0 {
+                was := interf[d];
+                ir::put(&mut interf, d, was | (1 << c));
+            }
+        }
+    }
     // Heaviest first, each into the lowest of the seven registers no interfering candidate holds:
     // slots whose lives do not overlap share one.
     mut color = u64[];
@@ -3858,6 +3998,210 @@ fn retarget<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
         }
         kill(&mut o, i);
         kill(&mut o, j);
+    }
+}
+// The liveness of general-register candidates (bit c for slot cands[c]) over the label graph, as
+// xmm_live does for SSE ones, but a call is no barrier - the registers are callee-saved - and a slot
+// that is the destination of an operation other than a move (`addq %rax,-8(%rbp)`, `cmpq $0,...`)
+// is read there. `interf[c]` collects the candidates live at the same time as candidate c.
+fn gpr_live<a>(o: (&a ir::Body), cands: (&u64[]), lin: (&mut u64[]), interf: (&mut u64[])) -> u64 {
+    last := o.op.len();
+    all := (1 << cands.len()) - 1;
+    mut live = 0;
+    mut changed = 0;
+    mut i = last;
+    while 0 < i {
+        i -= 1;
+        if (o.del[i] != 0) || (o.tr[i] != 0) {
+            continue;
+        }
+        op := o.op[i];
+        if op == 101 {
+            continue;
+        }
+        if op == 100 {
+            if lin[i] != live {
+                ir::put(&mut lin, i, live);
+                changed = 1;
+            }
+            continue;
+        }
+        if ir::is_jump(op) && (op != 15) {
+            t := jump_target(&o, i);
+            mut there = all;
+            if t < last {
+                there = lin[t];
+            }
+            if op == 16 {
+                live = there;
+            } else {
+                live = live | there;
+            }
+            continue;
+        }
+        if (op == 29) || (op == 30) {
+            live = 0;
+            continue;
+        }
+        if interf.len() != 0 {
+            for c in cands.len() {
+                at := cands[c] * 8;
+                written := (o.k1[i] == 2) && (o.v1[i] == at);
+                if written || (((live >> c) & 1) != 0) {
+                    was := interf[c];
+                    ir::put(&mut interf, c, was | live);
+                }
+            }
+        }
+        for c in cands.len() {
+            at := cands[c] * 8;
+            if (o.k1[i] == 2) && (o.v1[i] == at) {
+                if ir::movelike(op) {
+                    live = live & (all - (1 << c));
+                } else {
+                    live = live | (1 << c);
+                }
+            }
+            if (o.k0[i] == 2) && (o.v0[i] == at) {
+                live = live | (1 << c);
+            }
+        }
+    }
+    return changed;
+}
+// Live-range allocation of the general registers promotion gives to single slots (dev-gap item 5):
+// the heaviest 63 candidates are coloured by interference into `pal`, so slots whose lives do not
+// overlap - the variables of one loop and those of the next - share a callee-saved register. Fills
+// the slot-to-register map and marks the slots taken.
+fn gpr_colour<a, c>(o: (&a ir::Body), f: (&c mut F), own: (&u64[]), ns: u64, pal: (&u64[]), mslot: (&mut u64[]), mreg: (&mut u64[])) {
+    last := o.op.len();
+    mut cands = u64[];
+    mut taken = u64[];
+    for n in ns {
+        taken.push(0);
+    }
+    while cands.len() < 63 {
+        mut best = 0;
+        mut bw = 3;
+        for n in ns {
+            if (taken[n] == 0) && (f.bad[n] == 0) && (own[n] > bw) {
+                best = n;
+                bw = own[n];
+            }
+        }
+        if best == 0 {
+            break;
+        }
+        ir::put(&mut taken, best, 1);
+        cands.push(best);
+    }
+    if cands.len() == 0 {
+        return ();
+    }
+    mut lin = u64[];
+    for i in last {
+        lin.push(0);
+    }
+    mut none = u64[];
+    mut rounds = 0;
+    while rounds < 50 {
+        rounds += 1;
+        if gpr_live(&o, &cands, &mut lin, &mut none) == 0 {
+            break;
+        }
+    }
+    mut interf = u64[];
+    for c in cands.len() {
+        interf.push(0);
+    }
+    if rounds == 50 {
+        // No fixed point: every candidate interferes with every other, one register each.
+        for c in cands.len() {
+            ir::put(&mut interf, c, (1 << cands.len()) - 1);
+        }
+    } else {
+        gpr_live(&o, &cands, &mut lin, &mut interf);
+    }
+    // Interference is mutual: a slot written but never read records the ones live across its
+    // write, and they must record it, or the later-coloured one could share its register.
+    for c in cands.len() {
+        for d in cands.len() {
+            if ((interf[c] >> d) & 1) != 0 {
+                was := interf[d];
+                ir::put(&mut interf, d, was | (1 << c));
+            }
+        }
+    }
+    mut color = u64[];
+    for c in cands.len() {
+        color.push(0);
+    }
+    for c in cands.len() {
+        mut used = 0;
+        for d in c {
+            if (color[d] != 0) && (((interf[c] >> d) & 1) != 0) {
+                used = used | (1 << (color[d] - 1));
+            }
+        }
+        mut k = 0;
+        while (k < pal.len()) && (((used >> k) & 1) != 0) {
+            k += 1;
+        }
+        if k < pal.len() {
+            ir::put(&mut color, c, k + 1);
+            mslot.push(cands[c]);
+            mreg.push(pal[k]);
+            ir::put(&mut f.bad, cands[c], 1);
+        }
+    }
+}
+// `addq $k,%R; movq (%R),%X` is `movq k(%R),%X` when %R is the destination or dead after: a raw
+// field load (`raw_load(p + 16)`, docs/design/decisions "raw address offsets") without the add.
+// Loads only - movq, movzbq, movl - whose memory operand is the source.
+fn offset_loads<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
+    names := u8[][
+        copy_text(view("(%rax)")), copy_text(view("(%rcx)")), copy_text(view("(%rdx)")),
+        copy_text(view("(%rbx)")), copy_text(view("(%rsp)")), copy_text(view("(%rbp)")),
+        copy_text(view("(%rsi)")), copy_text(view("(%rdi)"))
+    ];
+    for i in last {
+        if (o.del[i] != 0) || (o.op[i] != 4) || (o.k0[i] != 3) || (o.k1[i] != 1) || (o.v1[i] > 7) {
+            continue;
+        }
+        r := o.v1[i];
+        if (r == 4) || (r == 5) {
+            continue;
+        }
+        k := imm_value(&o, view(s), i);
+        if (k == 0) || (k - 1 > 2147483647) {
+            continue;
+        }
+        j := next_live(&o, i, last);
+        if j >= last {
+            continue;
+        }
+        op := o.op[j];
+        if !((op == 1) || (op == 28) || (op == 98)) || (o.k0[j] != 4) {
+            continue;
+        }
+        if !ir::same_range(view(s), o.s0[j], o.e0[j], view(names[r])) {
+            continue;
+        }
+        overwrites := (o.k1[j] == 1) && (o.v1[j] == r);
+        if !overwrites && !dead_after(&o, j, r, 6) {
+            continue;
+        }
+        // The flags of the add are not read: the next line is a load.
+        start := o.gen.len();
+        gen_number(&mut o, k - 1);
+        for x in names[r].len() {
+            o.gen.push(names[r][x]);
+        }
+        end := o.gen.len();
+        set_operand(&mut o, j, 0, 5, 0);
+        ir::put(&mut o.m0, j, 1 << r);
+        set_range(&mut o, j, 0, start, end);
+        kill(&mut o, i);
     }
 }
 fn name_hash<b>(s: &b [u8], a: u64, e: u64) -> u64 {

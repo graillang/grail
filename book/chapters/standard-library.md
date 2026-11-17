@@ -39,14 +39,17 @@ fn main() {
 
 `find` returns the byte index of the first occurrence, `contains` is its boolean form, and
 `starts_with`, `ends_with`, `replace`, `split`, `trim`, `join_with`, `to_upper`, `to_lower`, `repeat`
-and `chars` cover the everyday cases - `chars`, `split`, `trim`, `replace`, `repeat`, `starts_with`,
-`ends_with` and `to_upper`/`to_lower` are the compiler's own methods on text, the rest are `strings`.
-`lines` and `split_whitespace` split text into its lines and its words. `parse_u64` accepts decimal
+and `chars` cover the everyday cases - `chars`, `replace`, `repeat`, `starts_with`, `ends_with` and
+`to_upper`/`to_lower` are the compiler's own methods on text, the rest are `strings`. `split`, `trim`
+(with `trim_start` and `trim_end`), `lines` and `split_whitespace` return views of the text rather
+than copies; `split_owned` copies the pieces. `parse_f64` is correctly rounded (Eisel-Lemire with an
+exact fallback, shared with `json`). `parse_u64` accepts decimal
 digits only and rejects empty input, a stray character and overflow; `parse_i64` also accepts a
 leading `-` and checks the signed range. `from_u64` and `from_i64` are their inverse, and they are
 free functions because the receiver would be the number, not the text - `value.text()` is the
 builtin that turns a number into a `string`. Building a line from parts needs no library call:
-`format("{} of {}", done, total)` is a builtin and returns a `string`, which is what `println` uses.
+`format("{} of {}", done, total)` is a builtin and returns a `string`, which is what `println` uses. `out.append_format("{} of {}", done, total)` writes the same text onto the end of a
+`string` or byte vector `out` instead, with no string of its own.
 
 ## Errors
 

@@ -1,0 +1,133 @@
+// The open-addressed index under stress: keys whose hashes all collide (one Robin Hood run that
+// wraps past the table's end, every removal a backward shift through it), keys that collide in
+// the low bits only, and churn of removals and reinsertions across many growths. Every step is
+// checked against a vector model, including the iteration order that swap-removal gives.
+use hashmap;
+use hash;
+use core;
+struct Clash {
+    id: u64,
+    group: u64
+}
+// Only `group` is hashed, so every key of a group lands on the same home slot.
+impl hash::Hash for Clash {
+    fn hash<a, b>(key: (&a Self), state: (&b mut hash::Hasher)) {
+        hash::write_num(state, key.group);
+    }
+}
+impl hash::Equal for Clash {
+    fn equal<a, b>(left: (&a Self), right: (&b Self)) -> bool {
+        return (left.id == right.id) && (left.group == right.group);
+    }
+}
+fn model_find<a>(keys: (&a u64[]), key: u64) -> u64 {
+    for i in keys.len() {
+        if keys[i] == key {
+            return i;
+        }
+    }
+    return keys.len();
+}
+fn check_order<a, b>(map: (&a [Clash: u64]), keys: (&b u64[]), values: (&b u64[])) {
+    assert(map.len() == keys.len());
+    for i in keys.len() {
+        assert(map.key_at(i).id == keys[i]);
+        assert(*map.value_at(i) == values[i]);
+    }
+}
+fn churn(groups: u64, range: u64, steps: u64, seed: u64) -> u64 {
+    mut map = [Clash: u64]::with_seed(seed, seed + 1);
+    mut keys = u64[];
+    mut values = u64[];
+    mut state = seed;
+    mut hits: u64 = 0;
+    for step in steps {
+        state = wrapping_add(wrapping_mul(state, 6364136223846793005), 1442695040888963407);
+        k := (state >> 33) % range;
+        op := (state >> 20) % 5;
+        key := Clash { id: k, group: k % groups };
+        if op < 3 {
+            old := map.insert(Clash { id: k, group: k % groups }, step);
+            pos := model_find(&keys, k);
+            if pos < keys.len() {
+                assert(old! == values[pos]);
+                values[pos] = step;
+            } else {
+                assert(old.is_none());
+                keys.push(k);
+                values.push(step);
+            }
+        } else if op == 3 {
+            got := map.remove(&key);
+            pos := model_find(&keys, k);
+            if pos < keys.len() {
+                assert(got! == values[pos]);
+                lk := keys.pop()!;
+                lv := values.pop()!;
+                if pos < keys.len() {
+                    keys[pos] = lk;
+                    values[pos] = lv;
+                }
+            } else {
+                assert(got.is_none());
+            }
+        } else {
+            pos := model_find(&keys, k);
+            if let Some(v) = map.get(&key) {
+                assert(pos < keys.len());
+                assert(*v == values[pos]);
+                hits += 1;
+            } else {
+                assert(pos == keys.len());
+            }
+        }
+        if step % 97 == 0 {
+            check_order(&map, &keys, &values);
+        }
+    }
+    check_order(&map, &keys, &values);
+    // Empty it completely, then fill again: no residue may survive the shifts.
+    for i in keys.len() {
+        k := keys[i];
+        assert(map.remove(&Clash { id: k, group: k % groups }).is_some());
+    }
+    assert(map.len() == 0);
+    for i in keys.len() {
+        k := keys[i];
+        assert(!map.contains(&Clash { id: k, group: k % groups }));
+        assert(map.insert(Clash { id: k, group: k % groups }, i).is_none());
+    }
+    for i in keys.len() {
+        k := keys[i];
+        assert(*map.get(&Clash { id: k, group: k % groups })! == i);
+    }
+    return hits + map.len();
+}
+fn main() {
+    // One group: every key in one run.
+    a := churn(1, 60, 4000, 7);
+    // Eight groups: runs that interleave and wrap.
+    b := churn(8, 300, 6000, 11);
+    // Distinct hashes: growth from empty to a few thousand, removals throughout.
+    c := churn(1000000000, 5000, 30000, 13);
+    // Growth with nothing removed, then every other key removed and the rest found.
+    mut m = [u64: u64]::with_seed(5, 6);
+    for i in 100000 {
+        assert(m.insert(i * 7919, i).is_none());
+    }
+    for i in 100000 {
+        if i % 2 == 0 {
+            assert(m.remove(&(i * 7919))! == i);
+        }
+    }
+    mut found: u64 = 0;
+    for i in 100000 {
+        if let Some(v) = m.get(&(i * 7919)) {
+            assert(*v == i);
+            found += 1;
+        }
+    }
+    assert(found == 50000);
+    assert(m.len() == 50000);
+    println("{} {} {} {}", a > 0, b > 0, c > 0, found);
+}
