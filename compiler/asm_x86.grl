@@ -351,6 +351,8 @@ fn directives<a>(o: (&a mut A)) {
     def(&mut o, view(".protected"), 26);
     def(&mut o, view(".internal"), 27);
     def(&mut o, view(".comm"), 28);
+    def(&mut o, view(".4byte"), 29);
+    def(&mut o, view(".8byte"), 30);
 }
 
 pub fn new() -> A {
@@ -1335,6 +1337,12 @@ fn directive<a>(o: (&a mut A), id: u64) {
             fail(&mut o, view("unsupported `.option`"));
         }
         o.at = e;
+    } else if id == 29 {
+        // `.4byte`: a raw word, written into code for an instruction the lowering names by its
+        // encoding (RISC-V fence.tso) - data to the mapping symbols.
+        data(&mut o, 4);
+    } else if id == 30 {
+        data(&mut o, 8);
     } else if id == 28 {
         // `.comm NAME,SIZE,ALIGN`: a common symbol, which the linker allocates.
         sym := sym_operand(&mut o);
@@ -4177,12 +4185,22 @@ fn rv_fixup<a, c>(o: (&a mut A), i: u64, r_sec: (&c mut u64[]), r_off: (&c mut u
     } else if local {
         delta := wrapping_sub(wrapping_add(o.sym_pos[sym], add), at);
         if kind == asm_rv64::fx_branch() {
-            b := ((delta >> 12) & 1) << 31 | ((delta >> 5) & 0x3f) << 25 | ((delta >> 1) & 15) << 8 | ((delta >> 11) & 1) << 7;
+            // B-type: imm[12|10:5] in bits 31:25, imm[4:1|11] in bits 11:7.
+            b12 := ((delta >> 12) & 1) << 31;
+            b10 := ((delta >> 5) & 0x3f) << 25;
+            b4 := ((delta >> 1) & 15) << 8;
+            b11 := ((delta >> 11) & 1) << 7;
+            b := b12 | b10 | b4 | b11;
             or_word(&mut o, sec, at, b);
             return ();
         }
         if kind == asm_rv64::fx_jal() {
-            j := ((delta >> 20) & 1) << 31 | ((delta >> 1) & 0x3ff) << 21 | ((delta >> 11) & 1) << 20 | ((delta >> 12) & 0xff) << 12;
+            // J-type: imm[20|10:1|11|19:12] in bits 31:12.
+            j20 := ((delta >> 20) & 1) << 31;
+            j10 := ((delta >> 1) & 0x3ff) << 21;
+            j11 := ((delta >> 11) & 1) << 20;
+            j19 := ((delta >> 12) & 0xff) << 12;
+            j := j20 | j10 | j11 | j19;
             or_word(&mut o, sec, at, j);
             return ();
         }

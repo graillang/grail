@@ -12,6 +12,8 @@ f:
 addi sp,sp,-64
 lla t0,g_guard
 call h
+sext.w t2,t2
+.4byte 0x0100000f
 ret
 .weak h
 .globl g

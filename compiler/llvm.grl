@@ -2724,13 +2724,6 @@ fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> uni
 // AArch64 and RV64 a code pointer names the native-convention entry, which an IR call cannot reach
 // without a thunk, so those bodies stay native.
 fn lower_indirect_call<a, b>(l: (&a mut L), reg: &b [u8]) -> unit {
-    // The runtime's own callers through a pointer are the job, task and thread machinery: stacks
-    // that are switched away from and resumed, and failures that abandon a stack. They stay the
-    // native text they were, whose frame slots survive that; program and library code is lifted.
-    if starts(view(l.fname), view("rt_")) {
-        bad(&mut l);
-        return ();
-    }
     if l.areaopen != 0 {
         bad(&mut l);
         return ();
@@ -2998,6 +2991,31 @@ fn instruction<a, b, c>(l: (&a mut L), line: &b [u8], facts: (&c Facts)) -> unit
     }
     o := operands(view(rest));
     n := o.len();
+    if eq(view(op), view("movq")) && (n == 2) && (l.target == 0) && starts(view(o[0]), view("%fs:")) {
+        // The thread pointer (raw_tp_get): `%fs:0` is the Grail record, `%fs:SYM@tpoff` a TLS word.
+        // It is inline assembly with a side effect so LLVM never merges two reads: a green task
+        // can resume on another OS thread between them. Without this the whole function stayed in
+        // the unoptimised native stream - rt_current, the mutex fast path, the allocator's threaded
+        // path among them. The memory clobber keeps loads and stores of the thread's record on the
+        // right side of the read, too. (The pool::split crash once blamed on this lift was an
+        // escaped two-word slot lowered as one word: escaped_overreach.)
+        mut asm = copy(view("call i64 asm sideeffect \"movq "));
+        put(&mut asm, view(o[0]));
+        put(&mut asm, view(", $0\", \"=r,~{memory}\"()"));
+        v := def(&mut l, view(asm), &u8[][]);
+        store(&mut l, view(o[1]), view(v), 64);
+        return ();
+    }
+    if eq(view(op), view("movq")) && (n == 2) && (l.target == 0) && starts(view(o[1]), view("%fs:")) {
+        // Publishing this thread's record (raw_tp_set with libc loaded): a TLS word written by
+        // inline assembly, ordered like the reads above.
+        v := value(&mut l, view(o[0]), 64);
+        mut asm = copy(view("call void asm sideeffect \"movq $0, "));
+        put(&mut asm, view(o[1]));
+        put(&mut asm, view("\", \"r,~{memory}\"(i64 {})"));
+        emit(&mut l, view(asm), &u8[][v]);
+        return ();
+    }
     if eq(view(op), view("movq")) || eq(view(op), view("movabsq")) {
         if n != 2 {
             bad(&mut l);
@@ -4036,6 +4054,177 @@ fn body_lines<a, b>(lines: (&a u8[][]), f: (&b Func)) -> u8[][] {
     }
     return out;
 }
+// Whether the body reads or writes through the address of a frame slot past the extent the facts
+// give that slot: one word for a plain slot, the whole object for a multi-word value (kind-3 fact).
+// The address is followed from its `leaq -N(%rbp)` through register copies and frame-slot spills
+// until something else writes the holder; a label or a call forgets what it is not sure of, so this
+// reports no false overreach, only real ones. The lifter gives each slot its own alloca unless a
+// fact joins them, so an access past the fact's width would land in an unrelated object.
+fn escaped_overreach<a, b>(l: (&a L), instrs: (&b u8[][])) -> bool {
+    mut regs = u64[];
+    for i in 14 {
+        regs.push(0);
+    }
+    mut spill_at = u8[][];
+    mut spill_k = u64[];
+    for m in instrs.len() {
+        line := view(instrs[m]);
+        if (line.len() == 0) || (line[line.len() - 1] == 58) {
+            for i in 14 {
+                regs[i] = 0;
+            }
+            spill_at.clear();
+            spill_k.clear();
+            continue;
+        }
+        mut sp = line.len();
+        for i in line.len() {
+            if (line[i] == 32) & (sp == line.len()) {
+                sp = i;
+            }
+        }
+        op := sub(line, 0, sp);
+        mut rest = u8[];
+        if sp < line.len() {
+            rest = sub(line, sp + 1, line.len());
+        }
+        o := operands(view(rest));
+        if !eq(view(op), view("leaq")) {
+            for q in o.len() {
+                if overreach_operand(&l, &regs, view(o[q])) {
+                    return true;
+                }
+            }
+        }
+        n := o.len();
+        if eq(view(op), view("call")) {
+            // The caller-saved registers do not survive; rbx and r12..r15 do.
+            for i in 14 {
+                if (i != 1) & (i < 10) {
+                    regs[i] = 0;
+                }
+            }
+            spill_at.clear();
+            spill_k.clear();
+            continue;
+        }
+        if n == 0 {
+            continue;
+        }
+        dst := view(o[n - 1]);
+        mut held: u64 = 0;
+        if eq(view(op), view("leaq")) && (n == 2) {
+            held = rbp_slot_plus_one(view(o[0]));
+        } else if eq(view(op), view("movq")) && (n == 2) {
+            src := view(o[0]);
+            if (src.len() > 1) && (src[0] == 37) {
+                sr := reg_index(view(sub(src, 1, src.len())));
+                if sr < 14 {
+                    held = regs[sr];
+                }
+            } else {
+                for i in spill_at.len() {
+                    if eq(view(spill_at[i]), src) {
+                        held = spill_k[i];
+                    }
+                }
+            }
+        }
+        if (dst.len() > 1) && (dst[0] == 37) {
+            dr := reg_index(view(sub(dst, 1, dst.len())));
+            if dr < 14 {
+                regs[dr] = held;
+            }
+        } else if ends(dst, view("(%rbp)")) {
+            mut found = spill_at.len();
+            for i in spill_at.len() {
+                if eq(view(spill_at[i]), dst) {
+                    found = i;
+                }
+            }
+            if found == spill_at.len() {
+                spill_at.push(copy(dst));
+                spill_k.push(held);
+            } else {
+                spill_k[found] = held;
+            }
+        }
+    }
+    return false;
+}
+// `-N(%rbp)` as slot N/8 - 1, plus one; 0 for any other operand.
+fn rbp_slot_plus_one<a>(t: &a [u8]) -> u64 {
+    if !starts(t, view("-")) || !ends(t, view("(%rbp)")) {
+        return 0;
+    }
+    mut v: u64 = 0;
+    mut i = 1;
+    while (i < t.len()) && (t[i] != 40) {
+        if (t[i] < 48) || (57 < t[i]) {
+            return 0;
+        }
+        v = v * 10 + u64(t[i] - 48);
+        i += 1;
+    }
+    if (v < 8) || (v % 8 != 0) {
+        return 0;
+    }
+    return v / 8;
+}
+// A memory operand `D(%r)` whose base register holds the address of slot k, and whose constant
+// displacement reaches outside k's object.
+fn overreach_operand<a, b>(l: (&a L), regs: (&b u64[]), t: &[u8]) -> bool {
+    mut lp = t.len();
+    for i in t.len() {
+        if (t[i] == 40) & (lp == t.len()) {
+            lp = i;
+        }
+    }
+    if lp == t.len() {
+        return false;
+    }
+    mut rp = lp + 1;
+    while (rp < t.len()) && (t[rp] != 41) && (t[rp] != 44) {
+        rp += 1;
+    }
+    if (rp >= t.len()) || (t[rp] != 41) || (lp + 2 > rp) || (t[lp + 1] != 37) {
+        // Not `D(%r)`: an indexed access's extent is not a constant, so it is not judged here.
+        return false;
+    }
+    r := reg_index(view(sub(t, lp + 2, rp)));
+    if (r >= 14) || (regs[r] == 0) {
+        return false;
+    }
+    k := regs[r] - 1;
+    mut d: i64 = 0;
+    mut neg = false;
+    mut i = 0;
+    if (lp != 0) && (t[0] == 45) {
+        neg = true;
+        i = 1;
+    }
+    while i < lp {
+        ch := t[i];
+        if (ch < 48) || (57 < ch) {
+            return false;
+        }
+        d = d * 10 + i64(ch - 48);
+        i += 1;
+    }
+    if neg {
+        d = 0 - d;
+    }
+    // Slot k's object: its first word's slot b (the lowest address) and `w` words; k is word b - k.
+    b := pair_base(&l, k);
+    mut lo: i64 = 0;
+    mut hi: i64 = 0;
+    if b != 0 {
+        at := i64(b - 1 - k);
+        lo = 0 - 8 * at;
+        hi = 8 * (i64(pair_words(&l, b)) - 1 - at);
+    }
+    return (d < lo) || (hi < d);
+}
 // The `DynPair` slots of the function being lowered, from the typed-IR facts (docs/design/fat-dyn.md):
 // each is the first word of a 16-byte, 8-aligned `{data, vtable}` value whose second word is the slot
 // above it, lowered as one `[2 x i64]` alloca so the two words stay one addressable value.
@@ -4308,6 +4497,19 @@ fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), fact
         index_slot_lines(&mut l, &instrs, slots);
         accept_slots(&mut l, &instrs, &facts, view(f.name), slots);
         accept_headers(&mut l, &instrs, &facts, view(f.name), slots);
+        if escaped_overreach(&l, &instrs) {
+            // An address-taken slot is used past the width the facts give it: lowered as separate
+            // allocas, the access would land in another object. The body stays native, where the
+            // frame is one block (and --verify-facts says so).
+            if l.verify != 0 {
+                mut msg = copy(view("verify-facts: "));
+                put(&mut msg, view(f.name));
+                put(&mut msg, view(" accesses an address-taken frame slot past its declared width (a multi-word value without its kind-3 fact)\n"));
+                host::print(view(msg));
+                host::exit(1);
+            }
+            bad(&mut l);
+        }
         mut count = slots;
         if deepest + 1 > count {
             count = deepest + 1;
@@ -7542,6 +7744,12 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
             name = pool_name(r);
         }
         set_add(&mut exported, r);
+        // The module defines these itself (weak, beside the intrinsics it lowers to them), so a
+        // C declaration of the same name - an `extern "C"` memcpy a program calls - must not
+        // declare them again: with opaque pointers the call needs no matching declaration.
+        if (target == 0) && (eq(r, view("memcpy")) || eq(r, view("memset")) || eq(r, view("memmove"))) {
+            continue;
+        }
         if set_has(&callset, r) {
             // A native body with a signature fact is called with exactly its words (lower_call).
             mut dn = 6;
@@ -7648,7 +7856,9 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
         if at != 0 {
             // A body the stream declared `.weak` (a generic specialisation, a content-addressed
             // drop helper) may be defined by every module that instantiates it, so its lifted body
-            // is weak too, or a release build of two such modules fails to link.
+            // is weak too, or a release build of two such modules fails to link. `weak_odr`, not
+            // `weak`: every definition is the same code, so LLVM may inline it (a plain weak body is
+            // interposable and never inlined, which kept every generic call a call).
             mut e = at;
             while (e < line.len()) && (line[e] != 34) {
                 e += 1;
@@ -7658,7 +7868,7 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
                 base = sub(view(base), 0, base.len() - 3);
             }
             if set_has(&weak, view(base)) {
-                put(&mut ir, view("define weak "));
+                put(&mut ir, view("define weak_odr "));
                 put(&mut ir, view(rename_line(view(sub(line, 7, line.len())), &exported)));
                 ir.push(10);
                 continue;

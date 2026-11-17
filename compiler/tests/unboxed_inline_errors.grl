@@ -1,0 +1,36 @@
+// A fallible parse in a loop: `u64 |? Bad` where Bad is a plain record, and `?` through a helper.
+struct Bad {
+    at: u64,
+    code: u64
+}
+fn digit(b: u8, at: u64) -> u64 |? Bad {
+    if (b < 48) || (57 < b) {
+        return Bad { at: at, code: u64(b) };
+    }
+    return u64(b - 48);
+}
+fn parse(text: &[u8]) -> u64 |? Bad {
+    mut n = 0;
+    for i in text.len() {
+        d := digit(text[i], i)?;
+        n = wrapping_add(wrapping_mul(n, 10), d);
+    }
+    return n;
+}
+fn main() {
+    good := u8[49, 50, 51, 52, 53, 54, 55, 56, 57, 48];
+    bad := u8[49, 50, 51, 52, 53, 120, 55, 56, 57, 48];
+    mut total = 0;
+    mut fails = 0;
+    for k in 2000 {
+        match parse(&good) {
+            u64(n) => { total = wrapping_add(total, n + k); },
+            Bad(e) => { fails = fails + 1; },
+        }
+        match parse(&bad) {
+            u64(n) => { total = wrapping_add(total, n); },
+            Bad(e) => { fails = fails + e.at; },
+        }
+    }
+    println("{} {}", total, fails);
+}

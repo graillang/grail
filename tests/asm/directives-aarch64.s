@@ -11,6 +11,8 @@ sub sp,sp,#.Fx
 adrp x9,g_guard
 add x9,x9,:lo12:g_guard
 bl h
+csel x11,x10,x9,hi
+yield
 ret
 .weak h
 .globl g

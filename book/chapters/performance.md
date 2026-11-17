@@ -99,7 +99,8 @@ and Zig, written the way each language is usually written:
 - **`hashmap`: a bucket is a vector.** The standard map chains collisions through a `u64[]` per
   bucket and keeps its entries in insertion order in a second vector, so a lookup reads the
   bucket's own header, then an index, then the entry; growing the table rebuilds every bucket
-  vector. Rust's, Go's and Zig's maps are one open-addressed table.
+  vector. Rust's, Go's and Zig's maps are one open-addressed table. (Since replaced: the map is
+  now dense entries under one open-addressed index, hashed with SipHash-1-3 as Rust's is.)
 - **`ecs`: owned vectors re-read their headers.** The update loop stores through six vectors made
   in the same function, and after each store the next access reloads a length and a data pointer
   and checks the index, so the loop stays scalar where C, Rust and Zig vectorise it.

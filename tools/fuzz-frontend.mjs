@@ -526,6 +526,10 @@ async function baselines(results, options, compiler) {
   const found = [];
   for (const [path, sample] of suspects) {
     const bytes = readFileSync(path);
+    // A fixture that is meant to be refused as it stands (a strict-mode refusal, a rejection case's
+    // input) says so on its first line - `// fuzz: refused`, or those words in the comment already
+    // there, so no pinned line number moves - and is not a baseline bug.
+    if (/fuzz: refused\b/.test(bytes.toString('utf8').split('\n', 1)[0])) continue;
     const directory = join(workRoot, 'cases', `base-${sample.id}`);
     const entry = layOutCase(directory, path, bytes);
     const started = Date.now();
