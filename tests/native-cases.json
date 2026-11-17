@@ -19287,5 +19287,15 @@
     "source": "interface Seq {\n    type Item;\n    fn next(self: &mut Self) -> Self::Item?;\n    fn fold<A, G: FnMut(A, Self::Item) -> A>(self: Self, init: A, g: G) -> A {\n        mut it = self;\n        mut acc = init;\n        mut f = g;\n        while let Some(x) = it.next() { acc = f(acc, x); }\n        return acc;\n    }\n}\nstruct Count { n: u64, end: u64 }\nimpl Seq for Count {\n    type Item = u64;\n    fn next(self: &mut Self) -> u64? { if self.n == self.end { return None; } self.n += 1; return Some(self.n); }\n}\nfn total<I: Seq<Item = u64>>(it: I) -> u64 { return it.fold(0, |a: u64, x: u64| -> bool a > x); }\nfn main() { println(total(Count { n: 0, end: 4 })); }\n",
     "reject": true,
     "diagnostic": "callable bound"
+  },
+  {
+    "name": "iter-fold-internal-iteration",
+    "note": "Iterator has a default `fold`; Map and Filter override it to pass a composed callback down (internal iteration), and `fold` through `I: Iterator` reaches the override",
+    "source": "use iter;\nfn total<I: iter::Iterator<Item = u64>>(it: I) -> u64 { return it.fold(0, |a: u64, x: u64| -> u64 a + x); }\nfn main() {\n    v := u64[1, 2, 3, 4, 5, 6];\n    k := 10;\n    s := iter::over(v.copy()).map(|x: u64| -> u64 x * k).filter(|x: &u64| -> bool *x % 20 == 0).fold(0, |a: u64, x: u64| -> u64 a + x);\n    println(s);\n    println(total(iter::over(v.copy()).map(|x: u64| -> u64 x + 1)));\n    println(iter::fold_all(iter::over(v), 1, |a: u64, x: u64| -> u64 a * x));\n}\n",
+    "stdout": "120\n27\n720\n",
+    "modules": [
+      "lib/iter.grl",
+      "lib/core.grl"
+    ]
   }
 ]
