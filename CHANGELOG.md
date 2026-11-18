@@ -1,5 +1,12 @@
 ## Unreleased
 
+- **`abundance/PORTING.md` writes down the per-domain recipe** the lanes used: enumerating a
+  domain's sources from its `cmake/tx/<domain>.cmake`, building the reference from the engine's own
+  C++, the harness's reference fields and `ABUNDANCE_ROOT`/`ABUNDANCE_BUILD` overrides, the
+  stale-build-tree ODR trap, the Grail shapes not to fight (copy helpers, interface dispatch,
+  short-circuit guards, `.text()`), the test's mirrored stream, landing, what to skip, and the
+  gameplay kernel as a worked example.
+
 - **The shader pipeline takes `geometry/`, the largest area.** 30 of its 46 entries (4.5 MB of SPIR-V)
   are built with the engine's pinned DXC at pin `ca1f1bc05b`: the cull, motion, HZB, software and
   hardware raster, assembly, VSM argument/cluster/SAT/settle and vegetation passes, plus the two mesh
