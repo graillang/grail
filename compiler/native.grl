@@ -1027,6 +1027,9 @@ struct C {
     drop_names_by_ty: u8[][],
     // framable's answer by type (0 not asked, 1 no, 2 yes), and layout_bits' nesting depth.
     framable_memo: u64[],
+    // Per type: 1 when no type parameter occurs in it (bind_types returns it as it is), 2 when one
+    // may, 0 not yet asked (ty_closed).
+    ty_closed: u8[],
     // A type's interface encoding by type id, and the dependency pairs encoding it adds: a type is
     // spelled once per run and copied after that (iface_w_type). Empty bytes: not encoded yet.
     wty_bytes: u8[][],
@@ -15382,7 +15385,51 @@ fn project<a>(c: (&a mut C), base: u64, mode: u64) -> u64 {
     fail(&mut c, view("missing associated type in an interface implementation"));
     return 0;
 }
+// Whether no type parameter occurs in `ty`, so binding it gives `ty` back. Unions (binding checks their
+// members again), projections and arrays (binding puts their length in canonical form) are never
+// counted closed: bind_types takes the whole path for them.
+fn ty_closed<a>(c: (&a mut C), ty: u64) -> bool {
+    if !is_type_id(ty) {
+        return false;
+    }
+    if ty < c.ty_closed.len() {
+        known := c.ty_closed[ty];
+        if known != 0 {
+            return known == 1;
+        }
+    }
+    k := ty_kind(&mut c, ty);
+    mut closed = (k != 9) && (k != 30) && (k != 32);
+    if closed && (k == 8) && is_union(&mut c, ty) {
+        closed = false;
+    }
+    if closed
+        && ((k == 6) || (k == 27) || (k == 28) || (k == 7) || (k == 12) || (k == 13) || (k == 14) || (k == 16) || (k == 20) || (k == 29)
+            || (k == 34) || (k == 35) || (k == 36)) {
+        closed = ty_closed(&mut c, ty_arg(&mut c, ty));
+    }
+    n := c.types[ty].args.len();
+    mut i = 0;
+    while closed && (i < n) {
+        a := c.types[ty].args[i];
+        closed = ty_closed(&mut c, a);
+        i += 1;
+    }
+    while c.ty_closed.len() <= ty {
+        c.ty_closed.push(0);
+    }
+    mut mark = 2;
+    if closed {
+        mark = 1;
+    }
+    c.ty_closed[ty] = mark;
+    return closed;
+}
 fn bind_types<a, b>(c: (&a mut C), ty: u64, map: (&b u64[])) -> u64 {
+    // A type no parameter occurs in binds to itself: nothing to copy, rebuild or intern again.
+    if ty_closed(&mut c, ty) {
+        return ty;
+    }
     k := ty_kind(&mut c, ty);
     mode := ty_mode(&mut c, ty);
     mut arg = ty_arg(&mut c, ty);
@@ -15440,12 +15487,17 @@ fn bind_types<a, b>(c: (&a mut C), ty: u64, map: (&b u64[])) -> u64 {
 fn field_type<a>(c: (&a mut C), ty: u64, index: u64) -> u64 {
     d := ty_arg(&mut c, ty);
     mut t = field_ty(&mut c, d, index);
-    mut rs = type_regions(&mut c, ty);
-    mut args = type_args(&mut c, ty);
-    field := bind_types(&mut c, t, &args);
-    if rs.len() == 0 {
+    // The record's arguments and regions are copied out only when they are used: a field whose type
+    // no parameter occurs in is that type, and most records have no regions.
+    mut field = t;
+    if !ty_closed(&mut c, t) {
+        args := type_args(&mut c, ty);
+        field = bind_types(&mut c, t, &args);
+    }
+    if !is_type_id(ty) || (c.types[ty].regions.len() == 0) {
         return field;
     }
+    rs := type_regions(&mut c, ty);
     return substitute(&mut c, field, &rs);
 }
 fn concrete_type<a>(c: (&a mut C), ty: u64) -> bool {
@@ -61554,6 +61606,7 @@ pub fn main() -> u64 {
         drop_walked: u64[],
         drop_names_by_ty: u8[][],
         framable_memo: u64[],
+        ty_closed: u8[],
         wty_bytes: u8[][],
         wty_deps: u64[][],
         layout_busy: 0,
