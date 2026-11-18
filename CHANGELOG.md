@@ -1,5 +1,15 @@
 ## Unreleased
 
+- **The crafting screen's classifier is ported.** `abundance/src/crafting_menu.grl` carries
+  `ui/crafting_menu.hpp/.cpp` of `cmake/tx/crafting_menu.cmake`: the ten categories and their
+  display labels (Machines reads "Facilities"), every sub-type group with its display rank and
+  out-of-range fallback, and the 123-rule first-match classification table (prefix at the id's
+  start, `contains` searched from the prefix's end), with `craft_class`'s catalogue-label
+  overrides (Building Part, Farming unless the item is food, then Tool/Weapon/Machine/Electrical,
+  else Materials group 0). `abundance/tests/crafting_menu_test.grl` prints 328 lines that match a
+  reference compiling the engine's own `crafting_menu.cpp`, probing every rule and 37 realistic
+  products.
+
 - **The island generator's gradient noise kernels are ported bit for bit.** `abundance/src/
   worldgen_noise.grl` carries `gradient_noise`, `gradient_fbm` and `ridged_multifractal` from the
   shared `engine/base/worldgen_noise_impl.hpp` (rotated mix64 lattice mixes, the eight-entry
