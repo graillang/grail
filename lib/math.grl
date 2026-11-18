@@ -249,3 +249,53 @@ pub fn fmod(x:f64,y:f64)->f64{
     if x<zero{return -r;}
     return r;
 }
+// hypot: the correctly rounded sqrt(x*x + y*y). glibc's double hypot is
+// correctly rounded (newer than fdlibm's __ieee754_hypot, whose split-high-word
+// expression still rounds twice); this takes the square root of the rounded
+// sum and then corrects the last bit with the exact residual of
+// x^2 + y^2 - s^2, computed with Dekker products. Large operands are scaled by
+// powers of two first, which is exact, and infinite/NaN follow C's hypot.
+struct HypotPair {
+    hi: f64,
+    lo: f64
+}
+
+fn two_product(a:f64,b:f64)->HypotPair{
+    p:=a*b;
+    ca:=134217729.0*a;ah:=ca-(ca-a);al:=a-ah;
+    cb:=134217729.0*b;bh:=cb-(cb-b);bl:=b-bh;
+    return HypotPair{hi:p,lo:((ah*bh-p)+ah*bl+al*bh)+al*bl};
+}
+
+fn two_sum(a:f64,b:f64)->HypotPair{
+    s:=a+b;bb:=s-a;
+    return HypotPair{hi:s,lo:(a-(s-bb))+(b-bb)};
+}
+
+@no_block
+pub fn hypot(x:f64,y:f64)->f64{
+    mut a = x.abs();
+    mut b = y.abs();
+    if b>a{const_swap:=a;a=b;b=const_swap;}
+    if a.is_nan()||b.is_nan(){return a+b;}
+    if (bits(a)&9223372036854775807)==9218868437227405312{return a;}
+    // Exact power-of-two scaling so neither a*a nor the squares underflow:
+    // 2^-600 for huge operands, 2^600 for subnormal ones.
+    mut back = 1.0;
+    if a>3.273390607896142e150{
+        a=a*f64_from_bits(1905022642377719808);b=b*f64_from_bits(1905022642377719808);back=f64_from_bits(7309342195222315008);
+    }else if b<2.7624420577613535e-151{
+        a=a*f64_from_bits(7309342195222315008);b=b*f64_from_bits(7309342195222315008);back=f64_from_bits(1905022642377719808);
+    }
+    if b==0.0{return a*back;}
+    s:=(a*a+b*b).sqrt();
+    if s==0.0{return 0.0;}
+    ap:=two_product(a,a);
+    bp:=two_product(b,b);
+    sp:=two_sum(ap.hi,bp.hi);
+    err:=ap.lo+bp.lo+sp.lo;
+    ss:=two_product(s,s);
+    d1:=two_sum(sp.hi,-ss.hi);
+    diff:=d1.hi+(err-ss.lo+d1.lo);
+    return (s+diff/(2.0*s))*back;
+}

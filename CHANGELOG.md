@@ -126,6 +126,30 @@
   a duplicate is refused and an erase in the middle leaves the rest ascending (1 201 reference
   lines).
 
+- **The rest of the Abundance sky policy library is ported: precipitation, volumetric fog, storm
+  cells and lightning.** `abundance/src/sky_precipitation.grl` (the Marshall-Palmer drop population,
+  the Atlas terminal speeds, the drawn-drop extinction and splash flux, snow, surface wetness and
+  the canopy throughfall share), `sky_fog.grl` (the froxel plan's haze/mist/rain extinction, the
+  hygroscopic growth f(RH) with its saturation clamp and the wet-haze height), `sky_storm_cells.grl`
+  (local maxima of the regional rain with the quadratic sub-sample peak and curvature radius, the
+  plateau rule and nearest-first ordering) and `sky_lightning.grl` (the Poisson flash grid over 2 km
+  cells and 1 s bins, the seeded stroke timing, the integrated frame brightness, the stepped-leader
+  bolt with its branch stack and the thunder arrivals with distance/343 s delays).
+  `abundance/tests/parity/sky_weather.cpp` compiles the engine's precipitation/volumetric_fog/
+  storm_cells/lightning sources with -ffp-contract=off and prints 2767 values;
+  `abundance/tests/sky_weather_test.grl` reproduces every one - nine rain/snow populations with all
+  sixteen drop classes, 120 wetness combinations, both frost gates and the air-rain saturation
+  channel, 112 fog plans over two skies x seven rates x eight humidities, the storm-cell grid with
+  its five caps plus the empty/plateau/nearest cases and drift, and the lightning block (activity
+  curve, the 30 s flash window, the boundary refusals, sixteen wide-radius flashes, a hand-built
+  cloud-to-ground bolt's 231 segments and its capped/degenerate paths, per-cell flashes and both
+  thunder paths).
+- `lib/math.grl` gains `hypot`: the correctly rounded sqrt(x^2 + y^2). glibc's double hypot is
+  correctly rounded and is NOT fdlibm's split-high-word expression, so the port takes the square
+  root of the rounded sum and corrects it with the exact residual of x^2+y^2-s^2 (Dekker
+  products), with exact power-of-two scaling for huge and subnormal operands. It is a stdlib
+  addition needed by the sky port (the thunder distances and the storm-cell ordering compared
+  against std::hypot are this test's evidence).
 - **Abundance's content tool is ported: `inspect`, `cook` and `verify` reach byte parity.**
   `abundance/src/content.grl` reproduces `engine/tools/content.py`'s bounded manifest inventory and
   audio-index closure, the deterministic cook into a SHA256-named package (same directory name, same
