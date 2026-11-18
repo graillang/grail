@@ -1,5 +1,13 @@
 ## Unreleased
 
+- **The shader pipeline takes `geometry/`, the largest area.** 30 of its 46 entries (4.5 MB of SPIR-V)
+  are built with the engine's pinned DXC at pin `ca1f1bc05b`: the cull, motion, HZB, software and
+  hardware raster, assembly, VSM argument/cluster/SAT/settle and vegetation passes, plus the two mesh
+  stages (`geo_raster_hw.ms`/`.ps`, `geo_raster_hw_masked.ms`/`.ps`) — the first mesh stages in the
+  inventory. The layout pin grows from 21 to 23 structs. The 16 entries that reach the engine's
+  CMake-mirrored kernel and terrain trees stay recorded as skipped with the include that blocks each
+  (`docs/design/abundance-shaders.md`). Vendoring geometry also brings the material and flora headers
+  its closure reaches into `abundance/shaders/`, so those areas are now header-complete.
 - **The Abundance tools lane records the last five tools' boundaries.** `abundance/README.md` now
   states exactly what each remaining tool needs: ui_snapshot's engine frame-stream format and
   rasteriser arithmetic, soundscape_render's audio/sky cores and ffmpeg rain loops,
