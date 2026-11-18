@@ -6,6 +6,18 @@
   type/amplitude/progressive octaves), warp-then-sample, and the C++ constructor's and sample()'s
   refusals as typed verdicts. 136 values matched against the real facade linked from the worldgen
   library.
+- **The manufacturing domain's machine wear model is ported.** `abundance/src/
+  manufacturing_maintenance.grl` carries the run half of `machine_maintenance.hpp/.cpp` and the
+  manufacturing adapter's content (`manufacturing_maintenance.hpp/.cpp`, cmake/tx/manufacturing):
+  the fault and machine definitions with their rules, the condition state and isolation bits, the
+  load-basis-point conversion, the checked wear accrual with its numerator remainder carried
+  across runs, the availability and status classification, the run path's guards (sequence,
+  revision, time, runtime and load bounds, the shutdown fault, the wear limit) and fault
+  triggering at each trigger wear, and the industrial/food machine definitions with their
+  service, wear and breakdown ladders. `abundance/tests/manufacturing_maintenance_test.grl`
+  prints 79 lines that match a reference driving the engine's real MachineMaintenanceAuthority
+  through `libabundance_gameplay_core.a`, including a 2375-hour fault ladder. The replay store,
+  the inspection/repair commands and the snapshot codec are later increments.
 
 - **The island's world features are ported: sites, cave entrances, strategic regions and transport
   corridors, with the seeded fields and portable math they are placed by.** `abundance/src/
