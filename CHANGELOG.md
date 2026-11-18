@@ -1,5 +1,18 @@
 ## Unreleased
 
+- **Stage 9 begins: the post area's and the core frame pipeline's render policies are ported.**
+  `abundance/src/render_policy_post.grl` carries the engine's exposure automation
+  (`engine/render_policy/auto_exposure.cpp`: histogram binning, EV100 from luminance and incident
+  illuminance, the night adaptation floor, the band around the incident anchor, and the metering
+  and adaptation step with highlight protection and partial shade adaptation) and its white balance
+  (`white_balance.hpp`: chromaticity, McCamy CCT, the degree of adaptation, the Bradford display
+  matrix and the adaptation step). `abundance/src/render_policy_frame.grl` carries the TAA axes
+  and flags (`core/frame.hpp`), the history reset word (`frame_continuity.hpp`), Halton(2,3) jitter
+  and its projection terms, the F3 ladder and which resets move the exposure. Both match the
+  engine's own sources bit for bit (901 and 338 reference lines; the frame fixture is the engine's
+  `frame_continuity_tests.cpp`). `abundance/src/render_float.grl` adds correctly rounded
+  exp2/exp/ln/log2, because lib/math's 1-ulp fdlibm ones disagree with glibc on roughly 10 % of
+  EV100 inputs.
 - **Abundance's item_icons_check is ported, byte-identical to the built reference.**
   `abundance/src/item_icons.grl` reads `ui/icons/index.json`, applies the UI's stem rule and reports
   every catalogue item without a picture; the catalogue (the gameplay economy, stage 6) is an input
