@@ -705,3 +705,16 @@ parse, typecheck, codegen and assembly.
   `grail build`'s default shape — one run per module — is the shape incremental builds use. The
   module entry on the whole-program path additionally records the digest of the assembly its object
   came from and requires it to match, so an object is never reused when its text moved.
+
+## Unit packs
+
+A module run files its per-function units in one pack (`fncache::pack_write`): the units' bytes, each
+exactly as a one-file entry holds it, behind a header of names, offsets and lengths, written once at the
+end of the run to `stage/` and renamed into place. The driver names the pack by the module (target,
+name and source files) - not its contents - with the run's mode (`-check`, `-debug`) appended by the
+compiler, so an edit refiles only that module's pack and a check never overwrites a build's. The run
+reads its pack once, before any body worker forks, and looks units up through an in-memory index; a
+unit not in the pack is looked for as a one-file entry, so stores written before packs still replay.
+Body workers file nothing: the parent keeps every unit it applies - compiled, replayed from the pack,
+or replayed through the body record - and files them together. A cold check of a 104k-line module
+filed 16,126 entries before; it files one pack now.

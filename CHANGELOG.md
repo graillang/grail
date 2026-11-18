@@ -1,5 +1,13 @@
 ## Unreleased
 
+- **The per-function store files one pack per module run.** A cold compile used to file one store
+  entry per function (16,126 files for a 4,000-function module, each a create, write and rename); a
+  module run now writes all its units into one pack, once, with one rename, and reads its module's
+  pack once before any body. Units are still keyed per function, so an edit refiles only its own
+  module's pack and replays every other body; entries filed one per file by an older compiler are
+  still read; `grail cache gc` stamps and evicts packs like any entry; a check and a build (and a
+  debug build) of a module keep separate packs. Cold check of a 104k-line module: system time 0.82 s
+  to 0.16 s; cold build: 1.62 s to 1.12 s.
 - **Generic code over a type that owns nothing has no drop bookkeeping.** In a specialisation, a
   type parameter bound to a plain type (`A = u64`) answered "needs drop" like an unknown type, so
   every value of it carried a drop flag, a drop-helper call guarded by it, and a callee-saved register
