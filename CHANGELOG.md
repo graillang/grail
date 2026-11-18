@@ -1,5 +1,15 @@
 ## Unreleased
 
+- **Compile-time values: one cache entry for builds with and without the function-unit store.** A
+  run-tier value's cache key (R3) named the compiler by `--fn-cache-id` when the store was on and by
+  its file otherwise, and hashed the store's options and the internal `--skip-body`/`--reported`
+  options of an error re-run. So a build with the store found the value a previous build had filed
+  while the same build without it - and its own re-run that reports the next error - missed it and
+  ran a whole-program probe, which reported the program's errors a second time: an edited `main`
+  printed its error twice and `aborting due to 2 previous errors` with the store, once plus `did not
+  compile` without it. The key now leaves those options out and always names the compiler by its
+  file, so both builds print the same diagnostics (`test-native --unit-identity`: 2 failing cases ->
+  0, comptime-r4-reached-through-generic and comptime-r4-closure-falls-back).
 - **Faster float loops in development builds (native backend): `ecs` runs 3.69 G instructions instead of
   7.31 G (Go: 3.02 G), `ecs_par` 4.96 G instead of 10.66 G (Go: 4.32 G).** The optimiser now (1) keeps
   the data of vectors and slices that are stable across a loop in r8..r11/rdx when the loop makes no
