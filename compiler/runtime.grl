@@ -127,10 +127,12 @@ fn rt_stack_overflow_at(site: u64) -> u64 {
 fn rt_fail(kind: u64, a: u64, b: u64) -> u64 {
     j := rt_job_failing();
     if j != 0 {
+        raw_store(rt_fail_site_word(), 0);
         return rt_job_fail_here(j, kind, a, b, 0);
     }
     t := rt_containable();
     if t != 0 {
+        raw_store(rt_fail_site_word(), 0);
         return rt_contain_site(t, kind, a, b, rt_site_here(t + 200), 0);
     }
     if rt_abort_begin() == 0 {
@@ -382,6 +384,18 @@ fn rt_site_here(scratch: u64) -> u64 {
 // The innermost program statement on this stack among the frames above `above` (a stack address;
 // 0 for all of them), skipping standard-library statements (site flag bit 62) unless `std` is set.
 // A statement-table entry, or 0. It writes only the five scratch words it is given.
+// The caller's frame in a frame-pointer walk, or 0 where the chain stops being one. A caller's frame
+// is at a higher address, 8-byte aligned, and on the same stack; the bottom of a task's stack does not
+// always end the chain with 0 (the RV64 and AArch64 entry leave whatever the register held), so a
+// walk that followed it read garbage and crashed - a failed check inside a job on riscv64 died with
+// SIGSEGV in rt_site_above instead of being reported. 64 MiB bounds one stack's frames.
+fn rt_frame_next(frame: u64) -> u64 {
+    next := raw_load(frame);
+    if (next <= frame) || ((next & 7) != 0) || (67108864 < wrapping_sub(next, frame)) {
+        return 0;
+    }
+    return next;
+}
 fn rt_site_above(scratch: u64, above: u64, std: u64) -> u64 {
     have := rt_sites_fill(scratch);
     if have < 3 {
@@ -422,7 +436,7 @@ fn rt_site_above(scratch: u64, above: u64, std: u64) -> u64 {
                 return hit;
             }
         }
-        frame = raw_load(frame);
+        frame = rt_frame_next(frame);
         depth = depth + 1;
     }
     return 0;
@@ -583,7 +597,9 @@ fn rt_contained_word() -> u64 {
     return raw_state() + 3584;
 }
 fn rt_contained_note() -> u64 {
-    raw_store(rt_contained_word(), raw_load(rt_contained_word()) + 1);
+    // Atomic: failures are contained on several threads at once, and a joiner's re-raise
+    // (rt_job_reraise) may take its one back before this adds it.
+    raw_atomic_fetch_add(rt_contained_word(), 1);
     return 0;
 }
 // How many stacks a contained failure discarded beyond the one it happened on (it was raised again
@@ -668,7 +684,21 @@ fn rt_refine(msg: u64, req: u64) -> u64 {
 }
 // ` --> file:line:col` for the frame that failed, then one ` = called from` line per further frame
 // that lies in a statement - at most 32 of them.
+// A release (LLVM) build has no site table: a failure in lifted code writes a pointer to its
+// statement's record - the same {address, file, line | column << 32} shape - here just before it
+// calls the failure entry, and the report prints it as the ` --> ` line (llvm.grl site_hint). A
+// contained failure clears it, so the next report never reads a stale one.
+fn rt_fail_site_word() -> u64 {
+    return raw_state() + 3440;
+}
 fn rt_fail_where(buf: u64, n: u64) -> u64 {
+    hint := raw_load(rt_fail_site_word());
+    if hint != 0 {
+        raw_store(rt_fail_site_word(), 0);
+        if raw_load(hint + 8) != 0 {
+            return rt_fail_line(buf, n, hint, view(" --> "));
+        }
+    }
     // The program's entry stores the compiler-emitted rt_sites in state word 3400; asked for the
     // descriptor (rt_sites_fill), it fills in the tables' bounds and the caller's frame pointer. No
     // table, a refused descriptor or zeros: no location lines.
@@ -724,7 +754,7 @@ fn rt_fail_where(buf: u64, n: u64) -> u64 {
                 lines = lines + 1;
             }
         }
-        frame = raw_load(frame);
+        frame = rt_frame_next(frame);
         depth = depth + 1;
     }
     return at;
@@ -1009,7 +1039,7 @@ fn rt_backtrace() -> u64 {
                 lines = lines + 1;
             }
         }
-        frame = raw_load(frame);
+        frame = rt_frame_next(frame);
         depth = depth + 1;
     }
     text := rt_lit(buf, n);
@@ -1175,12 +1205,19 @@ fn rt_zero(p: u64, n: u64) -> u64 {
 // record, a static or large block, a double free, a process with threads - is rt_free_any_slow,
 // out of line and cold.
 fn rt_free(p: u64) -> u64 {
-    if ((p & 8) == 0) & (p != 0) & (raw_load(wrapping_add(raw_state(), 3416)) == 0) {
+    // Freeing nothing is common (an empty vector's buffer): answered before anything is loaded.
+    if p == 0 {
+        return 0;
+    }
+    if ((p & 8) == 0) & (raw_load(wrapping_add(raw_state(), 3416)) == 0) {
         block := wrapping_sub(p, 16);
         if raw_load(wrapping_add(block, 8)) == 1 {
             size := raw_load(block);
             if size < 257 {
-                head := wrapping_add(raw_state(), wrapping_add(256, ((197136 >> ((size >> 6) << 2)) & 15) << 3));
+                // The block sizes here are 32, 64, 128 and 256; (size >> 6) - (size >> 8) is their
+                // class, 0..3, with two constant shifts and no lookup.
+                class := wrapping_sub(size >> 6, size >> 8);
+                head := wrapping_add(raw_state(), wrapping_add(256, class << 3));
                 raw_store(wrapping_add(block, 8), raw_load(head));
                 raw_store(head, block);
                 live := wrapping_add(raw_state(), 24);
@@ -1578,25 +1615,52 @@ fn rt_block_bin(size: u64) -> u64 {
 // the block is the head of that class's free list, and it is cleared for the words asked for.
 // Everything else - an empty list, a larger request - is rt_alloc_slow.
 fn rt_alloc_unlocked(n: u64) -> u64 {
-    if n < 241 {
-        bin := (4294945360 >> (((n + 15) >> 4) << 1)) & 3;
-        head := wrapping_add(raw_state(), wrapping_add(256, bin << 3));
+    // The class and the clearing in one test chain, with no variable shift and no checked add (each
+    // would be a range check and a call to rt_abort in the hottest function the compiler runs), and
+    // the two smallest classes - most allocations - cleared with fixed stores. Class k's head is
+    // state word 256 + 8k; its blocks hold 16 << ... bytes of payload: 16, 48, 112, 240.
+    if n < 17 {
+        head := wrapping_add(raw_state(), 256);
+        block := raw_load(head);
+        if block != 0 {
+            raw_store(head, raw_load(wrapping_add(block, 8)));
+            raw_store(wrapping_add(block, 8), 1);
+            raw_store(wrapping_add(block, 16), 0);
+            raw_store(wrapping_add(block, 24), 0);
+            live := wrapping_add(raw_state(), 24);
+            raw_store(live, wrapping_add(raw_load(live), 1));
+            return wrapping_add(block, 16);
+        }
+    } else if n < 49 {
+        head := wrapping_add(raw_state(), 264);
+        block := raw_load(head);
+        if block != 0 {
+            raw_store(head, raw_load(wrapping_add(block, 8)));
+            raw_store(wrapping_add(block, 8), 1);
+            raw_store(wrapping_add(block, 16), 0);
+            raw_store(wrapping_add(block, 24), 0);
+            raw_store(wrapping_add(block, 32), 0);
+            raw_store(wrapping_add(block, 40), 0);
+            raw_store(wrapping_add(block, 48), 0);
+            raw_store(wrapping_add(block, 56), 0);
+            live := wrapping_add(raw_state(), 24);
+            raw_store(live, wrapping_add(raw_load(live), 1));
+            return wrapping_add(block, 16);
+        }
+    } else if n < 241 {
+        mut head = wrapping_add(raw_state(), 280);
+        if n < 113 {
+            head = wrapping_add(raw_state(), 272);
+        }
         block := raw_load(head);
         if block != 0 {
             raw_store(head, raw_load(wrapping_add(block, 8)));
             raw_store(wrapping_add(block, 8), 1);
             ptr := wrapping_add(block, 16);
-            // The smallest bin holds every request up to 16 bytes in at least 16, so its blocks
-            // are cleared with two fixed stores (a tree node, a box) rather than the loop.
-            if n < 17 {
-                raw_store(ptr, 0);
-                raw_store(wrapping_add(ptr, 8), 0);
-            } else {
-                mut i = 0;
-                while i < n {
-                    raw_store(wrapping_add(ptr, i), 0);
-                    i = wrapping_add(i, 8);
-                }
+            mut i = 0;
+            while i < n {
+                raw_store(wrapping_add(ptr, i), 0);
+                i = wrapping_add(i, 8);
             }
             live := wrapping_add(raw_state(), 24);
             raw_store(live, wrapping_add(raw_load(live), 1));
@@ -1980,14 +2044,18 @@ fn rt_reserveb(s: u64, need: u64) -> u64 {
 }
 // Copies n bytes, a word at a time while possible.
 fn rt_copy_bytes(dst: u64, src: u64, n: u64) -> u64 {
+    // Wrapping arithmetic: every checked add here was a range test and an rt_abort call in a loop the
+    // compiler runs about a million times per thousand-function check. A copy cannot overflow an
+    // address: both ranges exist.
     mut i = 0;
-    while i + 8 < n + 1 {
-        raw_store(dst + i, raw_load(src + i));
-        i = i + 8;
+    words := n & 18446744073709551608;
+    while i < words {
+        raw_store(wrapping_add(dst, i), raw_load(wrapping_add(src, i)));
+        i = wrapping_add(i, 8);
     }
     while i < n {
-        raw_putbyte(dst + i, raw_byte(src + i));
-        i = i + 1;
+        raw_putbyte(wrapping_add(dst, i), raw_byte(wrapping_add(src, i)));
+        i = wrapping_add(i, 1);
     }
     return 0;
 }
@@ -2419,11 +2487,11 @@ fn rt_drop_seq(s: u64) -> u64 {
         // A literal's static object (block state 2) owns nothing and is never freed. Most of what
         // is dropped is one of those - every `view("text")` has one - so it is settled here and
         // not by two calls of rt_free that each find the same thing out.
-        if raw_load(s - 8) == 2 {
+        if raw_load(wrapping_sub(s, 8)) == 2 {
             return 0;
         }
         // Bytes that share the header's block (rt_copy) go with it.
-        if raw_load(s) != s + 24 {
+        if raw_load(s) != wrapping_add(s, 24) {
             rt_free(raw_load(s));
         }
         rt_free(s);
@@ -4400,7 +4468,8 @@ fn rt_thread_spawn_detached(entry: u64, arg: u64) -> u64 {
 }
 // One OS thread running entry(arg) on its own worker record. The record is the top 128 bytes of a
 // mapped region: {0 self, 8 scheduler sp, 16 current task, 24 entry then the runtime-worker marker,
-// 32 arg, 40 TID word of a persistent thread, 48 Windows wait value, 56 host TLS base, 64 the
+// 32 arg, 40 TID word of a persistent thread, 48 Windows: the wait value; Linux: the running block's
+// foreign-call pair (rt_marker_cache), 56 host TLS base, 64 the
 // thread's allocator cache (rt_cache_make; 0 until it allocates), 72 frees made with no cache
 // (rt_cache_for_free), 80 the record of the dedicated thread whose closure this thread is running
 // (rt_uthread_main; 0 on every other thread), 88 the thread's locals (rt_locals), 96 the thread's
@@ -4885,6 +4954,7 @@ fn rt_thread_join(handle: u64) -> u64 {
 //   3416         a second thread was started  rt_allocator_lock          compile-speed
 //   3424         scheduler config block       rt_sched_config            sched-start
 //   3432         failure report block address rt_report_block            statics-no-alloc
+//   3440         release failure site record  rt_fail_site_word          release-sites
 //   3448         stacks discarded by re-raise rt_discarded_word          job-failure
 //   3456         abort report claim           rt_abort                   abort-once
 //   3464..3576   task-stack fault handler     rt_state_stack_guard       stack-guard
@@ -4895,7 +4965,8 @@ fn rt_thread_join(handle: u64) -> u64 {
 //   3856..       Windows fiber table          os-windows                 --
 //
 // Not a claim: thread-record word 48 (raw_state() + 176 for the main thread). os-windows keeps the
-// per-thread WaitOnAddress expected value there, so nothing else may use it. The job pool once did, which
+// per-thread WaitOnAddress expected value there; on Linux it is the running block's foreign-call pair
+// (rt_marker_cache, read by every foreign call's marker). Nothing else may use it. The job pool once did, which
 // was the same disease as the 88 collision: an unowned word in a shared structure.
 // The task-stack fault handler's state: 0 restorer code page (x86-64), 8 install state
 // (0 none, 1 installing, 2 ready), 16 a 32-byte message scratch, 48 the sigaction the handler is
@@ -5583,6 +5654,23 @@ fn rt_sysmon(s: u64) -> u64 {
     }
     return 0;
 }
+// Thread-record word 48 on Linux: the foreign-call pair of the block this thread runs, or 0 when it
+// runs none, so a foreign call's marker reaches it in one load (ffi_marker_enter). (On Windows the
+// word is WaitOnAddress's compare value, and the marker takes the long way.) Every place a thread
+// gains or loses a block sets it: rt_worker_loop, rt_blocking_enter, rt_foreign_lost. A retake
+// gives the block a fresh pair while its old owner is still in its call; the old owner then counts
+// out on the old pair, and loses the block (rt_foreign_lost) before it uses the word again.
+fn rt_marker_cache(tp: u64, w: u64) -> u64 {
+    if rt_os_marker_cached() == 0 {
+        return 0;
+    }
+    if w == 0 {
+        raw_store(tp + 48, 0);
+    } else {
+        raw_store(tp + 48, raw_load(w + 320));
+    }
+    return 0;
+}
 // A foreign call came back and found `retaken` set (ffi_hooks_leave in native.grl): settle it.
 // 1 -> 0 cancels the monitor's retake and this thread keeps its block; 2 means the block was taken
 // during the call; 0 means the monitor cancelled first.
@@ -5624,6 +5712,7 @@ fn rt_foreign_lost(symbol: u64) -> u64 {
     tp := raw_tp_get();
     raw_store(tp + 24, 0);
     raw_store(tp + 32, 0);
+    rt_marker_cache(tp, 0);
     j := raw_load(rt_state_jobs());
     if raw_atomic_cas(j + 512, 0, 1) == 0 {
         mut n = 0;
@@ -5914,6 +6003,7 @@ fn rt_worker_loop(worker: u64) -> u64 {
     tp := raw_tp_get();
     raw_store(tp + 24, 2); // runtime worker with a deque: rt_abort_signals, rt_worker_self
     raw_store(tp + 32, worker);
+    rt_marker_cache(tp, worker);
     raw_store(worker + 48, tp);
     // What this thread needs to switch onto a task's stack with this block: the fault handler's
     // alternate stack is the block's (Linux, macOS), the fiber conversion is the thread's and done
@@ -7017,8 +7107,12 @@ fn rt_job_message(f: u64) -> u64 {
 fn rt_job_reraise(f: u64) -> u64 {
     // The failure was counted where it happened; the stack it is raised on now is one more stack
     // discarded, not one more failure (rt_contained_note counts it again when it is contained).
-    raw_store(rt_contained_word(), raw_load(rt_contained_word()) - 1);
-    raw_store(rt_discarded_word(), raw_load(rt_discarded_word()) + 1);
+    // Atomic and wrapping: the failing stack may not have counted its failure yet (it publishes the
+    // job before it is contained), so the count can pass through -1 here. A checked subtraction
+    // trapped on exactly that - silently, inside the failure path - when the joiner ran first
+    // (sched-job-failure-forms-from-a-task, exit 134 about 1 run in 10 under qemu).
+    raw_atomic_fetch_add(rt_contained_word(), wrapping_sub(0, 1));
+    raw_atomic_fetch_add(rt_discarded_word(), 1);
     // Numbers, as at the failure: the kind, the operands, the failing statement and - the first
     // time the failure crosses a join - this joiner's own statement. Whoever reports it renders
     // both lines from them; only a message text is copied (the record is shared).
@@ -8026,6 +8120,7 @@ fn rt_blocking_enter() -> u64 {
     }
     raw_store(tp + 24, 0);
     raw_store(tp + 32, 0);
+    rt_marker_cache(tp, 0);
     rt_block_give(w);
     return 0;
 }

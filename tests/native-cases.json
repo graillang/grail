@@ -15306,9 +15306,6 @@
     "name": "mutex-waiter-sees-poison-when-holder-fails",
     "source": "use host;\nstruct Shared { m: Mutex<u64> }\nfn slow_bad<a>(v: (&a mut u64), n: u64) -> u64 {\n    host::sleep_ms(100);\n    w := u64[1];\n    return w[n];\n}\nfn peek<a>(v: (&a mut u64), n: u64) -> u64 { return *v; }\nfn fails(n: u64, s: (&Shared)) -> u64 {\n    return s.m.lock_with(3, slow_bad);\n}\nfn waits(n: u64, s: (&Shared)) -> u64 {\n    host::sleep_ms(20);\n    return s.m.lock_with(0, peek);\n}\nfn body<sc>(scope: (&sc Scope<(&Shared)>), s: (&Shared)) -> u64 {\n    a := spawn(scope, 0, fails);\n    b := spawn(scope, 0, waits);\n    // The waiter is parked on the lock when its holder fails: it is woken and sees the poison.\n    match try_join(b) {\n        TaskFailure(e) => { println(\"waiter: {}\", e.kind); },\n        u64(v) => { println(v); }\n    }\n    match try_join(a) {\n        TaskFailure(e) => { println(\"holder: {}\", e.message); },\n        u64(v) => { println(v); }\n    }\n    return 0;\n}\nfn main() {\n    s := Shared { m: Mutex::new(0) };\n    println(task_scope(&s, body));\n}\n",
     "stdout": "waiter: 17\nholder: index 3 out of bounds for length 1\n0\n",
-    "stderr": [
-      "note: "
-    ],
     "targets": [
       "x86_64"
     ],
@@ -15440,9 +15437,6 @@
       "lib/time.grl"
     ],
     "stdout": "reader failed\nfalse\n3\nwriter failed\ntrue\nreader: 17\n5\n5\npermit holder failed\ntrue\ninit failed\n42\n2\n0\n",
-    "stderr": [
-      "note: "
-    ],
     "targets": [
       "x86_64"
     ],
@@ -19466,5 +19460,15 @@
     "note": "closures given to a generic function's lent `Fn(..)` parameters before every type argument is fixed (`R` comes from the last one) are lent frame environments, not boxes - Condition::wait_with's shape",
     "source": "fn wait_with<T, C, R>(x: T, ctx: C, ready: Fn((&T), (&C)) -> bool, then: FnMut(T, C) -> R) -> R? { mut f = then; if ready(&x, &ctx) { return Some(f(x, ctx)); } return None; }\nfn main() {\n    mut s: u64 = 0;\n    for i in 1000 {\n        k := i % 7;\n        got := wait_with(i, k, |x: (&u64), c: (&u64)| -> bool *x % 2 == 0, |x: u64, c: u64| -> u64 x + c);\n        if let Some(v) = got { s += v; }\n    }\n    println(s);\n}\n",
     "stdout": "250997\n"
+  },
+  {
+    "name": "dyn-iterator-with-generic-fold",
+    "note": "`dyn Iterator` stays usable while Iterator has a generic by-value `fold`: as in Rust, a method with its own type parameters that takes self by value is not part of the dyn object, and is called on concrete types and through bounds",
+    "source": "use iter;\nstruct Up { n: u64, end: u64 }\nimpl iter::Iterator for Up {\n    type Item = u64;\n    fn next(self: &mut Self) -> u64? { if self.n == self.end { return None; } self.n += 1; return Some(self.n); }\n}\nfn drain(it: (&mut dyn iter::Iterator<Item = u64>)) -> u64 { mut s = 0; while let Some(x) = it.next() { s += x; } return s; }\nfn main() {\n    mut u = Up { n: 0, end: 4 };\n    println(drain(&mut u));\n    println(Up { n: 0, end: 3 }.fold(0, |a: u64, x: u64| -> u64 a + x));\n}\n",
+    "stdout": "10\n6\n",
+    "modules": [
+      "lib/iter.grl",
+      "lib/core.grl"
+    ]
   }
 ]
