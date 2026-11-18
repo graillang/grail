@@ -19,6 +19,14 @@
 - **Fixed: a yield on AArch64 and RV64 Linux did nothing.** The runtime's `sched_yield` had no
   entry in their system-call table, so the scheduler's own yields there returned "not
   implemented"; it is system call 124 on both.
+- **f32 locals in development builds stay in SSE registers, in binary32.** The native optimiser
+  kept no float local in a register in any function that multiplied two f32 values (that sequence
+  names %xmm8/%xmm9, and the allocator gave up on a function naming either), and a local set to
+  `0.0` (a `movq $0` store) never qualified. Now the registers a body names are skipped rather than
+  disqualifying it, a zero store becomes `xorps`, and `xmm_narrow` keeps such a local in binary32
+  when it is returned or added to a product: `s = s + x[i] * y[i]` is one `addss` on the register.
+  bench/dot_f32 (dev): 0.690 s to 0.330 s, 5.14 G to 4.14 G instructions; matmul 11.88 G to 10.54 G;
+  outputs unchanged.
 
 - **Default `extern "C"` calls on AArch64 and RV64 Linux lost their atomic instruction too.** The
   foreign-call marker counts out with a plain load, add and store (the `ldaxr`/`stlxr` loop and
@@ -35,6 +43,14 @@
   release instructions; the scheduler): Grail's ratio to the fastest rival, the geometric mean of the
   category's rows, with its best and worst rows marked. A table under it names them. It reads the
   same committed results as the other charts (`{{perf:summary}}`).
+- **The release compiler is built with profile-guided optimisation.** `tools/native.mjs release`
+  compiles the compiler's LLVM code with `-fprofile-use` and the profile in
+  `tools/pgo/grail.profdata.xz`: a training run of the instrumented compiler (a cold check and build
+  of a 26 000-line program and the compiler's own check), regenerated with `bun tools/native.mjs
+  pgo-train`. The compiler's output is unchanged (byte-identical text and objects); it runs 7-9% fewer
+  instructions per compile: check of a 104 000-line program 5.06 G -> 4.60 G, its build 26.5 G ->
+  24.7 G. `GRAIL_PGO=0` builds without the profile.
+
 - **Generic code over a type that owns nothing has no drop bookkeeping.** In a specialisation, a
   type parameter bound to a plain type (`A = u64`) answered "needs drop" like an unknown type, so
   every value of it carried a drop flag, a drop-helper call guarded by it, and a callee-saved register
