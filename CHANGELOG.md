@@ -530,6 +530,12 @@
   staging offsets), the vt.hlsli address/closeness/LOD math on exact inputs, and 46 writer, container and
   page refusals: 386 reference lines. `lib/zstd.grl` gains `frame_size` (what
   `ZSTD_findFrameCompressedSize` returns, for the one-frame rule).
+- **Abundance's render graph runs in Grail, plan for plan.** `abundance/src/render_graph.grl` ports the
+  CPU model of `engine/core/render_graph.cpp`: pass declarations, culling, transient lifetimes,
+  first-fit aliased heaps with the 256 MiB cap, per-mip synchronisation2 barriers, async-compute
+  segments, persistent imports and `transient_report()`. A reference that compiles the engine's own
+  file against a mocked device prints the compiled plan for eight declaration programs, and the port
+  matches all 2131 lines (`just abundance-test`).
 
 - **Every performance chart is re-measured with the machine idle** (load average under 3; release
   compiler with PGO on main bcf78e5a). Every compile row now beats the fastest rival: the cold
