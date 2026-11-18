@@ -1,5 +1,19 @@
 ## Unreleased
 
+- **The construction catalogue is computed and ported, with the shape monument placement
+  reads.** `abundance/src/construction_catalog.grl` carries the ConstructionModule record (id,
+  kind, dimensions, sorted occupied cells), the material tiers and build modules, and the
+  compound-wall piece table — all generated from the engine's own
+  `compound_wall_content_before_glass_tiers()` — with `find_module`, `find_tier`,
+  `find_material_tier`, `allows_material`, `module_bounds(module, turns)` (the inclusive local
+  cell box, computed the way `monument_layout.cpp` does), `occupied_cells_of(module, turns)`
+  (rotated and sorted), and `transform_construction_offset` with the engine's exact int64
+  arithmetic and int32-overflow refusal. `abundance/tests/construction_catalog_test.grl` prints
+  4153 lines that match a reference built from the engine's own content and transform: every
+  module's cells and bounds at turns 0 and 1, every tier and build module, every piece, the
+  transforms and the lookups. The compound-wall piece→module id namespace and the build
+  catalogue's content hash are the next increment.
+
 - **Abundance's megaplants_batch extraction cache is ported.** `abundance/src/megaplants_batch.grl`
   reproduces `_file_sig` (a provenance-recorded sha256, else `size:mtime`), `_variant_sig` (archive,
   atlas and traced templates, extractor bytes), the `<species>_<tag>-<sig>` entry name and `_prune`'s
