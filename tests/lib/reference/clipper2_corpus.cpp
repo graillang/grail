@@ -258,6 +258,69 @@ static void emit_treed(const char* name, ClipType op, FillRule fill, int precisi
     mark("treed", name);
 }
 
+// ---- offset (ClipperOffset / InflatePaths) ----
+// Input line: <join> <end> <precision> <miter> <arc_tolerance> <delta> <npaths>; paths as %.17g.
+static void write_input_inflate(const char* name, int jt, int et, int precision, double miter,
+                                double arc_tol, double delta, const std::vector<PathD>& paths) {
+    std::string in = path_of(name, ".in");
+    FILE* f = fopen(in.c_str(), "w");
+    fprintf(f, "%d %d %d %.17g %.17g %.17g %zu\n", jt, et, precision, miter, arc_tol, delta, paths.size());
+    for (const auto& p : paths) {
+        fprintf(f, "%zu", p.size());
+        for (const auto& pt : p) fprintf(f, " %.17g %.17g", pt.x, pt.y);
+        fprintf(f, "\n");
+    }
+    fclose(f);
+}
+
+static void emit_inflate_d(const char* name, JoinType jt, EndType et, int precision, double miter,
+                           double arc_tol, double delta, const std::vector<PathD>& paths) {
+    write_input_inflate(name, (int)jt, (int)et, precision, miter, arc_tol, delta, paths);
+    // The C++ InflatePaths throws on a refused precision (exceptions enabled); record the code.
+    int error_code = 0;
+    std::vector<PathD> result;
+    int clamped = precision;
+    try {
+        CheckPrecisionRange(clamped, error_code);
+    } catch (const Clipper2Exception&) {
+        error_code = precision_error_i;
+    }
+    if (error_code == 0 && delta != 0.0) {
+        const double scale = std::pow(10, precision);
+        try {
+            ClipperOffset off(miter, arc_tol * scale);
+            off.AddPaths(ScalePaths<int64_t, double>(paths, scale, error_code), jt, et);
+            if (error_code == 0) {
+                Paths64 solution;
+                off.Execute(delta * scale, solution);
+                result = ScalePaths<double, int64_t>(solution, 1 / scale, error_code);
+            }
+        } catch (const Clipper2Exception&) {
+            error_code = range_error_i;
+            result.clear();
+        }
+    } else if (delta == 0.0) {
+        result = paths;
+    }
+    write_d_paths(name, result, error_code);
+    mark("inflated", name);
+}
+
+static void emit_inflate_64(const char* name, JoinType jt, EndType et, double miter,
+                            double arc_tol, double delta, const std::vector<Path64>& paths) {
+    std::string in = path_of(name, ".in");
+    FILE* f = fopen(in.c_str(), "w");
+    fprintf(f, "%d %d 0 %.17g %.17g %.17g %zu\n", (int)jt, (int)et, miter, arc_tol, delta, paths.size());
+    for (const auto& p : paths) {
+        fprintf(f, "%zu", p.size());
+        for (const auto& pt : p) fprintf(f, " %lld %lld", (long long)pt.x, (long long)pt.y);
+        fprintf(f, "\n");
+    }
+    fclose(f);
+    write_i64_paths(name, InflatePaths(paths, delta, jt, et, miter, arc_tol));
+    mark("inflate64", name);
+}
+
 int main(int argc, char** argv) {
     g_out = argc > 1 ? argv[1] : ".";
     const char* abundance = argc > 2 ? argv[2] : "/home/shulgin/abundance";
@@ -422,6 +485,48 @@ int main(int argc, char** argv) {
         mark("area", name.c_str());
     }
     (void)abundance;
+    // ---- offset cases: the caller's round/round centreline buffer plus every join/end kind ----
+    {
+        std::vector<PathD> centreline{PathD{{0, 0}, {40, 5}, {85, 2}, {130, -18}, {175, -22},
+                                            {220, 4}, {260, 30}, {300, 38}, {340, 12}, {380, -8}}};
+        emit_inflate_d("inflate-river", JoinType::Round, EndType::Round, 3, 2.0, 0.20, 2.5, centreline);
+        emit_inflate_d("inflate-river-wide", JoinType::Round, EndType::Round, 3, 2.0, 0.20, 7.0, centreline);
+        std::vector<PathD> hairpin{PathD{{0, 0}, {60, 0}, {80, 8}, {80, 40}, {55, 52}}};
+        emit_inflate_d("inflate-hairpin", JoinType::Round, EndType::Round, 3, 2.0, 0.25, 6.0, hairpin);
+        // Closed polygons: outward and inward offsets (Polygon end type).
+        std::vector<PathD> blob{PathD{{0, 0}, {100, 0}, {100, 80}, {60, 60}, {40, 100}, {0, 80}}};
+        emit_inflate_d("inflate-polygon-out", JoinType::Round, EndType::Polygon, 3, 2.0, 0.20, 4.0, blob);
+        emit_inflate_d("inflate-polygon-in", JoinType::Round, EndType::Polygon, 3, 2.0, 0.20, -4.0, blob);
+        // A single point becomes a circle (Round) or a square.
+        std::vector<PathD> dot{PathD{{10.5, 10.25}}};
+        emit_inflate_d("inflate-dot-round", JoinType::Round, EndType::Round, 3, 2.0, 0.20, 5.0, dot);
+        emit_inflate_d("inflate-dot-square", JoinType::Square, EndType::Round, 3, 2.0, 0.20, 5.0, dot);
+        // Open path ends: Butt (bevel), Square, Round, and Joined.
+        std::vector<PathD> open_line{PathD{{0, 0}, {50, 20}, {90, 0}}};
+        emit_inflate_d("inflate-butt", JoinType::Square, EndType::Butt, 3, 2.0, 0.20, 3.0, open_line);
+        emit_inflate_d("inflate-square-end", JoinType::Square, EndType::Square, 3, 2.0, 0.20, 3.0, open_line);
+        emit_inflate_d("inflate-round-end", JoinType::Round, EndType::Round, 3, 2.0, 0.20, 3.0, open_line);
+        emit_inflate_d("inflate-joined", JoinType::Miter, EndType::Joined, 3, 2.0, 0.20, 3.0, open_line);
+        // Join kinds on a sharp corner.
+        std::vector<PathD> corner{PathD{{0, 0}, {40, 0}, {40, 40}}};
+        emit_inflate_d("inflate-miter", JoinType::Miter, EndType::Round, 3, 2.0, 0.20, 6.0, corner);
+        emit_inflate_d("inflate-bevel", JoinType::Bevel, EndType::Round, 3, 2.0, 0.20, 6.0, corner);
+        emit_inflate_d("inflate-squarejoin", JoinType::Square, EndType::Round, 3, 2.0, 0.20, 6.0, corner);
+        // Precision 2 and 0 (coarser grids), and the two refusals.
+        emit_inflate_d("inflate-prec2", JoinType::Round, EndType::Round, 2, 2.0, 0.20, 2.5, centreline);
+        emit_inflate_d("inflate-prec0", JoinType::Round, EndType::Round, 0, 2.0, 0.20, 2.5, centreline);
+        emit_inflate_d("inflate-bad-precision", JoinType::Round, EndType::Round, 12, 2.0, 0.20, 2.5, centreline);
+        {
+            std::vector<PathD> huge{PathD{{0.0, 0.0}, {1e19, 0.0}, {1e19, 1e19}}};
+            emit_inflate_d("inflate-range-error", JoinType::Round, EndType::Round, 3, 2.0, 0.20, 2.5, huge);
+        }
+        emit_inflate_d("inflate-zero-delta", JoinType::Round, EndType::Round, 3, 2.0, 0.20, 0.0, open_line);
+        // Int64 offset paths.
+        emit_inflate_64("inflate64-open", JoinType::Round, EndType::Round, 2.0, 3.0, 4.0,
+                        Paths64{Path64{{0, 0}, {60, 10}, {120, 0}}});
+        emit_inflate_64("inflate64-polygon", JoinType::Round, EndType::Polygon, 2.0, 3.0, 5.0,
+                        Paths64{rect64(0, 0, 50, 40)});
+    }
     {
         std::string m = path_of("manifest", ".txt");
         FILE* f = fopen(m.c_str(), "w");

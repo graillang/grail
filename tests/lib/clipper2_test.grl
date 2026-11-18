@@ -293,6 +293,35 @@ fn compare_paths_d(got: clipper2::PointD[][], t: &mut Tokens) -> bool {
     return true;
 }
 
+fn join_type_of(jt: u64) -> clipper2::JoinType {
+    if jt == 0 {
+        return clipper2::JoinType::Square;
+    }
+    if jt == 1 {
+        return clipper2::JoinType::Bevel;
+    }
+    if jt == 2 {
+        return clipper2::JoinType::Round;
+    }
+    return clipper2::JoinType::Miter;
+}
+
+fn end_type_of(et: u64) -> clipper2::EndType {
+    if et == 0 {
+        return clipper2::EndType::Polygon;
+    }
+    if et == 1 {
+        return clipper2::EndType::Joined;
+    }
+    if et == 2 {
+        return clipper2::EndType::Butt;
+    }
+    if et == 3 {
+        return clipper2::EndType::Square;
+    }
+    return clipper2::EndType::Round;
+}
+
 fn kind_is<a, b>(kind: &a [u8], expect: &b [u8]) -> bool {
     if kind.len() != expect.len() {
         return false;
@@ -368,6 +397,47 @@ fn run_case<a, b, c>(dir: &a [u8], kind: &b [u8], name: &c [u8]) -> bool {
             return false;
         }
         return compare_tree_d(&tree, &mut ot);
+    }
+    if kind_is(kind, "inflated") {
+        jt := next_u64(&mut it);
+        et := next_u64(&mut it);
+        precision := next_i64(&mut it);
+        miter := next_f64(&mut it);
+        arc := next_f64(&mut it);
+        delta := next_f64(&mut it);
+        sub := read_paths_d(&mut it);
+        r := clipper2::inflate_paths_d(
+            &sub,
+            delta,
+            join_type_of(jt),
+            end_type_of(et),
+            miter,
+            precision,
+            arc
+        );
+        want_error := next_u64(&mut ot);
+        if r.error_code != want_error {
+            return false;
+        }
+        return compare_paths_d(r.paths, &mut ot);
+    }
+    if kind_is(kind, "inflate64") {
+        jt := next_u64(&mut it);
+        et := next_u64(&mut it);
+        _precision := next_u64(&mut it);
+        miter := next_f64(&mut it);
+        arc := next_f64(&mut it);
+        delta := next_f64(&mut it);
+        sub := read_paths64(&mut it);
+        got := clipper2::inflate_paths64(
+            &sub,
+            delta,
+            join_type_of(jt),
+            end_type_of(et),
+            miter,
+            arc
+        );
+        return compare_paths64(got, &mut ot);
     }
     if kind_is(kind, "pip") {
         ring_len := next_u64(&mut it);

@@ -1,5 +1,15 @@
 ## Unreleased
 
+- **`lib/clipper2.grl` gains the offset engine (`ClipperOffset`, `InflatePaths`), and `lib/math.grl`
+  gains `acos`.** The water-geometry callers buffer river centrelines with
+  `InflatePaths(..., JoinType::Round, EndType::Round, 2.0, 3, arcTol)`; the port carries all of
+  `clipper.offset.cpp` (square/bevel/round/miter joins, polygon/joined/butt/square/round ends,
+  single-point circles and squares, the lowest-path orientation check that picks the final
+  Positive/Negative union) and both entry points (`inflate_paths64`, and `inflate_paths_d` with its
+  10^precision scale). `acos` is the fdlibm routine beside the existing `asin`. `lib-clipper2` grows
+  to 50 cases with 21 offset fixtures from the vendored C++, every vertex compared exactly. The arc
+  steps go through Grail's own sin/cos/acos/atan2 rather than glibc's, so a fixture whose arc vertex
+  lands within an ulp of a rounding boundary could in principle differ; none of the 21 does.
 - **Abundance's item_icons_check is ported, byte-identical to the built reference.**
   `abundance/src/item_icons.grl` reads `ui/icons/index.json`, applies the UI's stem rule and reports
   every catalogue item without a picture; the catalogue (the gameplay economy, stage 6) is an input
