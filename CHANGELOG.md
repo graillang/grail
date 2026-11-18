@@ -1,5 +1,12 @@
 ## Unreleased
 
+- **The shader pipeline takes post/ and sky/.** 34 more entries are built with the engine's pinned
+  DXC (post 9, sky 25; 2.6 MB of SPIR-V), so the pin now holds 21 structs, including the sky's
+  `SkyPush` with its `uint res[12]` slot array. `vendor-shaders.mjs` now skips an entry whose include
+  closure reaches the engine's CMake-mirrored trees and records it in `upstream.json`, rather than
+  refusing its whole area. Today that is only `sky/rain_splash.cs` (`AbundanceTerrain/`). The layout
+  grammar gained fixed arrays with literal lengths and interpolation modifiers. The
+  `shader_inventory` probe and the suite now cover all three areas.
 - **Abundance's item_icons_check is ported, byte-identical to the built reference.**
   `abundance/src/item_icons.grl` reads `ui/icons/index.json`, applies the UI's stem rule and reports
   every catalogue item without a picture; the catalogue (the gameplay economy, stage 6) is an input
@@ -53,6 +60,16 @@
   slow-stage naming. Gated by `tests/parity/sim.cpp` compiling the engine's own Private/sim TUs
   and step_work_profile.cpp: 125 reference lines, all matched by `abundance/tests/sim_test.grl`.
 
+- **`scarab`, the headless Abundance session driver, replays a recorded 30 Hz trace in lockstep
+  with the engine's own HostCore.** `abundance/src/app_session.grl` ports the app/session seam:
+  `abe::gameplay::Session`'s boundary adapter (epoch, pending-boundary retry and refusal texts, the
+  publish gate), HostCore/Simulation's fixed-step acceptance and publication tick, and the
+  `FrameContext` stamps the engine fills from the published frame. `abundance/tests/scarab_test.grl`
+  is the program (`scarab`, `world`, `ticks [N]`, `replay [TRACE]`; no window, no device). Its
+  reference, `tests/parity/scarab.cpp`, creates a real `ab::host::HostCore` through
+  `libabundance_gameplay_core.a`, records `tests/parity/scarab_trace.bin` (48 boundaries, including
+  the stale/earlier-pending/retry refusals) and replays it; 1150 per-tick lines and digests match.
+  Saving through the checkpoint container is the next increment.
 - **Abundance's megaplants_import is ported as a plan, byte-identical to the reference's
   invocations.** `abundance/src/megaplants_import.grl` discovers the extracted variants, names the
   canopy family, picks the bark set and tile size, applies the leaf-atlas rule (with its flat-colour
