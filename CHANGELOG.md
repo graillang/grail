@@ -36,6 +36,18 @@
   producer kind byte all refused with the live state unchanged, the canonical-zero rule that
   refuses every -0.0 snapshot field and setter, and the instance-generation table the encoder
   appends once a record is replaced.
+- **The world model grows the generic component set and shares the tx vocabulary.** Components
+  are now a `ComponentSet<T>` primitive (`abundance/src/world_model.grl`): ascending keys beside
+  values, insertion in key order, duplicate keys refused, erase/index/at/value_mut — the keyed-table
+  shape `ab::tx::PagedRows` and HostCore's pawn map have, as the thing gameplay lanes instantiate
+  once per component type (the pawn is its first instance, and the 48-tick replay gate came
+  through the refactor line for line). The registry is the tx table `engine.entities`: the frame
+  now carries its table id in its bytes, and the world uses `abundance_tx`'s `world_actor` /
+  `engine_id_base` / `table_entities` instead of restating them. The replay also walks the
+  registry's lifecycle now — a duplicate spawn is refused and a remove erases the row and its
+  component, with the remaining encoding and FNV gated against the real `ab::tx::EntityRows`
+  insert/erase/encode (1 184 reference lines).
+
 - **`lib/earcut.grl`: mapbox earcut triangulation, ported from the vendored C++.** The Abundance
   water-geometry callers (`water_geometry.cpp`) triangulate their bank, island and raster-cell
   polygons with `mapbox::earcut<std::uint32_t>` rather than Clipper2's experimental triangulator, so
