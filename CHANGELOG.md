@@ -109,6 +109,20 @@
   83d90ed95e; 1548 values match exactly, including the ledger's malformed-image refusals. The
   chunked collision view (world triangles, back-face penetration, sweep/raycast narrow phase) is the
   next increment.
+- **Abundance's platform layer lands on Grail: the SDL3 window, event loop and `InputState` are
+  gated against the engine's own `engine/core/window.cpp`, compiled unmodified.** `platform_window.grl`
+  ports the window lifecycle, the event switch and the gamepad sampling line for line (key edges that
+  do not re-arm on a repeat, text accumulated to 4096 bytes, the logical-to-pixel mouse scaling, the
+  `v<0 ? v/32768 : v/32767` axis asymmetry, trigger half-travel edges, the focus walk that makes a
+  regain re-arm a held pad button, and the three quit paths with their reasons), plus
+  `input_routing.hpp`'s per-device overlay capture. `platform_sdl3.grl` binds SDL3 directly and a
+  small C shim (`tools/platform_sdl_shim.c`) carries the four things an `extern "C"` declaration
+  cannot: the `SDL_Event` union decode, the quit-signal handler, the display-mode read, and the
+  probe's synthetic event/virtual-gamepad sources; `platform_window_test.grl` is diffed byte for byte
+  against the engine's own `poll()` run on SDL's offscreen driver, under the suite's GPU lock.
+  `docs/design/abundance-platform.md` records the audio decision too: miniaudio is shimmed (the
+  engine is written against its node graph), with the engine's no-device 48 kHz capture mode as the
+  parity gate.
 - **The crafting screen's classifier is ported.** `abundance/src/crafting_menu.grl` carries
   `ui/crafting_menu.hpp/.cpp` of `cmake/tx/crafting_menu.cmake`: the ten categories and their
   display labels (Machines reads "Facilities"), every sub-type group with its display rank and
