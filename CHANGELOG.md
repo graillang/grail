@@ -1,5 +1,9 @@
 ## Unreleased
 
+- `abundance/src/sky_model.grl` derives `Clone` for its colour, phase-weight, palette and
+  render-parameter records instead of the hand-written field-wise copies, now that `@derive(Clone)`
+  copies `f32` fields correctly (main 4ca09186); `rain_streak_shutter_s` is written `1.0 / 120.0`
+  again now that module constants fold.
 - **Abundance's megaplants_import is ported as a plan, byte-identical to the reference's
   invocations.** `abundance/src/megaplants_import.grl` discovers the extracted variants, names the
   canopy family, picks the bark set and tile size, applies the leaf-atlas rule (with its flat-colour
@@ -337,8 +341,7 @@
   on Evaluate measured against the engine's own `SetActiveSeason`. The engine's process-wide
   active season is host glue, so the port takes the locked solar-year day as an explicit
   parameter (quiet NaN = no lock).
-- `math::asin` and `math::fmod` (earlier in this release) are what the sky port needed; `lib/clone.grl`'s
-  `Clone` is not used because `@derive(Clone)` loses `f32` fields (reported separately, with a repro).
+- `math::asin` and `math::fmod` (earlier in this release) are what the sky port needed.
 - Abundance port: `abundance/src/abcmesh.grl` is the `.abcmesh` character-mesh codec - the version-5
   container (render vertices with their topology split at UV seams, rigid joints, twelve influences
   per vertex with unorm16 weights, centres of rotation, rest positions, tangent rings and sparse
