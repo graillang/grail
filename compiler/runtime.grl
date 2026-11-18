@@ -5516,6 +5516,8 @@ fn rt_env_is(name: u64, value: u64) -> u64 {
 //  96 parked workers (atomic)  104 timer lock  112 timer count  120 timer capacity
 // 128 timer heap (Windows: one entry per pending sleep)  136 holder of the external slot (0 none);
 // the worker array has one block more than the worker count, the external slot's
+// 144 how many open task scopes of the external slot's holder hold it (rt_scope_take; only the
+//     holder reads or writes it)
 // 1024..1112 the task injection ring (rt_task_ring): 0 lock  8 head  16 tail  80 buffer  88 capacity
 // Worker block (raw_map, one page per worker):
 //   0 deque buffer  8 deque head (atomic)  16 deque tail (atomic)  24 deque mask
@@ -5896,6 +5898,32 @@ fn rt_deque_push(w: u64, t: u64) -> u64 {
     raw_atomic_store_release(w + 16, tail + 1);
     return 1;
 }
+// rt_deque_push for a deque only thieves drain - the external slot's, which a main thread's task
+// scope fills (rt_spawn_enqueue). 0 when the deque is full; else 1 when a worker may have to be
+// woken for this entry, 2 when the deque still held older work after the entry landed: a worker is
+// bound for that work and takes this entry after it, so no other need be woken.
+//
+// The first look at the head can be stale: a thief may take the last older entry, look once more
+// and park before this entry is published. So when that look saw work, a full barrier follows the
+// publication and the head is read again; it pairs with the barrier a parking worker puts between
+// counting itself parked and its last look (rt_worker_loop). Either that look sees this entry, or
+// this read sees the head at this entry and the push reports 1, and rt_notify sees the parked count.
+fn rt_deque_push_seen(w: u64, t: u64) -> u64 {
+    tail := raw_atomic_load(w + 16);
+    head := raw_atomic_load(w + 8);
+    if head + raw_load(w + 80) <= tail {
+        return 0;
+    }
+    raw_store(raw_load(w) + (tail & raw_load(w + 24)) * 8, t);
+    raw_atomic_store_release(w + 16, tail + 1);
+    if head < tail {
+        rt_full_fence();
+        if raw_atomic_load(w + 8) < tail {
+            return 2;
+        }
+    }
+    return 1;
+}
 fn rt_deque_pop(w: u64) -> u64 {
     mut tail = raw_atomic_load(w + 16);
     if tail == 0 {
@@ -5993,14 +6021,16 @@ fn rt_worker_random(w: u64) -> u64 {
     raw_store(w + 72, x);
     return x;
 }
+// Every block's task deque but this worker's own: the workers' and the external slot's, which
+// holds the spawns of a main thread's task scope.
 fn rt_worker_steal(w: u64) -> u64 {
-    workers := raw_load(w + 344);
-    if 1 < workers {
+    blocks := raw_load(w + 344) + 1;
+    if 1 < blocks {
         array := raw_load(w + 352);
-        start := rt_worker_random(w) % workers;
+        start := rt_worker_random(w) % blocks;
         mut i = 0;
-        while i < workers {
-            victim := (start + i) % workers;
+        while i < blocks {
+            victim := (start + i) % blocks;
             if victim != raw_load(w + 40) {
                 t := rt_deque_steal(raw_load(array + victim * 8));
                 if t != 0 {
@@ -6028,6 +6058,30 @@ fn rt_enqueue_in(s: u64, t: u64) -> u64 {
     }
     rt_notify(s);
     return 0;
+}
+// A spawn. On a thread that is not a worker and holds the external slot - a main thread's task scope
+// takes it (rt_scope_take) - the task goes onto the slot's deque: its owner pushes, every worker
+// steals (rt_worker_steal), and no lock is taken. The push notifies only when the deque was empty
+// (rt_deque_push_seen): one into a deque that held work wakes nobody, because a worker is already
+// bound for that work - none parks while its last look still sees it (rt_worker_loop), and one that
+// takes an entry comes back for the next. Through the injection ring every spawn of a burst took
+// the ring's lock against the polling workers and notified, reading the parked and searching counts
+// that two dozen idle workers keep writing: about 500 ns a spawn on 24 workers.
+fn rt_spawn_enqueue(s: u64, t: u64) -> u64 {
+    if rt_worker_self() == 0 {
+        x := rt_job_block();
+        if x != 0 {
+            placed := rt_deque_push_seen(x, t);
+            if placed == 0 {
+                rt_inject_push(s, t);
+            }
+            if placed != 2 {
+                rt_notify(s);
+            }
+            return 0;
+        }
+    }
+    return rt_enqueue_in(s, t);
 }
 // Task words: 0 saved sp (Windows: the fiber handle), 8 stack base, 16 stack size,
 // 24 park state (0 running, 1 parking,
@@ -6420,8 +6474,55 @@ fn rt_external_give(tp: u64) -> u64 {
     if raw_load(tp + 104) == 0 {
         return 0;
     }
+    s := raw_atomic_load(raw_state() + 72);
+    if raw_load(s + 144) != 0 {
+        // A task scope of this thread still holds the slot; the last to close gives it back.
+        return 0;
+    }
     raw_store(tp + 104, 0);
-    raw_atomic_store_release(raw_atomic_load(raw_state() + 72) + 136, 0);
+    raw_atomic_store_release(s + 136, 0);
+    return 0;
+}
+// A spawn from a thread that is neither a worker nor a task - the main thread's task scope - takes
+// the external slot for its scope when the slot is free, so the scope's spawns go onto the slot's
+// task deque (rt_spawn_enqueue) instead of the locked injection ring that every idle worker polls.
+// Scope word 32 says this scope holds it, scheduler word 144 counts the scopes that do, and
+// rt_scope_end gives it back with the last of them unless a parallel region still holds it.
+fn rt_scope_take(sc: u64) -> u64 {
+    if raw_load(sc + 32) != 0 {
+        return 0;
+    }
+    if rt_current() != 0 {
+        return 0;
+    }
+    tp := raw_tp_get();
+    if (tp == 0) || (raw_load(tp + 24) == 2) {
+        return 0;
+    }
+    s := raw_atomic_load(raw_state() + 72);
+    if s == 0 {
+        return 0;
+    }
+    if raw_load(tp + 104) == 0 {
+        rt_external_take(tp);
+        if raw_load(tp + 104) == 0 {
+            return 0;
+        }
+    }
+    raw_store(sc + 32, 1);
+    raw_store(s + 144, raw_load(s + 144) + 1);
+    return 0;
+}
+fn rt_scope_give(sc: u64) -> u64 {
+    if raw_load(sc + 32) == 0 {
+        return 0;
+    }
+    s := raw_atomic_load(raw_state() + 72);
+    tp := raw_tp_get();
+    raw_store(s + 144, raw_load(s + 144) - 1);
+    if raw_load(tp + 24) == 0 {
+        rt_external_give(tp);
+    }
     return 0;
 }
 fn rt_job_new() -> u64 {
@@ -7643,9 +7744,10 @@ fn rt_yield() -> u64 {
     return 0;
 }
 // ---- structured task scopes ----
-// Scope words: 0 self (a scope reference points here), 8 cancel flag, 16 context, 24 tasks.
+// Scope words: 0 self (a scope reference points here), 8 cancel flag, 16 context, 24 tasks,
+// 32 1 while the scope holds the external slot (rt_scope_take).
 fn rt_scope_begin(context: u64) -> u64 {
-    s := rt_alloc(32);
+    s := rt_alloc(40);
     raw_store(s, s);
     raw_store(s + 16, context);
     return s;
@@ -7704,7 +7806,9 @@ fn rt_task_spawn(s: u64, f: u64, item: u64, arity: u64, dropper: u64) -> u64 {
     // and macOS, a fiber started in rt_win_fiber_start on Windows) is built the first time a worker
     // runs it (rt_worker_run), not here. A burst of 100k spawns therefore costs records and queue
     // slots, not 100k stack mappings, and only the tasks that actually run hold a stack.
-    rt_enqueue(t);
+    sched := rt_sched();
+    rt_scope_take(s);
+    rt_spawn_enqueue(sched, t);
     return t;
 }
 // A finished task's joiner (word 88): 0 nobody yet, a task record when a task joins it (rt_wake),
@@ -7939,6 +8043,7 @@ fn rt_scope_end(s: u64) -> u64 {
         rt_free(t);
         t = next;
     }
+    rt_scope_give(s);
     rt_free(s);
     return 0;
 }

@@ -1,5 +1,14 @@
 ## Unreleased
 
+- **A task scope on the main thread spawns onto a deque of its own.** Its spawns went through the
+  shared injection ring - a lock the idle workers poll - and every one notified, reading the parked
+  and searching counts those workers keep writing. The scope now takes the external slot (the
+  worker-shaped block the main thread's parallel calls already use) and pushes onto its task deque,
+  which every worker's steal scan visits; a push notifies only when the deque was empty, with a
+  barrier and a second look at the head so that a thief that emptied it and parked meanwhile is
+  still woken. Job forks and wakes are unchanged. bench/sched.grl on 24 workers (release): a burst
+  of 100k spawns 500 to 225 ns a spawn; the other rows and the frame loop within noise (20
+  interleaved rounds, and 60 timed `fib(32)` joins from main against the committed runtime).
 - **Performance charts re-measured on 4ab4767a**, machine idle: run time, engine, parallel ECS and
   the scheduler (the compile and Abundance charts are unchanged). Parallel ECS in development builds
   is 1.3x to 1.6x Go (it was 2.6x to 6.4x); in release it is level with C's OpenMP on four workers
