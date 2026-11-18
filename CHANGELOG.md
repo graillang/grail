@@ -129,6 +129,19 @@
   `libabundance_gameplay_core.a`, records `tests/parity/scarab_trace.bin` (48 boundaries, including
   the stale/earlier-pending/retry refusals) and replays it; 1150 per-tick lines and digests match.
   Saving through the checkpoint container is the next increment.
+- **Abundance localisation's pure surface is ported, byte for byte against the engine.**
+  `abundance/src/localization.grl` carries `ab::loc` of `cmake/tx/localization.cmake`: language info,
+  `parse_language` (case, `_`, `.charset`, region and the zh fallback), `next_language`, the CLDR
+  cardinal plural rules for all six languages, `plural_categories`, named-placeholder `format` with
+  `{{`/`}}` escapes and visible unknown placeholders, `placeholders`, `format_number` with each
+  language's decimal separator, `Message::select`'s fallbacks, UTF-8 decode/encode with the
+  engine's U+FFFD rules, Latin/Greek/Cyrillic upper-casing, the CJK/RTL script tests, RTL
+  alignment, and `elide`/`wrap_lines` (CJK breaking, kinsoku punctuation, hard splits, line caps
+  with the ellipsis). `abundance/src/fixed_decimal.grl` is glibc's `printf("%.Nf")` exactly: the
+  double's exact decimal expansion (m*2^e or m*5^-e/10^-e) rounded half-to-even, with `-0`, `nan`
+  and `inf` as glibc prints them. `abundance/tests/parity/localization.cpp` compiles the engine's
+  localization.cpp and prints 1776 lines; `localization_test.grl` reproduces them byte for byte.
+  The JSON Catalog and draw-time `translate()` are the next increment.
 - `abundance/src/sky_model.grl` derives `Clone` for its colour, phase-weight, palette and
   render-parameter records instead of the hand-written field-wise copies, now that `@derive(Clone)`
   copies `f32` fields correctly (main 4ca09186); `rain_streak_shutter_s` is written `1.0 / 120.0`
