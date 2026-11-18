@@ -5527,7 +5527,6 @@ fn rt_env_is(name: u64, value: u64) -> u64 {
 }
 
 // Scheduler block (raw_state()+72, raw_map: infrastructure, not counted as user allocation):
-//  24 park/wake sequence (futex word)
 //  32 worker count  40 reactor handle  48 fence descriptor  56 reactor batch epoch
 //  64 blocking-call warning flag  72 worker array
 // 104 timer lock  112 timer count  120 timer capacity
@@ -5535,7 +5534,8 @@ fn rt_env_is(name: u64, value: u64) -> u64 {
 // the worker array has one block more than the worker count, the external slot's
 // 144 how many open task scopes of the external slot's holder hold it (rt_scope_take; only the
 //     holder reads or writes it)
-// 256 the idle word (rt_idle_word), on a line of its own
+// 256 the idle word (rt_idle_word), 264 the idle lock, 272 the parked workers' bit mask, on a line of
+//     their own
 // 1024..1112 the task injection ring (rt_task_ring): 0 lock  8 head  16 tail  80 buffer  88 capacity
 // Worker block (raw_map, one page per worker):
 //   0 deque buffer  16 deque tail (atomic)  24 deque mask (word 8 is unused: the head is at 1024)
@@ -5546,11 +5546,14 @@ fn rt_env_is(name: u64, value: u64) -> u64 {
 //     capacity at +80, the head at +1024), so the same three deque functions serve both
 // 224 this worker's runner (0 none)  232 the job handed to the runner  240 free job records
 // 248 their count  264 help-depth high-water mark
-// 280 1 while this worker is counted as searching (rt_worker_loop, rt_worker_run)
+// 280 1 while this worker is counted as searching, 2 while it is on the idle list for its last look
+//     (rt_worker_loop, rt_worker_run)
 // 296 link in the jobs block's list of blocks waiting for a thread (rt_block_give)
 // 304..312 the first foreign-call pair {seq, retaken}, 320 the pair the owner uses now (`seq` odd:
 // inside a foreign call; rt_sysmon), 328 the `seq` the monitor saw last, 336 how many ticks it stayed
 // 344 the worker count and 352 the block array, copied from the scheduler block for the steal scans
+// 384 the wake word a parked worker sleeps on (0 not parked, 1 on the idle list, 2 taken by a waker;
+//     rt_idle_wake), on a line of its own
 // 512..592 the Frame job deque, 640..720 the Background job deque (the Normal one is at 128)
 // 896..1024 the CPU mask a pinned worker hands the kernel
 // 1024, 1152, 1536, 1664 the four deques' heads (rt_deque_head: deque + 1024), each on a line of its
@@ -5881,16 +5884,18 @@ fn rt_worker_self() -> u64 {
     }
     return raw_load(tp + 32);
 }
-// The workers parked (high half, rt_worker_loop) and searching (low half): one word, which every
-// push reads (rt_notify). As two words on two lines - the parked count here, the searching count in
-// the jobs block - a burst's pusher missed on both, since the searching count changes each time a
-// worker starts or stops looking and workers park and wake throughout a burst.
+// The idle word: the workers parked (high half) and searching (low half), on a line of its own that
+// every push reads (rt_notify). The parked workers themselves are a bit mask beside it (word 272,
+// bit i for worker i: at most 64 workers), and the parked half always equals the number of bits set:
+// both change only under the idle lock (word 264), and only on real transitions - a worker parking
+// (rt_idle_park) or leaving the list after its last look found work (rt_idle_leave), and a waker
+// taking one (rt_idle_wake). The searching half changes without the lock.
 fn rt_idle_word(s: u64) -> u64 {
     return s + 256;
 }
 // New work is queued. Wake a parked worker only when there is one and no worker is searching: a
 // searching worker will find the work, and in a join the forker usually takes its own fork back
-// before anyone could. The fence orders the push before the reads, as the parking worker orders its
+// before anyone could. The fence orders the push before the read, as a parking worker orders its
 // count before its last look (rt_worker_loop), so one of the two always sees the other.
 fn rt_notify(s: u64) -> u64 {
     rt_full_fence();
@@ -5901,10 +5906,61 @@ fn rt_notify(s: u64) -> u64 {
     if (idle & 4294967295) != 0 {
         return 0;
     }
-    raw_atomic_fetch_add(s + 24, 1);
+    return rt_idle_wake(s);
+}
+// A precise wake: take one specific parked worker off the list and count it as searching in the
+// same step, then wake it. Until the woken thread runs - a futex wake takes microseconds to land -
+// every later push sees a searcher on its way and wakes nobody; counting it only once it ran let
+// each fork of a join wake another worker meanwhile (6,000 wakes per fib(32), rt_notify a quarter
+// of all parallel CPU). The worker's wake word goes to 2 under the lock, so the worker - which
+// re-reads it under the same lock if its last look found work (rt_idle_leave) - knows it was taken.
+fn rt_idle_wake(s: u64) -> u64 {
+    rt_spin_lock(s + 264);
+    idle := raw_atomic_load(rt_idle_word(s));
+    if ((idle >> 32) == 0) | ((idle & 4294967295) != 0) {
+        rt_spin_unlock(s + 264);
+        return 0;
+    }
+    m := raw_load(s + 272);
+    mut i = 0;
+    while ((m >> i) & 1) == 0 {
+        i += 1;
+    }
+    raw_store(s + 272, m ^ (1 << i));
+    // parked - 1, searching + 1
+    raw_atomic_fetch_sub(rt_idle_word(s), 4294967295);
+    w := raw_load(raw_load(s + 72) + i * 8);
+    raw_atomic_store(w + 384, 2);
+    rt_spin_unlock(s + 264);
     raw_atomic_fetch_add(raw_load(rt_state_jobs()) + 424, 1);
-    rt_syscall_low(202, s + 24, 129, 1);
+    rt_syscall_low(202, w + 384, 129, 1);
     return 0;
+}
+// A searching worker that found nothing goes on the list: its bit, its wake word at 1, and
+// searching - 1, parked + 1 in one atomic step, which is the full barrier before its last look.
+fn rt_idle_park(s: u64, w: u64) -> u64 {
+    rt_spin_lock(s + 264);
+    raw_store(s + 272, raw_load(s + 272) | (1 << raw_load(w + 40)));
+    raw_atomic_store(w + 384, 1);
+    raw_atomic_fetch_add(rt_idle_word(s), 4294967295);
+    rt_spin_unlock(s + 264);
+    return 0;
+}
+// The last look found work: off the list. 0 when the worker was still on it (now neither parked nor
+// searching), 1 when a waker had taken it meanwhile and counted it as searching.
+fn rt_idle_leave(s: u64, w: u64) -> u64 {
+    rt_spin_lock(s + 264);
+    m := raw_load(s + 272);
+    bit := 1 << raw_load(w + 40);
+    mut taken = 1;
+    if (m & bit) != 0 {
+        raw_store(s + 272, m ^ bit);
+        raw_atomic_fetch_sub(rt_idle_word(s), 4294967296);
+        taken = 0;
+    }
+    raw_atomic_store(w + 384, 0);
+    rt_spin_unlock(s + 264);
+    return taken;
 }
 // ---- Chase-Lev deques ---------------------------------------------------------------------
 // Owner push and pop at the bottom (the tail), thieves steal at the top (the head) with a CAS. The
@@ -6003,7 +6059,7 @@ fn rt_inject_push(s: u64, t: u64) -> u64 {
 }
 fn rt_inject_pop(s: u64) -> u64 {
     // An unlocked look first: idle and helping workers ask often and the ring is usually empty. A
-    // push that this look misses bumps the park sequence afterwards, so no worker sleeps on it.
+    // push that this look misses notifies afterwards (rt_notify), so no worker sleeps on it.
     if raw_atomic_load(s + 8) == raw_atomic_load(s + 16) {
         return 0;
     }
@@ -6116,21 +6172,27 @@ fn rt_worker_loop(worker: u64) -> u64 {
     rt_os_stack_warm(rt_sched_setting(32));
     spin := rt_sched_setting(48);
     searching := rt_idle_word(s);
+    // 1 after a wake: the waker already counted this worker as searching (rt_idle_wake).
+    mut woken = 0;
     while true {
         if raw_load(tp + 32) != worker {
             // The block went to a spare while this thread was in a blocking foreign call.
             return 0;
         }
-        if rt_worker_step(s, worker) != 0 {
-            continue;
+        if woken == 0 {
+            if rt_worker_step(s, worker) != 0 {
+                continue;
+            }
+            // Out of work. SEARCH before sleeping: a worker that is still looking is one a fork
+            // does not have to wake (rt_notify), which is what spares a join its system calls - in
+            // a join the forker nearly always takes its own fork back, and a woken worker would
+            // find nothing. Counted as searching until it runs something (rt_worker_run clears it,
+            // before the work runs: work that forks must not see its own worker as the one that
+            // will find the fork).
+            raw_store(worker + 280, 1);
+            raw_atomic_fetch_add(searching, 1);
         }
-        // Out of work. SEARCH before sleeping: a worker that is still looking is one a fork does
-        // not have to wake (rt_notify), which is what spares a join its system calls - in a join
-        // the forker nearly always takes its own fork back, and a woken worker would find nothing.
-        // Counted as searching until it runs something (rt_worker_run clears it, before the work
-        // runs: work that forks must not see its own worker as the one that will find the fork).
-        raw_store(worker + 280, 1);
-        raw_atomic_fetch_add(searching, 1);
+        woken = 0;
         mut found = 0;
         mut round = 0;
         while (found == 0) & (round < rt_worker_search_rounds()) {
@@ -6159,27 +6221,31 @@ fn rt_worker_loop(worker: u64) -> u64 {
                 return 0;
             }
         }
-        if raw_load(worker + 280) != 0 {
-            raw_store(worker + 280, 0);
-            raw_atomic_fetch_sub(searching, 1);
-        }
         if found != 0 {
             continue;
         }
-        // PARK, without losing a wake: count this worker parked BEFORE the last look (a pusher
-        // reads the count after its push, both with full barriers - rt_notify), and read the
-        // sequence before it, so a wake that lands between the look and the wait changes the word
-        // the wait compares.
-        seq := raw_atomic_load(s + 24);
-        raw_atomic_fetch_add(rt_idle_word(s), 4294967296);
+        // PARK, without losing a wake. Nothing ran, so this worker is still counted as searching:
+        // it goes on the idle list, uncounted as searching and counted as parked in one atomic
+        // step, BEFORE its last look (a pusher reads the idle word after its push, both with full
+        // barriers - rt_notify). The last look runs what it finds, and rt_worker_run takes the
+        // worker off the list first (word 280 = 2 says it is on it). Otherwise it sleeps on its own
+        // wake word until a waker takes it (word 384: 1 parked, 2 taken); a wake that lands
+        // between the look and the wait changed the word the wait compares.
+        rt_idle_park(s, worker);
+        raw_store(worker + 280, 2);
         // A full barrier between the count and the last look: a sequentially consistent RMW is not
         // one on AArch64 or RV64 (LL/SC with acquire/release lets a later plain load pass the store),
         // and on those targets the Dekker pair needs it on both sides (rt_notify has the other).
         rt_full_fence();
-        if rt_worker_step(s, worker) == 0 {
-            rt_syscall_low(202, s + 24, 128, seq);
+        if rt_worker_step(s, worker) != 0 {
+            continue;
         }
-        raw_atomic_fetch_sub(rt_idle_word(s), 4294967296);
+        while raw_atomic_load(worker + 384) == 1 {
+            rt_syscall_low(202, worker + 384, 128, 1);
+        }
+        // Taken by a waker, which counted this worker as searching.
+        raw_store(worker + 280, 1);
+        woken = 1;
     }
     return 0;
 }
@@ -6238,14 +6304,21 @@ fn rt_worker_step(s: u64, w: u64) -> u64 {
     return 1;
 }
 fn rt_worker_run(s: u64, w: u64, t: u64) -> u64 {
-    if raw_load(w + 280) != 0 {
+    flag := raw_load(w + 280);
+    if flag != 0 {
         raw_store(w + 280, 0);
+        // A last look before parking found this (rt_worker_loop): off the idle list first. If a
+        // waker took the worker meanwhile it counted it as searching, and that count ends here.
+        mut counted = 1;
+        if flag == 2 {
+            counted = rt_idle_leave(s, w);
+        }
         // The last searcher found work: wake another to look for what may be queued behind it.
         // A push wakes nobody while someone searches (rt_notify), on the understanding that the
         // searcher finds the work; but it finds one entry, and that entry may spin until the
         // next one runs (two tasks that meet). Without this the next one waited, every other
         // worker parked, for ever (task-scopes-join-cancel-abandon, about once in 60 runs).
-        if (raw_atomic_fetch_sub(rt_idle_word(s), 1) & 4294967295) == 1 {
+        if (counted != 0) && ((raw_atomic_fetch_sub(rt_idle_word(s), 1) & 4294967295) == 1) {
             rt_notify(s);
         }
     }
