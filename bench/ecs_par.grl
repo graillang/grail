@@ -3,6 +3,7 @@
 // (docs/design/simd-layout-parallel-loops.md 4.2). Every axis is one zip of its velocity and
 // position columns, cut into pieces of GRAIN entities - the same pieces on any number of workers,
 // and each entity is updated by exactly the arithmetic of ecs.grl, so the sum is the same bits.
+// The columns are made at their full length and filled by index, as in ecs.grl and every twin.
 // GRAIL_WORKERS sets the worker count.
 const GRAIN: u64 = 16384;
 const DT: f32 = 0.016;
@@ -10,23 +11,23 @@ const DAMPING: f32 = 0.999;
 const GRAVITY: f32 = 0.0981;
 fn main() {
     n: u64 := 1000000;
-    mut px = f32[];
-    mut py = f32[];
-    mut pz = f32[];
-    mut vx = f32[];
-    mut vy = f32[];
-    mut vz = f32[];
+    mut px = f32[0.0; n];
+    mut py = f32[0.0; n];
+    mut pz = f32[0.0; n];
+    mut vx = f32[0.0; n];
+    mut vy = f32[0.0; n];
+    mut vz = f32[0.0; n];
     mut x: u64 = 88172645463325252;
     for i in n {
         x = x ^ (x << 13);
         x = x ^ (x >> 7);
         x = x ^ (x << 17);
-        px.push(f32(i64(x % 1000)) * 0.5);
-        py.push(f32(i64((x >> 10) % 1000)) * 0.5);
-        pz.push(f32(i64((x >> 20) % 1000)) * 0.5);
-        vx.push(f32(i64((x >> 30) % 100)) * 0.01);
-        vy.push(f32(i64((x >> 40) % 100)) * 0.01);
-        vz.push(f32(i64((x >> 50) % 100)) * 0.01);
+        px[i] = f32(i64(x % 1000)) * 0.5;
+        py[i] = f32(i64((x >> 10) % 1000)) * 0.5;
+        pz[i] = f32(i64((x >> 20) % 1000)) * 0.5;
+        vx[i] = f32(i64((x >> 30) % 100)) * 0.01;
+        vy[i] = f32(i64((x >> 40) % 100)) * 0.01;
+        vz[i] = f32(i64((x >> 50) % 100)) * 0.01;
     }
     for frame in 100 {
         // Each callback is a literal at the call, so its body knows `p.len == v.len` and indexes

@@ -1,5 +1,28 @@
 ## Unreleased
 
+- **Development builds convert a 64-bit integer to `f32` in one instruction.** `f32(x)` of an `i64`
+  (or a `u64`, or any integer wider than 32 bits) called the runtime, which converted in software and
+  then rounded bit by bit; on x86-64 it is now `cvtsi2ssq`, one rounding as the language requires,
+  and a `u64` from 2^63 up is halved with a sticky bit and doubled again, the sequence C compilers
+  use, without a branch. The runtime's own rounding (the other targets) finds the top bit with one
+  conversion instead of a loop. bench/ecs_par (native): 0.47 to 0.23 s on one worker and 0.35 to
+  0.13 s on four - the set-up loop's six million conversions were a serial third of the run;
+  bench/ecs (native) 0.73 to 0.49 s. Results agree bit for bit with the old code and the LLVM build
+  over 8 million random signed and unsigned values.
+- **A burst of spawns from the main thread costs half as much with every worker started.** An idle
+  worker reserved a Background slot on every empty look before looking for Background work, then
+  gave it back and notified - which, on its last look before parking, woke another parked worker to
+  do the same. It now reserves only when Background work is queued. Steal scans read the worker
+  count and the block array from the worker's own block, and the task injection ring has cache lines
+  of its own: all three shared lines with what every spawn from a thread that is not a worker
+  writes or reads. bench/sched.grl on 24 workers (release): a burst of 100k spawns 850 to 490 ns a
+  spawn.
+- **`T[0; n]` into a new vector writes nothing.** An allocation comes back cleared, so copies of a
+  zero word are already there and the pages of a large buffer are first touched by the program's own
+  writes. bench/ecs and bench/ecs_par now make their columns at full length (`f32[0.0; n]`) and fill
+  them by index, as every twin sizes its columns once (malloc, `Vec::with_capacity`, `make`,
+  `alloc`); their set-up loop is level with C's (7.2 ms against 7.2 in ecs_par).
+
 - **Every performance chart is re-measured with the machine idle** (load average under 3; release
   compiler with PGO on main bcf78e5a). Every compile row now beats the fastest rival: the cold
   check of the 104,000-line program is 0.93x Zig's instructions (3.05 against 3.28 billion). Channels

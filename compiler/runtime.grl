@@ -1961,16 +1961,24 @@ fn rt_push_slow(s: u64, v: u64) -> u64 {
 }
 // Byte sequences (bytes, string, views) store one byte per element; vectors store words.
 // `T[v; n]`: n copies of a plain word value, reserved once.
+// `T[v; n]` for a word-sized T. An allocation comes back cleared (rt_alloc_take: a reused block is
+// cleared for the request, a fresh one is a zeroed mapping), so copies of zero into a new buffer are
+// there already: the loop is skipped, and the pages of a large buffer are first touched by the
+// program's own writes, as C's calloc leaves them.
 fn rt_fill(s: u64, v: u64, n: u64) -> u64 {
     if 144115188075855872 < n {
         rt_abort();
     }
+    fresh := raw_load(s) == 0;
     if n != 0 {
         ptr := rt_grow(raw_load(s), 0, n * 8);
         raw_store(s, ptr);
         raw_store(wrapping_add(s, 16), n);
     }
     mut i: u64 = 0;
+    if fresh & (v == 0) {
+        i = n;
+    }
     while i < n {
         raw_store(wrapping_add(raw_load(s), wrapping_mul(i, 8)), v);
         i = i + 1;
@@ -5502,12 +5510,13 @@ fn rt_env_is(name: u64, value: u64) -> u64 {
 }
 
 // Scheduler block (raw_state()+72, raw_map: infrastructure, not counted as user allocation):
-//   0 injection lock  8 injection head  16 injection tail  24 park/wake sequence (futex word)
+//  24 park/wake sequence (futex word)
 //  32 worker count  40 reactor handle  48 fence descriptor  56 reactor batch epoch
-//  64 blocking-call warning flag  72 worker array  80 injection ring  88 injection capacity
+//  64 blocking-call warning flag  72 worker array
 //  96 parked workers (atomic)  104 timer lock  112 timer count  120 timer capacity
 // 128 timer heap (Windows: one entry per pending sleep)  136 holder of the external slot (0 none);
 // the worker array has one block more than the worker count, the external slot's
+// 1024..1112 the task injection ring (rt_task_ring): 0 lock  8 head  16 tail  80 buffer  88 capacity
 // Worker block (raw_map, one page per worker):
 //   0 deque buffer  8 deque head (atomic)  16 deque tail (atomic)  24 deque mask
 //  32 scheduler  40 index  48 thread record  56 free-stack list head  64 free-stack count
@@ -5521,6 +5530,7 @@ fn rt_env_is(name: u64, value: u64) -> u64 {
 // 296 link in the jobs block's list of blocks waiting for a thread (rt_block_give)
 // 304..312 the first foreign-call pair {seq, retaken}, 320 the pair the owner uses now (`seq` odd:
 // inside a foreign call; rt_sysmon), 328 the `seq` the monitor saw last, 336 how many ticks it stayed
+// 344 the worker count and 352 the block array, copied from the scheduler block for the steal scans
 // 512..592 the Frame job deque, 640..720 the Background job deque (the Normal one is at 128)
 // 896..1024 the CPU mask a pinned worker hands the kernel
 //
@@ -5564,8 +5574,9 @@ fn rt_sched() -> u64 {
             workers = 64;
         }
         raw_store(made + 32, workers);
-        raw_store(made + 80, raw_map(65536));
-        raw_store(made + 88, 8192);
+        ring := rt_task_ring(made);
+        raw_store(ring + 80, raw_map(65536));
+        raw_store(ring + 88, 8192);
         // One block more than there are workers: the external slot (rt_external_take), which a
         // thread that is not a worker - main, a render thread - holds while it is inside a
         // parallel call, so its forks go on a deque of their own instead of the locked ring.
@@ -5704,7 +5715,8 @@ fn rt_work_queued(s: u64) -> u64 {
         }
         i += 1;
     }
-    if raw_atomic_load(s + 8) != raw_atomic_load(s + 16) {
+    ring := rt_task_ring(s);
+    if raw_atomic_load(ring + 8) != raw_atomic_load(ring + 16) {
         return 1;
     }
     jb := raw_load(rt_state_jobs());
@@ -5793,6 +5805,11 @@ fn rt_sched_worker_new(s: u64, index: u64) -> u64 {
     raw_store(w, buf);
     raw_store(w + 24, cap - 1);
     raw_store(w + 32, s);
+    // The worker count and the block array, which every steal scan reads, copied onto a line of
+    // this block's: read from the scheduler block, they shared a line with what every spawn from a
+    // thread that is not a worker writes.
+    raw_store(w + 344, raw_load(s + 32));
+    raw_store(w + 352, raw_load(s + 72));
     raw_store(w + 40, index);
     raw_store(w + 80, cap);
     seed := rt_sched_setting(40);
@@ -5916,20 +5933,29 @@ fn rt_deque_steal(v: u64) -> u64 {
     }
     return 0;
 }
+// The task ring's words, at 1024 in the scheduler block: the lock, head and tail on a line of their
+// own and the buffer and capacity (+80, +88) on the next, which nothing writes after the start. At
+// words 0..16 the ring shared its line with the park sequence and the worker count, and its buffer
+// word with the parked count every park writes, so a spawn from a thread that is not a worker paid
+// misses that grew with the number of workers.
+fn rt_task_ring(s: u64) -> u64 {
+    return s + 1024;
+}
 // A ring for every push that is not the owner's: spawns and wakeups from a thread without a deque,
 // and a deque that is full. The lock is the only shared state, and it is held for one slot.
 fn rt_inject_push(s: u64, t: u64) -> u64 {
+    ring := rt_task_ring(s);
     while true {
-        rt_spin_lock(s);
-        head := raw_load(s + 8);
-        tail := raw_load(s + 16);
-        if tail - head < raw_load(s + 88) {
-            raw_store(raw_load(s + 80) + (tail % raw_load(s + 88)) * 8, t);
-            raw_atomic_store_release(s + 16, tail + 1);
-            rt_spin_unlock(s);
+        rt_spin_lock(ring);
+        head := raw_load(ring + 8);
+        tail := raw_load(ring + 16);
+        if tail - head < raw_load(ring + 88) {
+            raw_store(raw_load(ring + 80) + (tail % raw_load(ring + 88)) * 8, t);
+            raw_atomic_store_release(ring + 16, tail + 1);
+            rt_spin_unlock(ring);
             return 0;
         }
-        rt_spin_unlock(s);
+        rt_spin_unlock(ring);
         // Full: the other workers are draining it, so let them run and try again.
         rt_notify(s);
         rt_syscall_low(24, 0, 0, 0);
@@ -5967,10 +5993,10 @@ fn rt_worker_random(w: u64) -> u64 {
     raw_store(w + 72, x);
     return x;
 }
-fn rt_worker_steal(s: u64, w: u64) -> u64 {
-    workers := raw_load(s + 32);
+fn rt_worker_steal(w: u64) -> u64 {
+    workers := raw_load(w + 344);
     if 1 < workers {
-        array := raw_load(s + 72);
+        array := raw_load(w + 352);
         start := rt_worker_random(w) % workers;
         mut i = 0;
         while i < workers {
@@ -6117,7 +6143,7 @@ fn rt_worker_step(s: u64, w: u64) -> u64 {
     tick := raw_load(w + 272) + 1;
     raw_store(w + 272, tick);
     if tick % 61 == 0 {
-        t := rt_inject_pop(s);
+        t := rt_inject_pop(rt_task_ring(s));
         if t != 0 {
             rt_worker_run(s, w, t);
             return 1;
@@ -6130,10 +6156,10 @@ fn rt_worker_step(s: u64, w: u64) -> u64 {
     if j == 0 {
         mut t = rt_deque_pop(w);
         if t == 0 {
-            t = rt_inject_pop(s);
+            t = rt_inject_pop(rt_task_ring(s));
         }
         if t == 0 {
-            t = rt_worker_steal(s, w);
+            t = rt_worker_steal(w);
         }
         if t != 0 {
             rt_worker_run(s, w, t);
@@ -6590,19 +6616,51 @@ fn rt_job_take(s: u64, w: u64, class: u64) -> u64 {
             return r;
         }
     }
-    return rt_job_steal(s, w, class);
+    return rt_job_steal(w, class);
 }
 // Background work, if fewer than the cap are running.
 // A worker reserves one of the cap's slots before it takes a Background job (a CAS, so two workers
 // cannot both take the last one) and the job gives the slot back when it finishes: record word 88
 // says it holds one. Work a Background job's own stack runs while it waits - its forks, run inline
 // or helped - is not counted again: the stack already holds the slot.
+//
+// A worker that is out of work asks on every look, so it reserves only once it has seen Background
+// work queued (rt_job_background_queued). Reserving first made every idle look a compare-and-swap
+// and a decrement of word 400 - the line rt_notify reads on every spawn - and, with nothing taken,
+// a notify that woke a parked worker, which did the same on its own last look before parking.
 fn rt_job_take_background(s: u64, w: u64) -> u64 {
+    if rt_job_background_queued(w) == 0 {
+        return 0;
+    }
     if rt_job_reserve_background() == 0 {
         return 0;
     }
     r := rt_job_take(s, w, 2);
     return rt_job_hold_background(r);
+}
+// Whether a Background job may be queued where rt_job_take looks for one: this worker's deque, the
+// ring, or another block's deque. Plain loads: a hint, like every queue entry, so a job pushed just
+// after the look is found by the next one, and its push notifies (rt_notify) as any push does.
+fn rt_job_background_queued(w: u64) -> u64 {
+    mine := rt_job_deque(w, 2);
+    if raw_atomic_load(mine + 8) < raw_atomic_load(mine + 16) {
+        return 1;
+    }
+    ring := rt_job_ring_at(raw_load(rt_state_jobs()), 2);
+    if raw_atomic_load(ring + 8) != raw_atomic_load(ring + 16) {
+        return 1;
+    }
+    blocks := raw_load(w + 344) + 1;
+    array := raw_load(w + 352);
+    mut i = 0;
+    while i < blocks {
+        v := rt_job_deque(raw_load(array + i * 8), 2);
+        if raw_atomic_load(v + 8) < raw_atomic_load(v + 16) {
+            return 1;
+        }
+        i += 1;
+    }
+    return 0;
 }
 // The slot reserved for a Background job goes with the job only once the job is this worker's: it
 // is claimed here, at once. An entry is a hint, so its job may already be another stack's - claimed
@@ -6637,9 +6695,9 @@ fn rt_now_us() -> u64 {
 }
 // The victims are every worker and the external slot. An empty deque is passed over with two
 // loads and no call (an idle worker asks often, and most deques are empty).
-fn rt_job_steal(s: u64, w: u64, class: u64) -> u64 {
-    blocks := raw_load(s + 32) + 1;
-    array := raw_load(s + 72);
+fn rt_job_steal(w: u64, class: u64) -> u64 {
+    blocks := raw_load(w + 344) + 1;
+    array := raw_load(w + 352);
     mut off = 128;
     if class == 0 {
         off = 512;
@@ -9576,10 +9634,8 @@ fn rt_f32_round(v: u64) -> u64 {
     if q == 0 {
         return sign;
     }
-    mut top = 0;
-    while (1 << (top + 1)) < q + 1 {
-        top += 1;
-    }
+    // q is at most 2^24, exact in binary64: its exponent is the position of its top bit.
+    top := (raw_f64_from_i64(q) >> 52) - 1023;
     biased := e - 52 + shift + top; // value = q * 2^(e-1075+shift)
     if 1150 < biased {
         return sign + 9218868437227405312;
@@ -10750,16 +10806,21 @@ fn rt_push4_slow(s: u64, v: u64) -> u64 {
     raw_store(wrapping_add(s, 8), n + 1);
     return 0;
 }
+// `T[v; n]` for a 4-byte T; zero into a new buffer is skipped as in rt_fill.
 fn rt_fill4(s: u64, v: u64, n: u64) -> u64 {
     if 288230376151711744 < n {
         rt_abort();
     }
+    fresh := raw_load(s) == 0;
     if n != 0 {
         ptr := rt_grow(raw_load(s), 0, n * 4);
         raw_store(s, ptr);
         raw_store(wrapping_add(s, 16), n);
     }
     mut i: u64 = 0;
+    if fresh & (v == 0) {
+        i = n;
+    }
     while i < n {
         raw_store32(wrapping_add(raw_load(s), wrapping_mul(i, 4)), v);
         i = i + 1;
