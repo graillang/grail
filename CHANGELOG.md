@@ -1,5 +1,12 @@
 ## Unreleased
 
+- **The shader pipeline takes `ui/`, and with it every area of the inventory.** `canvas.vs`/`canvas.ps`
+  (10.8 KB) at pin `ca1f1bc05b`: the pipeline now carries 180 entries and 10.56 MB of SPIR-V across all
+  ten areas (core, post, sky, geometry, lighting, water, materials, characters, vfx, ui), with 64 shared
+  structs pinned field by field. What remains vendorable-but-absent is only what the engine's CMake
+  mirror step reaches, each entry recorded with its blocking include in
+  `docs/design/abundance-shaders.md`.
+
 - **The shader pipeline takes `materials/`, 3 of its 9 entries.** `debug_view`, `mean_albedo` and the
   screen-tile builder: 20 KB of SPIR-V at pin `ca1f1bc05b`, the layout pin growing from 61 to 64
   structs. All six `resolve*` passes stay recorded as skipped: a material resolve shades a G-buffer and
