@@ -5,6 +5,40 @@
   every value of it carried a drop flag, a drop-helper call guarded by it, and a callee-saved register
   saved and restored to hold the flag. It now answers for the type it is bound to. bench/iterchain's
   native build: 1.92G to 1.14G instructions.
+- **The compiler checks about 5% faster: the allocator's and copy's hot paths lost their checks.**
+  `rt_alloc_unlocked` finds the class and clears the block in one compare chain (no variable shift,
+  no checked add, the two smallest classes cleared with fixed stores); `rt_free` answers a null
+  pointer before loading anything and finds the class with two constant shifts; `rt_copy_bytes` and
+  `rt_drop_seq` use wrapping arithmetic. A cold `grail check` of the 26k-line syn1000 runs 4.247 G
+  -> 4.040 G instructions (-4.9%), with identical output.
+
+- **A release build's runtime error says where it failed.** A failing check in a release (LLVM)
+  build printed its message without the ` --> file:line:col` line a development build prints, because
+  that line came from the native backend's site table. The front end now records statement positions
+  for the lifter too (`.gsite` lines), and the failure path of lifted code - only the failure path -
+  points the runtime at a record of its statement before it calls the failure entry, which the report
+  prints as the ` --> ` line. Measured: no instruction changes on bench/ecs, sort, sieve, xform_f32 or
+  nbody. Failures inside a runtime helper that is not lifted in place still report no location, and a
+  contained task failure keeps the location it had.
+- Interfaces record the source they describe by the build store's fast hash (`source-hash`) rather
+  than SHA-256 (interface format 14): digesting every source byte with SHA-256 was a twelfth of
+  checking a large module. Interfaces written by an older compiler are refused as a different format
+  and rebuilt.
+- **Fix: `dyn Iterator` works again.** `Iterator::fold` (a generic method taking `self` by value)
+  made the interface "cannot be used as dyn". As in Rust, such a method is now left out of the dyn
+  object - it is called on concrete types and through bounds - and the interface stays usable as
+  `dyn` for its other methods.
+- **A failed check inside a parallel job no longer aborts silently now and then.** The joiner that
+  re-raises a job's failure took one from the contained-failure count with a checked subtraction,
+  which trapped - inside the failure path, so without a report - when it ran before the failing stack
+  had counted the failure (exit 134 about 1 run in 10 under aarch64/riscv64 emulation). The counts
+  are atomic and wrapping now. The failure-site walk also stops where the frame chain stops being one
+  (a task stack's bottom on AArch64/RV64 left garbage there: SIGSEGV in `rt_site_above`).
+
+- The foreign-call marker reaches its worker's counter in one load (x86-64 Linux): thread-record
+  word 48 caches the running block's pair, set wherever a thread gains or loses a block. One to two
+  instructions less per default `extern "C"` call (LLVM `f64` row 15 -> 13).
+
 - **Capture-free and named-function callbacks to generic functions cost no allocation, and named
   functions are accepted.** A closure given for a lent `Fn(..)` parameter of a generic function was
   boxed whenever the call's type arguments were not all fixed yet - `Condition::wait_with`'s two
