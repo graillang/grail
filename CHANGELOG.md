@@ -266,6 +266,19 @@
   checkout at `83d90ed95e` (generator version 122): the world and synthetic hashes and the cache
   containers change with it, the landscape authority snapshot does not. All 13 programs and 6 probes
   still match.
+- **The Abundance gameplay kernel's engine tables and commit pipeline are ported**
+  (`abundance/src/tx_engine.grl`): the schedule table in (due, id) order, the action ledger with
+  its 4096-tick retention window and watermark fold, the EngineState codec with the engine's own
+  admitted validations, the World's engine state and savepoint, the action registry, the Tx
+  (eagerly copied engine tables, id grants, savepoints, entity/schedule primitives, the recorded
+  observed-read log answered or replayed) and the Engine pipeline - admission, apply, changeset
+  diff, central invariants, commit, verify_receipt replay and scheduled effects. Gated by
+  `tests/parity/tx_engine.cpp` driving eleven file-local actions through the engine's own Engine:
+  251 reference lines (admission refusals + detail text, commit hashes, due ordering, a refused
+  effect's removal-only commit, replay, the read-log tamper refusal, savepoint id reuse, double
+  apply, the mass invariant, liveness without a survival authority, ledger pruning and the
+  state codec), all matched by `abundance/tests/tx_engine_test.grl`.
+
 - `tools/abundance-test.mjs`: the references map had two identical `checkpoint` entries; the first
   was shadowed and dead, and is deleted. No behavior change.
 
