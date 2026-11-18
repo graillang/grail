@@ -1,5 +1,21 @@
 ## Unreleased
 
+- **The logistics stock authority is ported, with its parity reference on the engine's own code.**
+  `abundance/src/logistics_registry.grl` carries `logistics.hpp`/`logistics_catalog.hpp`/
+  `logistics_types.hpp` and the instant stock-edit half of `Private/logistics.cpp`: the resource
+  catalog (sorted, its refusals, `find`, the FNV content hash from the short world seed,
+  `extends`), the container/lot/crop-genome records with their acceptance rules (capacity and
+  handling bounds, form masks, dedicated resources, the `player_work_ids` reserved band — where
+  harvest/craft/mining outputs and the general lot band are the only admitted ids — and the
+  48-byte UTF-8 name rule), gross usage summed in the engine's canonical order (direct lots by
+  lot id, then carried containers by container id, innermost first) with its 1e-9 kg / 1e-12 m3
+  margins, and every instant edit `ab::tx` uses: add/remove container, custody, empty-container
+  dedication, parenting with its cycle walk, container policy, add/split/move lot, and mass
+  additions. Each edit runs on a candidate and commits only on success, so a refusal leaves the
+  registry byte-identical, as the engine's save/restore does. `abundance/tests/
+  logistics_registry_test.grl` prints 123 lines that match a reference compiling the engine's
+  own `logistics.cpp` from source. Handling-calendar operations (deposit, transfer, consume,
+  consolidation, exchange), the FRLG1 codec and the publication binding are later increments.
 - **The shader pipeline takes `geometry/`, the largest area.** 30 of its 46 entries (4.5 MB of SPIR-V)
   are built with the engine's pinned DXC at pin `ca1f1bc05b`: the cull, motion, HZB, software and
   hardware raster, assembly, VSM argument/cluster/SAT/settle and vegetation passes, plus the two mesh
