@@ -1,5 +1,9 @@
 ## Unreleased
 
+- `bench/results/compile.json` re-measured with the PGO release compiler of main d086c472: a cold
+  check of the 104 000-line program is 1.10x Zig's instructions (from 1.29x); every other row is
+  below the fastest rival.
+
 - **Release builds lift the `dyn` adapter thunks.** A thunk (`.C<hash>_N`) adjusts the receiver and
   tail-calls the method with `jmp *%r11`; the lifter refused it, so every `dyn` call went through a
   native thunk and a second jump. It is now a call and a return in IR, which LLVM inlines the method
