@@ -90,6 +90,26 @@
   magic is "FRW2" - the docs call the format ABW2, but the AB rename kept the FR wire bytes
   (Abundance 8071d8c2ca) - and like the engine's assert-based reader, decoding does not require EOF
   after field 32, which the trailing-bytes case pins.
+- **The Abundance day/night sky model and season lock are ported, bit for bit against the engine.**
+  `abundance/src/sky_model.grl` carries `ab::sky::DayNightSkyModel` of
+  `cmake/tx/render_sky.cmake`'s `ab_sky_policy` (`day_night_sky_model.cpp`): canonical input,
+  the celestial state (solar declination and equation of time, hour angle, the sidereal frame the
+  star field rotates in, the compact lunar orbit, phase and illuminated fraction), phase weights,
+  the biome-biased sunset palette and its display refinement, the full 47-field render-parameter
+  block, the FNV determinism signature over the fields clients compare, the exposure/leak/occlusion
+  policy, `SmoothPresentation` and `ValleyMistFloorMetres`. `abundance/src/world_season.grl` is
+  the season lock (`world_season.cpp`), and `abundance/src/sky_float.grl` the exact numeric
+  helpers it shares (an exact `fmod`, positive modulo, degree normalisation, finiteness).
+  `abundance/tests/parity/sky.cpp` compiles those two engine sources with `-ffp-contract=off` and
+  prints 669 values; `abundance/tests/sky_test.grl` reproduces every one — four complete Evaluate
+  outputs, the canonicaliser's fallbacks and eleven refusals, bands, solar fraction, sidereal,
+  exposure limits, leak/occlusion, smoothing (including the NaN, zero-elapsed and invalid-previous
+  paths), gamut mutations, valley mist and the whole season block, with the locked season's effect
+  on Evaluate measured against the engine's own `SetActiveSeason`. The engine's process-wide
+  active season is host glue, so the port takes the locked solar-year day as an explicit
+  parameter (quiet NaN = no lock).
+- `math::asin` and `math::fmod` (earlier in this release) are what the sky port needed; `lib/clone.grl`'s
+  `Clone` is not used because `@derive(Clone)` loses `f32` fields (reported separately, with a repro).
 - Abundance port: `abundance/src/abcmesh.grl` is the `.abcmesh` character-mesh codec - the version-5
   container (render vertices with their topology split at UV seams, rigid joints, twelve influences
   per vertex with unorm16 weights, centres of rotation, rest positions, tangent rings and sparse
