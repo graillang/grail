@@ -44,6 +44,19 @@
   payloads through the engine's decode_tables, whose "payload does not load (table N name)" wording
   the port reproduces verbatim; `abundance/tests/tx_tables_test.grl` matches all 26 lines and
   re-encodes each blob byte for byte.
+- **Abundance: the mountain sculpting pass is ported and bit-exact — the first mask solver.** 
+  `src/mountain_shape.grl` carries `sculpt_mountains`: relief gain about a low-pass, the coarse and
+  fine stream-power incision stages (Braun-Willett, Rho8 jitter, bilinear resampling of the incision),
+  crest sharpening, cirques on shaded high slopes, tilted cliff bands, scree aprons, the closing
+  Priority-Flood and the MountainCliff / Outcrop / Scree marks with their BareRock / Scree materials.
+  With it come the exact kernels it needs: gradient noise with a quintic fade, the rotated fbm and
+  ridged multifractals, the thrice-repeated box blur, Felzenszwalb's squared distance transform, and
+  a priority queue ordered exactly as `std::priority_queue<pair<double, size_t>, greater>`. 
+  `tests/mountain_shape_test.grl` matches Abundance's own `mountain_shape.cpp` (compiled at
+  `-ffp-contract=off`) on a synthetic 192x192 alpine world at 8 m cells: heights, all four mask
+  channels, and the pass's own counts (28,387 sculpted, 19,171 cliff, 891 scree, 383 outcrop, 0
+  cirque, 0 fill, and the max raise/lower). A config-knob bisect shows every stage identical
+  (relief, coarse erosion, gully erosion, crest, cirques, cliff bands, scree, fill).
 
 - **World loot's per-fill rules are ported.** `abundance/src/world_loot_rules.grl` carries
   `world_loot_sealed_mask` (each compartment sealed when mix64(site ^ cycle<<32 ^ 0x5EA1<<8 ^
