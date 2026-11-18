@@ -1,0 +1,1064 @@
+// Mapbox earcut.hpp (as vendored by Abundance at ThirdParty/earcut): the ear-clipping triangulator
+// the water-geometry callers use (Source/AbundanceWorldGen/Private/water_geometry.cpp chooses it
+// over Clipper2's experimental triangulator). Pure Grail, no FFI and no libm: every predicate is
+// the C++'s own IEEE double sequence, so the emitted index stream matches the vendored library
+// index for index. The one unspecified behaviour — the order in which ties come out when several
+// holes share a leftmost x — is pinned by replicating libstdc++'s introsort permutation exactly.
+//
+// API: earcut(rings) triangulates rings[0] (the outer ring) with the remaining rings as holes,
+// exactly like mapbox::earcut<std::uint32_t>(polygon). Each ring is a flat f64 array of x,y pairs;
+// the returned indices are 3 per triangle in the C++'s emission order and index the input points
+// counting the outer ring first, then each hole in order.
+module earcut;
+
+// The Earcut object of the C++: a pool of nodes and the running triangulation state. Node ids are
+// 1-based so 0 can mean "no node", which stands for the C++'s null pointers.
+pub struct Earcut {
+    // The node pool: x/y/vidx are the Node fields; prev/next are the ring links, prev_z/next_z the
+    // z-order links, z the interleaved z-order key (0 until index_curve runs).
+    x: f64[],
+    y: f64[],
+    vidx: u32[],
+    prev: u64[],
+    next: u64[],
+    prev_z: u64[],
+    next_z: u64[],
+    z: i32[],
+    steiner: u8[],
+    // The emitted triangle indices, 3 per triangle.
+    indices: u32[],
+    vertices: u64,
+    // True when the total vertex count passed the C++'s 80-point threshold, switching the ear
+    // tests onto the z-order hash walk.
+    hashing: bool,
+    min_x: f64,
+    min_y: f64,
+    max_x: f64,
+    max_y: f64,
+    inv_size: f64
+}
+
+pub fn new() -> Earcut {
+    return Earcut {
+        x: f64[],
+        y: f64[],
+        vidx: u32[],
+        prev: u64[],
+        next: u64[],
+        prev_z: u64[],
+        next_z: u64[],
+        z: i32[],
+        steiner: u8[],
+        indices: u32[],
+        vertices: 0,
+        hashing: false,
+        min_x: 0.0,
+        min_y: 0.0,
+        max_x: 0.0,
+        max_y: 0.0,
+        inv_size: 0.0,
+    };
+}
+
+// nodes.construct(): the C++'s object pool never recycles nodes within a run, so the pool is a
+// stack of fresh records.
+fn node_of(e: &mut Earcut) -> u64 {
+    e.x.push(0.0);
+    e.y.push(0.0);
+    e.vidx.push(0);
+    e.prev.push(0);
+    e.next.push(0);
+    e.prev_z.push(0);
+    e.next_z.push(0);
+    e.z.push(0);
+    e.steiner.push(0);
+    return e.x.len();
+}
+
+// insertNode(i, pt, last): create the node and link it after `last` (0 = start a fresh ring).
+fn insert_node(e: &mut Earcut, i: u64, px: f64, py: f64, last: u64) -> u64 {
+    p := node_of(e);
+    e.x[p - 1] = px;
+    e.y[p - 1] = py;
+    e.vidx[p - 1] = u32(i);
+    if last == 0 {
+        e.prev[p - 1] = p;
+        e.next[p - 1] = p;
+    } else {
+        e.next[p - 1] = e.next[last - 1];
+        e.prev[p - 1] = last;
+        e.prev[e.next[last - 1] - 1] = p;
+        e.next[last - 1] = p;
+    }
+    return p;
+}
+
+fn remove_node(e: &mut Earcut, p: u64) {
+    e.prev[e.next[p - 1] - 1] = e.prev[p - 1];
+    e.next[e.prev[p - 1] - 1] = e.next[p - 1];
+    if e.prev_z[p - 1] != 0 {
+        e.next_z[e.prev_z[p - 1] - 1] = e.next_z[p - 1];
+    }
+    if e.next_z[p - 1] != 0 {
+        e.prev_z[e.next_z[p - 1] - 1] = e.prev_z[p - 1];
+    }
+    return ();
+}
+
+fn area3(e: &mut Earcut, p: u64, q: u64, r: u64) -> f64 {
+    return (e.y[q - 1] - e.y[p - 1])
+        * (e.x[r - 1] - e.x[q - 1])
+        - (e.x[q - 1] - e.x[p - 1])
+        * (e.y[r - 1] - e.y[q - 1]);
+}
+
+fn equals(e: &mut Earcut, p1: u64, p2: u64) -> bool {
+    return (e.x[p1 - 1] == e.x[p2 - 1]) && (e.y[p1 - 1] == e.y[p2 - 1]);
+}
+
+fn sign(val: f64) -> i64 {
+    if val > 0.0 {
+        return 1;
+    }
+    if val < 0.0 {
+        return -1;
+    }
+    return 0;
+}
+
+fn fmax(a: f64, b: f64) -> f64 {
+    if a < b {
+        return b;
+    }
+    return a;
+}
+
+fn fmin(a: f64, b: f64) -> f64 {
+    if b < a {
+        return b;
+    }
+    return a;
+}
+
+fn on_segment(e: &mut Earcut, p: u64, q: u64, r: u64) -> bool {
+    px := e.x[p - 1];
+    py := e.y[p - 1];
+    qx := e.x[q - 1];
+    qy := e.y[q - 1];
+    rx := e.x[r - 1];
+    ry := e.y[r - 1];
+    return (qx <= fmax(px, rx))
+        && (qx >= fmin(px, rx))
+        && (qy <= fmax(py, ry))
+        && (qy >= fmin(py, ry));
+}
+
+fn intersects(e: &mut Earcut, p1: u64, q1: u64, p2: u64, q2: u64) -> bool {
+    o1 := sign(area3(e, p1, q1, p2));
+    o2 := sign(area3(e, p1, q1, q2));
+    o3 := sign(area3(e, p2, q2, p1));
+    o4 := sign(area3(e, p2, q2, q1));
+    if (o1 != o2) && (o3 != o4) {
+        return true;
+    }
+    if (o1 == 0) && on_segment(e, p1, p2, q1) {
+        return true;
+    }
+    if (o2 == 0) && on_segment(e, p1, q2, q1) {
+        return true;
+    }
+    if (o3 == 0) && on_segment(e, p2, p1, q2) {
+        return true;
+    }
+    if (o4 == 0) && on_segment(e, p2, q1, q2) {
+        return true;
+    }
+    return false;
+}
+
+fn point_in_triangle(
+    ax: f64,
+    ay: f64,
+    bx: f64,
+    by: f64,
+    cx: f64,
+    cy: f64,
+    px: f64,
+    py: f64
+) -> bool {
+    return ((cx - px) * (ay - py) >= (ax - px) * (cy - py))
+        && ((ax - px) * (by - py) >= (bx - px) * (ay - py))
+        && ((bx - px) * (cy - py) >= (cx - px) * (by - py));
+}
+
+fn locally_inside(e: &mut Earcut, a: u64, b: u64) -> bool {
+    pa := e.prev[a - 1];
+    na := e.next[a - 1];
+    if area3(e, pa, a, na) < 0.0 {
+        return (area3(e, a, b, na) >= 0.0) && (area3(e, a, pa, b) >= 0.0);
+    }
+    return (area3(e, a, b, pa) < 0.0) || (area3(e, a, na, b) < 0.0);
+}
+
+fn middle_inside(e: &mut Earcut, a: u64, b: u64) -> bool {
+    px := (e.x[a - 1] + e.x[b - 1]) / 2.0;
+    py := (e.y[a - 1] + e.y[b - 1]) / 2.0;
+    mut p = a;
+    mut inside = false;
+    loop {
+        if ((e.y[p - 1] > py) != (e.y[e.next[p - 1] - 1] > py))
+            && (e.y[e.next[p - 1] - 1] != e.y[p - 1])
+            && (
+                px < (e.x[e.next[p - 1] - 1] - e.x[p - 1])
+                    * (py - e.y[p - 1])
+                    / (e.y[e.next[p - 1] - 1] - e.y[p - 1])
+                    + e.x[p - 1]
+            ) {
+            inside = !inside;
+        }
+        p = e.next[p - 1];
+        if p == a {
+            break;
+        }
+    }
+    return inside;
+}
+
+fn intersects_polygon(e: &mut Earcut, a: u64, b: u64) -> bool {
+    mut p = a;
+    loop {
+        pn := e.next[p - 1];
+        if (e.vidx[p - 1] != e.vidx[a - 1])
+            && (e.vidx[pn - 1] != e.vidx[a - 1])
+            && (e.vidx[p - 1] != e.vidx[b - 1])
+            && (e.vidx[pn - 1] != e.vidx[b - 1])
+            && intersects(e, p, pn, a, b) {
+            return true;
+        }
+        p = e.next[p - 1];
+        if p == a {
+            break;
+        }
+    }
+    return false;
+}
+
+fn is_valid_diagonal(e: &mut Earcut, a: u64, b: u64) -> bool {
+    an := e.next[a - 1];
+    ap := e.prev[a - 1];
+    bn := e.next[b - 1];
+    bp := e.prev[b - 1];
+    return (e.vidx[an - 1] != e.vidx[b - 1])
+        && (e.vidx[ap - 1] != e.vidx[b - 1])
+        && !intersects_polygon(e, a, b)
+        && (
+            (
+                (locally_inside(e, a, b))
+                    && (locally_inside(e, b, a))
+                    && (middle_inside(e, a, b))
+                    && ((area3(e, ap, a, bp) != 0.0) || (area3(e, a, bp, b) != 0.0))
+            )
+                || ((equals(e, a, b)) && (area3(e, ap, a, an) > 0.0) && (area3(e, bp, b, bn) > 0.0))
+        );
+}
+
+// ---- the libstdc++ introsort replica ----
+// std::sort is not stable, and earcut sorts the hole queue by leftmost x only, so holes tied on x
+// come out in an order that depends on the sort's permutation. GCC's libstdc++ introsort is
+// deterministic for a given input sequence; this replicates it exactly — the 16-element threshold,
+// the 2*floor(log2(n)) recursion depth with the heapsort fallback, the median-of-three pivot and
+// the final insertion sort — so the port's tie order matches the reference binaries.
+
+fn sort_less(e: &mut Earcut, a: u64, b: u64) -> bool {
+    return e.x[a - 1] < e.x[b - 1];
+}
+
+fn swap_at(a: &mut u64[], i: u64, j: u64) {
+    t := a[i];
+    a[i] = a[j];
+    a[j] = t;
+    return ();
+}
+
+// __push_heap: climb `value` up from `hole` while it beats the parent, within [top, ...].
+fn heap_push(e: &mut Earcut, a: &mut u64[], hole: i64, top: i64, value: u64) {
+    mut h = hole;
+    mut parent = (h - 1) / 2;
+    while (h > top) && sort_less(e, a[u64(parent)], value) {
+        a[u64(h)] = a[u64(parent)];
+        h = parent;
+        parent = (h - 1) / 2;
+    }
+    a[u64(h)] = value;
+    return ();
+}
+
+// __adjust_heap: sift the `value` down from `hole` in the max-heap a[first .. first+len).
+fn heap_adjust(e: &mut Earcut, a: &mut u64[], first: i64, hole: i64, len: i64, value: u64) {
+    top := hole;
+    mut h = hole;
+    mut second = hole;
+    while second < (len - 1) / 2 {
+        second = 2 * (second + 1);
+        if sort_less(e, a[u64(first + second)], a[u64(first + second - 1)]) {
+            second -= 1;
+        }
+        a[u64(first + h)] = a[u64(first + second)];
+        h = second;
+    }
+    if ((len & 1) == 0) && (second == (len - 2) / 2) {
+        second = 2 * (second + 1);
+        a[u64(first + h)] = a[u64(first + second - 1)];
+        h = second - 1;
+    }
+    heap_push(e, a, h, top, value);
+    return ();
+}
+
+// __make_heap over a[first .. first+len).
+fn heap_make(e: &mut Earcut, a: &mut u64[], first: i64, len: i64) {
+    if len < 2 {
+        return;
+    }
+    mut parent = (len - 2) / 2;
+    loop {
+        value := a[u64(first + parent)];
+        heap_adjust(e, a, first, parent, len, value);
+        if parent == 0 {
+            return ();
+        }
+        parent -= 1;
+    }
+}
+
+// __pop_heap(first, last, result): move a[result] out, put the root there, re-heap the rest.
+fn heap_pop(e: &mut Earcut, a: &mut u64[], first: i64, last: i64, result: i64) {
+    value := a[u64(result)];
+    a[u64(result)] = a[u64(first)];
+    heap_adjust(e, a, first, 0, last - first, value);
+    return ();
+}
+
+// __partial_sort(first, last, last): the introsort depth fallback. The heap_select scan over
+// [middle, last) is empty because middle == last here, so this is make_heap + sort_heap.
+fn heap_partial_sort(e: &mut Earcut, a: &mut u64[], first: i64, last: i64) {
+    heap_make(e, a, first, last - first);
+    mut tail = last;
+    while tail - first > 1 {
+        tail -= 1;
+        heap_pop(e, a, first, tail, tail);
+    }
+    return ();
+}
+
+fn insertion_sort_range(e: &mut Earcut, a: &mut u64[], first: u64, last: u64) {
+    if first == last {
+        return;
+    }
+    mut i = first + 1;
+    while i < last {
+        if sort_less(e, a[i], a[first]) {
+            val := a[i];
+            mut j = i;
+            while j > first {
+                a[j] = a[j - 1];
+                j -= 1;
+            }
+            a[first] = val;
+        } else {
+            val := a[i];
+            mut j = i;
+            while sort_less(e, val, a[j - 1]) {
+                a[j] = a[j - 1];
+                j -= 1;
+            }
+            a[j] = val;
+        }
+        i += 1;
+    }
+    return ();
+}
+
+fn unguarded_insertion_sort_range(e: &mut Earcut, a: &mut u64[], first: u64, last: u64) {
+    mut i = first;
+    while i < last {
+        val := a[i];
+        mut j = i;
+        while sort_less(e, val, a[j - 1]) {
+            a[j] = a[j - 1];
+            j -= 1;
+        }
+        a[j] = val;
+        i += 1;
+    }
+    return ();
+}
+
+fn final_insertion_sort(e: &mut Earcut, a: &mut u64[], first: u64, last: u64) {
+    if last - first > 16 {
+        insertion_sort_range(e, a, first, first + 16);
+        unguarded_insertion_sort_range(e, a, first + 16, last);
+    } else {
+        insertion_sort_range(e, a, first, last);
+    }
+    return ();
+}
+
+// __lg: floor(log2(n)).
+fn gcc_lg(n: u64) -> u64 {
+    mut k = 0;
+    mut v = n;
+    while v > 1 {
+        v = v >> 1;
+        k += 1;
+    }
+    return k;
+}
+
+// __move_median_to_first: the pivot is the median of positions x, y, z by the comparator.
+fn move_median_to_first(e: &mut Earcut, a: &mut u64[], result: u64, x: u64, y: u64, z: u64) {
+    if sort_less(e, a[x], a[y]) {
+        if sort_less(e, a[y], a[z]) {
+            swap_at(a, y, result);
+        } else if sort_less(e, a[x], a[z]) {
+            swap_at(a, z, result);
+        } else {
+            swap_at(a, x, result);
+        }
+    } else if sort_less(e, a[x], a[z]) {
+        swap_at(a, x, result);
+    } else if sort_less(e, a[y], a[z]) {
+        swap_at(a, z, result);
+    } else {
+        swap_at(a, y, result);
+    }
+    return ();
+}
+
+// __unguarded_partition: Hoare partition of a[first .. last) around the pivot element.
+fn unguarded_partition(e: &mut Earcut, a: &mut u64[], first: u64, last: u64, pivot: u64) -> u64 {
+    mut i = first;
+    mut j = last;
+    loop {
+        while sort_less(e, a[i], a[pivot]) {
+            i += 1;
+        }
+        j -= 1;
+        while sort_less(e, a[pivot], a[j]) {
+            j -= 1;
+        }
+        if i >= j {
+            return i;
+        }
+        swap_at(a, i, j);
+        i += 1;
+    }
+}
+
+fn introsort_loop(e: &mut Earcut, a: &mut u64[], first: u64, last: u64, depth: u64) {
+    mut f = first;
+    mut l = last;
+    mut d = depth;
+    while l - f > 16 {
+        if d == 0 {
+            heap_partial_sort(e, a, i64(f), i64(l));
+            return;
+        }
+        d -= 1;
+        mid := f + (l - f) / 2;
+        move_median_to_first(e, a, f, f + 1, mid, l - 1);
+        cut := unguarded_partition(e, a, f + 1, l, f);
+        introsort_loop(e, a, cut, l, d);
+        l = cut;
+    }
+    return ();
+}
+
+// std::sort, the libstdc++ way.
+fn gcc_sort(e: &mut Earcut, a: &mut u64[]) {
+    n := a.len();
+    if n < 2 {
+        return;
+    }
+    introsort_loop(e, a, 0, n, gcc_lg(n) * 2);
+    final_insertion_sort(e, a, 0, n);
+    return ();
+}
+
+// ---- the triangulator ----
+
+// zOrder: the Morton key of a coordinate, with the C++'s truncating double-to-int32 casts.
+fn z_order(e: &mut Earcut, px: f64, py: f64) -> i32 {
+    mut x = i32((px - e.min_x) * e.inv_size);
+    mut y = i32((py - e.min_y) * e.inv_size);
+    x = (x | (x << 8)) & 16711935; // 0x00FF00FF
+    x = (x | (x << 4)) & 252645135; // 0x0F0F0F0F
+    x = (x | (x << 2)) & 858993459; // 0x33333333
+    x = (x | (x << 1)) & 1431655765; // 0x55555555
+    y = (y | (y << 8)) & 16711935;
+    y = (y | (y << 4)) & 252645135;
+    y = (y | (y << 2)) & 858993459;
+    y = (y | (y << 1)) & 1431655765;
+    return x | (y << 1);
+}
+
+// linkedList(points, clockwise): build the ring's circular doubly-linked list in the winding the
+// triangulator wants, computing the ring's own signed winding first exactly as the C++ does.
+fn linked_list(e: &mut Earcut, ring: &f64[], clockwise: bool) -> u64 {
+    len := ring.len() / 2;
+    mut sum: f64 = 0.0;
+    mut i = 0;
+    while i < len {
+        mut j = len - 1;
+        if i > 0 {
+            j = i - 1;
+        }
+        sum = sum + (ring[2 * j] - ring[2 * i]) * (ring[2 * i + 1] + ring[2 * j + 1]);
+        i += 1;
+    }
+    mut last: u64 = 0;
+    base := e.vertices;
+    if clockwise == (sum > 0.0) {
+        mut k = 0;
+        while k < len {
+            last = insert_node(e, base + k, ring[2 * k], ring[2 * k + 1], last);
+            k += 1;
+        }
+    } else {
+        mut k = len;
+        while k > 0 {
+            k -= 1;
+            last = insert_node(e, base + k, ring[2 * k], ring[2 * k + 1], last);
+        }
+    }
+    if last != 0 {
+        nxt := e.next[last - 1];
+        if equals(e, last, nxt) {
+            remove_node(e, last);
+            last = e.next[last - 1];
+        }
+    }
+    e.vertices = e.vertices + len;
+    return last;
+}
+
+fn filter_points(e: &mut Earcut, start: u64, end_in: u64) -> u64 {
+    mut end = start;
+    if end_in != 0 {
+        end = end_in;
+    }
+    mut p = start;
+    mut again: bool;
+    loop {
+        again = false;
+        pv := e.prev[p - 1];
+        nx := e.next[p - 1];
+        mut drop_it = false;
+        if e.steiner[p - 1] == 0 {
+            drop_it = equals(e, p, nx) || (area3(e, pv, p, nx) == 0.0);
+        }
+        if drop_it {
+            remove_node(e, p);
+            p = e.prev[p - 1];
+            end = p;
+            if p == e.next[p - 1] {
+                break;
+            }
+            again = true;
+        } else {
+            p = e.next[p - 1];
+        }
+        if !((again) || (p != end)) {
+            break;
+        }
+    }
+    return end;
+}
+
+fn earcut_linked(e: &mut Earcut, ear_in: u64, pass: i64) {
+    mut ear = ear_in;
+    if ear == 0 {
+        return;
+    }
+    if (pass == 0) && e.hashing {
+        index_curve(e, ear);
+    }
+    mut stop = ear;
+    while e.prev[ear - 1] != e.next[ear - 1] {
+        prev := e.prev[ear - 1];
+        next := e.next[ear - 1];
+        mut is_ear = false;
+        if e.hashing {
+            is_ear = is_ear_hashed(e, ear);
+        } else {
+            is_ear = is_ear_plain(e, ear);
+        }
+        if is_ear {
+            i0 := e.vidx[prev - 1];
+            i1 := e.vidx[ear - 1];
+            i2 := e.vidx[next - 1];
+            e.indices.push(i0);
+            e.indices.push(i1);
+            e.indices.push(i2);
+            remove_node(e, ear);
+            nn := e.next[next - 1];
+            ear = nn;
+            stop = nn;
+            continue;
+        }
+        ear = next;
+        if ear == stop {
+            if pass == 0 {
+                filtered := filter_points(e, ear, 0);
+                earcut_linked(e, filtered, 1);
+            } else if pass == 1 {
+                filtered := filter_points(e, ear, 0);
+                ear = cure_local_intersections(e, filtered);
+                earcut_linked(e, ear, 2);
+            } else {
+                split_earcut(e, ear);
+            }
+            break;
+        }
+    }
+    return ();
+}
+
+fn is_ear_plain(e: &mut Earcut, ear: u64) -> bool {
+    a := e.prev[ear - 1];
+    b := ear;
+    c := e.next[ear - 1];
+    if area3(e, a, b, c) >= 0.0 {
+        return false;
+    }
+    mut p = e.next[e.next[ear - 1] - 1];
+    while p != e.prev[ear - 1] {
+        ppv := e.prev[p - 1];
+        pnx := e.next[p - 1];
+        if point_in_triangle(
+            e.x[a - 1],
+            e.y[a - 1],
+            e.x[b - 1],
+            e.y[b - 1],
+            e.x[c - 1],
+            e.y[c - 1],
+            e.x[p - 1],
+            e.y[p - 1]
+        )
+            && (area3(e, ppv, p, pnx) >= 0.0) {
+            return false;
+        }
+        p = e.next[p - 1];
+    }
+    return true;
+}
+
+fn is_ear_hashed(e: &mut Earcut, ear: u64) -> bool {
+    a := e.prev[ear - 1];
+    b := ear;
+    c := e.next[ear - 1];
+    if area3(e, a, b, c) >= 0.0 {
+        return false;
+    }
+    min_tx := fmin(e.x[a - 1], fmin(e.x[b - 1], e.x[c - 1]));
+    min_ty := fmin(e.y[a - 1], fmin(e.y[b - 1], e.y[c - 1]));
+    max_tx := fmax(e.x[a - 1], fmax(e.x[b - 1], e.x[c - 1]));
+    max_ty := fmax(e.y[a - 1], fmax(e.y[b - 1], e.y[c - 1]));
+    min_z := z_order(e, min_tx, min_ty);
+    max_z := z_order(e, max_tx, max_ty);
+    mut p = e.next_z[ear - 1];
+    while (p != 0) && (e.z[p - 1] <= max_z) {
+        ppv := e.prev[p - 1];
+        pnx := e.next[p - 1];
+        if (p != e.prev[ear - 1])
+            && (p != e.next[ear - 1])
+            && point_in_triangle(
+                e.x[a - 1],
+                e.y[a - 1],
+                e.x[b - 1],
+                e.y[b - 1],
+                e.x[c - 1],
+                e.y[c - 1],
+                e.x[p - 1],
+                e.y[p - 1]
+            )
+            && (area3(e, ppv, p, pnx) >= 0.0) {
+            return false;
+        }
+        p = e.next_z[p - 1];
+    }
+    p = e.prev_z[ear - 1];
+    while (p != 0) && (e.z[p - 1] >= min_z) {
+        ppv := e.prev[p - 1];
+        pnx := e.next[p - 1];
+        if (p != e.prev[ear - 1])
+            && (p != e.next[ear - 1])
+            && point_in_triangle(
+                e.x[a - 1],
+                e.y[a - 1],
+                e.x[b - 1],
+                e.y[b - 1],
+                e.x[c - 1],
+                e.y[c - 1],
+                e.x[p - 1],
+                e.y[p - 1]
+            )
+            && (area3(e, ppv, p, pnx) >= 0.0) {
+            return false;
+        }
+        p = e.prev_z[p - 1];
+    }
+    return true;
+}
+
+fn cure_local_intersections(e: &mut Earcut, start: u64) -> u64 {
+    mut p = start;
+    mut st = start;
+    loop {
+        a := e.prev[p - 1];
+        pn := e.next[p - 1];
+        b := e.next[pn - 1];
+        if !equals(e, a, b)
+            && intersects(e, a, p, pn, b)
+            && locally_inside(e, a, b)
+            && locally_inside(e, b, a) {
+            va := e.vidx[a - 1];
+            vp := e.vidx[p - 1];
+            vb := e.vidx[b - 1];
+            e.indices.push(va);
+            e.indices.push(vp);
+            e.indices.push(vb);
+            remove_node(e, p);
+            remove_node(e, pn);
+            p = b;
+            st = b;
+        }
+        p = e.next[p - 1];
+        if p == st {
+            break;
+        }
+    }
+    return filter_points(e, p, 0);
+}
+
+fn split_earcut(e: &mut Earcut, start: u64) {
+    mut a = start;
+    loop {
+        mut b = e.next[e.next[a - 1] - 1];
+        while b != e.prev[a - 1] {
+            va := e.vidx[a - 1];
+            vb := e.vidx[b - 1];
+            if (va != vb) && is_valid_diagonal(e, a, b) {
+                c := split_polygon(e, a, b);
+                an := e.next[a - 1];
+                af := filter_points(e, a, an);
+                cn := e.next[c - 1];
+                cf := filter_points(e, c, cn);
+                earcut_linked(e, af, 0);
+                earcut_linked(e, cf, 0);
+                return ();
+            }
+            b = e.next[b - 1];
+        }
+        a = e.next[a - 1];
+        if a == start {
+            break;
+        }
+    }
+    return ();
+}
+
+// splitPolygon(a, b): duplicate both endpoints and re-link, merging two rings (or splitting one).
+fn split_polygon(e: &mut Earcut, a: u64, b: u64) -> u64 {
+    ia := u64(e.vidx[a - 1]);
+    ax := e.x[a - 1];
+    ay := e.y[a - 1];
+    ib := u64(e.vidx[b - 1]);
+    bx := e.x[b - 1];
+    by := e.y[b - 1];
+    an := e.next[a - 1];
+    bp := e.prev[b - 1];
+    a2 := insert_node(e, ia, ax, ay, 0);
+    b2 := insert_node(e, ib, bx, by, 0);
+    e.next[a - 1] = b;
+    e.prev[b - 1] = a;
+    e.next[a2 - 1] = an;
+    e.prev[an - 1] = a2;
+    e.next[b2 - 1] = a2;
+    e.prev[a2 - 1] = b2;
+    e.next[bp - 1] = b2;
+    e.prev[b2 - 1] = bp;
+    return b2;
+}
+
+// ---- hole elimination ----
+
+fn get_leftmost(e: &mut Earcut, start: u64) -> u64 {
+    mut p = start;
+    mut leftmost = start;
+    loop {
+        if (e.x[p - 1] < e.x[leftmost - 1])
+            || ((e.x[p - 1] == e.x[leftmost - 1]) && (e.y[p - 1] < e.y[leftmost - 1])) {
+            leftmost = p;
+        }
+        p = e.next[p - 1];
+        if p == start {
+            break;
+        }
+    }
+    return leftmost;
+}
+
+fn sector_contains_sector(e: &mut Earcut, m: u64, p: u64) -> bool {
+    mp := e.prev[m - 1];
+    pp := e.prev[p - 1];
+    pn := e.next[p - 1];
+    mn := e.next[m - 1];
+    return (area3(e, mp, m, pp) < 0.0) && (area3(e, pn, m, mn) < 0.0);
+}
+
+fn find_hole_bridge(e: &mut Earcut, hole: u64, outer: u64) -> u64 {
+    hx := e.x[hole - 1];
+    hy := e.y[hole - 1];
+    mut qx: f64 = -1.0 / 0.0;
+    mut m: u64 = 0;
+    mut p = outer;
+    loop {
+        if (hy <= e.y[p - 1])
+            && (hy >= e.y[e.next[p - 1] - 1])
+            && (e.y[e.next[p - 1] - 1] != e.y[p - 1]) {
+            x := e.x[p - 1]
+                + (hy - e.y[p - 1])
+                * (e.x[e.next[p - 1] - 1] - e.x[p - 1])
+                / (e.y[e.next[p - 1] - 1] - e.y[p - 1]);
+            if (x <= hx) && (x > qx) {
+                qx = x;
+                if e.x[p - 1] < e.x[e.next[p - 1] - 1] {
+                    m = p;
+                } else {
+                    m = e.next[p - 1];
+                }
+                if x == hx {
+                    return m;
+                }
+            }
+        }
+        p = e.next[p - 1];
+        if p == outer {
+            break;
+        }
+    }
+    if m == 0 {
+        return 0;
+    }
+    stop := m;
+    mut tan_min: f64 = 1.0 / 0.0;
+    mut tan_cur: f64 = 0.0;
+    p = m;
+    mx := e.x[m - 1];
+    my := e.y[m - 1];
+    loop {
+        if (hx >= e.x[p - 1])
+            && (e.x[p - 1] >= mx)
+            && (hx != e.x[p - 1])
+            && point_in_triangle(
+                if hy < my { hx } else { qx },
+                hy,
+                mx,
+                my,
+                if hy < my { qx } else { hx },
+                hy,
+                e.x[p - 1],
+                e.y[p - 1]
+            ) {
+            tan_cur = (hy - e.y[p - 1]).abs() / (hx - e.x[p - 1]);
+            if locally_inside(e, p, hole)
+                && (
+                    (tan_cur < tan_min)
+                        || (
+                            (tan_cur == tan_min)
+                                && ((e.x[p - 1] > e.x[m - 1]) || sector_contains_sector(e, m, p))
+                        )
+                ) {
+                m = p;
+                tan_min = tan_cur;
+            }
+        }
+        p = e.next[p - 1];
+        if p == stop {
+            break;
+        }
+    }
+    return m;
+}
+
+fn eliminate_hole(e: &mut Earcut, hole: u64, outer_in: u64) -> u64 {
+    bridge := find_hole_bridge(e, hole, outer_in);
+    if bridge == 0 {
+        return outer_in;
+    }
+    bridge_reverse := split_polygon(e, bridge, hole);
+    brn := e.next[bridge_reverse - 1];
+    filter_points(e, bridge_reverse, brn);
+    bn := e.next[bridge - 1];
+    return filter_points(e, bridge, bn);
+}
+
+fn eliminate_holes(e: &mut Earcut, rings: &f64[][], outer_in: u64) -> u64 {
+    len := rings.len();
+    mut queue = u64[];
+    mut i = 1;
+    while i < len {
+        list := linked_list(e, &rings[i], false);
+        if list != 0 {
+            if list == e.next[list - 1] {
+                e.steiner[list - 1] = 1;
+            }
+            queue.push(get_leftmost(e, list));
+        }
+        i += 1;
+    }
+    gcc_sort(e, &mut queue);
+    mut outer = outer_in;
+    for qi in queue.len() {
+        outer = eliminate_hole(e, queue[qi], outer);
+    }
+    return outer;
+}
+
+// ---- z-order indexing ----
+
+// indexCurve: assign z keys and sort the z-order list with Tatham's bottom-up merge sort, exactly
+// as the C++ (including the two fixups after the walk).
+fn index_curve(e: &mut Earcut, start: u64) {
+    mut p = start;
+    loop {
+        if e.z[p - 1] == 0 {
+            zx := e.x[p - 1];
+            zy := e.y[p - 1];
+            key := z_order(e, zx, zy);
+            e.z[p - 1] = key;
+        }
+        e.prev_z[p - 1] = e.prev[p - 1];
+        e.next_z[p - 1] = e.next[p - 1];
+        p = e.next[p - 1];
+        if p == start {
+            break;
+        }
+    }
+    // The C++ cuts the circular z-order chain once (p->prevZ->nextZ = nullptr) before sorting.
+    tail_z := e.prev_z[p - 1];
+    e.next_z[tail_z - 1] = 0;
+    e.prev_z[p - 1] = 0;
+    sort_linked(e, p);
+    return ();
+}
+
+// sortLinked (Simon Tatham's linked-list merge sort over the z keys).
+fn sort_linked(e: &mut Earcut, list_in: u64) -> u64 {
+    mut list = list_in;
+    mut in_size: u64 = 1;
+    loop {
+        mut p = list;
+        list = 0;
+        mut tail: u64 = 0;
+        mut num_merges: u64 = 0;
+        while p != 0 {
+            num_merges += 1;
+            mut q = p;
+            mut p_size: u64 = 0;
+            mut count = in_size;
+            while (count > 0) && (q != 0) {
+                p_size += 1;
+                q = e.next_z[q - 1];
+                count -= 1;
+            }
+            mut q_size = in_size;
+            while (p_size > 0) || ((q_size > 0) && (q != 0)) {
+                mut chosen: u64;
+                if p_size == 0 {
+                    chosen = q;
+                    q = e.next_z[q - 1];
+                    q_size -= 1;
+                } else if (q_size == 0) || (q == 0) {
+                    chosen = p;
+                    p = e.next_z[p - 1];
+                    p_size -= 1;
+                } else if e.z[p - 1] <= e.z[q - 1] {
+                    chosen = p;
+                    p = e.next_z[p - 1];
+                    p_size -= 1;
+                } else {
+                    chosen = q;
+                    q = e.next_z[q - 1];
+                    q_size -= 1;
+                }
+                if tail != 0 {
+                    e.next_z[tail - 1] = chosen;
+                } else {
+                    list = chosen;
+                }
+                e.prev_z[chosen - 1] = tail;
+                tail = chosen;
+            }
+            p = q;
+        }
+        e.next_z[tail - 1] = 0;
+        if num_merges <= 1 {
+            return list;
+        }
+        in_size = in_size * 2;
+    }
+}
+
+// ---- the entry point ----
+
+pub fn earcut(rings: &f64[][]) -> u32[] {
+    mut e = new();
+    if rings.len() == 0 {
+        return e.indices;
+    }
+    // threshold/len: the C++ stops counting once the running threshold goes negative, so the
+    // hashing decision depends only on that prefix of rings.
+    mut threshold: i64 = 80;
+    mut i: u64 = 0;
+    while (threshold >= 0) && (i < rings.len()) {
+        threshold = threshold - i64(rings[i].len() / 2);
+        i += 1;
+    }
+    mut outer = linked_list(&mut e, &rings[0], true);
+    if (outer == 0) || (e.prev[outer - 1] == e.next[outer - 1]) {
+        return e.indices;
+    }
+    if rings.len() > 1 {
+        outer = eliminate_holes(&mut e, rings, outer);
+    }
+    e.hashing = threshold < 0;
+    if e.hashing {
+        mut p = e.next[outer - 1];
+        e.min_x = e.x[outer - 1];
+        e.max_x = e.x[outer - 1];
+        e.min_y = e.y[outer - 1];
+        e.max_y = e.y[outer - 1];
+        loop {
+            px := e.x[p - 1];
+            py := e.y[p - 1];
+            e.min_x = fmin(e.min_x, px);
+            e.min_y = fmin(e.min_y, py);
+            e.max_x = fmax(e.max_x, px);
+            e.max_y = fmax(e.max_y, py);
+            p = e.next[p - 1];
+            if p == outer {
+                break;
+            }
+        }
+        size := fmax(e.max_x - e.min_x, e.max_y - e.min_y);
+        if size != 0.0 {
+            e.inv_size = 32767.0 / size;
+        } else {
+            e.inv_size = 0.0;
+        }
+    }
+    earcut_linked(&mut e, outer, 0);
+    return e.indices;
+}
