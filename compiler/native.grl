@@ -5732,26 +5732,69 @@ fn return_bonds<a>(c: (&a mut C), src: u64, dst: u64, aggregate: u64) -> unit {
     if !bond_under(&mut c, src) {
         return ();
     }
+    // The bonds held by `src` or a place inside it, found through the storage tree and the per-holder
+    // chains instead of a pass over every bond the function has made (that pass was a tenth of a
+    // check), then visited in the order of the bond list as before. A place outside the tree
+    // (bond_unranged) falls back to the full pass.
+    bonds_sync(&mut c);
     n := c.bonds.len();
-    for i in n {
-        mut b = &c.bonds[i];
-        holder := b.holder;
-        loan := b.loan;
-        guard := b.guard;
-        if loan_live(&mut c, loan) != 0 {
-            if ownership::ancestor(&c.check, src, holder) {
-                mut role = guard;
-                if aggregate != 0 {
-                    role = 1;
-                }
-                if guard == 3 {
-                    role = 3;
-                }
-                if aggregate == 3 {
-                    role = 3;
-                }
-                bond_kind(&mut c, dst, loan, role);
+    mut found = u64[];
+    if (c.bond_unranged != 0) || (c.check.places.len() < src) {
+        for i in n {
+            if ownership::ancestor(&c.check, src, c.bonds[i].holder) {
+                found.push(i);
             }
+        }
+    } else {
+        // Marked in a byte map and read back in index order: the bond list's order, as before.
+        mut hit = u8[0; n];
+        mut any = false;
+        mut stack = u64[];
+        stack.push(src);
+        while let Some(p) = stack.pop() {
+            mut j = 0;
+            if p < c.bond_hhead.len() {
+                j = c.bond_hhead[p];
+            }
+            while j != 0 {
+                if j - 1 < n {
+                    hit[j - 1] = 1;
+                    any = true;
+                }
+                j = c.bond_hnext[j - 1];
+            }
+            mut k = c.check.places[p - 1].child;
+            while k != 0 {
+                if (k < c.bond_under.len()) && (c.bond_under[k] != 0) {
+                    stack.push(k);
+                }
+                k = c.check.places[k - 1].next;
+            }
+        }
+        if any {
+            for i in n {
+                if hit[i] != 0 {
+                    found.push(i);
+                }
+            }
+        }
+    }
+    for f in found.len() {
+        i := found[f];
+        loan := c.bonds[i].loan;
+        guard := c.bonds[i].guard;
+        if loan_live(&mut c, loan) != 0 {
+            mut role = guard;
+            if aggregate != 0 {
+                role = 1;
+            }
+            if guard == 3 {
+                role = 3;
+            }
+            if aggregate == 3 {
+                role = 3;
+            }
+            bond_kind(&mut c, dst, loan, role);
         }
     }
     return ();
