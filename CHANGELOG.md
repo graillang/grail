@@ -26,6 +26,13 @@
   layer at 790 m scaled by its trap's show halo, all in the C++'s f32/double split. The feature
   parity fixture now probes 32 points (four positions at eight depths, every Gaussian centre
   included) and all ten sample fields; `features.txt` carries 4974 bit-exact values.
+- **The recorded input's float view is gated against the engine's own deserializer.** The world
+  model derives the input floats exactly as `deserialize_mover_input` does (`axis_value` is the
+  i16 over 32767 in double narrowed to f32, `yaw_degrees` the u16 times 360/65536,
+  `pitch_degrees` the i16 times 90/32767), so the movement kernel's seam starts from the engine's
+  values rather than a re-derived approximation. The replay compares the bit pattern of every
+  field of all 48 recorded samples against the C++ deserializer's output (1 393 reference lines).
+
 - **ab::CoherentField2D, the standard basis every coherent terrain field samples through, is
   ported.** The u64 world-seed fold into the noise seed, the generator's exact construction
   sequence over the FastNoiseLite port (noise type, frequency, fractal state; the warp object's
