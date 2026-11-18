@@ -1,5 +1,10 @@
 ## Unreleased
 
+- **The shader pipeline takes `water/`, 14 of its 20 entries.** The ocean spectrum, FFT, assemble and
+  mip chain, the clipmap and cull passes, caustics, reflection, ripple, the scene copy and the wetness
+  passes: 185 KB of SPIR-V at pin `ca1f1bc05b`, the layout pin growing from 37 to 46 structs. Six
+  entries stay recorded as skipped for the terrain mirror, including `water_surface.ms` — so water
+  contributes no mesh stage to the inventory yet.
 - **The dedicated server's datagram reliability layer is ported** (`abundance/src/net_datagram.grl`):
   `ab::server::DatagramConnection` - which the engine's own header documents as pure logic with no
   sockets - with packet sequence numbers and the wrap-safe newer-than compare plus a 32-bit ack
