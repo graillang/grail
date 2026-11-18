@@ -1,5 +1,11 @@
 ## Unreleased
 
+- **The compiler's SHA-256 round-constant table is a function again, so the checked-in seed can
+  build the compiler.** `compiler/pkg.grl` declared it `static SHA_K: u64[] = u64[...]`, a
+  vector-literal static the published bootstrap predates: every build on main stopped with
+  `expected `fn`, found `static`` and the landing queue could not gate anything. `sha_k()` returns
+  the same table; the digest is unchanged.
+
 - **The Jolt surface closes with the overlap query.** `gr_jolt_overlap_capsule` is one `CollideShape`
   of the same capsule the cast sweeps, stopped at the first hit: `abundance/src/jolt.grl` now answers
   the core's `overlap` contract (a boolean, with `invalid_request` for a capsule shorter than its own
