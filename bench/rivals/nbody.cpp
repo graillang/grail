@@ -1,0 +1,41 @@
+// C++ twin of bench/nbody.c: five bodies, two million steps; prints the energy before and after.
+// Positions and velocities are std::array, three doubles per body, as in the C twin.
+#include <array>
+#include <cmath>
+#include <cstdio>
+using Vec = std::array<double, 15>;
+using Masses = std::array<double, 5>;
+static double energy(const Vec &p, const Vec &v, const Masses &m) {
+    double e = 0.0;
+    for (int i = 0; i < 5; ++i) {
+        e = e + 0.5 * m[i] * (v[i * 3] * v[i * 3] + v[i * 3 + 1] * v[i * 3 + 1] + v[i * 3 + 2] * v[i * 3 + 2]);
+        for (int j = i + 1; j < 5; ++j) {
+            double dx = p[i * 3] - p[j * 3], dy = p[i * 3 + 1] - p[j * 3 + 1], dz = p[i * 3 + 2] - p[j * 3 + 2];
+            double d2 = dx * dx + dy * dy + dz * dz;
+            e = e - m[i] * m[j] / std::sqrt(d2);
+        }
+    }
+    return e;
+}
+int main() {
+    Vec p = {0.0, 0.0, 0.0, 4.84143144246472090, -1.16032004402742839, -0.103622044471123109, 8.34336671824457987, 4.12479856412430479, -0.403523417114321381, 12.8943695621391310, -15.1111514016986312, -0.223307578892655734, 15.3796971148509165, -25.9193146099879641, 0.179258772950371181};
+    Vec v = {0.0, 0.0, 0.0, 0.606326392995832, 2.81198684491626, -0.02521836165988763, -1.010774346178792, 1.825662371230411, 0.008415761376584154, 1.082791006441535, 0.8687130181696082, -0.01032737054813680, 0.979090732243898, 0.5946989986476762, -0.03476475593358662};
+    const Masses m = {39.47841760435743, 0.03769367487038949, 0.011286326131968767, 0.0017237240570597112, 0.0020336868699246304};
+    std::printf("%.17g\n", energy(p, v, m));
+    const double dt = 0.01;
+    for (int step = 0; step < 2000000; ++step) {
+        for (int i = 0; i < 5; ++i)
+            for (int j = i + 1; j < 5; ++j) {
+                double dx = p[i * 3] - p[j * 3], dy = p[i * 3 + 1] - p[j * 3 + 1], dz = p[i * 3 + 2] - p[j * 3 + 2];
+                double d2 = dx * dx + dy * dy + dz * dz;
+                double mag = dt / (d2 * std::sqrt(d2));
+                for (int k = 0; k < 3; ++k) {
+                    double d = p[i * 3 + k] - p[j * 3 + k];
+                    v[i * 3 + k] = v[i * 3 + k] - d * m[j] * mag;
+                    v[j * 3 + k] = v[j * 3 + k] + d * m[i] * mag;
+                }
+            }
+        for (int i = 0; i < 15; ++i) p[i] = p[i] + dt * v[i];
+    }
+    std::printf("%.17g\n", energy(p, v, m));
+}

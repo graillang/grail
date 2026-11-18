@@ -134,6 +134,27 @@ test('performance charts render from a results file: SVG, direction captions, ra
   expect(perfBlock('perf-results#no-such-table|numbers-only', join(root, 'tools/fixtures'))).toContain('A table without a chart'); // the first table present
   expect(() => renderResults({ schema: 2 })).toThrow('not a rivals result file');
 });
+test('the languages overview: geometric mean of each language over the fastest per program, missing twins averaged over the rest', async () => {
+  const { overviewRows, overview } = await import('./perf-charts.mjs');
+  const table = (id, rows) => ({ id, rows: rows.map(([name, values]) => ({ name, values })) });
+  const files = {
+    'bench-rivals': { commit: 'abc', tables: [table('release', [['a', { c: 1, cpp: 2, 'rust-release': 4, go: 8, 'zig-fast': 1, 'grail-llvm': 2 }], ['b', { c: 4, 'rust-release': 1, go: 2, 'zig-fast': 4, 'grail-llvm': null }]])] },
+    parallel: { commit: 'abc', tables: [table('release', [['p x1', { c: 1, cpp: 100, 'grail-llvm': 1 }], ['p x8', { c: 2, cpp: 1, 'grail-llvm': 4 }]])] },
+  };
+  const [release, dev] = overviewRows(files);
+  expect(release.programs.map(p => p.name)).toEqual(['a', 'b', 'p x8']); // the parallel file at its most workers only
+  const lang = key => release.languages.find(l => l.key === key);
+  expect(lang('c').mean).toBeCloseTo(Math.cbrt(1 * 4 * 2));
+  expect(lang('cpp').mean).toBeCloseTo(Math.sqrt(2 * 1)); // no twin of b: averaged over a and p x8
+  expect(lang('cpp').missing).toEqual(['b']);
+  expect(lang('grail-llvm').count).toBe(2); // a null (a wrong answer) is not a figure
+  expect(lang('zig-fast').fastest).toBe(1);
+  expect(dev.programs).toEqual([]);
+  const html = overview(files);
+  expect(html).toContain('id="chart-overview"');
+  expect(html).toContain('no twin of b');
+  expect(html).not.toContain('\n');
+});
 test('the Performance chapter renders every committed result file', () => {
   const chapter = book.chapters.find(c => c.slug === 'performance');
   expect(chapter).toBeDefined();
@@ -143,7 +164,7 @@ test('the Performance chapter renders every committed result file', () => {
     expect(text).toContain(`{{perf:${name}`);
   }
   const html = expand(text, book);
-  for (const id of ['chart-bench-rivals-release', 'chart-bench-rivals-dev', 'chart-engine-release', 'chart-engine-dev', 'chart-compile-compile', 'chart-compile-compile-wall', 'chart-sched-rivals-scheduler']) expect(html).toContain(`id="${id}"`);
+  for (const id of ['chart-overview', 'chart-bench-rivals-release', 'chart-bench-rivals-dev', 'chart-engine-release', 'chart-engine-dev', 'chart-compile-compile', 'chart-compile-compile-wall', 'chart-sched-rivals-scheduler']) expect(html).toContain(`id="${id}"`);
   expect(new Set(html.match(/id="chart-[^"]+"/g)).size).toBe(html.match(/id="chart-[^"]+"/g).length); // no id twice
   expect(html).toContain('higher is better');
 });

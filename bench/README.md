@@ -40,7 +40,12 @@ intrinsics twins instead.
 `bintrees`, `strings`, `json`, `dyncall`, `iterchain`, `ecs`) and `chan` also have a C++20 twin,
 `NAME.cpp` (`std::unordered_map`, `std::unique_ptr` nodes, `std::string`, a `std::variant` DOM,
 virtual functions, ranges views, `std::vector<float>` columns, a mutex/condition-variable channel);
-each file's header states its idiomatic choice.
+each file's header states its idiomatic choice. So do the run-time programs and `ecs_par`
+(`std::span`, `std::inner_product`, `std::transform`, `std::merge`, `std::vector<bool>` for the
+sieve, and `std::jthread` per frame, with `CPP_THREADS` setting the workers). bench-rivals builds every
+`NAME.cpp` it finds with `clang++ -std=c++20 -O2 -ffp-contract=off` plus the file's own
+`// bench-cflags:` line, and -pthread when it includes `<thread>`. A twin must print exactly what
+the C twin prints. A program without a C++ twin has no C++ figure.
 `bun tools/bench-rivals.mjs` times all of them against Grail's two builds, and
 `bun tools/sched-rivals.mjs` the scheduler against rayon and oneTBB; the tables are in
 `docs/design/runtime-parity.md`, "Against other languages". `bench/results/` holds their latest
