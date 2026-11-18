@@ -1,5 +1,12 @@
 ## Unreleased
 
+- **The island generator's province layer is ported.** `abundance/src/worldgen_provinces.grl`
+  carries the six-type lithospheric recipe table (and the rock inverse), ab::ProvinceSummary, the
+  splitmix64 Random helper with its bounded/shuffle draws, and make_provinces' shuffle plus
+  farthest-point rejection. 189 values gate the table and, through a real `ab::generate_world` at
+  resolution 64, the exact province records - which match only if every draw of the generator's
+  random stream does.
+
 - **The crafting screen's classifier is ported.** `abundance/src/crafting_menu.grl` carries
   `ui/crafting_menu.hpp/.cpp` of `cmake/tx/crafting_menu.cmake`: the ten categories and their
   display labels (Machines reads "Facilities"), every sub-type group with its display rank and
