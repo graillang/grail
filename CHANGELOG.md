@@ -15,6 +15,14 @@
   configures once and builds the seven reference libraries, so `ABUNDANCE_ROOT=<pin>/src
   ABUNDANCE_BUILD=<pin>/build` gates the suite against that commit. The README records the current pin
   (`ca1f1bc05b`, generator 123) and the invocation.
+- **Texture decode: enumerated, and the Basis/KTX2 premise does not hold.** The engine has no
+  Basis Universal / KTX2 transcoder, no `.ktx2`/`.basis` asset and no call site; the file that
+  suggested one (`engine/characters/tests/basis_decode_tests.cpp`) is the character shape-basis
+  codec. The runtime decodes `abtex` containers (already ported) and block-compressed payloads:
+  `bc7decomp::unpack_bc7` in `material_registry.cpp` for the terrain palette's means, and rgbcx's
+  BC4/BC5 unpack. BC7 decode (679 integer-only lines, no search) is recorded in
+  abundance/README.md as the real decode gap; nothing was shimmed or ported on a guess.
+
 - **The procedural rock kit's pebble and rock-node meshes are ported, bit for bit.**
   `abundance/src/procgen_rock_kit.grl` carries `build_pebble_mesh` and `build_rock_node_mesh` with
   `procgen_math.hpp`'s Rng and vector maths and the shared Soup pipeline (position-welded smooth
