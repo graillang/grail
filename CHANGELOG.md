@@ -99,6 +99,12 @@
   asks `job_cancelled`, `job_preempt_requested` and `job_yield` through the handle it is given. The
   port's own `SchedulerRef` wrapper type is deleted. A plain `(&JobScheduler)` parameter is still
   blocked by two compiler gaps, both reported.
+- Fixed: a compound assignment on an `f64` no longer multiplies by a float literal rounded to `f32`.
+  `mut y = 0.0044444444444444444; y *= 2.03;` gave `0.009022222095065646` (bits `4576354578717423552`)
+  where `y * 2.03` gives `0.009022222222222221` (bits `4576354578790724327`): the literal was rounded
+  to binary32 and widened back. Only an `f32` context rounds a literal from its text now, so the
+  compound forms (`*=`, `+=`, ...) agree bit for bit with `y = y * lit`; an `f32` target is unchanged.
+  Case `compound-f64-literal-keeps-its-bits`.
 - **The dedicated server's datagram reliability layer is ported** (`abundance/src/net_datagram.grl`):
   `ab::server::DatagramConnection` - which the engine's own header documents as pure logic with no
   sockets - with packet sequence numbers and the wrap-safe newer-than compare plus a 32-bit ack
