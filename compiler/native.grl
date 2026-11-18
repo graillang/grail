@@ -5744,9 +5744,8 @@ fn return_bonds<a>(c: (&a mut C), src: u64, dst: u64, aggregate: u64) -> unit {
             }
         }
     } else {
-        // Marked in a byte map and read back in index order: the bond list's order, as before.
-        mut hit = u8[0; n];
-        mut any = false;
+        // Put back in the bond list's order (an insertion sort: a source holds few bonds, and the
+        // list can be long, so nothing proportional to it is built).
         mut stack = u64[];
         stack.push(src);
         while let Some(p) = stack.pop() {
@@ -5756,8 +5755,14 @@ fn return_bonds<a>(c: (&a mut C), src: u64, dst: u64, aggregate: u64) -> unit {
             }
             while j != 0 {
                 if j - 1 < n {
-                    hit[j - 1] = 1;
-                    any = true;
+                    found.push(j - 1);
+                    mut q = found.len() - 1;
+                    while (q != 0) && (found[q - 1] > found[q]) {
+                        swap := found[q - 1];
+                        found[q - 1] = found[q];
+                        found[q] = swap;
+                        q -= 1;
+                    }
                 }
                 j = c.bond_hnext[j - 1];
             }
@@ -5767,13 +5772,6 @@ fn return_bonds<a>(c: (&a mut C), src: u64, dst: u64, aggregate: u64) -> unit {
                     stack.push(k);
                 }
                 k = c.check.places[k - 1].next;
-            }
-        }
-        if any {
-            for i in n {
-                if hit[i] != 0 {
-                    found.push(i);
-                }
             }
         }
     }
