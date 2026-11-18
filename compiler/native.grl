@@ -12442,7 +12442,8 @@ fn ident<a>(c: (&a mut C)) -> u8[] {
         not_a_name(&mut c);
     }
     t := tok_text(&mut c, c.pos);
-    if same(view(t), view("true")) || same(view(t), view("false")) {
+    // Only a four- or five-byte name can be `true` or `false`.
+    if ((t.len() == 4) || (t.len() == 5)) && (same(view(t), view("true")) || same(view(t), view("false"))) {
         truth_not_a_name(&mut c);
     }
     advance(&mut c);
@@ -48310,6 +48311,111 @@ fn map_expression<a>(c: (&a mut C), expected: u64) -> Val {
 // `expected` is the type the place this value goes into has (NO_TYPE when the context fixes none):
 // a closure literal reads it as its signature hint, and an `if`/`match` in expression position hands
 // it to its arms, so a literal, a `None` or a narrower integer adopts the type the context wants.
+// The words `primary` treats specially, by number (0: none of them), dispatched on length and first byte.
+fn primary_word<a>(n: &a [u8]) -> u64 {
+    k := n.len();
+    if k == 0 {
+        return 0;
+    }
+    f := n[0];
+    if (k == 3) && (f == 100) {
+        if same(n, view("dyn")) {
+            return 11;
+        }
+        return 0;
+    }
+    if (k == 3) && (f == 102) {
+        if same(n, view("f32")) {
+            return 13;
+        }
+        if same(n, view("f64")) {
+            return 16;
+        }
+        return 0;
+    }
+    if (k == 4) && (f == 78) {
+        if same(n, view("None")) {
+            return 3;
+        }
+        return 0;
+    }
+    if (k == 4) && (f == 83) {
+        if same(n, view("Self")) {
+            return 4;
+        }
+        if same(n, view("Some")) {
+            return 5;
+        }
+        return 0;
+    }
+    if (k == 4) && (f == 98) {
+        if same(n, view("bits")) {
+            return 6;
+        }
+        return 0;
+    }
+    if (k == 4) && (f == 99) {
+        if same(n, view("char")) {
+            return 9;
+        }
+        if same(n, view("core")) {
+            return 10;
+        }
+        return 0;
+    }
+    if (k == 4) && (f == 101) {
+        if same(n, view("else")) {
+            return 12;
+        }
+        return 0;
+    }
+    if (k == 4) && (f == 104) {
+        if same(n, view("host")) {
+            return 18;
+        }
+        return 0;
+    }
+    if (k == 5) && (f == 77) {
+        if same(n, view("Mutex")) {
+            return 2;
+        }
+        return 0;
+    }
+    if (k == 6) && (f == 65) {
+        if same(n, view("Atomic")) {
+            return 1;
+        }
+        return 0;
+    }
+    if (k == 6) && (f == 98) {
+        if same(n, view("borrow")) {
+            return 7;
+        }
+        return 0;
+    }
+    if (k == 8) && (f == 102) {
+        if same(n, view("f32_bits")) {
+            return 14;
+        }
+        return 0;
+    }
+    if (k == 10) && (f == 98) {
+        if same(n, view("borrow_mut")) {
+            return 8;
+        }
+        return 0;
+    }
+    if (k == 13) && (f == 102) {
+        if same(n, view("f32_from_bits")) {
+            return 15;
+        }
+        if same(n, view("f64_from_bits")) {
+            return 17;
+        }
+        return 0;
+    }
+    return 0;
+}
 fn primary<a>(c: (&a mut C), expected: u64) -> Val {
     k := kind(&mut c);
     // An `if` written where a value is required. The statement form is what `statement_body` parses,
@@ -48699,16 +48805,19 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
         return val(imm(&mut c, truth), ty);
     }
     first := ident(&mut c);
-    if same(view(first), view("Some")) & is(&mut c, view("(")) {
+    // Which of the words below `first` is (primary_word), found once: every name passed
+    // through a comparison with each of them before.
+    fsp := primary_word(view(first));
+    if (fsp == 5) & is(&mut c, view("(")) {
         return call(&mut c, view("core"), view("some"));
     }
-    if same(view(first), view("None")) {
+    if (fsp == 3) {
         exchange(&mut c.none_start, c.pos - 1);
         exchange(&mut c.none_end, c.pos);
         return val(imm(&mut c, 0), 0);
     }
     // `dyn I[...]`: a sequence literal of interface objects.
-    if same(view(first), view("dyn")) && (kind(&mut c) == 1) && (find_local(&mut c, view(first)) == 0) {
+    if (fsp == 11) && (kind(&mut c) == 1) && (find_local(&mut c, view(first)) == 0) {
         exchange(&mut c.pos, c.pos - 1);
         ty := parse_type_base(&mut c);
         return finish_type_literal(&mut c, ty);
@@ -48716,7 +48825,7 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
     // `T::Item[...]` / `Self::Item[...]`: a sequence literal of an associated type.
     here_pos := c.pos;
     if is(&mut c, view("::")) && (kind_at(&mut c, here_pos + 1) == 1) && (kind_at(&mut c, here_pos + 2) == 91) {
-        mut generic = same(view(first), view("Self")) && (c.self_type != NO_TYPE);
+        mut generic = (fsp == 4) && (c.self_type != NO_TYPE);
         for i in c.tnames.len() {
             if same(view(c.tnames[i]), view(first)) {
                 generic = true;
@@ -48752,7 +48861,7 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
         n := ident(&mut c);
         return simd_static(&mut c, simd_named(&mut c, view(first)), view(n));
     }
-    if same(view(first), view("Atomic")) & is(&mut c, view("::")) {
+    if (fsp == 1) & is(&mut c, view("::")) {
         advance(&mut c);
         n := ident(&mut c);
         if same(view(n), view("new")) {
@@ -48760,7 +48869,7 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
         }
         fail(&mut c, view("unknown Atomic constructor"));
     }
-    if same(view(first), view("Mutex")) & is(&mut c, view("::")) {
+    if (fsp == 2) & is(&mut c, view("::")) {
         advance(&mut c);
         n := ident(&mut c);
         if same(view(n), view("new")) {
@@ -48783,7 +48892,7 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
         // --deny-ambient-host: OS access must be an explicit grant. A module opts in to the
         // ambient `host::` interface by declaring `use host;`; the gated stdlib module
         // (lib/authority.grl) is the recommended route and opts in exactly once.
-        if same(view(first), view("host")) & (c.deny_ambient != 0) & (c.host_optin == 0) {
+        if (fsp == 18) & (c.deny_ambient != 0) & (c.host_optin == 0) {
             fail(
                 &mut c,
                 view(
@@ -48793,7 +48902,7 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
         }
         // `Some(value)` and `None` are the only spellings; the core constructors they lower to
         // cannot be named directly.
-        if same(view(first), view("core")) & (same(view(second), view("some")) || same(view(second), view("none"))) {
+        if (fsp == 10) & (same(view(second), view("some")) || same(view(second), view("none"))) {
             fail(&mut c, view("use Some(value)/None, not core::some/core::none"));
         }
         if is(&mut c, view("<")) {
@@ -48869,7 +48978,7 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
         }
     }
     if is(&mut c, view("(")) {
-        if same(view(first), view("f64")) {
+        if (fsp == 16) {
             if (find_local(&mut c, view(first)) == 0)
                 & (find_func(&mut c, view(m), view(first)) == 0) {
                 advance(&mut c);
@@ -48894,7 +49003,7 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
                 return val(slot, ty);
             }
         }
-        if same(view(first), view("f32")) {
+        if (fsp == 13) {
             if (find_local(&mut c, view(first)) == 0)
                 & (find_func(&mut c, view(m), view(first)) == 0) {
                 advance(&mut c);
@@ -48928,7 +49037,7 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
             }
         }
         // char(n): checked conversion from an integer code point (aborts on surrogates / > 0x10FFFF).
-        if same(view(first), view("char")) {
+        if (fsp == 9) {
             if (find_local(&mut c, view(first)) == 0)
                 & (find_func(&mut c, view(m), view(first)) == 0) {
                 advance(&mut c);
@@ -48960,10 +49069,10 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
                 return val(slot, ty);
             }
         }
-        if same(view(first), view("f32_from_bits")) || same(view(first), view("f32_bits")) {
+        if (fsp == 15) || (fsp == 14) {
             if (find_local(&mut c, view(first)) == 0)
                 & (find_func(&mut c, view(m), view(first)) == 0) {
-                from := same(view(first), view("f32_from_bits"));
+                from := (fsp == 15);
                 advance(&mut c);
                 value := expr(&mut c, 0);
                 expect(&mut c, view(")"));
@@ -48981,7 +49090,7 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
                 return val(t, 0);
             }
         }
-        if same(view(first), view("f64_from_bits")) {
+        if (fsp == 17) {
             if (find_local(&mut c, view(first)) == 0)
                 & (find_func(&mut c, view(m), view(first)) == 0) {
                 advance(&mut c);
@@ -49002,7 +49111,7 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
                 wrapping = 1;
             }
         }
-        if (named == 0) & same(view(first), view("bits")) {
+        if (named == 0) & (fsp == 6) {
             named = 64;
             raw_bits = 1;
         }
@@ -49059,10 +49168,10 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
                 return val(slot, ty);
             }
         }
-        if same(view(first), view("borrow")) {
+        if (fsp == 7) {
             fail(&mut c, view("borrow was removed; write &value"));
         }
-        if same(view(first), view("borrow_mut")) {
+        if (fsp == 8) {
             fail(&mut c, view("borrow_mut was removed; write &mut value"));
         }
         // A function of this module, or a callable local (closure, function pointer), named like a
@@ -49225,7 +49334,7 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
     }
     // A statement word here is a statement written where a value is required: say that, rather than
     // reporting a name that no binding has (an `if`/`match` reaches its own expression form above).
-    if statement_head(view(first)) || same(view(first), view("else")) {
+    if statement_head(view(first)) || (fsp == 12) {
         mut said = copy_bytes(view("`"));
         push_bytes(&mut said, view(first));
         push_bytes(&mut said, view("` is a statement, not an expression: it has no value"));

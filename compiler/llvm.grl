@@ -9596,6 +9596,13 @@ fn lower_range<a, b, c, d, e, g, h>(l: (&a mut L), lines: (&b u8[][]), funcs: (&
             // own fast paths are small too; their refills are `_slow`.)
             if starts(view(f.name), view("rt_")) && ends(view(f.name), view("_slow")) {
                 put(&mut p.functions, view(" noinline cold"));
+            } else if eq(view(f.name), view("rt_alloc_shared")) || eq(view(f.name), view("rt_free_shared")) {
+                put(&mut p.functions, view(" noinline"));
+            } else if eq(view(f.name), view("rt_alloc")) || eq(view(f.name), view("rt_alloc_unlocked")) || eq(view(f.name), view("rt_free")) {
+                // With their fall-backs out of line, the one-thread fast paths are a dozen
+                // instructions: inlined where a program allocates and frees, they spare a call and
+                // a return per operation (bench/bintrees: 45M of each).
+                put(&mut p.functions, view(" inlinehint"));
             }
             atomics_inline(&mut p.functions, l.target);
             put(&mut p.functions, view(" {\n"));

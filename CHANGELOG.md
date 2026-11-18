@@ -1,11 +1,23 @@
 ## Unreleased
 
+- **bintrees runs 21% fewer instructions in release and 18% fewer in dev.** Freeing a static object
+  (a payload-less variant such as a tree's `Leaf`, or a literal's) is answered in the free fast path;
+  it went through two slow-path calls, a third of the frees in bintrees. And with release builds the
+  allocator's fast paths are inlined where a program allocates and frees: the LLVM lifter keeps the
+  threaded paths out of line and hints `rt_alloc`, `rt_alloc_unlocked` and `rt_free` inline.
+  bench/bintrees: release 3.653 G -> 2.878 G, dev 12.168 G -> 9.931 G user instructions, output
+  unchanged.
+
 - **Development builds drop the register copies around float arithmetic.** The native backend
   computes every float operation in the %xmm0/%xmm1 scratch pair and copies values in and out; a new
   pass (`xmm_copies`) and the f32 constant rewrite now load straight into the destination, store
   straight from it and do two-address arithmetic in place, wherever the scratch is dead after.
   Development builds, outputs identical: ecs_par 18.3G to 15.2G instructions (-17%), dot_f32 -10%,
   xform_f32 -9%, ecs -8%, matmul -7%; f64 code unchanged.
+- `bench/results/compile.json` re-measured with the PGO release compiler of main d086c472: a cold
+  check of the 104 000-line program is 1.10x Zig's instructions (from 1.29x); every other row is
+  below the fastest rival.
+
 - **Release builds lift the `dyn` adapter thunks.** A thunk (`.C<hash>_N`) adjusts the receiver and
   tail-calls the method with `jmp *%r11`; the lifter refused it, so every `dyn` call went through a
   native thunk and a second jump. It is now a call and a return in IR, which LLVM inlines the method
