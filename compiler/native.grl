@@ -3809,12 +3809,20 @@ fn ffi_marker_enter<a>(c: (&a mut C), slot: u64) -> unit {
             o(&mut c, view("movq %fs:0,%r11\n"));
             mark(&mut c, have);
         }
-        o(&mut c, view("cmpq $2,24(%r11)\n"));
-        jump(&mut c, view("jne"), none);
-        o(&mut c, view("movq 32(%r11),%r11\nmovq 320(%r11),%r11\nincq (%r11)\n"));
-        jump(&mut c, view("jmp"), done);
-        mark(&mut c, none);
-        o(&mut c, view("xorl %r11d,%r11d\n"));
+        if c.target == 0 {
+            // Linux: record word 48 is the block's foreign-call pair, or 0 off a worker
+            // (rt_marker_cache).
+            o(&mut c, view("movq 48(%r11),%r11\ntestq %r11,%r11\n"));
+            jump(&mut c, view("je"), done);
+            o(&mut c, view("incq (%r11)\n"));
+        } else {
+            o(&mut c, view("cmpq $2,24(%r11)\n"));
+            jump(&mut c, view("jne"), none);
+            o(&mut c, view("movq 32(%r11),%r11\nmovq 320(%r11),%r11\nincq (%r11)\n"));
+            jump(&mut c, view("jmp"), done);
+            mark(&mut c, none);
+            o(&mut c, view("xorl %r11d,%r11d\n"));
+        }
         mark(&mut c, done);
         o(&mut c, view("movq %r11,"));
     } else {
@@ -4089,7 +4097,7 @@ fn save_result<a>(c: (&a mut C), ret: u64) -> u64 {
         if words <= 2 {
             // Word 0 in rax, word 1 in rdx (docs/design/unboxed-values.md, 3c): stored straight
             // into frame words of this call site.
-            return frame_from_registers(&mut c, words);
+            return frame_from_registers(&mut c, words, ret);
         }
         // A larger result was written to the destination the call passed (call_dest): rax is it.
         slot := save(&mut c);
@@ -5293,7 +5301,7 @@ fn call_dest<a>(c: (&a mut C), ret: u64) -> u64 {
     if !needs_dest(&mut c, ret) {
         return 0;
     }
-    return frame_alloc(&mut c, record_words(&mut c, base_type(&mut c, ret)));
+    return frame_alloc_fresh(&mut c, record_words(&mut c, base_type(&mut c, ret)), ret);
 }
 fn needs_dest<a>(c: (&a mut C), ret: u64) -> bool {
     if !framed(&mut c, ret) {
@@ -31121,7 +31129,7 @@ fn retag_enum<a>(c: (&a mut C), xt: u64, tag: u64, ty: u64, from: u64) -> u64 {
         if enum_words(&mut c, base_type(&mut c, ty)) < words {
             words = enum_words(&mut c, base_type(&mut c, ty));
         }
-        n := frame_alloc(&mut c, enum_words(&mut c, base_type(&mut c, ty)));
+        n := frame_alloc_fresh(&mut c, enum_words(&mut c, base_type(&mut c, ty)), ty);
         get(&mut c, xt, view("%rdx"));
         get(&mut c, n, view("%rcx"));
         for k in words {
@@ -31147,7 +31155,7 @@ fn free_enum_shell<a>(c: (&a mut C), xt: u64, ty: u64) -> unit {
 // A small enum's value in frame words of this site: word 0 the tag, word 1 the payload word.
 // `ety` is the enum's type and `pty` the payload's (1 for none): a plain payload is copied in.
 fn enum_frame<a>(c: (&a mut C), tag: u64, payload: u64, ety: u64, pty: u64) -> u64 {
-    n := frame_alloc(&mut c, enum_words(&mut c, base_type(&mut c, ety)));
+    n := frame_alloc_fresh(&mut c, enum_words(&mut c, base_type(&mut c, ety)), ety);
     get(&mut c, n, view("%rcx"));
     get(&mut c, tag, view("%rax"));
     o(&mut c, view("movq %rax,(%rcx)\n"));
@@ -31181,12 +31189,26 @@ fn framed<a>(c: (&a mut C), ty: u64) -> bool {
 // (llvm::fact_aggregate), laid out as a DynPair is: word 0 is the slot allocated last, the lowest
 // address, and word j is `word0 - j`. Returns a slot holding word 0's address.
 fn frame_alloc<a>(c: (&a mut C), words: u64) -> u64 {
+    return frame_alloc_as(&mut c, words, 0);
+}
+// Frame words that are written before anything reads them and own nothing (a plain value fresh from
+// its constructor, a copy, a view's pair, a call's result): the frame's zeroing is not needed for
+// them, and the LLVM lifter skips it (the aggregate fact's `what` 1). Zeroing the words of every
+// such temporary at every entry was most of a recursive parser's per-call cost.
+fn frame_alloc_fresh<a>(c: (&a mut C), words: u64, ty: u64) -> u64 {
+    mut fresh_words = 0;
+    if plain(&mut c, ty) {
+        fresh_words = 1;
+    }
+    return frame_alloc_as(&mut c, words, fresh_words);
+}
+fn frame_alloc_as<a>(c: (&a mut C), words: u64, written: u64) -> u64 {
     mut first = 0;
     for j in words {
         first = fresh(&mut c);
     }
     if c.facts_fn.len() != 0 {
-        llvm::fact_aggregate(&mut c.facts, copy_bytes(view(c.facts_fn)), first, words);
+        llvm::fact_aggregate(&mut c.facts, copy_bytes(view(c.facts_fn)), first, words, written);
     }
     o(&mut c, view("leaq "));
     stack_slot(&mut c, first);
@@ -31203,13 +31225,13 @@ fn take_temp<a>(c: (&a mut C), slot: u64) -> bool {
     return false;
 }
 // The words of a framed result just returned in rax (and rdx), stored into fresh frame words.
-fn frame_from_registers<a>(c: (&a mut C), words: u64) -> u64 {
+fn frame_from_registers<a>(c: (&a mut C), words: u64, ty: u64) -> u64 {
     mut first = 0;
     for j in words {
         first = fresh(&mut c);
     }
     if c.facts_fn.len() != 0 {
-        llvm::fact_aggregate(&mut c.facts, copy_bytes(view(c.facts_fn)), first, words);
+        llvm::fact_aggregate(&mut c.facts, copy_bytes(view(c.facts_fn)), first, words, u64(plain(&mut c, ty)));
     }
     o(&mut c, view("movq %rax,"));
     stack_slot(&mut c, first);
@@ -31284,7 +31306,7 @@ fn frame_copy<a>(c: (&a mut C), src: u64, ty: u64) -> u64 {
         return simd_emit(&mut c, view("copy"), base_type(&mut c, ty), base_type(&mut c, ty), src, SIMD_NONE, SIMD_NONE, SIMD_NONE, 0, false);
     }
     words := record_words(&mut c, base_type(&mut c, ty));
-    dst := frame_alloc(&mut c, words);
+    dst := frame_alloc_fresh(&mut c, words, ty);
     get(&mut c, src, view("%rcx"));
     get(&mut c, dst, view("%rdx"));
     for k in words {
@@ -33788,7 +33810,7 @@ fn array_storage<a>(c: (&a mut C), ty: u64) -> u64 {
         first = fresh(&mut c);
     }
     if c.facts_fn.len() != 0 {
-        llvm::fact_aggregate(&mut c.facts, copy_bytes(view(c.facts_fn)), first, words);
+        llvm::fact_aggregate(&mut c.facts, copy_bytes(view(c.facts_fn)), first, words, 0);
     }
     if c.array_big < words * 8 {
         exchange(&mut c.array_big, words * 8);
@@ -34635,7 +34657,7 @@ fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
     // depends on the record's type arguments, and those are known only now.
     mut n = 0;
     if framed(&mut c, ty) {
-        n = frame_alloc(&mut c, record_words(&mut c, ty));
+        n = frame_alloc_fresh(&mut c, record_words(&mut c, ty), ty);
         if plain(&mut c, ty) {
             c.temps.push(n);
         }
@@ -37366,7 +37388,7 @@ fn builtin_id<a>(n: &a [u8]) -> u64 {
 // unboxed-values.md, views as two words): a slice writes its pair into fresh frame words of this
 // site, and the value is their address.
 fn view_into<a, b>(c: (&a mut C), f: &b [u8], args: u64[]) -> u64 {
-    dst := frame_alloc(&mut c, 2);
+    dst := frame_alloc_as(&mut c, 2, 1);
     mut all = args.copy();
     all.push(dst);
     return invoke(&mut c, f, all);
@@ -37376,7 +37398,7 @@ fn view_into<a, b>(c: (&a mut C), f: &b [u8], args: u64[]) -> u64 {
 fn view_of<a>(c: (&a mut C), source: u64) -> u64 {
     // A pair of its own, copied from the header: a view is a value, and swapping or assigning one
     // (exchange, `*r = v`) must not write into the vector's header.
-    dst := frame_alloc(&mut c, 2);
+    dst := frame_alloc_as(&mut c, 2, 1);
     get(&mut c, source, view("%rcx"));
     get(&mut c, dst, view("%rdx"));
     o(&mut c, view("movq (%rcx),%rax\nmovq %rax,(%rdx)\nmovq 8(%rcx),%rax\nmovq %rax,8(%rdx)\n"));
