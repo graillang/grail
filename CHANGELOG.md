@@ -313,6 +313,18 @@
   heap re-placement, a hit and a second re-placement. The plan output is unchanged by a replay (which
   is what ABE_GRAPH_CACHE_CHECK asserts in the engine); disabling the replay changes 6 lines.
   `abundance/tests/parity/render_graph.txt` is now 2699 lines.
+- **The frame boundary's section schedule and intent-outcome window are ported.**
+  `abundance/src/world_model.grl` now carries `FrameSections::update`'s decision: a frame rebuilds
+  its sections when the environment, action, world, intent-count or HUD-UI revisions moved (or on
+  the first update, or without a model), and otherwise refreshes the clock and — when an accepted
+  body change moved `life_revision` — the life views; `invalidate()` restarts it and
+  `create`/`reset` replace it as `Session` replaces `FrameSections`. The intent window is
+  `Session::record`: the newest 8 outcomes out of `intent_total`, with the admission refusals
+  (`no_world`, `player_boundary_pending`) returning before anything is recorded, and `publish`
+  now stops before the digest and the sections while a boundary is pending (the design doc
+  claimed that; the code did not). The replay gates every schedule branch and the window overflow
+  on the live session (1 491 reference lines). The section producers — the JSON/HUD documents —
+  remain the gameplay lanes' work, since they need the state those lanes port.
 
 - Fixed: a struct partly moved before a loop (`f := r.inner;`) no longer makes the loop refuse with "loop
   backedge consumes entry storage: `r` is moved out of it" when the body only reads it. The backedge check
