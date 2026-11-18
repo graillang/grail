@@ -1,5 +1,14 @@
 ## Unreleased
 
+- **The abundance suite's `frame_loop` wiring no longer breaks every other port test.** `frame_loop.grl`
+  names `abundance_job_scheduler`, which `portSources` deliberately leaves out (it is the one port
+  module with real threads, added only for the tests that ask); `frame_loop.grl` itself was still in
+  the glob, so every other test compiled it and failed with `cannot resolve module
+  abundance_job_scheduler`. Two lines: `frame_loop.grl` leaves the glob and joins its own test's
+  modules. Found while landing the platform OS increment (which no longer touches frame_loop, but its
+  tests hit the same glob); `frame_loop_test` still matches its 83 lines.
+
+
 - **Abundance's file/OS services land on Grail, matching `content_paths.hpp` 35/35 lines.**
   `abundance/src/platform_os.grl` carries the engine core's content paths (`packaged`, `root` including
   the `$HOME/.cache` and `/tmp` fallbacks, `shader_root`, `resolve`) as rules over the environment
