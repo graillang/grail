@@ -1,5 +1,6 @@
 module llvm;
 use machine;
+use bytes;
 use jobs;
 use host;
 
@@ -640,11 +641,16 @@ fn has<a, b>(a: &a [u8], b: &b [u8]) -> bool {
     if b.len() == 0 {
         return true;
     }
-    first := b[0];
-    for i in a.len() - b.len() + 1 {
-        if (a[i] == first) && occurs_at(a, i, b) {
+    // Candidates by their first byte, eight bytes at a time (bytes::find_byte): the lifter asks this
+    // of every line it reads and writes.
+    first := u64(b[0]);
+    last := a.len() - b.len();
+    mut i = bytes::find_byte(a, 0, first);
+    while i <= last {
+        if occurs_at(a, i, b) {
             return true;
         }
+        i = bytes::find_byte(a, i + 1, first);
     }
     return false;
 }
