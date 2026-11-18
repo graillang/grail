@@ -1654,18 +1654,22 @@ fn reg_read_later<a, b>(s: &a [u8], from: u64, reg: &b [u8], low: &b [u8]) -> bo
     }
     return false;
 }
-pub fn f32_const_ops<a>(s: &a [u8]) -> u8[] {
-    // Every rewrite below starts at a `cvtss2sd` line: a stream with none - any program without f32
-    // arithmetic - is returned as it is, without walking it line by line.
-    mut any = false;
-    mut x = 0;
-    while (x + 8 <= s.len()) && !any {
-        if (s[x] == 99) && ir::at(view(s), x, view("cvtss2sd")) {
-            any = true;
+// Whether f32_const_ops can rewrite anything in `s`: every rewrite involves a `cvtss2sd` line, and
+// instructions start their lines, so only line starts are looked at (find_byte jumps between them a
+// word at a time). A stream without one - any program without f32 arithmetic - need not be passed.
+pub fn has_f32_const_ops<a>(s: &a [u8]) -> bool {
+    mut a = 0;
+    n := s.len();
+    while a + 8 <= n {
+        if (s[a] == 99) && ir::at(view(s), a, view("cvtss2sd")) {
+            return true;
         }
-        x += 1;
+        a = bytes::find_byte(view(s), a, 10) + 1;
     }
-    if !any {
+    return false;
+}
+pub fn f32_const_ops<a>(s: &a [u8]) -> u8[] {
+    if !has_f32_const_ops(view(s)) {
         return s.copy();
     }
     mut out = u8[];
