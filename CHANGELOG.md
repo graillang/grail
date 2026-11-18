@@ -22,6 +22,15 @@
   uniform or push-constant block, since most of the tree's records are loaded by address and never
   pinned. `docs/design/abundance-shaders.md` records the vendored/blocked inventory per area and the
   mirror-tree includes that block the rest.
+- **The Abundance host composition boundary is ported** (`abundance/src/host.grl`, the engine-free
+  half of `cmake/tx/host.cmake`): the dedicated store scope marker (`"ABESCP1\0"` + realm + world)
+  and its created/matched/wrong-scope/unowned/corrupt/error decision, `should_compact`'s
+  4x-live-plus-64-MiB threshold, the plain manufacturing panel's revision and wording, and
+  `account_claim_digest` (64 hex characters, either case, to SHA-256 hex). Gated by
+  `tests/parity/host.cpp`, which compiles the engine's own scope/group-commit/telemetry/claim
+  sources and runs the scope against a real LocalStore: 121 reference lines, all matched by
+  `abundance/tests/host_test.grl`.
+
 - **The job scheduler test calls methods on captured `Arc`s directly.** Since the compiler treats a
   `&self` method on a captured value as a shared call, the free-function helpers `jobsched_test.grl`
   used to reach its shared counters are deleted.
