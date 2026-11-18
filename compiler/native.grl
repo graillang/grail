@@ -5306,10 +5306,16 @@ fn ffi_signature_fact<a, b, d, e>(c: (&a mut C), argtypes: (&b u64[]), formals: 
 fn signature_fact<a>(c: (&a mut C), declared: u64) -> unit {
     // The native optimiser reads it too: a direct call to this body reads only its argument
     // registers (ir.grl `exact_calls`).
-    if !wants_facts(&c) {
+    mut words = arg_words(&c, declared);
+    // An `unsafe module` records no type facts, but a body taking more than six words still gets
+    // this one, which only counts them: without it the lifter cannot name the words past the sixth
+    // (stack_param) or pass them (lower_call), so the body and every caller that fills an outgoing
+    // area stayed native - the runtime's own seven-word functions ran unoptimised. Its reference
+    // mask stays empty there: the declared types are not checked.
+    raw_wide := (c.raw != 0) && (c.validating == 0) && (c.facts_fn.len() != 0) && (words > 6);
+    if !wants_facts(&c) && !raw_wide {
         return ();
     }
-    mut words = arg_words(&c, declared);
     if (c.forge_sig.len() != 0) && same(view(c.forge_sig), view(c.facts_fn)) {
         words = c.forge_words;
     }
@@ -5317,6 +5323,9 @@ fn signature_fact<a>(c: (&a mut C), declared: u64) -> unit {
     // backend passes them as `ptr` so the caller's slot does not escape as an integer.
     mut refs = 0;
     for i in declared {
+        if c.raw != 0 {
+            break;
+        }
         if (i < 6) && (i < c.locals.len()) {
             pty := c.locals[i].ty;
             if ty_kind(&mut c, pty) == 7 {

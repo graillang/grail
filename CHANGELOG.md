@@ -1,5 +1,14 @@
 ## Unreleased
 
+- **Release builds: a function of more than six words in an `unsafe module` is optimised.** Such a
+  body reads its seventh and later arguments from the caller's stack, which the LLVM lifter names
+  through the body's signature fact - but an `unsafe module` recorded none, so the body and every
+  caller that filled an outgoing argument area stayed native: unoptimised, frame zeroed with
+  `rep stos`, every value spilled. That module now records the one fact it can (the word count; no
+  types), and both are lifted. The runtime is such a module: with `rt_job_make` given a seventh
+  parameter, a one-worker `pfib(27)` fork/join ran 299M user-space instructions against 166M with six;
+  it now runs 165M either way, so runtime functions need no longer be packed into six words. Output is
+  unchanged; ordinary modules already recorded the fact.
 - **Native backend: iterator chains run 18% fewer instructions** (bench/iterchain: 1100M -> 897M
   user-space instructions in the development build). A direct call to a capture-free closure now
   zeroes its environment register with `xorq %rax,%rax`, which the optimiser reads as a write that
