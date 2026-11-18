@@ -1,5 +1,22 @@
 ## Unreleased
 
+- **The performance charts are measured again** on main bd532104 (kernels, engine programs, parallel
+  ECS; compile on 66e3b3b6 with PGO). `tools/bench-rivals.mjs` now takes the best of 7 runs by default
+  (it was 3) and `just bench-results` the best of 9 for the parallel chart (it was 5), so the next
+  refresh on a shared machine is less at the mercy of one quiet round.
+
+- `bench/results/compile.json` re-measured with the release compiler of main 66e3b3b6 (with its
+  profile): a cold check of the 104 000-line program is now 1.29x Zig's instructions (from 1.51x),
+  and every other row is at or below the fastest rival.
+
+- **Default `extern "C"` calls on Windows x64 lost their locked instruction.** The foreign-call
+  marker counts out with a plain increment and one load; the scheduler's monitor orders it with
+  `FlushProcessWriteBuffers` before it hands a stuck call's worker on (docs/design/concurrency-model.md,
+  2.4.1). With this every target has the asymmetric-fence marker.
+- **Fix: a per-module build where two modules coerce a function links.** Each module's object carried
+  its own global `grail_fn_thunk` (the adapter that lets a named function act as an `Fn` value), so
+  the link failed with `duplicate symbol: grail_fn_thunk`. It is now a weak definition like the
+  other shared adapters, and the linker keeps one.
 - **f32 element loads and stores and f32 constants in development builds take no detours.** An f32
   element now loads and stores with one `movss` (it went through `%eax`), and an f32 constant hoisted
   into an SSE register is rounded to binary32 once, so `v * damping - gravity * dt` is `mulss` and
