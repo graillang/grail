@@ -488,13 +488,16 @@ its block. A stale 1 can at worst send one later return through the slow path, w
 A retake gives the block a fresh pair, so a late `incq` by the old owner never touches the counter
 the new owner uses.
 
-**Where the barrier comes from on each target.** x86-64 Linux: the thread side is plain, and the
-monitor pays with `membarrier` (registered once with `MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED`;
-without it - kernels before 4.14 - undeclared calls are never handed off; declared `blocking` calls
-still are). Windows x64: `FlushProcessWriteBuffers` is the same tool. AArch64 and RV64: the
-thread side's increment is still a sequentially consistent read-modify-write, which is its own full
-barrier (a signal to the owner thread is the fallback where neither exists). The instruction-count
-win is on x86-64 Linux first; the other targets keep a fenced leave until their barrier is wired in.
+**Where the barrier comes from on each target.** Linux, every target: the thread side is plain
+(x86-64 `incq`; AArch64 `ldr`/`add`/`str`; RV64 `ld`/`addi`/`sd`, each followed by a plain load of
+`retaken`), and the monitor pays with `membarrier` (system call 324 on x86-64, 283 in the generic
+table; registered once with `MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED`; without it - kernels before
+4.14 - undeclared calls are never handed off, while declared `blocking` calls still are). The
+argument above does not depend on the hardware's ordering: `membarrier` is a full barrier in every
+running thread on every architecture, which is all the Dekker pair needs. Windows x64:
+`FlushProcessWriteBuffers` is the same tool; until it is wired in the call keeps a locked increment,
+which is its own barrier. On Linux the entry also reaches the pair in one load: thread-record word 48
+caches the running block's pair (rt_marker_cache).
 
 ### 2.5 Coordination
 
@@ -520,7 +523,10 @@ to know which. Lists are guarded by a word lock held for a few instructions.
   a migration is the worker-affine-guard problem `concurrency-v1.md` leaves open; a callback makes
   it unrepresentable. `Condition` follows the same shape, which also removes the "forgot to re-test
   the predicate" bug.
-- Channels allocate once, at creation. A `bounded(0)` channel is a rendezvous. A task's result is
+- Channels allocate once, at creation. `lib/chan.grl` is crossbeam-channel's array flavour: per-slot
+  stamps, padded `head`/`tail` counters, spin then yield then park, and a gate taken only when a
+  waiter is parked. `bounded(0)` holds one value, as `bounded(1)` does; there is no rendezvous
+  channel yet. A task's result is
   already the one-shot channel (`Task<R>`, `Job<R>`, `Thread<R>`), so there is no separate oneshot.
 - Every parking wait takes the enclosing scope's cancel token and has an `_until(deadline)` form.
 - Holding a mutex while waiting is allowed and no longer burns CPU; `@no_wait` on the callback is

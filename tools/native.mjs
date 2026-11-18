@@ -493,6 +493,68 @@ function buildTreeCompiler() {
 // LLVM backend could carry a miscompile in), and the result is accepted only if it compiles the
 // compiler to the same text and objects and its programs pass a corpus slice. The LLVM module is
 // compiled in parallel parts (`grail llvm-compile`).
+// Profile-guided optimisation of the release compiler: tools/pgo/grail.profdata.xz is the profile
+// of a training run (`bun tools/native.mjs pgo-train`: a cold check and build of a 26 000-line
+// program and the compiler's own check), and clang lays out and inlines the compiler's code by it -
+// about 9% fewer instructions per compile, output unchanged. A function changed since the training
+// has no profile and is compiled as without one; GRAIL_PGO=0 builds with no profile at all.
+const pgoProfile = join(root, 'tools/pgo/grail.profdata.xz');
+function profileUse(log) {
+  if (process.env.GRAIL_PGO === '0' || !existsSync(pgoProfile)) return [];
+  const packed = readFileSync(pgoProfile);
+  const digest = createHash('sha256').update(packed).digest('hex').slice(0, 16);
+  const path = join(root, '.work/pgo', `${digest}.profdata`);
+  if (!existsSync(path)) {
+    mkdirSync(dirname(path), { recursive: true });
+    const unpacked = spawnSync('xz', ['-dc', pgoProfile], { maxBuffer: 1 << 28 });
+    if (unpacked.status !== 0) {
+      log('xz is not available: building the release compiler without its profile');
+      return [];
+    }
+    writeFileSync(path, unpacked.stdout);
+  }
+  return [`-fprofile-use=${path}`, '-Wno-profile-instr-unprofiled', '-Wno-profile-instr-out-of-date', '-Wno-backend-plugin'];
+}
+// `bun tools/native.mjs pgo-train`: the instrumented release compiler (clang -fprofile-generate, the
+// counters written at exit by tools/pgo/shim.c), the training runs with one process each
+// (GRAIL_JOBS=1, so no forked worker's counters are lost), and the merged profile written to
+// tools/pgo/grail.profdata.xz. Run it after large changes to the compiler, and commit the profile.
+export async function trainProfile({ log = () => {} } = {}) {
+  const { scalingProgram } = await import('./compile-bench.mjs');
+  if (hostTarget !== 'x86_64') throw new Error('the profile is trained on x86_64 Linux');
+  const native = buildCompiler();
+  const work = join(root, '.work/pgo-train');
+  rmSync(work, { recursive: true, force: true });
+  mkdirSync(join(work, 'raw'), { recursive: true });
+  const stem = join(work, 'grail');
+  const flags = ['--default-u64', '--typed-refs', '--overflow=wrap'];
+  log(`lowering with ${native}`);
+  command([native, ...flags, '--backend=llvm', `${stem}.s`, ...compilerSources], { env: compilerEnvironment() });
+  log('clang -O2 -fprofile-generate');
+  const resource = spawnSync('clang', ['--print-resource-dir'], { encoding: 'utf8' }).stdout.trim();
+  const runtime = join(resource, 'lib', 'x86_64-pc-linux-gnu', 'libclang_rt.profile.a');
+  const generate = ['-fprofile-generate', '-mllvm', '-disable-vp=true'];
+  command([native, 'llvm-compile', `${stem}.s.ll`, `${stem}.ll.o`, emulations[hostTarget], 'clang', `--target=${triples[hostTarget]}`, ...moduleFlags(hostTarget), '-c', '-flto=thin', ...generate]);
+  command(['clang', `--target=${triples[hostTarget]}`, '-c', `${stem}.s`, '-o', `${stem}.o`]);
+  command(['clang', '-O2', '-ffreestanding', '-fno-stack-protector', '-fno-builtin', `-DPGO_DIR="${join(work, 'raw')}"`, '-c', join(root, 'tools/pgo/shim.c'), '-o', `${stem}.shim.o`]);
+  const instrumented = `${stem}.instrumented`;
+  command(['ld.lld', '-m', emulations[hostTarget], `${stem}.o`, '--whole-archive', `${stem}.ll.o`, '--no-whole-archive', `${stem}.shim.o`, '--wrap=rt_shutdown', runtime, '--thinlto-jobs=8', '-mllvm', '-disable-vp=true', '-o', instrumented]);
+  log('training');
+  const program = join(work, 'train');
+  mkdirSync(program, { recursive: true });
+  writeFileSync(join(program, 'main.grl'), scalingProgram(1000));
+  const env = { ...process.env, GRAIL_JOBS: '1' };
+  command([instrumented, 'check', 'main.grl'], { cwd: program, env: { ...env, GRAIL_CACHE_DIR: join(program, 'store1') } });
+  command([instrumented, 'build', 'main.grl', '-o', 'p'], { cwd: program, env: { ...env, GRAIL_CACHE_DIR: join(program, 'store2') } });
+  command([instrumented, ...flags, `${stem}.self.s`, ...compilerSources], { env: { ...compilerEnvironment(), GRAIL_JOBS: '1' } });
+  const raws = readdirSync(join(work, 'raw')).map(name => join(work, 'raw', name));
+  command(['llvm-profdata', 'merge', '-o', `${stem}.profdata`, ...raws]);
+  const packed = spawnSync('xz', ['-9', '-c', `${stem}.profdata`], { maxBuffer: 1 << 28 });
+  if (packed.status !== 0) throw new Error('xz failed');
+  writeFileSync(pgoProfile, packed.stdout);
+  log(`${raws.length} runs merged into ${pgoProfile}`);
+  return pgoProfile;
+}
 export function buildReleaseCompiler({ log = () => {} } = {}) {
   if (hostTarget !== 'x86_64') throw new Error('the release compiler is built on x86_64 Linux for now');
   const native = buildCompiler();
@@ -512,7 +574,7 @@ export function buildReleaseCompiler({ log = () => {} } = {}) {
   // compiler's module is serial and takes most of the build.
   // `-flto=thin`: the parts are ThinLTO bitcode in an archive, and the link below optimises across
   // them (a function of one part is inlined into another), with the backend run in parallel.
-  command([native, 'llvm-compile', `${stem}.s.ll`, `${stem}.ll.o`, emulations[hostTarget], process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[hostTarget]}`, ...moduleFlags(hostTarget), '-c', '-flto=thin']);
+  command([native, 'llvm-compile', `${stem}.s.ll`, `${stem}.ll.o`, emulations[hostTarget], process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[hostTarget]}`, ...moduleFlags(hostTarget), '-c', '-flto=thin', ...profileUse(log)]);
   command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[hostTarget]}`, '-c', `${stem}.s`, '-o', `${stem}.o`]);
   const pending = `${stem}.pending`;
   const thinJobs = Math.max(1, Math.min(Number(process.env.GRAIL_JOBS) || cpus().length, 8));
@@ -615,12 +677,14 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   } else if (mode === 'release') {
     // The compiler to ship and to measure: `bun tools/native.mjs release`.
     console.log(buildReleaseCompiler({ log: line => console.error(line) }));
+  } else if (mode === 'pgo-train') {
+    console.log(await trainProfile({ log: line => console.error(line) }));
   } else if (mode === 'compiler') {
     // `bun tools/native.mjs compiler --target macos-aarch64`: the compiler as a Mach-O binary.
     const at = process.argv.indexOf('--target');
     const target = at === -1 ? hostTarget : process.argv[at + 1];
     console.log(buildTargetCompiler(target).executable ?? buildTargetCompiler(target));
   } else {
-    throw new Error('usage: bun tools/native.mjs <build|release|compiler> [--target T]');
+    throw new Error('usage: bun tools/native.mjs <build|release|pgo-train|compiler> [--target T]');
   }
 }
