@@ -1,5 +1,10 @@
 ## Unreleased
 
+- **Generic code over a type that owns nothing has no drop bookkeeping.** In a specialisation, a
+  type parameter bound to a plain type (`A = u64`) answered "needs drop" like an unknown type, so
+  every value of it carried a drop flag, a drop-helper call guarded by it, and a callee-saved register
+  saved and restored to hold the flag. It now answers for the type it is bound to. bench/iterchain's
+  native build: 1.92G to 1.14G instructions.
 - **The compiler checks about 5% faster: the allocator's and copy's hot paths lost their checks.**
   `rt_alloc_unlocked` finds the class and clears the block in one compare chain (no variable shift,
   no checked add, the two smallest classes cleared with fixed stores); `rt_free` answers a null
