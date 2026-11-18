@@ -1,5 +1,11 @@
 ## Unreleased
 
+- **`grail check` is about 9% faster on a large program: the root module writes no interface.** A
+  check wrote every module's interface, including the program's root, which no other module reads.
+  The root's run now skips it, and with it the effect recording that only fed that interface. A
+  cached check of a module that other modules read still requires a record carrying its interface
+  (or the runtime's effect summary). A cold `grail check` of the 104k-line syn4000 runs 16.59 G ->
+  15.16 G instructions (-8.6%), with identical output.
 - **Generic code over a type that owns nothing has no drop bookkeeping.** In a specialisation, a
   type parameter bound to a plain type (`A = u64`) answered "needs drop" like an unknown type, so
   every value of it carried a drop flag, a drop-helper call guarded by it, and a callee-saved register
