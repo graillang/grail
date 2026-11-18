@@ -75,6 +75,18 @@
   `roll_world_loot` exactly. The one place the port first disagreed — the Van's cargo branch —
   was C++ argument evaluation order: `f.picks(table, f.count(..), ..)` draws the count before the
   manifest pick (right-to-left), and the port now keeps that order explicitly.
+- **The whole texture importer runs in Grail: source pixels to `.abtex` bytes, identical to the engine's.**
+  `abundance/src/texture_build.grl` gains `build_mips` - the Kaiser-windowed sinc filter in linear light, the sRGB
+  transfer through `lib/math`'s glibc-exact `sinf`/`powf`, the normal pyramid's 2x2 unnormalised means, alpha
+  coverage preservation, the albedo floor and the cut-out background blend - so the port now covers
+  `engine/materials/src/texture_build.cpp` end to end up to the file's zstd frames.
+  `abundance/tests/texbuild_test.grl` matches all 86 lines of the engine's own `build_mips`/`build_texture`: seven
+  fixtures (tiled BC4 under repeat and clamp, a cut-out mask, an sRGB-decoded mask, a random BC4 chain, an untiled
+  BC5 normal with green-down, an untiled RGBA16F LUT), each chain built from its source image on both sides, then
+  every encoded payload. The mip chains are committed as source images, not chains. Two byte-exactness findings from
+  the filter: the 2x2 normal box accumulates in single precision, and the engine rounds a normal's length to `f32`
+  before dividing by it (a double length costs 1 ulp at mip 2).
+
 - **The frame loop is wired headless: session, job scheduler and render graph's plan in one
   frame boundary.** `abundance/src/frame_loop.grl` runs a frame as `engine/core/engine.cpp` does —
   the session's boundary commits the authority step, the frame's payload goes to one scheduler job
