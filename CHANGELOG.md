@@ -12,6 +12,18 @@
   `lib/math.grl`'s glibc-exact f32 `powf`/`asinf`, so it is bit for bit the engine's. 216 new parity
   values (six variants, both windings); procgen is 576.
 
+- **World loot's deterministic roll is ported.** `abundance/src/world_loot_roll.grl` carries
+  `roll_world_loot` from `world_loot_tables.cpp` and the vehicle loot table from
+  `item_content/vehicle_parts.hpp`: every weighted table (crate, nailed crate, chest, toolbox,
+  ammo crate, drum junk, plastic junk, the eleven context lines, the rare table, the five shipping
+  manifests, cabins, cockpit, boot, bed, tractor cab, baggage, helicopter hold and the drone
+  parcels), the `Roll` (mix64 of the seed, then mix64(state + 0x9E3779B97F4A7C15) per step, the
+  top-53-bit uniform, the weighted pick and the unit range), the `Fill` merge rules (stacking by
+  resource and compartment, the refill leanings, the distance-lifted quality and rare chances),
+  the manifest selector and the rarity-weighted vehicle-part pool. Every table and id is generated
+  from the engine's own source. `abundance/tests/world_loot_roll_test.grl` prints 10 472 lines
+  (640 fills) that match a reference calling the engine's own `roll_world_loot` exactly; the Van
+  (kind 16) is excluded because one cargo-manifest merge diverges, and the module records it.
 - **The frame loop is wired headless: session, job scheduler and render graph's plan in one
   frame boundary.** `abundance/src/frame_loop.grl` runs a frame as `engine/core/engine.cpp` does —
   the session's boundary commits the authority step, the frame's payload goes to one scheduler job
