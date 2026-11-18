@@ -2,6 +2,15 @@
 
 - `tools/abundance-test.mjs`: the references map had two identical `checkpoint` entries; the first
   was shadowed and dead, and is deleted. No behavior change.
+
+- **The ab::tx engine's observed-character index is ported** (`abundance/src/tx_engine.grl`): the
+  host's per-tick population snapshot with its spatial index — a uniform 32 m grid over the
+  finite-positioned characters with a 2^30-cell clamp, order-preserving packed cell keys, the
+  padded covered span, and the scan-vs-walk heuristic that must answer identically — plus the
+  exact `within`/`touching` distance tests (per-actor capsule, unknown-capsule fallback) and the
+  id lookup. Gated by `tests/parity/tx_engine.cpp` against the engine's own `ObservedIndex`/
+  `ObservedList` with a nine-actor fixture covering every branch: 43 reference lines, all matched
+  by `abundance/tests/tx_engine_test.grl`.
 - **The Abundance gameplay kernel's shared vocabulary and table codec are ported**
   (`abundance/src/tx.grl`, the stage-6 base every gameplay domain builds on): action-kind and
   table-name identity hashes, the effect-id and engine-id ranges, all 55 refusal codes with the
