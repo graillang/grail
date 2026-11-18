@@ -438,6 +438,9 @@ struct L {
     // The id of the `body` block: the first block of the function's own code, which dominates
     // every block of it.
     body_blk: u64,
+    // The function symbol the stream last put in %r11 with `leaq SYM(%rip),%r11`, or empty: the dyn
+    // adapter thunks (`.C<hash>_N`) end in `jmp *%r11`, a tail call to it.
+    r11sym: u8[],
     // The statement being lowered, from the stream's `.gsite LINE COL PATH` lines (native.grl
     // site_resolve): a failure call in lifted code names it (site_hint). Empty where no statement of
     // the program is known. `sitedefs` collects the records the function's failures point at.
@@ -4613,6 +4616,11 @@ fn instruction<a, b, c>(l: (&a mut L), line: &b [u8], facts: (&c Facts)) -> unit
         return ();
     }
     if eq(view(op), view("leaq")) {
+        if (n == 2) && eq(view(o[1]), view("%r11")) && ends(view(o[0]), view("(%rip)")) {
+            exchange(&mut l.r11sym, sub(view(o[0]), 0, o[0].len() - 6));
+        } else if (n == 2) && eq(view(o[1]), view("%r11")) {
+            exchange(&mut l.r11sym, u8[]);
+        }
         hk := header_operand(&l, view(o[0]));
         p := address(&mut l, view(o[0]));
         v := def(&mut l, view("ptrtoint ptr {} to i64"), &u8[][p.copy()]);
@@ -4798,6 +4806,15 @@ fn instruction<a, b, c>(l: (&a mut L), line: &b [u8], facts: (&c Facts)) -> unit
     }
     if starts(view(op), view("j")) && (n != 1) {
         bad(&mut l);
+        return ();
+    }
+    if eq(view(op), view("jmp")) && eq(view(o[0]), view("*%r11")) && (l.r11sym.len() != 0) && (l.target == 0) {
+        // A tail call through %r11 to the symbol just loaded into it (a dyn adapter thunk): the
+        // call, then the callee's result returned as this function's. LLVM sees the callee and can
+        // inline it into the thunk, so a `dyn` call costs one indirect call, not a call and a jump.
+        sym := copy(view(l.r11sym));
+        lower_call(&mut l, view(sym), &facts);
+        instruction(&mut l, view("ret"), &facts);
         return ();
     }
     if eq(view(op), view("jmp")) {
@@ -9898,7 +9915,7 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
             set_add(&mut weak, view(sub(wl, 6, wl.len())));
         }
     }
-    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, pairs: u64[], pair_widths: u64[], pair_written: u64[], fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], edptr: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], hstable: u64[], hesc: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, body_blk: 0, sitepath: u8[], siteline: 0, sitecol: 0, sitedefs: u8[], sitecount: 0, rdiconst: u8[], slotconst: u8[][], lastload: u8[], lastconst: u8[], regconst: u8[][], kmap: map_new(16), kvals: u8[][], ebase: u64[], eptrs: set_new(16), evals: set_new(16), eslot: u64[], dnames: u8[][], dmap: map_new(16), hmap: map_new(16), cmap: map_new(16), sl_start: u64[], sl_lines: u64[], proof: u64[], rline: 0, ranges: ranges, sigs: set_new(16), nargs: 6, retw: 2, rdxdead: 0, pvreg: u8[][], pvptr: u8[][], pvoff: i64[], asy: u8[][], asx: u8[][], rdxcallee: u8[], curline: u8[], sigerr: u8[], wrong: u8[][], area: u8[][], areaopen: 0, argwritten: 0, ffis: set_new(16), ffimem: set_new(16), entryextra: u8[], outer: u8[][], outeropen: 0, why: host::env(view("GRAIL_LLVM_WHY")), refsigs: set_new(16), takenslots: u8[][], ownrefs: 0, argptrs: u8[][], grail_bodies: set_new(16), xpend: 0, xstale: 18446744073709551615 };
+    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, pairs: u64[], pair_widths: u64[], pair_written: u64[], fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], edptr: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], hstable: u64[], hesc: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, body_blk: 0, r11sym: u8[], sitepath: u8[], siteline: 0, sitecol: 0, sitedefs: u8[], sitecount: 0, rdiconst: u8[], slotconst: u8[][], lastload: u8[], lastconst: u8[], regconst: u8[][], kmap: map_new(16), kvals: u8[][], ebase: u64[], eptrs: set_new(16), evals: set_new(16), eslot: u64[], dnames: u8[][], dmap: map_new(16), hmap: map_new(16), cmap: map_new(16), sl_start: u64[], sl_lines: u64[], proof: u64[], rline: 0, ranges: ranges, sigs: set_new(16), nargs: 6, retw: 2, rdxdead: 0, pvreg: u8[][], pvptr: u8[][], pvoff: i64[], asy: u8[][], asx: u8[][], rdxcallee: u8[], curline: u8[], sigerr: u8[], wrong: u8[][], area: u8[][], areaopen: 0, argwritten: 0, ffis: set_new(16), ffimem: set_new(16), entryextra: u8[], outer: u8[][], outeropen: 0, why: host::env(view("GRAIL_LLVM_WHY")), refsigs: set_new(16), takenslots: u8[][], ownrefs: 0, argptrs: u8[][], grail_bodies: set_new(16), xpend: 0, xstale: 18446744073709551615 };
     // A function whose address is taken (`NAME(%rip)`, or named by data such as a vtable) is
     // called through a pointer by code that does not know its signature, so it keeps the six-word
     // form: an indirect call passes six words and reads rax:rdx, and LLVM must never see a call
