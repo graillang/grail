@@ -231,3 +231,43 @@ about ten non-leaf direct calls (nested `next`s, the closure bodies, `rt_pop`, w
 `rt_fail`, so it is never a leaf). The 1.2x target needs /root/xinline's S3 (non-leaf inlining) on
 native and the remaining inlining on LLVM; the library and type side is done. `strings` has no
 callback parameters to move (2d is empty).
+
+## 7. Where the native 1.2x stands, and the plan for it
+
+Since section 5, the chain has gained `SliceIter` (an index walk), `fold` overrides on `Map` and
+`Filter` (internal iteration: one call per adapter per element instead of nested `next`s), frame
+environments for lent closures, no drop bookkeeping for plain generic bindings, and in-place element
+stores. `--release` builds the chain within reach of C (bench/iterchain: 218M instructions, 20 ms;
+C 10 ms, Rust 12 ms). The native (dev) build does not: on main 3c83250c, bench/iterchain natively
+is 1310M instructions / 61 ms against the hand loop's 537M / 31 ms (2.4x), of which the vector fill
+is 330M in both. Per element the chain spends 99 instructions to the hand loop's 20: the slice
+`fold` loop (18), Map's `|a, x| h(a, m(x))` (39) and Filter's `|a, x| if k(&x) {..}` (43). The user's
+closures (`x * 2`, `% 3`, the sum) are already copied in by the optimiser's leaf inliner; the two
+adapter closures and the loop's call to the first are not.
+
+1.2x means about 31 instructions per element: the whole chain compiled to hand-loop quality. That
+needs four things, all in `compiler/optimize.grl` and its interaction with the emitter:
+
+1. **Inlining in rounds.** `inline_candidate` judges each body once, after it is optimised and
+   before any call in it is replaced (`inline_calls` splices copies into the text afterwards). A
+   caller becomes a leaf only once its callees are copied in - Filter's closure after the predicate
+   and the sum, Map's after Filter's - so each must be judged again after its own calls are
+   replaced: substitute, re-optimise that body, re-judge, until nothing changes or a depth bound is
+   hit. The optimiser's per-body memo (the `opt-` store entries) and the parallel bodies pass must
+   key on the round's input, and the cross-unit splice (`crossing_unit`, `export_form`) must carry
+   bodies made in a later round.
+2. **No address-taken slots on the call path.** A copied body cannot keep a slot whose address
+   escapes. Done: a direct call to a closure that captures nothing passes no environment (it was
+   the address of a stack copy of the closure value). Still to do: a captured closure that does
+   capture is passed the address of its storage in the capture record instead of a copy's (Map
+   handing Filter's closure on), and `k(&x)` on a parameter is forwarded once the predicate is
+   copied in (`lea slot` followed only by loads through it is the slot itself).
+3. **The size cap.** 32 instructions is too few for Map's closure with Filter's and the user's
+   bodies inside; the cap should count what the copy costs after promotion, not lines.
+4. **Promotion across the splice.** A copied body's slots go to free scratch registers today; after
+   rounds, the loop that holds the copies must have its slots promoted as one body (the slice
+   `fold`'s loop already promotes its own).
+
+The LLVM path lifts this same assembly, so each step is checked on both backends (the lifter must
+see the spliced copies as ordinary code, not as calls). Estimated several days; it is held for a
+decision (it is not in progress).
