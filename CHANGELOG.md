@@ -12,6 +12,10 @@
   than SHA-256 (interface format 14): digesting every source byte with SHA-256 was a twelfth of
   checking a large module. Interfaces written by an older compiler are refused as a different format
   and rebuilt.
+- **Fix: `dyn Iterator` works again.** `Iterator::fold` (a generic method taking `self` by value)
+  made the interface "cannot be used as dyn". As in Rust, such a method is now left out of the dyn
+  object - it is called on concrete types and through bounds - and the interface stays usable as
+  `dyn` for its other methods.
 - **A failed check inside a parallel job no longer aborts silently now and then.** The joiner that
   re-raises a job's failure took one from the contained-failure count with a checked subtraction,
   which trapped - inside the failure path, so without a report - when it ran before the failing stack
