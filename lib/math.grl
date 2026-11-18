@@ -307,3 +307,354 @@ pub fn hypot(x:f64,y:f64)->f64{
     diff:=d1.hi+(err-ss.lo+d1.lo);
     return (s+diff/(2.0*s))*back;
 }
+
+// ---------------------------------------------------------------------------------------------
+// Single precision, bit for bit what glibc computes: sinf, cosf, expf, exp2f, logf, log2f.
+//
+// glibc's float routines (sysdeps/ieee754/flt-32, from ARM's optimized-routines) evaluate in double
+// over small tables, and the x86-64 libm runs its FMA build, so each `a * b + c` there rounds once.
+// These follow those routines step for step with their exact tables (the bit patterns of glibc's
+// __exp2f_data, __logf_data, __log2f_data, __sincosf_table and __inv_pio4) and a software fused
+// multiply-add, so the result is the libm's on every input, not merely within an ulp. A C prototype
+// of exactly these steps matched the host libm on all 2^32 inputs of each function.
+// The tables are packed hex text, 16 digits a word (8 for __inv_pio4).
+
+static EXP2F_TAB: string = "3ff00000000000003fefd9b0d31585743fefb5586cf9890f3fef9301d0125b513fef72b83c7d517b3fef54873168b9aa3fef387a6e7562383fef1e9df51fdee13fef06fe0a31b7153feef1a7373aa9cb3feedea64c1234223feece086061892d3feebfdad5362a273feeb42b569d4f823feeab07dd4854293feea47eb03a55853feea09e667f3bcd3fee9f75e8ec5f743feea11473eb01873feea589994cce133feeace5422aa0db3feeb737b0cdc5e53feec49182a3f0903feed503b23e255d3feee89f995ad3ad3feeff76f2fb5e473fef199bdd85529c3fef3720dcef90693fef5818dcfba4873fef7c97337b9b5f3fefa4afa2a490da3fefd0765b6e4540";
+static LOGF_TAB: string = "3ff661ec79f8f3bebfd57bf7808caade3ff571ed4aaf883dbfd2bef0a7c06ddb3ff49539f0f010b0bfd01eae7f513a673ff3c995b0b80385bfcb31d8a68224e93ff30d190c8864a5bfc6574f0ac077583ff25e227b0b8ea0bfc1aa2bc79c81003ff1bb4a4a1a343fbfba4e76ce8c0e5e3ff12358f08ae5babfb1973c5a611ccc3ff0953f419900a7bfa252f438e10c1e3ff000000000000000000000000000003fee608cfd9a47ac3faaa5aa5df259843feca4b31f026aa03fbc5e53aa362eb43feb2036576afce63fc526e57720db083fe9c2d163a1aa2d3fcbc2860d2247703fe886e6037841ed3fd1058bc8a07ee13fe767dcf55348623fd4043057b6ee09";
+static LOG2F_TAB: string = "3ff661ec79f8f3bebfdefec65b9630193ff571ed4aaf883dbfdb0b6832d4fca43ff49539f0f010b0bfd7418b0a1fb77b3ff3c995b0b80385bfd39de91a6dcf7b3ff30d190c8864a5bfd01d9bf3f2b6313ff25e227b0b8ea0bfc97c1d1b3b7af03ff1bb4a4a1a343fbfc2f9e393af3c9f3ff12358f08ae5babfb960cbbf788d5c3ff0953f419900a7bfaa6f9db6475fce3ff000000000000000000000000000003fee608cfd9a47ac3fb338ca9f24f53d3feca4b31f026aa03fc476a9543891ba3feb2036576afce63fce840b4ac4e4d23fe9c2d163a1aa2d3fd40645f0c6651c3fe886e6037841ed3fd88e9c2c1b9ff83fe767dcf55348623fdce0a44eb17bcc";
+static SINCOSF_TAB: string = "3ff0000000000000bff0000000000000bff00000000000003ff000000000000041645f306dc9c8833ff921fb54442d183ff0000000000000bfdffffffd0c621c3fa55553e1068f19bf56c087e89a359d3ef99343027bf8c3bfc555545995a6033f81107605230bc4bf2994eb3774cf243ff0000000000000bff0000000000000bff00000000000003ff000000000000041645f306dc9c8833ff921fb54442d18bff00000000000003fdffffffd0c621cbfa55553e1068f193f56c087e89a359dbef99343027bf8c3bfc555545995a6033f81107605230bc4bf2994eb3774cf24";
+static INV_PIO4: string = "000000a20000a2f900a2f983a2f9836ef9836e4e836e4e446e4e44154e441529441529fc1529fc2729fc2757fc2757d12757d1f557d1f534d1f534ddf534ddc034ddc0dbddc0db62c0db6295db6295996295993c95993c43993c43903c439041";
+
+fn exp2f_tab(i: u64) -> u64 {
+    // Indexed in place: passing the static to a helper would view it, which allocates.
+    at := 16 * i;
+    mut word = 0;
+    for j in 16 {
+        d := EXP2F_TAB[at + j];
+        mut v = d - 48;
+        if d >= 97 {
+            v = d - 87;
+        }
+        word = (word << 4) | v;
+    }
+    return word;
+}
+fn logf_tab(i: u64) -> u64 {
+    // Indexed in place: passing the static to a helper would view it, which allocates.
+    at := 16 * i;
+    mut word = 0;
+    for j in 16 {
+        d := LOGF_TAB[at + j];
+        mut v = d - 48;
+        if d >= 97 {
+            v = d - 87;
+        }
+        word = (word << 4) | v;
+    }
+    return word;
+}
+fn log2f_tab(i: u64) -> u64 {
+    // Indexed in place: passing the static to a helper would view it, which allocates.
+    at := 16 * i;
+    mut word = 0;
+    for j in 16 {
+        d := LOG2F_TAB[at + j];
+        mut v = d - 48;
+        if d >= 97 {
+            v = d - 87;
+        }
+        word = (word << 4) | v;
+    }
+    return word;
+}
+fn sincosf_tab(i: u64) -> u64 {
+    // Indexed in place: passing the static to a helper would view it, which allocates.
+    at := 16 * i;
+    mut word = 0;
+    for j in 16 {
+        d := SINCOSF_TAB[at + j];
+        mut v = d - 48;
+        if d >= 97 {
+            v = d - 87;
+        }
+        word = (word << 4) | v;
+    }
+    return word;
+}
+fn inv_pio4(i: u64) -> u64 {
+    // Indexed in place: passing the static to a helper would view it, which allocates.
+    at := 8 * i;
+    mut word = 0;
+    for j in 8 {
+        d := INV_PIO4[at + j];
+        mut v = d - 48;
+        if d >= 97 {
+            v = d - 87;
+        }
+        word = (word << 4) | v;
+    }
+    return word;
+}
+// Arithmetic shift of a 32-bit two's-complement word.
+fn sext32(u: u64) -> i64 {
+    if u >= 2147483648 {
+        return i64(u) - 4294967296;
+    }
+    return i64(u);
+}
+// Round-to-odd a + b: the two-sum, nudged one ulp toward its error when inexact and even.
+fn add_odd(a: f64, b: f64) -> f64 {
+    sum := two_sum(a, b);
+    mut s = sum.hi;
+    if (sum.lo != 0.0) && ((bits(s) & 1) == 0) {
+        if (sum.lo > 0.0) == (s > 0.0) {
+            s = f64_from_bits(bits(s) + 1);
+        } else {
+            s = f64_from_bits(bits(s) - 1);
+        }
+    }
+    return s;
+}
+// a * b + c rounded once (Boldo and Melquiond, "Emulation of FMA and correctly rounded sums", 2008),
+// for the normal-range operands these routines pass it.
+fn fma_rn(a: f64, b: f64, c: f64) -> f64 {
+    u := two_product(a, b);
+    if u.hi == 0.0 {
+        return a * b + c;
+    }
+    t := two_sum(c, u.hi);
+    return t.hi + add_odd(t.lo, u.lo);
+}
+fn f32_top(x: f32) -> u64 {
+    return (f32_bits(x) >> 20) & 2047;
+}
+
+
+@no_block
+pub fn expf(x: f32) -> f32 {
+    xd := f64(x);
+    abstop := f32_top(x);
+    if abstop >= 1067 {
+        if f32_bits(x) == 4286578688 {
+            return 0.0;
+        }
+        if abstop >= 2040 {
+            return x + x;
+        }
+        if x > f32_from_bits(1118925335) {
+            return f32_from_bits(2139095040);
+        }
+        if x < f32_from_bits(3268407732) {
+            return 0.0;
+        }
+    }
+    shift := f64_from_bits(4843621399236968448);
+    invln2 := f64_from_bits(4631694138158056190);
+    mut kd = fma_rn(invln2, xd, shift);
+    ki := bits(kd);
+    kd = kd - shift;
+    r := fma_rn(invln2, xd, -kd);
+    s := f64_from_bits(wrapping_add(exp2f_tab(ki % 32), ki << 47));
+    z := fma_rn(f64_from_bits(4520605740625372052), r, f64_from_bits(4552787166160930035));
+    r2 := r * r;
+    mut y = fma_rn(f64_from_bits(4581900536177775318), r, 1.0);
+    y = fma_rn(z, r2, y);
+    return f32(y * s);
+}
+
+@no_block
+pub fn exp2f(x: f32) -> f32 {
+    xd := f64(x);
+    abstop := f32_top(x);
+    if abstop >= 1072 {
+        if f32_bits(x) == 4286578688 {
+            return 0.0;
+        }
+        if abstop >= 2040 {
+            return x + x;
+        }
+        if x > 0.0 {
+            return f32_from_bits(2139095040);
+        }
+        if x <= -150.0 {
+            return 0.0;
+        }
+    }
+    shift := f64_from_bits(4821103401100115968);
+    mut kd = xd + shift;
+    ki := bits(kd);
+    kd = kd - shift;
+    r := xd - kd;
+    s := f64_from_bits(wrapping_add(exp2f_tab(ki % 32), ki << 47));
+    z := fma_rn(f64_from_bits(4588159735035929492), r, f64_from_bits(4597823162434634995));
+    r2 := r * r;
+    mut y = fma_rn(f64_from_bits(4604418534314627798), r, 1.0);
+    y = fma_rn(z, r2, y);
+    return f32(y * s);
+}
+
+// The argument split both logarithms share: ix = 2^k z with z near 1, and the table index i.
+struct LogfSplit {
+    k: i64,
+    i: u64,
+    z: f64,
+    // 0 when the split applies; otherwise the result is `special`.
+    is_special: bool,
+    special: f32
+}
+fn logf_split(x: f32) -> LogfSplit {
+    mut ix = f32_bits(x);
+    if ix == 1065353216 {
+        return LogfSplit{k: 0, i: 0, z: 0.0, is_special: true, special: 0.0};
+    }
+    if wrapping_sub(ix, 8388608) >= 2130706432 {
+        if ((ix * 2) & 4294967295) == 0 {
+            return LogfSplit{k: 0, i: 0, z: 0.0, is_special: true, special: f32_from_bits(4286578688)};
+        }
+        if ix == 2139095040 {
+            return LogfSplit{k: 0, i: 0, z: 0.0, is_special: true, special: x};
+        }
+        if ((ix & 2147483648) != 0) || (((ix * 2) & 4294967295) >= 4278190080) {
+            return LogfSplit{k: 0, i: 0, z: 0.0, is_special: true, special: (x - x) / (x - x)};
+        }
+        // Subnormal: normalize.
+        ix = wrapping_sub(f32_bits(x * f32_from_bits(1258291200)), 192937984);
+    }
+    tmp := wrapping_sub(ix, 1060306944) & 4294967295;
+    iz := (wrapping_sub(ix, tmp & 4286578688)) & 4294967295;
+    return LogfSplit{k: sext32(tmp) >> 23, i: (tmp >> 19) % 16, z: f64(f32_from_bits(iz)), is_special: false, special: 0.0};
+}
+
+@no_block
+pub fn logf(x: f32) -> f32 {
+    sp := logf_split(x);
+    if sp.is_special {
+        return sp.special;
+    }
+    invc := f64_from_bits(logf_tab(2 * sp.i));
+    logc := f64_from_bits(logf_tab(2 * sp.i + 1));
+    r := fma_rn(sp.z, invc, -1.0);
+    y0 := fma_rn(f64(sp.k), f64_from_bits(4604418534313441775), logc);
+    r2 := r * r;
+    mut y = fma_rn(f64_from_bits(4599678642981702506), r, f64_from_bits(13826050851498246435));
+    y = fma_rn(f64_from_bits(13821563350862562100), r2, y);
+    y = fma_rn(y, r2, y0 + r);
+    return f32(y);
+}
+
+@no_block
+pub fn log2f(x: f32) -> f32 {
+    sp := logf_split(x);
+    if sp.is_special {
+        return sp.special;
+    }
+    invc := f64_from_bits(log2f_tab(2 * sp.i));
+    logc := f64_from_bits(log2f_tab(2 * sp.i + 1));
+    r := fma_rn(sp.z, invc, -1.0);
+    y0 := logc + f64(sp.k);
+    r2 := r * r;
+    mut y = fma_rn(f64_from_bits(4602338792138355424), r, f64_from_bits(13828044578235278302));
+    y = fma_rn(f64_from_bits(13823538158275034701), r2, y);
+    p := fma_rn(f64_from_bits(4609176139921213624), r, y0);
+    y = fma_rn(y, r2, p);
+    return f32(y);
+}
+
+// __sincosf_table row `row` (0, or 1 for the shifted quadrants): sign[4], hpi_inv, hpi, c0..c4, s1..s3.
+fn sc(row: u64, field: u64) -> f64 {
+    return f64_from_bits(sincosf_tab(14 * row + field));
+}
+struct SinReduced {
+    x: f64,
+    n: u64
+}
+// |x| < 120: x - n pi/2 with n rounded from x 2/pi (n as its low two bits).
+fn sinf_reduce_fast(x: f64) -> SinReduced {
+    r := x * sc(0, 4);
+    n := (i64(r) + 8388608) >> 24;
+    return SinReduced{x: fma_rn(-f64(n), sc(0, 5), x), n: u64(n & 3)};
+}
+// Large |x|: Payne-Hanek over __inv_pio4, in 32- and 64-bit integer steps.
+fn sinf_reduce_large(word: u64) -> SinReduced {
+    base := (word >> 26) & 15;
+    shift := (word >> 23) & 7;
+    m := ((word & 16777215) | 8388608) << shift;
+    a0 := inv_pio4(base);
+    a4 := inv_pio4(base + 4);
+    a8 := inv_pio4(base + 8);
+    mut res0 = (m * a0) & 4294967295;
+    res1 := m * a4;
+    res2 := m * a8;
+    res0 = (res2 >> 32) | (res0 << 32);
+    res0 = wrapping_add(res0, res1);
+    n := wrapping_add(res0, 2305843009213693952) >> 62;
+    res0 = wrapping_sub(res0, n << 62);
+    mut v = 0.0;
+    if res0 >= 9223372036854775808 {
+        v = -f64(wrapping_sub(u64(0), res0));
+    } else {
+        v = f64(res0);
+    }
+    return SinReduced{x: v * f64_from_bits(4330529880027704600), n: n};
+}
+fn sincosf_poly(x: f64, x2: f64, row: u64, n: u64) -> f32 {
+    if (n & 1) == 0 {
+        x3 := x * x2;
+        s1 := fma_rn(x2, sc(row, 13), sc(row, 12));
+        x7 := x3 * x2;
+        s := fma_rn(x3, sc(row, 11), x);
+        return f32(fma_rn(x7, s1, s));
+    }
+    x4 := x2 * x2;
+    c2 := fma_rn(x2, sc(row, 10), sc(row, 9));
+    c1 := fma_rn(x2, sc(row, 7), sc(row, 6));
+    x6 := x4 * x2;
+    c := fma_rn(x4, sc(row, 8), c1);
+    return f32(fma_rn(x6, c2, c));
+}
+// sinf when `cosine` is false, cosf when true (cosf is sinf a quadrant on).
+fn sincosf_eval(y: f32, cosine: bool) -> f32 {
+    mut odd = 0;
+    if cosine {
+        odd = 1;
+    }
+    x := f64(y);
+    a := f32_top(y);
+    if a < 1012 {
+        if a < 920 {
+            if cosine {
+                return 1.0;
+            }
+            return y;
+        }
+        return sincosf_poly(x, x * x, 0, odd);
+    }
+    if a >= 2040 {
+        return (y - y) / (y - y);
+    }
+    mut red = SinReduced{x: 0.0, n: 0};
+    mut q = 0;
+    if a < 1071 {
+        red = sinf_reduce_fast(x);
+        q = red.n;
+    } else {
+        word := f32_bits(y);
+        red = sinf_reduce_large(word);
+        q = (red.n + (word >> 31)) & 3;
+    }
+    mut row = 0;
+    if (q & 2) != 0 {
+        row = 1;
+    }
+    return sincosf_poly(red.x * sc(0, q & 3), red.x * red.x, row, red.n ^ odd);
+}
+
+@no_block
+pub fn sinf(x: f32) -> f32 {
+    return sincosf_eval(x, false);
+}
+
+@no_block
+pub fn cosf(x: f32) -> f32 {
+    return sincosf_eval(x, true);
+}

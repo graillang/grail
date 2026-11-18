@@ -24,6 +24,15 @@
   logistics_registry_test.grl` prints 123 lines that match a reference compiling the engine's
   own `logistics.cpp` from source. Handling-calendar operations (deposit, transfer, consume,
   consolidation, exchange), the FRLG1 codec and the publication binding are later increments.
+- Fixed: a closure type in a struct field can still be a vector element (`struct S { body: Fn<Share, Owned>((&T), u64) -> u64 }`
+  and then `S[]`): the fresh lifetime a closure parameter takes is now its own (a new `closure_input` parser state)
+  instead of an input region of the enclosing item, so the struct takes no lifetime parameter from it.
+- **glibc-exact single-precision maths**: `lib/math` gains `sinf`, `cosf`, `expf`, `exp2f`, `logf` and `log2f`, the
+  engine's own routines (sysdeps/ieee754/flt-32) step for step over glibc's tables as packed hex with a software
+  fused multiply-add, so a result is the host libm's bit for bit (`expf`/`exp2f`/`sinf`/`cosf` exhaustive over 2^32
+  inputs, all six pinned by `lib-f32-libm-glibc`). `logf_split` factors the argument split both logarithms share.
+- `abundance/tools/vendor-shaders.mjs`: refuses to vendor a working tree under a pin's name (`ABUNDANCE_COMMIT`
+  set while `ABUNDANCE_SRC` has a `.git`), so a vendored file's recorded commit cannot be a lie.
 - **The shader pipeline takes `geometry/`, the largest area.** 30 of its 46 entries (4.5 MB of SPIR-V)
   are built with the engine's pinned DXC at pin `ca1f1bc05b`: the cull, motion, HZB, software and
   hardware raster, assembly, VSM argument/cluster/SAT/settle and vegetation passes, plus the two mesh
