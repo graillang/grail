@@ -44,6 +44,14 @@
   copied: `find()` scans five entries of a four-slot array (zeroed padding answers as Hold, and a
   full vehicle row reads one past the array); the port scans its stored entries, which answers
   every in-bounds question identically.
+- **The Abundance simulation layer is ported** (`abundance/src/sim.grl`): the command inbox
+  (admission with per-issuer capacity, Duplicate/InboxFull verdicts, decided-nonce persistence,
+  reopen, close_prefix, close_until's late-issue hold, settle's completed-prefix decided set,
+  decided_after, restore), the submission retry policy (per-issuer/total caps, wait expiry,
+  transient vs refused outcomes, the no-attempt Ineligible answer), the rate-limited log, the
+  in-flight gate, and the step-work profile with the incident log's exact formatted summary and
+  slow-stage naming. Gated by `tests/parity/sim.cpp` compiling the engine's own Private/sim TUs
+  and step_work_profile.cpp: 125 reference lines, all matched by `abundance/tests/sim_test.grl`.
 
 - **Abundance's megaplants_import is ported as a plan, byte-identical to the reference's
   invocations.** `abundance/src/megaplants_import.grl` discovers the extracted variants, names the
