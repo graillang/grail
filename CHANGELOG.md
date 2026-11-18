@@ -59,6 +59,16 @@
   BC4/BC5 unpack. BC7 decode (679 integer-only lines, no search) is recorded in
   abundance/README.md as the real decode gap; nothing was shimmed or ported on a guess.
 
+- **The FFT ocean's spectrum is ported.** `abundance/src/render_policy_ocean.grl` carries
+  `abundance/ocean_sea_state.hpp` (JONSWAP's Phillips constant and peak with the Pierson-Moskowitz
+  cap, gamma's fetch dependence, swell mapped onto the same form, Cox & Munk's mean square slope,
+  Elfouhaily's short-wave branch, the omnidirectional band energy with the long-wave cutoff and the
+  short-wave term, Stockdon's run-up and Monahan's whitecap coverage) and `engine/water/ocean.cpp`
+  (`make_sea_state`'s record, `make_cascades`' disjoint bands and seeds, and `make_fetch_amplitudes`'
+  2 x 16-step fetch envelope that reweights one realisation for a lake or a sheltered bay). 1562
+  reference lines, bit exact. `render_float.grl` gains a correctly rounded `pow` (240 000 swept
+  calls: one glibc boundary case) and deliberately has no integer fast path, because glibc's
+  `pow(w, 5.0)` is the general algorithm's result and repeating the squaring disagreed with it.
 - **The procedural rock kit's pebble and rock-node meshes are ported, bit for bit.**
   `abundance/src/procgen_rock_kit.grl` carries `build_pebble_mesh` and `build_rock_node_mesh` with
   `procgen_math.hpp`'s Rng and vector maths and the shared Soup pipeline (position-welded smooth
