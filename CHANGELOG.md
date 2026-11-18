@@ -58,6 +58,73 @@
   of them (`validate`). Porting the check found a heap bug in the routing priority flood's sift-down
   (it promoted the later child); the filled-elevation raster now matches in every cell.
 
+- **The parity references can be built against a pinned Abundance tree**: `tools/abundance-test.mjs`
+  takes `ABUNDANCE_BUILD` for the native libraries and generated headers (`build/...` includes), so a
+  tree exported from a pinned commit (with no `build-engine` beside it) gates every reference
+  instead of whatever the checkout last built; `abundance/tools/vendor-shaders.mjs` resolves an
+  include beside the including file first, as DXC does (the split far-pixel kernels need it), and
+  records `ABUNDANCE_COMMIT` when the tree is an export with no `.git`.
+- Fixed: module-level integer constants fold `<<` and `>>` (`pub const A: u32 = 1 << 3;` was "expected a
+  compile-time constant expression"). The lexer emits a shift as two touching `<`/`>` tokens, which body
+  expressions already joined; the compile-time folder now joins them the same way. Cases
+  `const-int-shift-fold`, `const-int-shift-overflow`.
+- `abundance/README.md`: the parity section's hand-summed totals (two "currently compares" lines
+  and four "All N values match" lines left by concurrent merges) are replaced by one sentence; the
+  per-test bullets carry the counts and the suite prints them.
+- **Abundance: a world cache load's semantic checks are ported and gated on the engine's verdicts.**
+  `valid_world_landscape` decodes the landscape world's embedded ABWLA001 (a new reader, the
+  writer's inverse), rebuilds the authority, replays its reference operation and re-derives every
+  published raster cell (elevation, filled elevation, slope, lake depth, the hydraulic graph's
+  discharge, geology) to compare with the file. `valid_public_drainage_graph` checks the whole
+  receiver raster and the public drainage DAG; `valid_biome_authority` checks the biome rasters.
+  49 verdicts against Abundance's own validators on both committed caches and one-field corruptions
+  of them (`validate`). Porting the check found a heap bug in the routing priority flood's sift-down
+  (it promoted the later child); the filled-elevation raster now matches in every cell.
+
+- **The flora placement fields are ported, bit for bit.** `abundance/src/flora_fields.grl` carries
+  the one-way flora seed, scatter_clustering's CPU half (the double-precision patch noise, the grass
+  tuft keep rule, lushness) and the field functions of the GPU cell kernel (`cell_kernel.ush`, the
+  source the GPU pass and the CPU twin share): its lattice hashes, the f32 patch and tuft noise, the
+  domain-warped grass faciation that gives each stand its species, the thicket noise, the bush
+  habitat terms and species pick, the grass width rule and mesh_variant. `flora_test.grl` matches
+  `parity/flora.txt` (1397 values); the reference includes the kernel source as the engine's CPU
+  twin does and links the gameplay core for the exported halves.
+
+- The feature and cave fixtures are regenerated against the Abundance pin `ca1f1bc05b` (generator
+  123). Only the worlds' identity hash moved (and with it each cave network's binding hash); every
+  site, entrance, region, corridor, node and passage is unchanged, and both suites match.
+
+- Fixed: a struct partly moved before a loop (`f := r.inner;`) no longer makes the loop refuse with "loop
+  backedge consumes entry storage: `r` is moved out of it" when the body only reads it. The backedge check
+  now counts what the body consumes: a place that dies in the body, one that was whole at entry and is
+  not now, or a field of a partly-moved place that the body moves (still refused). Cases
+  `loop-after-partial-move-of-local`, `loop-moves-remaining-field-rejected`.
+- Fixed: a closure type written outside a parameter list (a struct field, a local's type) can take a
+  reference parameter: `struct S { body: Fn<Owned>(&T) -> u64 }` was "elided output reference needs one
+  input lifetime". Its elided lifetime is a fresh input of each call, as inside a function's parameter
+  list. Case `closure-type-field-reference-param`.
+- Fixed: a closure that calls a `self: &T` method of a captured struct is `Fn`, not `FnMut` (it was refused
+  with "a closure that mutates a captured value is FnMut"): the capture scan now looks the method up
+  on the struct and counts a shared receiver as a read; `&mut self`, by-value `self` and names the
+  struct does not define stay writes. Cases `closure-shared-method-on-capture-is-fn`,
+  `closure-mut-method-on-capture-is-fnmut`.
+- Fixed: module-level integer constants fold `<<` and `>>` (`pub const A: u32 = 1 << 3;` was "expected a
+  compile-time constant expression"). The lexer emits a shift as two touching `<`/`>` tokens, which body
+  expressions already joined; the compile-time folder now joins them the same way. Cases
+  `const-int-shift-fold`, `const-int-shift-overflow`.
+- `abundance/README.md`: the parity section's hand-summed totals (two "currently compares" lines
+  and four "All N values match" lines left by concurrent merges) are replaced by one sentence; the
+  per-test bullets carry the counts and the suite prints them.
+- **Abundance: a world cache load's semantic checks are ported and gated on the engine's verdicts.**
+  `valid_world_landscape` decodes the landscape world's embedded ABWLA001 (a new reader, the
+  writer's inverse), rebuilds the authority, replays its reference operation and re-derives every
+  published raster cell (elevation, filled elevation, slope, lake depth, the hydraulic graph's
+  discharge, geology) to compare with the file. `valid_public_drainage_graph` checks the whole
+  receiver raster and the public drainage DAG; `valid_biome_authority` checks the biome rasters.
+  49 verdicts against Abundance's own validators on both committed caches and one-field corruptions
+  of them (`validate`). Porting the check found a heap bug in the routing priority flood's sift-down
+  (it promoted the later child); the filled-elevation raster now matches in every cell.
+
 - **Abundance: the landscape authority serialiser is ported and byte-identical.** A Grail program now
   builds the landscape world's terrain authority the way the engine's own fixture builder does,
   advances it through the reference-weather epoch, and writes the ABWLA001 stream that
