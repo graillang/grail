@@ -8154,12 +8154,38 @@ fn advance<a>(c: (&a mut C)) -> unit {
     // cursor may step onto the end-of-file token, but stepping past it is a truncated program, not
     // a token to skip. Without this the scan spun forever on an unfinished declaration.
     if c.toks.len() <= c.pos {
-        if c.toks.len() != 0 {
-            exchange(&mut c.pos, c.toks.len() - 1);
-        }
-        fail(&mut c, view("unexpected end of file"));
+        past_end(&mut c);
     }
     exchange(&mut c.pos, c.pos + 1);
+    return ();
+}
+// The parser's refusals, out of line: a refusal's message is an owned value, and one in a hot
+// function made every call of it save, clear and drop-test registers for it (advance, ident and
+// expect run for every token).
+fn past_end<a>(c: (&a mut C)) -> unit {
+    if c.toks.len() != 0 {
+        exchange(&mut c.pos, c.toks.len() - 1);
+    }
+    fail(&mut c, view("unexpected end of file"));
+    return ();
+}
+fn not_a_name<a>(c: (&a mut C)) -> unit {
+    mut msg = copy_bytes(view("expected a name here"));
+    push_bytes(&mut msg, view(found_msg(&mut c)));
+    fail(&mut c, view(msg));
+    return ();
+}
+fn truth_not_a_name<a>(c: (&a mut C)) -> unit {
+    fail(&mut c, view("truth keyword is not an identifier"));
+    return ();
+}
+fn expected_token<a, b>(c: (&a mut C), s: &b [u8]) -> unit {
+    want := s.copy();
+    mut msg = copy_bytes(view("expected `"));
+    push_bytes(&mut msg, view(want));
+    msg.push(96);
+    push_bytes(&mut msg, view(found_msg(&mut c)));
+    fail(&mut c, view(msg));
     return ();
 }
 // The cursor's token text. Past the last token is the end of the file, which has no text.
@@ -8823,12 +8849,7 @@ fn eat<a, b>(c: (&a mut C), s: &b [u8]) -> bool {
 }
 fn expect<a, b>(c: (&a mut C), s: &b [u8]) -> unit {
     if !eat(&mut c, s) {
-        want := s.copy();
-        mut msg = copy_bytes(view("expected `"));
-        push_bytes(&mut msg, view(want));
-        msg.push(96);
-        push_bytes(&mut msg, view(found_msg(&mut c)));
-        fail(&mut c, view(msg));
+        expected_token(&mut c, s);
     }
     return ();
 }
@@ -12418,13 +12439,11 @@ fn pv_strict_fail_why<a, b, d>(c: (&a mut C), pred: Pred, pos: u64, need: &b [u8
 }
 fn ident<a>(c: (&a mut C)) -> u8[] {
     if kind(&mut c) != 1 {
-        mut msg = copy_bytes(view("expected a name here"));
-        push_bytes(&mut msg, view(found_msg(&mut c)));
-        fail(&mut c, view(msg));
+        not_a_name(&mut c);
     }
     t := tok_text(&mut c, c.pos);
     if same(view(t), view("true")) || same(view(t), view("false")) {
-        fail(&mut c, view("truth keyword is not an identifier"));
+        truth_not_a_name(&mut c);
     }
     advance(&mut c);
     return t;
