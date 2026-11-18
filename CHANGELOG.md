@@ -312,6 +312,22 @@
   `Digest::hex()` and seven canonical preimages the reference wrote. libsodium's UDP crypto is
   recorded as out of scope in abundance/README.md. Checked arithmetic rewrites the reference's
   `0 - x` complements as `wrapping_sub(0, x)`.
+- **Abundance `.abtex` texture containers are read and written byte for byte.** `abundance/src/abtex.grl`
+  carries every check `read_abtex` makes - magic and version, dimension and page/tail geometry, the
+  canonical (mip, y, x) page order, the read budgets, and one-complete-frame zstd admission with the
+  content-size check - in the engine's order and with its wording; `read_page` is `read_abtex_page`
+  (the caller's record must match the one at the canonical index; an HD-split mip-0 payload comes from
+  the base's pack) and `split_hd` is `split_abtex_hd`. The writer is `write_abtex`'s byte layout -
+  header, canonical page table, offsets, sizes and refusals - taking each compressed payload as data:
+  `lib/zstd.grl` decodes RFC 8878 only, so the module writes valid Raw-block frames, which is exactly
+  what libzstd's level-19 encoder emits for incompressible payloads. `abundance/tests/abtex_test.grl`
+  matches `abundance/tests/parity/abtex.cpp` (the engine's own reader and writer) on ten fixtures the
+  engine wrote - tiled BC7/BC5/BC4/RGBA16 chains, an untiled RG16 LUT, an untiled RGBA8 chain, a
+  non-square page grid, one compressible read-only fixture, and an HD split - plus every page record and
+  decoded payload, the shader-visible derivation (VtDesc packing, per-mip page grids and bases, tail
+  staging offsets), the vt.hlsli address/closeness/LOD math on exact inputs, and 46 writer, container and
+  page refusals: 386 reference lines. `lib/zstd.grl` gains `frame_size` (what
+  `ZSTD_findFrameCompressedSize` returns, for the one-frame rule).
 
 - **Every performance chart is re-measured with the machine idle** (load average under 3; release
   compiler with PGO on main bcf78e5a). Every compile row now beats the fastest rival: the cold
