@@ -27,6 +27,21 @@
   `abundance/tests/power_generation_test.grl` prints 122 lines that match a reference linked
   from the engine's own `power_generation.cpp` through `libabundance_gameplay_core.a`. The grid
   half (PowerGrid, dispatch, the offer_* adapters) is a later increment.
+
+- Abundance port: `abundance/src/frw.grl` is `world.frw`, the world's public runtime payload, in both
+  directions - the FRW2 header (schema 5, resolution, seed, map size and sea level as binary64 bit
+  patterns), the 32 self-describing fields (u16-length names and units, a type byte for f32/u16/u8/
+  u32/f64, a u64 count, then the values; type-5 doubles stay bit patterns because a Grail f64
+  canonicalises NaN payloads), and the reader's rules from `world_tests.cpp`: magic, schema, the
+  exact field count, every field header and value range, the six drainage fields' shapes and shared
+  node count, and the two biome-authority rasters at cell_count. `abundance/tests/frw_test.grl`
+  matches `parity/frw.cpp` on the 382 KB `world.frw` the engine's own `ab::export_world` writes for
+  the suite's seed-1/resolution-64/1024 m world, a four-cell synthetic world (every value type,
+  -0.0, infinity, NaN payloads, u16/u32 extremes) and thirteen malformed files that each reach their
+  intended refusal; the writer round-trips byte for byte. 118 reference lines. Recorded: the on-disk
+  magic is "FRW2" - the docs call the format ABW2, but the AB rename kept the FR wire bytes
+  (Abundance 8071d8c2ca) - and like the engine's assert-based reader, decoding does not require EOF
+  after field 32, which the trailing-bytes case pins.
 - Abundance port: `abundance/src/abcmesh.grl` is the `.abcmesh` character-mesh codec - the version-5
   container (render vertices with their topology split at UV seams, rigid joints, twelve influences
   per vertex with unorm16 weights, centres of rotation, rest positions, tangent rings and sparse
