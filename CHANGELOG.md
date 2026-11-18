@@ -1,5 +1,25 @@
 ## Unreleased
 
+- **`lib/clipper2.grl`: the Clipper2 boolean engine, ported from the vendored 2.0.1.** The
+  water-geometry callers clip buffered river banks, lake raster cells and tiles with Clipper2's
+  Vatti sweep (`BooleanOp` into paths or a PolyTree, `ClipperD` at a decimal precision,
+  `PointInPolygon`, `Area`/`IsPositive`); this is that surface in pure Grail. Ported operation for
+  operation from `clipper.engine.cpp`/`clipper.core.h`: the same scanline order, active-edge link
+  walk, intersection list, horizontal- and maxima handling, collinear cleaning and output building,
+  with the two places where the C++ leaves order to the standard library pinned explicitly (a
+  stable sort for the local minima and trial horizontal segments, and a replica of libstdc++'s
+  introsort permutation for the intersect list, whose equal (y, x) records are equivalent). The
+  exact 128-bit cross-product comparisons, the C library's `nearbyint` rounding, and the scanline
+  heap keep the double arithmetic identical. Where the C++ throws (a precision outside the
+  permitted range, D coordinates that scale out of the integer range), the port returns the same
+  error code with an empty result, which is what the library itself does when exceptions are
+  disabled; the tests pin both. Gated as `lib-clipper2` over `tests/lib/clipper2`: 29 cases from
+  `tests/lib/reference/clipper2_corpus.cpp`, which compiles the vendored sources and the engine's
+  own `water_geometry.cpp` unmodified - real buffered river centrelines, raster-cell unions and the
+  `water_volume_split.cpp` tile clip, plus crossing/touching/collinear/duplicate/spike/degenerate
+  shapes, all four clip types under all four fill rules, paths and PolyTrees, and the double
+  wrapper's precision and range refusals, every vertex compared exactly (doubles as 64-bit
+  patterns).
 - **The logistics route model is ported.** `abundance/src/logistics_network.grl` carries
   `logistics_network.hpp/.cpp` of `cmake/tx/logistics.cmake`: the rover and cargo-drone specs,
   the dispatcher (what busy carriers took and bring counts against both sides; an idle carrier

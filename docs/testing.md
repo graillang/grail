@@ -277,11 +277,12 @@ stripes partition it inside *one* run.
 
 One thing `--jobs` changes: a case runs in a **deeper** directory, `.work/native-tests/<target>/stripe-<i>-<n>/<case>`
 rather than `.work/native-tests/<target>/<case>`. A case whose `args` are relative paths into the
-tree — the six `lib-zlib`, `lib-png`, `lib-jpeg`, `lib-png-write`, `lib-zstd` and `lib-earcut` corpus
-cases pass `../../../../tests/lib/<name>` — therefore look one level too shallow under `--jobs` and
-report `cannot read a corpus file` with `0 cases, 0 failures`. They are not broken: run them without
-`--jobs` (they pass), or run the corpus in jobs mode and read those six as a known artifact. A
-green full run in jobs mode is `passed X failed 6` with exactly those names.
+tree — the seven `lib-zlib`, `lib-png`, `lib-jpeg`, `lib-png-write`, `lib-zstd`, `lib-earcut` and
+`lib-clipper2` corpus cases pass `../../../../tests/lib/<name>` — therefore look one level too
+shallow under `--jobs` and report `cannot read a corpus file` with `0 cases, 0 failures`. They are
+not broken: run them without `--jobs` (they pass), or run the corpus in jobs mode and read those
+seven as a known artifact. A green full run in jobs mode is `passed X failed 7` with exactly those
+names.
 
 Shards are safe to run **in parallel with each other** in one worktree: each case owns
 `.work/native-tests/<target>/<case>`, and a shard's case set is disjoint from every other shard's. Native and LLVM runs of one target use separate directories (`x86_64`, `x86_64-llvm`, `x86_64-llvm+facts`), so they may overlap too. What

@@ -1,0 +1,517 @@
+use clipper2;
+use fs;
+use io;
+
+// Runs every case in tests/lib/clipper2 (made by the vendored Clipper2 2.0.1 through
+// tests/lib/reference/clipper2_corpus.cpp): parses the case's input, runs the port, and compares
+// vertex for vertex against the C++ output. Kinds:
+//   bool64  clip paths (Union/Intersection/Difference/Xor over EvenOdd/NonZero/Positive/Negative)
+//   tree64  the same clip into a PolyTree (parent/level/polygon order)
+//   boold   the double wrapper at a precision, coordinates compared as 64-bit patterns
+//   treed   the double wrapper's PolyTree
+//   pip     PointInPolygon probe verdicts (0 on, 1 inside, 2 outside)
+//   area    Area bits and IsPositive
+// argv: the corpus directory. Returns the failure count.
+struct Tokens {
+    data: u8[],
+    at: u64
+}
+
+fn skip_space(t: &mut Tokens) {
+    while t.at < t.data.len() {
+        b := t.data[t.at];
+        if (b == 32) || (b == 10) || (b == 13) || (b == 9) {
+            t.at += 1;
+        } else {
+            break;
+        }
+    }
+    return ();
+}
+
+fn next_u64(t: &mut Tokens) -> u64 {
+    skip_space(t);
+    start := t.at;
+    while t.at < t.data.len() {
+        b := t.data[t.at];
+        if ((b >= 48) && (b <= 57))
+            || (b == 45)
+            || ((b >= 97) && (b <= 102))
+            || ((b >= 65) && (b <= 70))
+            || (b == 120) {
+            t.at += 1;
+        } else {
+            break;
+        }
+    }
+    token := t.data[start: t.at];
+    match token.text().parse_u64() {
+        Some(v) => {
+            return v;
+        },
+        None => {
+            return hex_value(token);
+        }
+    }
+}
+
+// A double output's bit pattern: exactly sixteen hex digits, never decimal (so a pattern made of
+// decimal digits alone is still hex).
+fn next_hex(t: &mut Tokens) -> u64 {
+    skip_space(t);
+    mut v: u64 = 0;
+    mut digits: u64 = 0;
+    while (t.at < t.data.len()) && (digits < 16) {
+        b := t.data[t.at];
+        mut d: u64 = 0;
+        if (b >= 48) && (b <= 57) {
+            d = u64(b - 48);
+        } else if (b >= 97) && (b <= 102) {
+            d = u64(b - 87);
+        } else if (b >= 65) && (b <= 70) {
+            d = u64(b - 55);
+        } else {
+            break;
+        }
+        v = (v << 4) | d;
+        digits += 1;
+        t.at += 1;
+    }
+    return v;
+}
+
+// Hex tokens (the double outputs' bit patterns) are parsed here rather than through parse_u64.
+fn hex_value<a>(token: &a [u8]) -> u64 {
+    mut v: u64 = 0;
+    for i in token.len() {
+        b := token[i];
+        mut d: u64 = 0;
+        if (b >= 48) && (b <= 57) {
+            d = u64(b - 48);
+        } else if (b >= 97) && (b <= 102) {
+            d = u64(b - 87);
+        } else if (b >= 65) && (b <= 70) {
+            d = u64(b - 55);
+        }
+        v = (v << 4) | d;
+    }
+    return v;
+}
+
+fn next_i64(t: &mut Tokens) -> i64 {
+    skip_space(t);
+    start := t.at;
+    mut negative = false;
+    if t.data[t.at] == 45 {
+        negative = true;
+        t.at += 1;
+    }
+    mut v: i64 = 0;
+    while t.at < t.data.len() {
+        b := t.data[t.at];
+        if (b >= 48) && (b <= 57) {
+            v = v * 10 + i64(b - 48);
+            t.at += 1;
+        } else {
+            break;
+        }
+    }
+    if negative {
+        return -v;
+    }
+    return v;
+}
+
+fn next_f64(t: &mut Tokens) -> f64 {
+    skip_space(t);
+    start := t.at;
+    while t.at < t.data.len() {
+        b := t.data[t.at];
+        if ((b >= 48) && (b <= 57))
+            || (b == 45)
+            || (b == 46)
+            || (b == 101)
+            || (b == 69)
+            || (b == 43) {
+            t.at += 1;
+        } else {
+            break;
+        }
+    }
+    match t.data[start: t.at].text().parse_f64() {
+        Some(v) => {
+            return v;
+        },
+        None => {
+            return 0.0;
+        }
+    }
+}
+
+fn read_file(path: u8[]) -> u8[] {
+    match fs::read(&path) {
+        d: u8[] => {
+            return d;
+        },
+        e: fs::Error => {
+            println("cannot read {}", path.text());
+            return u8[];
+        }
+    }
+}
+
+fn path_of<a, b, c>(dir: &a [u8], name: &b [u8], suffix: &c [u8]) -> u8[] {
+    mut out = dir.copy();
+    out.push(47);
+    for i in name.len() {
+        out.push(name[i]);
+    }
+    for i in suffix.len() {
+        out.push(suffix[i]);
+    }
+    return out;
+}
+
+fn read_paths64(t: &mut Tokens) -> clipper2::Point64[][] {
+    n := next_u64(t);
+    mut paths = clipper2::Point64[][];
+    for pi in n {
+        len := next_u64(t);
+        mut path = clipper2::Point64[];
+        for vi in len {
+            x := next_i64(t);
+            y := next_i64(t);
+            path.push(clipper2::Point64 { x: x, y: y });
+        }
+        paths.push(path);
+    }
+    return paths;
+}
+
+fn read_paths_d(t: &mut Tokens) -> clipper2::PointD[][] {
+    n := next_u64(t);
+    mut paths = clipper2::PointD[][];
+    for pi in n {
+        len := next_u64(t);
+        mut path = clipper2::PointD[];
+        for vi in len {
+            x := next_f64(t);
+            y := next_f64(t);
+            path.push(clipper2::PointD { x: x, y: y });
+        }
+        paths.push(path);
+    }
+    return paths;
+}
+
+fn clip_type_of(op: u64) -> clipper2::ClipType {
+    if op == 1 {
+        return clipper2::ClipType::Intersection;
+    }
+    if op == 2 {
+        return clipper2::ClipType::Union;
+    }
+    if op == 3 {
+        return clipper2::ClipType::Difference;
+    }
+    return clipper2::ClipType::Xor;
+}
+
+fn fill_rule_of(fill: u64) -> clipper2::FillRule {
+    if fill == 0 {
+        return clipper2::FillRule::EvenOdd;
+    }
+    if fill == 1 {
+        return clipper2::FillRule::NonZero;
+    }
+    if fill == 2 {
+        return clipper2::FillRule::Positive;
+    }
+    return clipper2::FillRule::Negative;
+}
+
+// Flatten the tree in the C++ writer's depth-first child order; parent is the index in that order.
+fn flatten_tree(
+    t: &clipper2::PolyTree,
+    node: u64,
+    parent_index: i64,
+    out_parent: &mut i64[],
+    out_level: &mut u64[],
+    out_node: &mut u64[]
+) {
+    count := clipper2::poly_tree_count(t, node);
+    for c in count {
+        child := clipper2::poly_tree_child(t, node, c);
+        my_index := i64(out_node.len());
+        out_node.push(child);
+        out_parent.push(parent_index);
+        out_level.push(clipper2::poly_tree_level(t, child));
+        flatten_tree(t, child, my_index, out_parent, out_level, out_node);
+    }
+    return ();
+}
+
+fn compare_paths64(got: clipper2::Point64[][], t: &mut Tokens) -> bool {
+    n := next_u64(t);
+    if got.len() != n {
+        return false;
+    }
+    for pi in n {
+        len := next_u64(t);
+        if got[pi].len() != len {
+            return false;
+        }
+        for vi in len {
+            x := next_i64(t);
+            y := next_i64(t);
+            if (got[pi][vi].x != x) || (got[pi][vi].y != y) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+fn compare_paths_d(got: clipper2::PointD[][], t: &mut Tokens) -> bool {
+    n := next_u64(t);
+    if got.len() != n {
+        return false;
+    }
+    for pi in n {
+        len := next_u64(t);
+        if got[pi].len() != len {
+            return false;
+        }
+        for vi in len {
+            xb := next_hex(t);
+            yb := next_hex(t);
+            if (bits(got[pi][vi].x) != xb) || (bits(got[pi][vi].y) != yb) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+fn kind_is<a, b>(kind: &a [u8], expect: &b [u8]) -> bool {
+    if kind.len() != expect.len() {
+        return false;
+    }
+    for i in kind.len() {
+        if kind[i] != expect[i] {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn run_case<a, b, c>(dir: &a [u8], kind: &b [u8], name: &c [u8]) -> bool {
+    in_data := read_file(path_of(dir, name, ".in"));
+    out_data := read_file(path_of(dir, name, ".out"));
+    mut it = Tokens { data: in_data, at: 0 };
+    mut ot = Tokens { data: out_data, at: 0 };
+    if kind_is(kind, "bool64") {
+        op := next_u64(&mut it);
+        fill := next_u64(&mut it);
+        _precision := next_u64(&mut it);
+        sub := read_paths64(&mut it);
+        clip := read_paths64(&mut it);
+        got := clipper2::boolean_op_paths64(clip_type_of(op), fill_rule_of(fill), &sub, &clip);
+        return compare_paths64(got, &mut ot);
+    }
+    if kind_is(kind, "tree64") {
+        op := next_u64(&mut it);
+        fill := next_u64(&mut it);
+        _precision := next_u64(&mut it);
+        sub := read_paths64(&mut it);
+        clip := read_paths64(&mut it);
+        mut tree = clipper2::poly_tree_new(1.0);
+        clipper2::boolean_op_tree64(clip_type_of(op), fill_rule_of(fill), &sub, &clip, &mut tree);
+        return compare_tree64(&tree, &mut ot);
+    }
+    if kind_is(kind, "boold") {
+        op := next_u64(&mut it);
+        fill := next_u64(&mut it);
+        precision := next_i64(&mut it);
+        sub := read_paths_d(&mut it);
+        clip := read_paths_d(&mut it);
+        r := clipper2::boolean_op_paths_d(
+            clip_type_of(op),
+            fill_rule_of(fill),
+            &sub,
+            &clip,
+            precision
+        );
+        want_error := next_u64(&mut ot);
+        if r.error_code != want_error {
+            return false;
+        }
+        return compare_paths_d(r.paths, &mut ot);
+    }
+    if kind_is(kind, "treed") {
+        op := next_u64(&mut it);
+        fill := next_u64(&mut it);
+        precision := next_i64(&mut it);
+        sub := read_paths_d(&mut it);
+        clip := read_paths_d(&mut it);
+        mut tree = clipper2::poly_tree_new(1.0);
+        r := clipper2::boolean_op_tree_d(
+            clip_type_of(op),
+            fill_rule_of(fill),
+            &sub,
+            &clip,
+            precision,
+            &mut tree
+        );
+        want_error := next_u64(&mut ot);
+        if r.error_code != want_error {
+            return false;
+        }
+        return compare_tree_d(&tree, &mut ot);
+    }
+    if kind_is(kind, "pip") {
+        ring_len := next_u64(&mut it);
+        mut ring = clipper2::Point64[];
+        for i in ring_len {
+            x := next_i64(&mut it);
+            y := next_i64(&mut it);
+            ring.push(clipper2::Point64 { x: x, y: y });
+        }
+        probes := next_u64(&mut it);
+        for i in probes {
+            x := next_i64(&mut it);
+            y := next_i64(&mut it);
+            want := next_u64(&mut ot);
+            r := clipper2::point_in_polygon64(clipper2::Point64 { x: x, y: y }, &ring);
+            mut got: u64 = 1;
+            if r == clipper2::PointInPolygonResult::IsOn {
+                got = 0;
+            } else if r == clipper2::PointInPolygonResult::IsOutside {
+                got = 2;
+            }
+            if got != want {
+                return false;
+            }
+        }
+        return true;
+    }
+    if kind_is(kind, "area") {
+        n := next_u64(&mut it);
+        for pi in n {
+            len := next_u64(&mut it);
+            mut path = clipper2::Point64[];
+            for vi in len {
+                x := next_i64(&mut it);
+                y := next_i64(&mut it);
+                path.push(clipper2::Point64 { x: x, y: y });
+            }
+            want_bits := next_hex(&mut ot);
+            want_positive := next_u64(&mut ot);
+            path_copy := clipper2::clone_path(&path);
+            got_bits := bits(clipper2::area64(path_copy));
+            got_positive := clipper2::is_positive(path);
+            if (got_bits != want_bits) || ((if got_positive { 1 } else { 0 }) != want_positive) {
+                return false;
+            }
+        }
+        return true;
+    }
+    return false;
+}
+
+fn compare_tree64(t: &clipper2::PolyTree, ot: &mut Tokens) -> bool {
+    want_nodes := next_u64(ot);
+    mut out_parent = i64[];
+    mut out_level = u64[];
+    mut out_node = u64[];
+    flatten_tree(t, 0, -1, &mut out_parent, &mut out_level, &mut out_node);
+    if out_node.len() != want_nodes {
+        return false;
+    }
+    for i in out_node.len() {
+        want_parent := next_i64(ot);
+        want_level := next_u64(ot);
+        n := next_u64(ot);
+        if (out_parent[i] != want_parent) || (out_level[i] != want_level) {
+            return false;
+        }
+        poly := clipper2::poly_tree_polygon64(&t, out_node[i]);
+        if poly.len() != n {
+            return false;
+        }
+        for vi in n {
+            x := next_i64(ot);
+            y := next_i64(ot);
+            if (poly[vi].x != x) || (poly[vi].y != y) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+fn compare_tree_d(t: &clipper2::PolyTree, ot: &mut Tokens) -> bool {
+    want_nodes := next_u64(ot);
+    mut out_parent = i64[];
+    mut out_level = u64[];
+    mut out_node = u64[];
+    flatten_tree(t, 0, -1, &mut out_parent, &mut out_level, &mut out_node);
+    if out_node.len() != want_nodes {
+        return false;
+    }
+    for i in out_node.len() {
+        want_parent := next_i64(ot);
+        want_level := next_u64(ot);
+        n := next_u64(ot);
+        if (out_parent[i] != want_parent) || (out_level[i] != want_level) {
+            return false;
+        }
+        poly := clipper2::poly_tree_polygon_d(&t, out_node[i]);
+        if poly.len() != n {
+            return false;
+        }
+        for vi in n {
+            xb := next_hex(ot);
+            yb := next_hex(ot);
+            if (bits(poly[vi].x) != xb) || (bits(poly[vi].y) != yb) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+pub fn main(dir: &[u8]) -> u64 {
+    manifest := read_file(path_of(dir, "manifest", ".txt"));
+    mut cases: u64 = 0;
+    mut failures: u64 = 0;
+    mut at: u64 = 0;
+    while at < manifest.len() {
+        while (at < manifest.len()) && ((manifest[at] == 10) || (manifest[at] == 13)) {
+            at += 1;
+        }
+        if at >= manifest.len() {
+            break;
+        }
+        line_start := at;
+        while (at < manifest.len()) && (manifest[at] != 10) {
+            at += 1;
+        }
+        line := manifest[line_start: at].copy();
+        // kind name
+        mut sp: u64 = 0;
+        while (sp < line.len()) && (line[sp] != 32) {
+            sp += 1;
+        }
+        kind := line[0: sp].copy();
+        name := line[sp + 1: line.len()].copy();
+        cases += 1;
+        ok := run_case(&dir, &kind, &name);
+        if ok == false {
+            println("FAIL {} {}", kind.text(), name.text());
+            failures += 1;
+        }
+    }
+    println("{} cases, {} failures", cases, failures);
+    return failures;
+}

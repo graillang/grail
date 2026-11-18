@@ -29,3 +29,10 @@ nice -n 19 $CXX "${FLAGS[@]}" "$REF/earcut_corpus.cpp" \
   "$AB/ThirdParty/clipper2/src/clipper.rectclip.cpp" -o "$WORK/earcut_corpus"
 "$WORK/earcut_corpus" "$AB" "$OUT_EARCUT"
 echo "earcut corpus: $(ls "$OUT_EARCUT" | wc -l) files"
+nice -n 19 $CXX "${FLAGS[@]}" "$REF/clipper2_corpus.cpp" \
+  "$AB/Source/AbundanceWorldGen/Private/water_geometry.cpp" \
+  "$AB/ThirdParty/clipper2/src/clipper.engine.cpp" \
+  "$AB/ThirdParty/clipper2/src/clipper.offset.cpp" \
+  "$AB/ThirdParty/clipper2/src/clipper.rectclip.cpp" -o "$WORK/clipper2_corpus"
+"$WORK/clipper2_corpus" "$OUT_CLIPPER2" "$AB"
+echo "clipper2 corpus: $(ls "$OUT_CLIPPER2" | wc -l) files"

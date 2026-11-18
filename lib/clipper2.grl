@@ -1,0 +1,4725 @@
+// Clipper2 2.0.1 (Angus Johnson; Boost licence), as vendored by Abundance at ThirdParty/clipper2,
+// restricted to the surface the engine's water-geometry callers use: the Vatti boolean engine
+// (Union/Intersection/Difference/Xor under EvenOdd/NonZero/Positive/Negative) returning paths or a
+// PolyTree, the double-precision ClipperD wrapper, PointInPolygon and polygon area/orientation.
+// RectClip, Minkowski sums and the experimental triangulator are not ported: no caller reaches
+// them (the callers triangulate with mapbox earcut instead). The offset engine (ClipperOffset /
+// InflatePaths) lands as its own increment.
+//
+// Ported operation for operation from clipper.engine.cpp / clipper.core.h: the same sweep order,
+// the same linked-list merge walk, the same output-building order, and the same double-precision
+// arithmetic sequence, so every output vertex and its position match the C++ vertex for vertex.
+// Two places where the C++ leaves order to the standard library are pinned explicitly:
+//   - the local-minima list and the trial horizontal segments use std::stable_sort, so any stable
+//     sort matches; this module implements one.
+//   - the intersect list uses std::sort (an unstable introsort): the port replicates libstdc++'s
+//     introsort permutation exactly, so records that compare equal keep the same final order.
+// The C++ throws C++ exceptions for a few refusals (precision out of the permitted range in the
+// ClipperD/BooleanOp path, D coordinates that scale out of the integer range). Grail has no
+// exceptions, so those entry points return a refusal through `error_code` and an empty result,
+// which is what the C++ itself does when exceptions are disabled; tests pin both behaviours.
+module clipper2;
+
+use math;
+use clone;
+
+// ---- public types ----
+
+@derive(
+    Clone
+) pub struct Point64 {
+    x: i64,
+    y: i64,
+} @derive(
+    Clone
+) pub struct PointD {
+    x: f64,
+    y: f64,
+} // The engine's clip operations, in the C++'s declaration order.
+pub enum ClipType {
+    NoClip,
+    Intersection,
+    Union,
+    Difference,
+    Xor,
+} pub enum FillRule {
+    EvenOdd,
+    NonZero,
+    Positive,
+    Negative,
+} pub enum JoinType {
+    Square,
+    Bevel,
+    Round,
+    Miter,
+} pub enum EndType {
+    Polygon,
+    Joined,
+    Butt,
+    Square,
+    Round,
+} pub enum PointInPolygonResult {
+    IsOn,
+    IsInside,
+    IsOutside,
+} // Error bits carried by `error_code`, as in clipper.core.h.
+pub const PRECISION_ERROR: u64 = 1;
+pub const SCALE_ERROR: u64 = 2;
+pub const NON_PAIR_ERROR: u64 = 4;
+pub const UNDEFINED_ERROR: u64 = 32;
+pub const RANGE_ERROR: u64 = 64;
+
+// MAX_COORD = INT64_MAX >> 2; the D wrappers refuse coordinates whose scaled magnitude passes it.
+pub const MAX_COORD: i64 = 2305843009213693951;
+
+pub fn check_precision_range(precision: i64) -> i64 {
+    // CheckPrecisionRange: clamp to [-CLIPPER2_MAX_DEC_PRECISION, +...] (8) and report.
+    if (precision >= -8) && (precision <= 8) {
+        return precision;
+    }
+    if precision > 0 {
+        return 8;
+    }
+    return -8;
+}
+
+// ---- point primitives (clipper.core.h) ----
+
+// nearbyint: round half to even, the C library call TopX and GetClosestPointOnSegment make.
+// Bit-exact implementation: the 1.5*2^52 magic constant for |x| < 2^51, an exact bit decode in
+// [2^51, 2^52) where the spacing is 0.5, and the identity beyond 2^52 where every value is
+// already integral.
+pub fn nearbyint(x: f64) -> f64 {
+    if x.is_nan() {
+        return x;
+    }
+    a := x.abs();
+    if a >= 4503599627370496.0 {
+        // 2^52 and beyond: every double is integral already; infinities pass through.
+        return x;
+    }
+    if a < 2251799813685248.0 {
+        // Below 2^51 the 1.5*2^52 magic constant rounds to nearest, ties to even.
+        magic := 6755399441055744.0;
+        return (x + magic) - magic;
+    }
+    // [2^51, 2^52): the spacing is 0.5, so only halves are non-integral; an integral value has a
+    // zero mantissa bit. A tie goes to the even neighbour, which is `n` when n is even.
+    if (bits(x) & 1) == 0 {
+        return x;
+    }
+    n := i64(x);
+    if (n & 1) == 0 {
+        return f64(n);
+    }
+    if x > 0.0 {
+        return f64(n + 1);
+    }
+    return f64(n - 1);
+}
+
+// Point64 from a double: std::round, halves away from zero (Point<T>::Init).
+pub fn point64_from_f64(x: f64, y: f64) -> Point64 {
+    return Point64 { x: i64(math::round(x)), y: i64(math::round(y)) };
+}
+
+// MultiplyUInt64: the exact 128-bit product as (lo, hi), used for the cross-product comparisons.
+struct U128 {
+    lo: u64,
+    hi: u64
+}
+
+fn multiply_u64(a: u64, b: u64) -> U128 {
+    x1 := (a & 4294967295) * (b & 4294967295);
+    x2 := (a >> 32) * (b & 4294967295) + (x1 >> 32);
+    x3 := (a & 4294967295) * (b >> 32) + (x2 & 4294967295);
+    lo := (x3 & 4294967295) << 32 | (x1 & 4294967295);
+    hi := (a >> 32) * (b >> 32) + (x2 >> 32) + (x3 >> 32);
+    return U128 { lo: lo, hi: hi };
+}
+
+fn tri_sign(x: i64) -> i64 {
+    if x > 0 {
+        return 1;
+    }
+    if x < 0 {
+        return -1;
+    }
+    return 0;
+}
+
+// ProductsAreEqual: exact (a * b == c * d) over signed 64-bit values.
+pub fn products_are_equal(a: i64, b: i64, c: i64, d: i64) -> bool {
+    abs_a := u64(if a < 0 { -a } else { a });
+    abs_b := u64(if b < 0 { -b } else { b });
+    abs_c := u64(if c < 0 { -c } else { c });
+    abs_d := u64(if d < 0 { -d } else { d });
+    ab := multiply_u64(abs_a, abs_b);
+    cd := multiply_u64(abs_c, abs_d);
+    sign_ab := tri_sign(a) * tri_sign(b);
+    sign_cd := tri_sign(c) * tri_sign(d);
+    return (ab.lo == cd.lo) && (ab.hi == cd.hi) && (sign_ab == sign_cd);
+}
+
+// CrossProductSign: the sign of (pt2-pt1) x (pt3-pt2), computed exactly.
+pub fn cross_product_sign(pt1: Point64, pt2: Point64, pt3: Point64) -> i64 {
+    a := pt2.x - pt1.x;
+    b := pt3.y - pt2.y;
+    c := pt2.y - pt1.y;
+    d := pt3.x - pt2.x;
+    abs_ab := multiply_u64(u64(if a < 0 { -a } else { a }), u64(if b < 0 { -b } else { b }));
+    abs_cd := multiply_u64(u64(if c < 0 { -c } else { c }), u64(if d < 0 { -d } else { d }));
+    sign_ab := tri_sign(a) * tri_sign(b);
+    sign_cd := tri_sign(c) * tri_sign(d);
+    if sign_ab == sign_cd {
+        mut result: i64 = 0;
+        if abs_ab.hi == abs_cd.hi {
+            if abs_ab.lo == abs_cd.lo {
+                return 0;
+            }
+            if abs_ab.lo > abs_cd.lo {
+                result = 1;
+            } else {
+                result = -1;
+            }
+        } else if abs_ab.hi > abs_cd.hi {
+            result = 1;
+        } else {
+            result = -1;
+        }
+        if sign_ab > 0 {
+            return result;
+        }
+        return -result;
+    }
+    if sign_ab > sign_cd {
+        return 1;
+    }
+    return -1;
+}
+
+pub fn is_collinear(pt1: Point64, shared: Point64, pt2: Point64) -> bool {
+    a := shared.x - pt1.x;
+    b := pt2.y - shared.y;
+    c := shared.y - pt1.y;
+    d := pt2.x - shared.x;
+    return products_are_equal(a, b, c, d);
+}
+
+// CrossProduct over points (doubles, as the C++ computes them).
+pub fn cross_product_points(pt1: Point64, pt2: Point64, pt3: Point64) -> f64 {
+    return f64(pt2.x - pt1.x) * f64(pt3.y - pt2.y) - f64(pt2.y - pt1.y) * f64(pt3.x - pt2.x);
+}
+
+pub fn cross_product_vecs(v1: PointD, v2: PointD) -> f64 {
+    return v1.y * v2.x - v2.y * v1.x;
+}
+
+pub fn dot_product_points(pt1: Point64, pt2: Point64, pt3: Point64) -> f64 {
+    return f64(pt2.x - pt1.x) * f64(pt3.x - pt2.x) + f64(pt2.y - pt1.y) * f64(pt3.y - pt2.y);
+}
+
+pub fn dot_product_vecs(v1: PointD, v2: PointD) -> f64 {
+    return v1.x * v2.x + v1.y * v2.y;
+}
+
+fn sqr(v: f64) -> f64 {
+    return v * v;
+}
+
+pub fn distance_sqr(p1: Point64, p2: Point64) -> f64 {
+    return sqr(f64(p1.x - p2.x)) + sqr(f64(p1.y - p2.y));
+}
+
+pub fn perpendic_dist_from_line_sqrd(pt: Point64, line1: Point64, line2: Point64) -> f64 {
+    a := f64(pt.x - line1.x);
+    b := f64(pt.y - line1.y);
+    c := f64(line2.x - line1.x);
+    d := f64(line2.y - line1.y);
+    if (c == 0.0) && (d == 0.0) {
+        return 0.0;
+    }
+    return sqr(a * d - c * b) / (c * c + d * d);
+}
+
+// Area(Path64): the C++'s pairwise double accumulation, in the same order.
+pub fn area64(path: Point64[]) -> f64 {
+    cnt := path.len();
+    if cnt < 3 {
+        return 0.0;
+    }
+    mut a: f64 = 0.0;
+    mut it2 = cnt - 1;
+    mut stop = it2;
+    if (cnt & 1) == 0 {
+        stop += 1;
+    }
+    mut it1: u64 = 0;
+    while it1 != stop {
+        a = a + f64(path[it2].y + path[it1].y) * f64(path[it2].x - path[it1].x);
+        it2 = it1 + 1;
+        a = a + f64(path[it1].y + path[it2].y) * f64(path[it1].x - path[it2].x);
+        it1 += 2;
+    }
+    if (cnt & 1) != 0 {
+        a = a + f64(path[it2].y + path[it1].y) * f64(path[it2].x - path[it1].x);
+    }
+    return a * 0.5;
+}
+
+pub fn is_positive(path: Point64[]) -> bool {
+    return area64(path) >= 0.0;
+}
+
+// PointInPolygon over Path64: the exact left-edge crossing walk of clipper.core.h.
+pub fn point_in_polygon64(pt: Point64, polygon: &Point64[]) -> PointInPolygonResult {
+    if polygon.len() < 3 {
+        return PointInPolygonResult::IsOutside;
+    }
+    mut val: i64 = 0;
+    cbegin := 0;
+    mut first: u64 = 0;
+    mut cend = polygon.len();
+    while (first != cend) && (polygon[first].y == pt.y) {
+        first += 1;
+    }
+    if first == cend {
+        return PointInPolygonResult::IsOutside;
+    }
+    mut is_above = polygon[first].y < pt.y;
+    starting_above := is_above;
+    mut curr = first + 1;
+    loop {
+        if curr == cend {
+            if (cend == first) || (first == cbegin) {
+                break;
+            }
+            cend = first;
+            curr = cbegin;
+        }
+        if is_above {
+            while (curr != cend) && (polygon[curr].y < pt.y) {
+                curr += 1;
+            }
+            if curr == cend {
+                continue;
+            }
+        } else {
+            while (curr != cend) && (polygon[curr].y > pt.y) {
+                curr += 1;
+            }
+            if curr == cend {
+                continue;
+            }
+        }
+        mut prev: u64 = 0;
+        if curr == cbegin {
+            prev = polygon.len() - 1;
+        } else {
+            prev = curr - 1;
+        }
+        if polygon[curr].y == pt.y {
+            if (polygon[curr].x == pt.x)
+                || (
+                    (polygon[curr].y == polygon[prev].y)
+                        && ((pt.x < polygon[prev].x) != (pt.x < polygon[curr].x))
+                ) {
+                return PointInPolygonResult::IsOn;
+            }
+            curr += 1;
+            if curr == first {
+                break;
+            }
+            continue;
+        }
+        if (pt.x < polygon[curr].x) && (pt.x < polygon[prev].x) {
+            // Only edges crossing on the left matter.
+        } else if (pt.x > polygon[prev].x) && (pt.x > polygon[curr].x) {
+            val = 1 - val;
+        } else {
+            d := cross_product_sign(polygon[prev].clone(), polygon[curr].clone(), pt.clone());
+            if d == 0 {
+                return PointInPolygonResult::IsOn;
+            }
+            if (d < 0) == is_above {
+                val = 1 - val;
+            }
+        }
+        is_above = !is_above;
+        curr += 1;
+    }
+    if is_above != starting_above {
+        cend = polygon.len();
+        if curr == cend {
+            curr = cbegin;
+        }
+        mut prev: u64 = 0;
+        if curr == cbegin {
+            prev = cend - 1;
+        } else {
+            prev = curr - 1;
+        }
+        d := cross_product_sign(polygon[prev].clone(), polygon[curr].clone(), pt.clone());
+        if d == 0 {
+            return PointInPolygonResult::IsOn;
+        }
+        if (d < 0) == is_above {
+            val = 1 - val;
+        }
+    }
+    if val == 0 {
+        return PointInPolygonResult::IsOutside;
+    }
+    return PointInPolygonResult::IsInside;
+}
+
+// GetLineIntersectPt (the default, non-high-precision build): doubles, then a truncating cast.
+pub fn line_intersect_pt(ln1a: Point64, ln1b: Point64, ln2a: Point64, ln2b: Point64) -> Point64? {
+    dx1 := f64(ln1b.x - ln1a.x);
+    dy1 := f64(ln1b.y - ln1a.y);
+    dx2 := f64(ln2b.x - ln2a.x);
+    dy2 := f64(ln2b.y - ln2a.y);
+    det := dy1 * dx2 - dy2 * dx1;
+    if det == 0.0 {
+        return None;
+    }
+    t := (f64(ln1a.x - ln2a.x) * dy2 - f64(ln1a.y - ln2a.y) * dx2) / det;
+    if t <= 0.0 {
+        return Some(ln1a);
+    }
+    if t >= 1.0 {
+        return Some(ln1b);
+    }
+    return Some(Point64 { x: i64(f64(ln1a.x) + t * dx1), y: i64(f64(ln1a.y) + t * dy1) });
+}
+
+// SegmentsIntersect: the C++'s double-precision orientation tests.
+pub fn segments_intersect(
+    seg1a: Point64,
+    seg1b: Point64,
+    seg2a: Point64,
+    seg2b: Point64,
+    inclusive: bool
+) -> bool {
+    dy1 := f64(seg1b.y - seg1a.y);
+    dx1 := f64(seg1b.x - seg1a.x);
+    dy2 := f64(seg2b.y - seg2a.y);
+    dx2 := f64(seg2b.x - seg2a.x);
+    cp := dy1 * dx2 - dy2 * dx1;
+    if cp == 0.0 {
+        return false;
+    }
+    if inclusive {
+        mut t = (f64(seg1a.x - seg2a.x) * dy2 - f64(seg1a.y - seg2a.y) * dx2);
+        if t == 0.0 {
+            return true;
+        }
+        if t > 0.0 {
+            if (cp < 0.0) || (t > cp) {
+                return false;
+            }
+        } else if (cp > 0.0) || (t < cp) {
+            return false;
+        }
+        t = (f64(seg1a.x - seg2a.x) * dy1 - f64(seg1a.y - seg2a.y) * dx1);
+        if t == 0.0 {
+            return true;
+        }
+        if t > 0.0 {
+            return (cp > 0.0) && (t <= cp);
+        }
+        return (cp < 0.0) && (t >= cp);
+    }
+    mut t = (f64(seg1a.x - seg2a.x) * dy2 - f64(seg1a.y - seg2a.y) * dx2);
+    if t == 0.0 {
+        return false;
+    }
+    if t > 0.0 {
+        if (cp < 0.0) || (t >= cp) {
+            return false;
+        }
+    } else if (cp > 0.0) || (t <= cp) {
+        return false;
+    }
+    t = (f64(seg1a.x - seg2a.x) * dy1 - f64(seg1a.y - seg2a.y) * dx1);
+    if t == 0.0 {
+        return false;
+    }
+    if t > 0.0 {
+        return (cp > 0.0) && (t < cp);
+    }
+    return (cp < 0.0) && (t > cp);
+}
+
+pub fn closest_point_on_segment(off_pt: Point64, seg1: Point64, seg2: Point64) -> Point64 {
+    if (seg1.x == seg2.x) && (seg1.y == seg2.y) {
+        return seg1;
+    }
+    dx := f64(seg2.x - seg1.x);
+    dy := f64(seg2.y - seg1.y);
+    mut q = (f64(off_pt.x - seg1.x) * dx + f64(off_pt.y - seg1.y) * dy) / (sqr(dx) + sqr(dy));
+    if q < 0.0 {
+        q = 0.0;
+    } else if q > 1.0 {
+        q = 1.0;
+    }
+    return Point64 { x: seg1.x + i64(nearbyint(q * dx)), y: seg1.y + i64(nearbyint(q * dy)) };
+}
+
+// StripDuplicates: adjacent duplicates, and for a closed path the wrap-around duplicate.
+pub fn strip_duplicates(path: &mut Point64[], is_closed_path: bool) {
+    mut out: u64 = 0;
+    mut i: u64 = 0;
+    while i < path.len() {
+        cur := path[i].clone();
+        mut keep = true;
+        if out > 0 {
+            prev_pt := path[out - 1].clone();
+            if (prev_pt.x == cur.x) && (prev_pt.y == cur.y) {
+                keep = false;
+            }
+        }
+        if keep {
+            path[out] = cur;
+            out += 1;
+        }
+        i += 1;
+    }
+    path.truncate(out);
+    if is_closed_path {
+        mut len = path.len();
+        while len > 1 {
+            last := path[len - 1].clone();
+            first := path[0].clone();
+            if (last.x != first.x) || (last.y != first.y) {
+                break;
+            }
+            path.truncate(len - 1);
+            len -= 1;
+        }
+    }
+    return ();
+}
+
+// ScalePath64: Point64 from scaled doubles, rounding half away from zero (Point64::Init), and the
+// out-of-range refusal ScalePaths applies first.
+pub fn scale_paths_d_to_64(paths: &PointD[][], scale: f64) -> Point64[][]? {
+    mut min_x: f64 = 0.0;
+    mut max_x: f64 = 0.0;
+    mut min_y: f64 = 0.0;
+    mut max_y: f64 = 0.0;
+    mut any = false;
+    for pi in paths.len() {
+        for vi in paths[pi].len() {
+            px := paths[pi][vi].x;
+            py := paths[pi][vi].y;
+            if any == false {
+                min_x = px;
+                max_x = px;
+                min_y = py;
+                max_y = py;
+                any = true;
+            } else {
+                if px < min_x {
+                    min_x = px;
+                }
+                if px > max_x {
+                    max_x = px;
+                }
+                if py < min_y {
+                    min_y = py;
+                }
+                if py > max_y {
+                    max_y = py;
+                }
+            }
+        }
+    }
+    if any {
+        if ((min_x * scale) < f64(-MAX_COORD))
+            || ((max_x * scale) > f64(MAX_COORD))
+            || ((min_y * scale) < f64(-MAX_COORD))
+            || ((max_y * scale) > f64(MAX_COORD)) {
+            return None;
+        }
+    }
+    mut result = Point64[][];
+    for pi in paths.len() {
+        mut path = Point64[];
+        for vi in paths[pi].len() {
+            path.push(
+                Point64 {
+                    x: i64(math::round(paths[pi][vi].x * scale)),
+                    y: i64(math::round(paths[pi][vi].y * scale)),
+                }
+            );
+        }
+        result.push(path);
+    }
+    return Some(result);
+}
+
+// ScalePath64 -> D: the descale multiplies each integer coordinate by `inv_scale`.
+pub fn scale_path_64_to_d(path: Point64[], inv_scale: f64) -> PointD[] {
+    mut out = PointD[];
+    inv := inv_scale;
+    for i in path.len() {
+        out.push(PointD { x: f64(path[i].x) * inv, y: f64(path[i].y) * inv });
+    }
+    return out;
+}
+
+// ---- the PolyTree ----
+// A flat arena for the C++ PolyPath tree: node 0 is the invisible root; every other index is a
+// path node, linked parent/first_child/next_sibling in the order RecursiveCheckOwners adds them.
+// Polygons stay in integer space; `inv_scale` is the ClipperD factor read back at access time
+// (identical to the C++ PolyPathD converting once at AddChild: a single multiply either way).
+pub struct PolyTree {
+    polygons: Point64[][],
+    parent: u64[],
+    first_child: u64[],
+    last_child: u64[],
+    next_sibling: u64[],
+    level: u64[],
+    root_first: u64,
+    root_last: u64,
+    inv_scale: f64,
+    open_paths: Point64[][],
+    open_paths_d: PointD[][]
+}
+
+pub fn poly_tree_new(inv_scale: f64) -> PolyTree {
+    return PolyTree {
+        polygons: Point64[][],
+        parent: u64[],
+        first_child: u64[],
+        last_child: u64[],
+        next_sibling: u64[],
+        level: u64[],
+        root_first: 0,
+        root_last: 0,
+        inv_scale: inv_scale,
+        open_paths: Point64[][],
+        open_paths_d: PointD[][],
+    };
+}
+
+fn poly_tree_add_child(tree: &mut PolyTree, parent: u64, path: Point64[]) -> u64 {
+    node := tree.polygons.len() + 1;
+    mut lvl = 1;
+    if parent != 0 {
+        lvl = tree.level[parent - 1] + 1;
+    }
+    tree.polygons.push(path);
+    tree.parent.push(parent);
+    tree.first_child.push(0);
+    tree.last_child.push(0);
+    tree.next_sibling.push(0);
+    tree.level.push(lvl);
+    if parent != 0 {
+        if tree.last_child[parent - 1] != 0 {
+            tree.next_sibling[tree.last_child[parent - 1] - 1] = node;
+        } else {
+            tree.first_child[parent - 1] = node;
+        }
+        tree.last_child[parent - 1] = node;
+    } else {
+        // Node 0 is the invisible root; its children chain through root_first/next_sibling.
+        if tree.root_last != 0 {
+            tree.next_sibling[tree.root_last - 1] = node;
+        } else {
+            tree.root_first = node;
+        }
+        tree.root_last = node;
+    }
+    return node;
+}
+
+pub fn poly_tree_count(tree: &PolyTree, node: u64) -> u64 {
+    mut count: u64 = 0;
+    mut c: u64 = 0;
+    if node == 0 {
+        c = tree.root_first;
+    } else {
+        c = tree.first_child[node - 1];
+    }
+    while c != 0 {
+        count += 1;
+        c = tree.next_sibling[c - 1];
+    }
+    return count;
+}
+
+pub fn poly_tree_child(tree: &PolyTree, node: u64, index: u64) -> u64 {
+    mut c: u64 = 0;
+    if node == 0 {
+        c = tree.root_first;
+    } else {
+        c = tree.first_child[node - 1];
+    }
+    mut i: u64 = 0;
+    while (c != 0) && (i < index) {
+        c = tree.next_sibling[c - 1];
+        i += 1;
+    }
+    return c;
+}
+
+pub fn poly_tree_is_hole(tree: &PolyTree, node: u64) -> bool {
+    if node == 0 {
+        return false;
+    }
+    lvl := tree.level[node - 1];
+    return (lvl != 0) && ((lvl & 1) == 0);
+}
+
+pub fn poly_tree_polygon64(tree: &PolyTree, node: u64) -> Point64[] {
+    return clone_path(&tree.polygons[node - 1]);
+}
+
+pub fn poly_tree_polygon_d(tree: &PolyTree, node: u64) -> PointD[] {
+    return scale_path_64_to_d(clone_path(&tree.polygons[node - 1]), tree.inv_scale);
+}
+
+pub fn clone_path(path: &Point64[]) -> Point64[] {
+    mut out = Point64[];
+    for i in path.len() {
+        out.push(path[i].clone());
+    }
+    return out;
+}
+
+pub fn poly_tree_level(tree: &PolyTree, node: u64) -> u64 {
+    if node == 0 {
+        return 0;
+    }
+    return tree.level[node - 1];
+}
+
+// ---- engine node types ----
+// Every pointer in clipper.engine.h becomes a 1-based arena index here (0 = null). The pools never
+// free or reuse a slot inside one clip run, so index identity means exactly what pointer identity
+// means in the C++, and deleted edges are marked only by being unlinked from the active list.
+
+struct Vertex {
+    pt: Point64,
+    next: u64,
+    prev: u64,
+    flags: u64
+}
+
+@derive(Clone) struct LocalMinima { vertex: u64, polytype: u8, // 0 = Subject, 1 = Clip
+is_open: bool } struct ActiveEdge { bot: Point64, top: Point64, curr_x: i64, dx: f64, wind_dx: i64, wind_cnt: i64, wind_cnt2: i64, outrec: u64, prev_in_ael: u64, next_in_ael: u64, prev_in_sel: u64, next_in_sel: u64, jump: u64, vertex_top: u64, local_min: u64, is_left_bound: bool, join_with: u8 // 0 = NoJoin, 1 = Left, 2 = Right
+} struct OutRec { idx: u64, owner: u64, front_edge: u64, back_edge: u64, pts: u64, polypath: u8, // 1 once RecursiveCheckOwners assigned its tree node
+polypath_node: u64, splits: u64[], recursive_split: u64, bounds: Rect64, path: Point64[], is_open: bool } @derive(
+    Clone
+) struct Rect64 {
+    left: i64,
+    top: i64,
+    right: i64,
+    bottom: i64,
+    valid: bool,
+} @derive(
+    Clone
+) struct OutPt {
+    pt: Point64,
+    next: u64,
+    prev: u64,
+    outrec: u64,
+    horz: u64,
+} @derive(
+    Clone
+) struct IntersectNode {
+    pt: Point64,
+    edge1: u64,
+    edge2: u64,
+} @derive(
+    Clone
+) struct HorzSegment {
+    left_op: u64,
+    right_op: u64,
+    left_to_right: bool,
+} @derive(Clone) struct HorzJoin { op1: u64, op2: u64 } // Vertex flags.
+const VF_OPEN_START: u64 = 1;
+const VF_OPEN_END: u64 = 2;
+const VF_LOCAL_MAX: u64 = 4;
+const VF_LOCAL_MIN: u64 = 8;
+
+// JoinWith values.
+const JOIN_NONE: u8 = 0;
+const JOIN_LEFT: u8 = 1;
+const JOIN_RIGHT: u8 = 2;
+
+// PathType.
+const POLY_SUBJECT: u8 = 0;
+const POLY_CLIP: u8 = 1;
+
+fn rect_invalid() -> Rect64 {
+    return Rect64 { left: 0, top: 0, right: 0, bottom: 0, valid: false };
+}
+
+fn rect_is_empty(r: &Rect64) -> bool {
+    if r.valid == false {
+        return true;
+    }
+    return (r.bottom <= r.top) || (r.right <= r.left);
+}
+
+fn rect_contains(r: &Rect64, other: &Rect64) -> bool {
+    return (other.left >= r.left)
+        && (other.right <= r.right)
+        && (other.top >= r.top)
+        && (other.bottom <= r.bottom);
+}
+
+pub struct Clipper {
+    // Input state (the C++'s ClipperBase private members).
+    cliptype: u8, // 0 NoClip, 1 Intersection, 2 Union, 3 Difference, 4 Xor
+    fillrule: u8, // 0 EvenOdd, 1 NonZero, 2 Positive, 3 Negative
+    fillpos: u8,
+    bot_y: i64,
+    minima_sorted: bool,
+    using_polytree: bool,
+    actives_head: u64,
+    sel_head: u64,
+    minima: LocalMinima[],
+    current_min: u64,
+    vertices: Vertex[],
+    scanlines: i64[],
+    scanline_count: u64,
+    intersect_nodes: IntersectNode[],
+    horz_segs: HorzSegment[],
+    horz_joins: HorzJoin[],
+    outrecs: OutRec[],
+    outpts: OutPt[],
+    actives: ActiveEdge[],
+    has_open_paths: bool,
+    succeeded: bool,
+    preserve_collinear: bool,
+    reverse_solution: bool,
+    error_code: u64,
+    inv_scale: f64,
+    // Introsort scratch for the intersect list (the C++ sorts IntersectNode records in place).
+    scratch: IntersectNode[]
+}
+
+pub fn new() -> Clipper {
+    return Clipper {
+        cliptype: 0,
+        fillrule: 0,
+        fillpos: 2,
+        bot_y: 0,
+        minima_sorted: false,
+        using_polytree: false,
+        actives_head: 0,
+        sel_head: 0,
+        minima: LocalMinima[],
+        current_min: 0,
+        vertices: Vertex[],
+        scanlines: i64[],
+        scanline_count: 0,
+        intersect_nodes: IntersectNode[],
+        horz_segs: HorzSegment[],
+        horz_joins: HorzJoin[],
+        outrecs: OutRec[],
+        outpts: OutPt[],
+        actives: ActiveEdge[],
+        has_open_paths: false,
+        succeeded: true,
+        preserve_collinear: true,
+        reverse_solution: false,
+        error_code: 0,
+        inv_scale: 1.0,
+        scratch: IntersectNode[],
+    };
+}
+
+// ---- small accessors ----
+
+fn is_odd(val: i64) -> bool {
+    return (val & 1) != 0;
+}
+
+fn is_hot_edge(c: &Clipper, e: u64) -> bool {
+    return c.actives[e - 1].outrec != 0;
+}
+
+fn is_open_edge(c: &Clipper, e: u64) -> bool {
+    return c.minima[c.actives[e - 1].local_min - 1].is_open;
+}
+
+fn is_open_end_vertex(c: &Clipper, v: u64) -> bool {
+    return (c.vertices[v - 1].flags & (VF_OPEN_START | VF_OPEN_END)) != 0;
+}
+
+fn is_open_end_edge(c: &Clipper, e: u64) -> bool {
+    return is_open_end_vertex(&c, c.actives[e - 1].vertex_top);
+}
+
+fn get_prev_hot_edge(c: &Clipper, e: u64) -> u64 {
+    mut prev = c.actives[e - 1].prev_in_ael;
+    while (prev != 0) && (is_open_edge(&c, prev) || !is_hot_edge(&c, prev)) {
+        prev = c.actives[prev - 1].prev_in_ael;
+    }
+    return prev;
+}
+
+fn is_front(c: &Clipper, e: u64) -> bool {
+    return e == c.outrecs[c.actives[e - 1].outrec - 1].front_edge;
+}
+
+fn is_invalid_path(c: &Clipper, op: u64) -> bool {
+    if op == 0 {
+        return true;
+    }
+    return c.outpts[op - 1].next == op;
+}
+
+fn dbl_max() -> f64 {
+    return f64_from_bits(9218868437227405311);
+}
+
+fn get_dx(pt1: Point64, pt2: Point64) -> f64 {
+    dy := f64(pt2.y - pt1.y);
+    if dy != 0.0 {
+        return f64(pt2.x - pt1.x) / dy;
+    }
+    if pt2.x > pt1.x {
+        return -dbl_max();
+    }
+    return dbl_max();
+}
+
+fn top_x(c: &Clipper, e: u64, current_y: i64) -> i64 {
+    top := c.actives[e - 1].top.clone();
+    bot := c.actives[e - 1].bot.clone();
+    dx := c.actives[e - 1].dx;
+    if (current_y == top.y) || (top.x == bot.x) {
+        return top.x;
+    }
+    if current_y == bot.y {
+        return bot.x;
+    }
+    return bot.x + i64(nearbyint(dx * f64(current_y - bot.y)));
+}
+
+fn is_horizontal(c: &Clipper, e: u64) -> bool {
+    return c.actives[e - 1].top.y == c.actives[e - 1].bot.y;
+}
+
+fn is_heading_right_horz(c: &Clipper, e: u64) -> bool {
+    return c.actives[e - 1].dx == -dbl_max();
+}
+
+fn is_heading_left_horz(c: &Clipper, e: u64) -> bool {
+    return c.actives[e - 1].dx == dbl_max();
+}
+
+fn poly_type(c: &Clipper, e: u64) -> u8 {
+    return c.minima[c.actives[e - 1].local_min - 1].polytype;
+}
+
+fn is_same_poly_type(c: &Clipper, e1: u64, e2: u64) -> bool {
+    return c.minima[c.actives[e1 - 1].local_min - 1].polytype
+        == c.minima[c.actives[e2 - 1].local_min - 1].polytype;
+}
+
+fn set_dx(c: &mut Clipper, e: u64) {
+    bot := c.actives[e - 1].bot.clone();
+    top := c.actives[e - 1].top.clone();
+    c.actives[e - 1].dx = get_dx(bot, top);
+    return ();
+}
+
+fn next_vertex(c: &Clipper, e: u64) -> u64 {
+    wind_dx := c.actives[e - 1].wind_dx;
+    vt := c.actives[e - 1].vertex_top;
+    if wind_dx > 0 {
+        return c.vertices[vt - 1].next;
+    }
+    return c.vertices[vt - 1].prev;
+}
+
+fn prev_prev_vertex(c: &Clipper, e: u64) -> u64 {
+    wind_dx := c.actives[e - 1].wind_dx;
+    vt := c.actives[e - 1].vertex_top;
+    if wind_dx > 0 {
+        pv := c.vertices[vt - 1].prev;
+        return c.vertices[pv - 1].prev;
+    }
+    nx := c.vertices[vt - 1].next;
+    return c.vertices[nx - 1].next;
+}
+
+fn is_maxima_vertex(c: &Clipper, v: u64) -> bool {
+    return (c.vertices[v - 1].flags & VF_LOCAL_MAX) != 0;
+}
+
+fn is_maxima(c: &Clipper, e: u64) -> bool {
+    return is_maxima_vertex(&c, c.actives[e - 1].vertex_top);
+}
+
+fn get_curr_y_maxima_vertex_open(c: &Clipper, e: u64) -> u64 {
+    mut result = c.actives[e - 1].vertex_top;
+    if c.actives[e - 1].wind_dx > 0 {
+        while (c.vertices[c.vertices[result - 1].next - 1].pt.y == c.vertices[result - 1].pt.y)
+            && ((c.vertices[result - 1].flags & (VF_OPEN_END | VF_LOCAL_MAX)) == 0) {
+            result = c.vertices[result - 1].next;
+        }
+    } else {
+        while (c.vertices[c.vertices[result - 1].prev - 1].pt.y == c.vertices[result - 1].pt.y)
+            && ((c.vertices[result - 1].flags & (VF_OPEN_END | VF_LOCAL_MAX)) == 0) {
+            result = c.vertices[result - 1].prev;
+        }
+    }
+    if !is_maxima_vertex(&c, result) {
+        return 0;
+    }
+    return result;
+}
+
+fn get_curr_y_maxima_vertex(c: &Clipper, e: u64) -> u64 {
+    mut result = c.actives[e - 1].vertex_top;
+    if c.actives[e - 1].wind_dx > 0 {
+        while c.vertices[c.vertices[result - 1].next - 1].pt.y == c.vertices[result - 1].pt.y {
+            result = c.vertices[result - 1].next;
+        }
+    } else {
+        while c.vertices[c.vertices[result - 1].prev - 1].pt.y == c.vertices[result - 1].pt.y {
+            result = c.vertices[result - 1].prev;
+        }
+    }
+    if !is_maxima_vertex(&c, result) {
+        return 0;
+    }
+    return result;
+}
+
+fn get_maxima_pair(c: &Clipper, e: u64) -> u64 {
+    mut e2 = c.actives[e - 1].next_in_ael;
+    while e2 != 0 {
+        if c.actives[e2 - 1].vertex_top == c.actives[e - 1].vertex_top {
+            return e2;
+        }
+        e2 = c.actives[e2 - 1].next_in_ael;
+    }
+    return 0;
+}
+
+fn point_count(c: &Clipper, op: u64) -> i64 {
+    mut op2 = op;
+    mut cnt: i64 = 0;
+    loop {
+        op2 = c.outpts[op2 - 1].next;
+        cnt += 1;
+        if op2 == op {
+            break;
+        }
+    }
+    return cnt;
+}
+
+fn duplicate_op(c: &mut Clipper, op: u64, insert_after: bool) -> u64 {
+    pt := c.outpts[op - 1].pt.clone();
+    outrec := c.outpts[op - 1].outrec;
+    result := c.outpts.len() + 1;
+    c.outpts.push(OutPt { pt: pt, next: 0, prev: 0, outrec: outrec, horz: 0 });
+    if insert_after {
+        nxt := c.outpts[op - 1].next;
+        c.outpts[result - 1].next = nxt;
+        c.outpts[nxt - 1].prev = result;
+        c.outpts[result - 1].prev = op;
+        c.outpts[op - 1].next = result;
+    } else {
+        pv := c.outpts[op - 1].prev;
+        c.outpts[result - 1].prev = pv;
+        c.outpts[pv - 1].next = result;
+        c.outpts[result - 1].next = op;
+        c.outpts[op - 1].prev = result;
+    }
+    return result;
+}
+
+fn dispose_out_pt(c: &mut Clipper, op: u64) -> u64 {
+    result := c.outpts[op - 1].next;
+    pv := c.outpts[op - 1].prev;
+    nx := c.outpts[op - 1].next;
+    c.outpts[pv - 1].next = nx;
+    c.outpts[nx - 1].prev = pv;
+    return result;
+}
+
+fn dispose_out_pts(c: &mut Clipper, outrec: u64) {
+    op := c.outrecs[outrec - 1].pts;
+    if op == 0 {
+        return ();
+    }
+    pv := c.outpts[op - 1].prev;
+    c.outpts[pv - 1].next = 0;
+    mut cur = op;
+    while cur != 0 {
+        cur = c.outpts[cur - 1].next;
+    }
+    c.outrecs[outrec - 1].pts = 0;
+    return ();
+}
+
+// IntersectListSort: equal (y, x) pairs are equivalent; the introsort below pins their order.
+fn intersect_less(a: &IntersectNode, b: &IntersectNode) -> bool {
+    if a.pt.y == b.pt.y {
+        return a.pt.x < b.pt.x;
+    }
+    return a.pt.y > b.pt.y;
+}
+
+fn set_sides(c: &mut Clipper, outrec: u64, start_edge: u64, end_edge: u64) {
+    c.outrecs[outrec - 1].front_edge = start_edge;
+    c.outrecs[outrec - 1].back_edge = end_edge;
+    return ();
+}
+
+fn swap_outrecs(c: &mut Clipper, e1: u64, e2: u64) {
+    or1 := c.actives[e1 - 1].outrec;
+    or2 := c.actives[e2 - 1].outrec;
+    if or1 == or2 {
+        fe := c.outrecs[or1 - 1].front_edge;
+        be := c.outrecs[or1 - 1].back_edge;
+        c.outrecs[or1 - 1].front_edge = be;
+        c.outrecs[or1 - 1].back_edge = fe;
+        return ();
+    }
+    if or1 != 0 {
+        if e1 == c.outrecs[or1 - 1].front_edge {
+            c.outrecs[or1 - 1].front_edge = e2;
+        } else {
+            c.outrecs[or1 - 1].back_edge = e2;
+        }
+    }
+    if or2 != 0 {
+        if e2 == c.outrecs[or2 - 1].front_edge {
+            c.outrecs[or2 - 1].front_edge = e1;
+        } else {
+            c.outrecs[or2 - 1].back_edge = e1;
+        }
+    }
+    c.actives[e1 - 1].outrec = or2;
+    c.actives[e2 - 1].outrec = or1;
+    return ();
+}
+
+// Area(OutPt*): the shoelace sum over the out-point ring, in the C++'s accumulation order.
+fn area_outpts(c: &Clipper, op: u64) -> f64 {
+    mut result: f64 = 0.0;
+    mut op2 = op;
+    loop {
+        result = result
+            + f64(c.outpts[c.outpts[op2 - 1].prev - 1].pt.y + c.outpts[op2 - 1].pt.y)
+            * f64(c.outpts[c.outpts[op2 - 1].prev - 1].pt.x - c.outpts[op2 - 1].pt.x);
+        op2 = c.outpts[op2 - 1].next;
+        if op2 == op {
+            break;
+        }
+    }
+    return result * 0.5;
+}
+
+fn area_triangle(pt1: Point64, pt2: Point64, pt3: Point64) -> f64 {
+    return f64(pt3.y + pt1.y)
+        * f64(pt3.x - pt1.x)
+        + f64(pt1.y + pt2.y)
+        * f64(pt1.x - pt2.x)
+        + f64(pt2.y + pt3.y)
+        * f64(pt2.x - pt3.x);
+}
+
+fn reverse_out_pts(c: &mut Clipper, op: u64) {
+    if op == 0 {
+        return ();
+    }
+    mut op1 = op;
+    loop {
+        op2 := c.outpts[op1 - 1].next;
+        pv := c.outpts[op1 - 1].prev;
+        c.outpts[op1 - 1].next = pv;
+        c.outpts[op1 - 1].prev = op2;
+        op1 = op2;
+        if op1 == op {
+            break;
+        }
+    }
+    return ();
+}
+
+fn swap_sides(c: &mut Clipper, outrec: u64) {
+    e2 := c.outrecs[outrec - 1].front_edge;
+    be := c.outrecs[outrec - 1].back_edge;
+    p0 := c.outrecs[outrec - 1].pts;
+    c.outrecs[outrec - 1].front_edge = be;
+    c.outrecs[outrec - 1].back_edge = e2;
+    c.outrecs[outrec - 1].pts = c.outpts[p0 - 1].next;
+    return ();
+}
+
+fn get_real_outrec(c: &Clipper, outrec_in: u64) -> u64 {
+    mut outrec = outrec_in;
+    while (outrec != 0) && (c.outrecs[outrec - 1].pts == 0) {
+        outrec = c.outrecs[outrec - 1].owner;
+    }
+    return outrec;
+}
+
+fn is_valid_owner(c: &Clipper, outrec: u64, test_owner_in: u64) -> bool {
+    mut test_owner = test_owner_in;
+    while (test_owner != 0) && (test_owner != outrec) {
+        test_owner = c.outrecs[test_owner - 1].owner;
+    }
+    return test_owner == 0;
+}
+
+fn uncouple_outrec(c: &mut Clipper, ae: u64) {
+    outrec := c.actives[ae - 1].outrec;
+    if outrec == 0 {
+        return ();
+    }
+    c.actives[c.outrecs[outrec - 1].front_edge - 1].outrec = 0;
+    c.actives[c.outrecs[outrec - 1].back_edge - 1].outrec = 0;
+    c.outrecs[outrec - 1].front_edge = 0;
+    c.outrecs[outrec - 1].back_edge = 0;
+    return ();
+}
+
+fn pts_really_close(pt1: Point64, pt2: Point64) -> bool {
+    dx := pt1.x - pt2.x;
+    dy := pt1.y - pt2.y;
+    return (((if dx < 0 { -dx } else { dx })) < 2) && (((if dy < 0 { -dy } else { dy })) < 2);
+}
+
+fn is_very_small_triangle(c: &Clipper, op: u64) -> bool {
+    o := c.outpts[op - 1].clone();
+    return (c.outpts[o.next - 1].next == o.prev)
+        && (
+            pts_really_close(c.outpts[o.prev - 1].pt.clone(), c.outpts[o.next - 1].pt.clone())
+                || pts_really_close(o.pt.clone(), c.outpts[o.next - 1].pt.clone())
+                || pts_really_close(o.pt.clone(), c.outpts[o.prev - 1].pt.clone())
+        );
+}
+
+fn is_valid_closed_path(c: &Clipper, op: u64) -> bool {
+    if op == 0 {
+        return false;
+    }
+    o := c.outpts[op - 1];
+    return (o.next != op) && (o.next != o.prev) && !is_very_small_triangle(&c, op);
+}
+
+fn outrec_is_ascending(c: &Clipper, hot_edge: u64) -> bool {
+    return hot_edge == c.outrecs[c.actives[hot_edge - 1].outrec - 1].front_edge;
+}
+
+fn swap_front_back_sides(c: &mut Clipper, outrec: u64) {
+    fe := c.outrecs[outrec - 1].front_edge;
+    be := c.outrecs[outrec - 1].back_edge;
+    p0 := c.outrecs[outrec - 1].pts;
+    c.outrecs[outrec - 1].front_edge = be;
+    c.outrecs[outrec - 1].back_edge = fe;
+    c.outrecs[outrec - 1].pts = c.outpts[p0 - 1].next;
+    return ();
+}
+
+fn edges_adjacent_in_ael(c: &Clipper, inode: IntersectNode) -> bool {
+    return (c.actives[inode.edge1 - 1].next_in_ael == inode.edge2)
+        || (c.actives[inode.edge1 - 1].prev_in_ael == inode.edge2);
+}
+
+fn is_joined(c: &Clipper, e: u64) -> bool {
+    return c.actives[e - 1].join_with != JOIN_NONE;
+}
+
+fn set_owner(c: &mut Clipper, outrec: u64, new_owner_in: u64) {
+    no_owner := c.outrecs[new_owner_in - 1].owner;
+    resolved := get_real_outrec(&c, no_owner);
+    c.outrecs[new_owner_in - 1].owner = resolved;
+    mut tmp = new_owner_in;
+    while (tmp != 0) && (tmp != outrec) {
+        tmp = c.outrecs[tmp - 1].owner;
+    }
+    if tmp != 0 {
+        owner_of_outrec := c.outrecs[outrec - 1].owner;
+        c.outrecs[new_owner_in - 1].owner = owner_of_outrec;
+    }
+    c.outrecs[outrec - 1].owner = new_owner_in;
+    return ();
+}
+
+// ---- input preprocessing ----
+
+fn add_loc_min(c: &mut Clipper, vert: u64, polytype: u8, is_open: bool) {
+    if (c.vertices[vert - 1].flags & VF_LOCAL_MIN) != 0 {
+        return ();
+    }
+    fl := c.vertices[vert - 1].flags;
+    c.vertices[vert - 1].flags = fl | VF_LOCAL_MIN;
+    c.minima.push(LocalMinima { vertex: vert, polytype: polytype, is_open: is_open });
+    return ();
+}
+
+// AddPaths_: build one circular vertex list per path, skipping adjacent duplicates, then walk each
+// list to mark local maxima and minima exactly as the C++ does.
+fn add_paths_(c: &mut Clipper, paths: &Point64[][], polytype: u8, is_open: bool) {
+    for pi in paths.len() {
+        path := paths[pi];
+        if path.len() == 0 {
+            continue;
+        }
+        mut prev_v: u64 = 0;
+        mut cnt: u64 = 0;
+        for vi in path.len() {
+            pt := path[vi].clone();
+            if prev_v != 0 {
+                if (c.vertices[prev_v - 1].pt.x == pt.x) && (c.vertices[prev_v - 1].pt.y == pt.y) {
+                    continue;
+                }
+            }
+            c.vertices.push(Vertex { pt: pt, next: 0, prev: prev_v, flags: 0 });
+            curr_v := c.vertices.len();
+            if prev_v != 0 {
+                c.vertices[prev_v - 1].next = curr_v;
+            }
+            prev_v = curr_v;
+            cnt += 1;
+        }
+        mut v0 = 0;
+        // v0 is this path's first vertex: walk back from prev_v cnt-1 links, or note that the
+        // first appended vertex of this path is the arena index after the previous path's end.
+        if cnt > 0 {
+            v0 = c.vertices.len() - cnt + 1;
+        }
+        if (prev_v == 0) || (c.vertices[prev_v - 1].prev == 0) {
+            continue;
+        }
+        if (is_open == false)
+            && (c.vertices[prev_v - 1].pt.x == c.vertices[v0 - 1].pt.x)
+            && (c.vertices[prev_v - 1].pt.y == c.vertices[v0 - 1].pt.y) {
+            prev_v = c.vertices[prev_v - 1].prev;
+        }
+        c.vertices[prev_v - 1].next = v0;
+        c.vertices[v0 - 1].prev = prev_v;
+        if (cnt < 2) || ((cnt == 2) && (is_open == false)) {
+            continue;
+        }
+        // Now find and assign local minima.
+        mut going_up = false;
+        mut going_up0 = false;
+        if is_open {
+            mut curr_v = c.vertices[v0 - 1].next;
+            while (curr_v != v0) && (c.vertices[curr_v - 1].pt.y == c.vertices[v0 - 1].pt.y) {
+                curr_v = c.vertices[curr_v - 1].next;
+            }
+            going_up = c.vertices[curr_v - 1].pt.y <= c.vertices[v0 - 1].pt.y;
+            if going_up {
+                c.vertices[v0 - 1].flags = VF_OPEN_START;
+                add_loc_min(c, v0, polytype, true);
+            } else {
+                c.vertices[v0 - 1].flags = VF_OPEN_START | VF_LOCAL_MAX;
+            }
+        } else {
+            mut pv = c.vertices[v0 - 1].prev;
+            while (pv != v0) && (c.vertices[pv - 1].pt.y == c.vertices[v0 - 1].pt.y) {
+                pv = c.vertices[pv - 1].prev;
+            }
+            if pv == v0 {
+                continue; // only open paths can be completely flat
+            }
+            going_up = c.vertices[pv - 1].pt.y > c.vertices[v0 - 1].pt.y;
+        }
+        going_up0 = going_up;
+        mut pv = v0;
+        mut curr_v = c.vertices[v0 - 1].next;
+        while curr_v != v0 {
+            if (c.vertices[curr_v - 1].pt.y > c.vertices[pv - 1].pt.y) && going_up {
+                fl := c.vertices[pv - 1].flags;
+                c.vertices[pv - 1].flags = fl | VF_LOCAL_MAX;
+                going_up = false;
+            } else if (c.vertices[curr_v - 1].pt.y < c.vertices[pv - 1].pt.y)
+                && (going_up == false) {
+                going_up = true;
+                add_loc_min(c, pv, polytype, is_open);
+            }
+            pv = curr_v;
+            curr_v = c.vertices[curr_v - 1].next;
+        }
+        if is_open {
+            fl0 := c.vertices[pv - 1].flags;
+            c.vertices[pv - 1].flags = fl0 | VF_OPEN_END;
+            if going_up {
+                fl1 := c.vertices[pv - 1].flags;
+                c.vertices[pv - 1].flags = fl1 | VF_LOCAL_MAX;
+            } else {
+                add_loc_min(c, pv, polytype, is_open);
+            }
+        } else if going_up != going_up0 {
+            if going_up0 {
+                add_loc_min(c, pv, polytype, false);
+            } else {
+                fl2 := c.vertices[pv - 1].flags;
+                c.vertices[pv - 1].flags = fl2 | VF_LOCAL_MAX;
+            }
+        }
+    }
+    return ();
+}
+
+// ---- stable sort (std::stable_sort's contract: equal elements keep input order) ----
+
+fn locmin_less(c: &mut Clipper, a: u64, b: u64) -> bool {
+    ya := c.vertices[c.minima[a - 1].vertex - 1].pt.y;
+    yb := c.vertices[c.minima[b - 1].vertex - 1].pt.y;
+    xa := c.vertices[c.minima[a - 1].vertex - 1].pt.x;
+    xb := c.vertices[c.minima[b - 1].vertex - 1].pt.x;
+    if yb != ya {
+        return yb < ya;
+    }
+    return xb > xa;
+}
+
+// A stable bottom-up merge sort over indices 1..n (the C++ sorts LocalMinima records with
+// std::stable_sort; any stable order gives the same sequence).
+fn stable_sort_minima(c: &mut Clipper) {
+    n := c.minima.len();
+    if n < 2 {
+        return ();
+    }
+    mut src = u64[0; n];
+    mut dst = u64[0; n];
+    for i in n {
+        src[i] = i + 1;
+    }
+    mut width: u64 = 1;
+    while width < n {
+        mut lo: u64 = 0;
+        while lo < n {
+            mut mid = lo + width;
+            if mid > n {
+                mid = n;
+            }
+            mut hi = lo + 2 * width;
+            if hi > n {
+                hi = n;
+            }
+            mut i = lo;
+            mut j = mid;
+            mut k = lo;
+            while (i < mid) && (j < hi) {
+                if locmin_less(c, src[i], src[j]) {
+                    dst[k] = src[i];
+                    i += 1;
+                } else {
+                    dst[k] = src[j];
+                    j += 1;
+                }
+                k += 1;
+            }
+            while i < mid {
+                dst[k] = src[i];
+                i += 1;
+                k += 1;
+            }
+            while j < hi {
+                dst[k] = src[j];
+                j += 1;
+                k += 1;
+            }
+            lo += 2 * width;
+        }
+        t := src;
+        src = dst;
+        dst = t;
+        width = width * 2;
+    }
+    // `src` holds the sorted order (after the final swap dance dst is authoritative).
+    // Rebuild the minima array in that order: move each record into its place.
+    mut reordered = LocalMinima[];
+    for i in n {
+        reordered.push(c.minima[src[i] - 1].clone());
+    }
+    c.minima = reordered;
+    return ();
+}
+
+// ---- scanlines: std::priority_queue<int64_t> (equal values are indistinguishable, so a plain
+// max-heap reproduces the pop order) ----
+
+fn scanline_push(c: &mut Clipper, y: i64) {
+    // The heap's live region is [0, scanline_count); pops leave stale tails, so cut them first.
+    c.scanlines.truncate(c.scanline_count);
+    c.scanlines.push(y);
+    c.scanline_count += 1;
+    mut i = c.scanline_count - 1;
+    while i > 0 {
+        parent := (i - 1) / 2;
+        if c.scanlines[parent] >= c.scanlines[i] {
+            break;
+        }
+        t := c.scanlines[parent];
+        c.scanlines[parent] = c.scanlines[i];
+        c.scanlines[i] = t;
+        i = parent;
+    }
+    return ();
+}
+
+fn scanline_pop(c: &mut Clipper) -> i64? {
+    if c.scanline_count == 0 {
+        return None;
+    }
+    top := c.scanlines[0];
+    c.scanline_count -= 1;
+    last := c.scanline_count;
+    c.scanlines[0] = c.scanlines[last];
+    mut i: u64 = 0;
+    loop {
+        mut largest = i;
+        l := 2 * i + 1;
+        r := 2 * i + 2;
+        if (l < c.scanline_count) && (c.scanlines[l] > c.scanlines[largest]) {
+            largest = l;
+        }
+        if (r < c.scanline_count) && (c.scanlines[r] > c.scanlines[largest]) {
+            largest = r;
+        }
+        if largest == i {
+            break;
+        }
+        t := c.scanlines[i];
+        c.scanlines[i] = c.scanlines[largest];
+        c.scanlines[largest] = t;
+        i = largest;
+    }
+    return Some(top);
+}
+
+fn insert_scanline(c: &mut Clipper, y: i64) {
+    scanline_push(c, y);
+    return ();
+}
+
+fn pop_scanline(c: &mut Clipper) -> i64? {
+    if c.scanline_count == 0 {
+        return None;
+    }
+    mut y: i64 = 0;
+    match scanline_pop(c) {
+        Some(v) => {
+            y = v;
+        },
+        None => {
+            return None;
+        }
+    }
+    loop {
+        if c.scanline_count == 0 {
+            break;
+        }
+        peek := c.scanlines[0];
+        if peek != y {
+            break;
+        }
+        scanline_pop(c);
+    }
+    return Some(y);
+}
+
+fn pop_local_minima(c: &mut Clipper, y: i64) -> u64 {
+    if (c.current_min >= c.minima.len())
+        || (c.vertices[c.minima[c.current_min].vertex - 1].pt.y != y) {
+        return 0;
+    }
+    c.current_min += 1;
+    return c.current_min; // 1-based index into minima
+}
+
+// ---- reset ----
+
+fn reset(c: &mut Clipper) {
+    if c.minima_sorted == false {
+        stable_sort_minima(c);
+        c.minima_sorted = true;
+    }
+    mut i = c.minima.len();
+    while i > 0 {
+        i -= 1;
+        y := c.vertices[c.minima[i].vertex - 1].pt.y;
+        insert_scanline(c, y);
+    }
+    c.current_min = 0;
+    c.actives_head = 0;
+    c.sel_head = 0;
+    c.succeeded = true;
+    return ();
+}
+
+// ---- winding rules ----
+
+fn is_contributing_closed(c: &Clipper, e: u64) -> bool {
+    wind_cnt := c.actives[e - 1].wind_cnt;
+    wind_cnt2 := c.actives[e - 1].wind_cnt2;
+    if c.fillrule == 0 {
+        // EvenOdd: nothing to check here.
+    } else if c.fillrule == 1 {
+        if (if wind_cnt < 0 { -wind_cnt } else { wind_cnt }) != 1 {
+            return false;
+        }
+    } else if c.fillrule == 2 {
+        if wind_cnt != 1 {
+            return false;
+        }
+    } else if wind_cnt != -1 {
+        return false;
+    }
+    if c.cliptype == 0 {
+        return false;
+    }
+    if c.cliptype == 1 {
+        if c.fillrule == 2 {
+            return wind_cnt2 > 0;
+        }
+        if c.fillrule == 3 {
+            return wind_cnt2 < 0;
+        }
+        return wind_cnt2 != 0;
+    }
+    if c.cliptype == 2 {
+        if c.fillrule == 2 {
+            return wind_cnt2 <= 0;
+        }
+        if c.fillrule == 3 {
+            return wind_cnt2 >= 0;
+        }
+        return wind_cnt2 == 0;
+    }
+    if c.cliptype == 3 {
+        mut result = wind_cnt2 == 0;
+        if c.fillrule == 2 {
+            result = wind_cnt2 <= 0;
+        } else if c.fillrule == 3 {
+            result = wind_cnt2 >= 0;
+        }
+        if poly_type(&c, e) == POLY_SUBJECT {
+            return result;
+        }
+        return !result;
+    }
+    if c.cliptype == 4 {
+        return true;
+    }
+    return false;
+}
+
+fn is_contributing_open(c: &Clipper, e: u64) -> bool {
+    wind_cnt := c.actives[e - 1].wind_cnt;
+    wind_cnt2 := c.actives[e - 1].wind_cnt2;
+    mut is_in_clip = false;
+    mut is_in_subj = false;
+    if c.fillrule == 2 {
+        is_in_clip = wind_cnt2 > 0;
+        is_in_subj = wind_cnt > 0;
+    } else if c.fillrule == 3 {
+        is_in_clip = wind_cnt2 < 0;
+        is_in_subj = wind_cnt < 0;
+    } else {
+        is_in_clip = wind_cnt2 != 0;
+        is_in_subj = wind_cnt != 0;
+    }
+    if c.cliptype == 1 {
+        return is_in_clip;
+    }
+    if c.cliptype == 2 {
+        return (is_in_subj == false) && (is_in_clip == false);
+    }
+    return is_in_clip == false;
+}
+
+fn set_wind_count_for_closed_path_edge(c: &mut Clipper, e: u64) {
+    mut e2 = c.actives[e - 1].prev_in_ael;
+    pt := poly_type(&c, e);
+    while (e2 != 0) && ((poly_type(&c, e2) != pt) || is_open_edge(&c, e2)) {
+        e2 = c.actives[e2 - 1].prev_in_ael;
+    }
+    mut wind_dx = c.actives[e - 1].wind_dx;
+    if e2 == 0 {
+        c.actives[e - 1].wind_cnt = wind_dx;
+        e2 = c.actives_head;
+    } else if c.fillrule == 0 {
+        c.actives[e - 1].wind_cnt = wind_dx;
+        e2_wind_cnt2 := c.actives[e2 - 1].wind_cnt2;
+        c.actives[e - 1].wind_cnt2 = e2_wind_cnt2;
+        e2 = c.actives[e2 - 1].next_in_ael;
+    } else {
+        e2_wind_cnt := c.actives[e2 - 1].wind_cnt;
+        e2_wind_dx := c.actives[e2 - 1].wind_dx;
+        if e2_wind_cnt * e2_wind_dx < 0 {
+            if (if e2_wind_cnt < 0 { -e2_wind_cnt } else { e2_wind_cnt }) > 1 {
+                if e2_wind_dx * wind_dx < 0 {
+                    c.actives[e - 1].wind_cnt = e2_wind_cnt;
+                } else {
+                    c.actives[e - 1].wind_cnt = e2_wind_cnt + wind_dx;
+                }
+            } else {
+                open_now := is_open_edge(&c, e);
+                if open_now {
+                    c.actives[e - 1].wind_cnt = 1;
+                } else {
+                    c.actives[e - 1].wind_cnt = wind_dx;
+                }
+            }
+        } else {
+            if e2_wind_dx * wind_dx < 0 {
+                c.actives[e - 1].wind_cnt = e2_wind_cnt;
+            } else {
+                c.actives[e - 1].wind_cnt = e2_wind_cnt + wind_dx;
+            }
+        }
+        wc2b := c.actives[e2 - 1].wind_cnt2;
+        c.actives[e - 1].wind_cnt2 = wc2b;
+        e2 = c.actives[e2 - 1].next_in_ael;
+    }
+    if c.fillrule == 0 {
+        while e2 != e {
+            if (poly_type(&c, e2) != pt) && (is_open_edge(&c, e2) == false) {
+                wc := c.actives[e - 1].wind_cnt2;
+                if wc == 0 {
+                    c.actives[e - 1].wind_cnt2 = 1;
+                } else {
+                    c.actives[e - 1].wind_cnt2 = 0;
+                }
+            }
+            e2 = c.actives[e2 - 1].next_in_ael;
+        }
+    } else {
+        while e2 != e {
+            if (poly_type(&c, e2) != pt) && (is_open_edge(&c, e2) == false) {
+                wc := c.actives[e - 1].wind_cnt2;
+                dx2 := c.actives[e2 - 1].wind_dx;
+                c.actives[e - 1].wind_cnt2 = wc + dx2;
+            }
+            e2 = c.actives[e2 - 1].next_in_ael;
+        }
+    }
+    return ();
+}
+
+fn set_wind_count_for_open_path_edge(c: &mut Clipper, e: u64) {
+    mut e2 = c.actives_head;
+    c.actives[e - 1].wind_cnt = 0;
+    c.actives[e - 1].wind_cnt2 = 0;
+    if c.fillrule == 0 {
+        mut cnt1: i64 = 0;
+        mut cnt2: i64 = 0;
+        while e2 != e {
+            if poly_type(&c, e2) == POLY_CLIP {
+                cnt2 += 1;
+            } else if is_open_edge(&c, e2) == false {
+                cnt1 += 1;
+            }
+            e2 = c.actives[e2 - 1].next_in_ael;
+        }
+        c.actives[e - 1].wind_cnt = if is_odd(cnt1) { 1 } else { 0 };
+        c.actives[e - 1].wind_cnt2 = if is_odd(cnt2) { 1 } else { 0 };
+    } else {
+        while e2 != e {
+            dx2 := c.actives[e2 - 1].wind_dx;
+            if poly_type(&c, e2) == POLY_CLIP {
+                wc := c.actives[e - 1].wind_cnt2;
+                c.actives[e - 1].wind_cnt2 = wc + dx2;
+            } else if is_open_edge(&c, e2) == false {
+                wc := c.actives[e - 1].wind_cnt;
+                c.actives[e - 1].wind_cnt = wc + dx2;
+            }
+            e2 = c.actives[e2 - 1].next_in_ael;
+        }
+    }
+    return ();
+}
+
+// ---- AEL ordering and maintenance ----
+
+fn is_valid_ael_order(c: &Clipper, resident: u64, newcomer: u64) -> bool {
+    if c.actives[newcomer - 1].curr_x != c.actives[resident - 1].curr_x {
+        return c.actives[newcomer - 1].curr_x > c.actives[resident - 1].curr_x;
+    }
+    resident_top := c.actives[resident - 1].top.clone();
+    newcomer_bot := c.actives[newcomer - 1].bot.clone();
+    newcomer_top := c.actives[newcomer - 1].top.clone();
+    i := cross_product_sign(resident_top.clone(), newcomer_bot.clone(), newcomer_top.clone());
+    if i != 0 {
+        return i < 0;
+    }
+    if (is_maxima(&c, resident) == false) && (resident_top.y > newcomer_top.y) {
+        nv := next_vertex(&c, resident);
+        return cross_product_sign(
+            newcomer_bot.clone(),
+            resident_top.clone(),
+            c.vertices[nv - 1].pt.clone()
+        )
+            <= 0;
+    } else if (is_maxima(&c, newcomer) == false) && (newcomer_top.y > resident_top.y) {
+        nv := next_vertex(&c, newcomer);
+        return cross_product_sign(
+            newcomer_bot.clone(),
+            newcomer_top.clone(),
+            c.vertices[nv - 1].pt.clone()
+        )
+            >= 0;
+    }
+    y := c.actives[newcomer - 1].bot.y;
+    newcomer_is_left := c.actives[newcomer - 1].is_left_bound;
+    if (c.actives[resident - 1].bot.y != y)
+        || (c.vertices[c.minima[c.actives[resident - 1].local_min - 1].vertex - 1].pt.y != y) {
+        return c.actives[newcomer - 1].is_left_bound;
+    }
+    if c.actives[resident - 1].is_left_bound != newcomer_is_left {
+        return newcomer_is_left;
+    }
+    resident_pp := prev_prev_vertex(&c, resident);
+    if is_collinear(
+        c.vertices[resident_pp - 1].pt.clone(),
+        c.actives[resident - 1].bot.clone(),
+        resident_top.clone()
+    ) {
+        return true;
+    }
+    newcomer_pp := prev_prev_vertex(&c, newcomer);
+    return (
+        cross_product_sign(
+            c.vertices[resident_pp - 1].pt.clone(),
+            newcomer_bot.clone(),
+            c.vertices[newcomer_pp - 1].pt.clone()
+        ) > 0
+    )
+        == newcomer_is_left;
+}
+
+fn insert_left_edge(c: &mut Clipper, e: u64) {
+    if c.actives_head == 0 {
+        c.actives[e - 1].prev_in_ael = 0;
+        c.actives[e - 1].next_in_ael = 0;
+        c.actives_head = e;
+        return ();
+    }
+    if is_valid_ael_order(&c, c.actives_head, e) == false {
+        c.actives[e - 1].prev_in_ael = 0;
+        c.actives[e - 1].next_in_ael = c.actives_head;
+        c.actives[c.actives_head - 1].prev_in_ael = e;
+        c.actives_head = e;
+        return ();
+    }
+    mut e2 = c.actives_head;
+    while (c.actives[e2 - 1].next_in_ael != 0)
+        && is_valid_ael_order(&c, c.actives[e2 - 1].next_in_ael, e) {
+        e2 = c.actives[e2 - 1].next_in_ael;
+    }
+    if c.actives[e2 - 1].join_with == JOIN_RIGHT {
+        e2 = c.actives[e2 - 1].next_in_ael;
+    }
+    if e2 == 0 {
+        return ();
+    }
+    nx := c.actives[e2 - 1].next_in_ael;
+    c.actives[e - 1].next_in_ael = nx;
+    if nx != 0 {
+        c.actives[nx - 1].prev_in_ael = e;
+    }
+    c.actives[e - 1].prev_in_ael = e2;
+    c.actives[e2 - 1].next_in_ael = e;
+    return ();
+}
+
+fn insert_right_edge(c: &mut Clipper, e: u64, e2: u64) {
+    nx := c.actives[e - 1].next_in_ael;
+    c.actives[e2 - 1].next_in_ael = nx;
+    if nx != 0 {
+        c.actives[nx - 1].prev_in_ael = e2;
+    }
+    c.actives[e2 - 1].prev_in_ael = e;
+    c.actives[e - 1].next_in_ael = e2;
+    return ();
+}
+
+fn new_active(c: &mut Clipper) -> u64 {
+    c
+        .actives
+        .push(
+            ActiveEdge {
+                bot: Point64 { x: 0, y: 0 },
+                top: Point64 { x: 0, y: 0 },
+                curr_x: 0,
+                dx: 0.0,
+                wind_dx: 1,
+                wind_cnt: 0,
+                wind_cnt2: 0,
+                outrec: 0,
+                prev_in_ael: 0,
+                next_in_ael: 0,
+                prev_in_sel: 0,
+                next_in_sel: 0,
+                jump: 0,
+                vertex_top: 0,
+                local_min: 0,
+                is_left_bound: false,
+                join_with: JOIN_NONE,
+            }
+        );
+    return c.actives.len();
+}
+
+fn push_horz(c: &mut Clipper, e: u64) {
+    c.actives[e - 1].next_in_sel = c.sel_head;
+    c.sel_head = e;
+    return ();
+}
+
+fn pop_horz(c: &mut Clipper) -> u64 {
+    e := c.sel_head;
+    if e == 0 {
+        return 0;
+    }
+    c.sel_head = c.actives[e - 1].next_in_sel;
+    return e;
+}
+
+fn insert_local_minima_into_ael(c: &mut Clipper, bot_y: i64) {
+    loop {
+        local_minima := pop_local_minima(c, bot_y);
+        if local_minima == 0 {
+            break;
+        }
+        lm := c.minima[local_minima - 1].clone();
+        mut left_bound: u64 = 0;
+        mut right_bound: u64 = 0;
+        if (c.vertices[lm.vertex - 1].flags & VF_OPEN_START) != 0 {
+            left_bound = 0;
+        } else {
+            left_bound = new_active(c);
+            c.actives[left_bound - 1].bot = c.vertices[lm.vertex - 1].pt.clone();
+            lbx := c.actives[left_bound - 1].bot.x;
+            c.actives[left_bound - 1].curr_x = lbx;
+            c.actives[left_bound - 1].wind_dx = -1;
+            c.actives[left_bound - 1].vertex_top = c.vertices[lm.vertex - 1].prev;
+            lvt := c.actives[left_bound - 1].vertex_top;
+            c.actives[left_bound - 1].top = c.vertices[lvt - 1].pt.clone();
+            c.actives[left_bound - 1].local_min = local_minima;
+            set_dx(c, left_bound);
+        }
+        if (c.vertices[lm.vertex - 1].flags & VF_OPEN_END) != 0 {
+            right_bound = 0;
+        } else {
+            right_bound = new_active(c);
+            c.actives[right_bound - 1].bot = c.vertices[lm.vertex - 1].pt.clone();
+            rbx := c.actives[right_bound - 1].bot.x;
+            c.actives[right_bound - 1].curr_x = rbx;
+            c.actives[right_bound - 1].wind_dx = 1;
+            c.actives[right_bound - 1].vertex_top = c.vertices[lm.vertex - 1].next;
+            rvt := c.actives[right_bound - 1].vertex_top;
+            c.actives[right_bound - 1].top = c.vertices[rvt - 1].pt.clone();
+            c.actives[right_bound - 1].local_min = local_minima;
+            set_dx(c, right_bound);
+        }
+        if (left_bound != 0) && (right_bound != 0) {
+            if is_horizontal(&c, left_bound) {
+                if is_heading_right_horz(&c, left_bound) {
+                    t := left_bound;
+                    left_bound = right_bound;
+                    right_bound = t;
+                }
+            } else if is_horizontal(&c, right_bound) {
+                if is_heading_left_horz(&c, right_bound) {
+                    t := left_bound;
+                    left_bound = right_bound;
+                    right_bound = t;
+                }
+            } else if c.actives[left_bound - 1].dx < c.actives[right_bound - 1].dx {
+                t := left_bound;
+                left_bound = right_bound;
+                right_bound = t;
+            }
+        } else if left_bound == 0 {
+            left_bound = right_bound;
+            right_bound = 0;
+        }
+        mut contributing = false;
+        c.actives[left_bound - 1].is_left_bound = true;
+        insert_left_edge(c, left_bound);
+        if is_open_edge(&c, left_bound) {
+            set_wind_count_for_open_path_edge(c, left_bound);
+            contributing = is_contributing_open(&c, left_bound);
+        } else {
+            set_wind_count_for_closed_path_edge(c, left_bound);
+            contributing = is_contributing_closed(&c, left_bound);
+        }
+        if right_bound != 0 {
+            c.actives[right_bound - 1].is_left_bound = false;
+            wc := c.actives[left_bound - 1].wind_cnt;
+            wc2 := c.actives[left_bound - 1].wind_cnt2;
+            c.actives[right_bound - 1].wind_cnt = wc;
+            c.actives[right_bound - 1].wind_cnt2 = wc2;
+            insert_right_edge(c, left_bound, right_bound);
+            if contributing {
+                lb_bot := c.actives[left_bound - 1].bot.clone();
+                add_local_min_poly(c, left_bound, right_bound, lb_bot, true);
+                if is_horizontal(&c, left_bound) == false {
+                    cjl_bot := c.actives[left_bound - 1].bot.clone();
+                    check_join_left(c, left_bound, cjl_bot, false);
+                }
+            }
+            while (c.actives[right_bound - 1].next_in_ael != 0)
+                && is_valid_ael_order(&c, c.actives[right_bound - 1].next_in_ael, right_bound) {
+                nb := c.actives[right_bound - 1].next_in_ael;
+                rb_bot := c.actives[right_bound - 1].bot.clone();
+                intersect_edges(c, right_bound, nb, rb_bot);
+                swap_positions_in_ael(c, right_bound, nb);
+            }
+            if is_horizontal(&c, right_bound) {
+                push_horz(c, right_bound);
+            } else {
+                cjr_bot := c.actives[right_bound - 1].bot.clone();
+                check_join_right(c, right_bound, cjr_bot, false);
+                rb_top_y := c.actives[right_bound - 1].top.y;
+                insert_scanline(c, rb_top_y);
+            }
+        } else if contributing {
+            lb_bot2 := c.actives[left_bound - 1].bot.clone();
+            start_open_path(c, left_bound, lb_bot2);
+        }
+        if is_horizontal(&c, left_bound) {
+            push_horz(c, left_bound);
+        } else {
+            lb_top_y := c.actives[left_bound - 1].top.y;
+            insert_scanline(c, lb_top_y);
+        }
+    }
+    return ();
+}
+
+fn new_outrec(c: &mut Clipper) -> u64 {
+    idx := c.outrecs.len();
+    c
+        .outrecs
+        .push(
+            OutRec {
+                idx: idx,
+                owner: 0,
+                front_edge: 0,
+                back_edge: 0,
+                pts: 0,
+                polypath: 0,
+                polypath_node: 0,
+                splits: u64[],
+                recursive_split: 0,
+                bounds: rect_invalid(),
+                path: Point64[],
+                is_open: false,
+            }
+        );
+    return idx + 1;
+}
+
+fn add_local_min_poly(c: &mut Clipper, e1: u64, e2: u64, pt: Point64, is_new: bool) -> u64 {
+    outrec := new_outrec(c);
+    c.actives[e1 - 1].outrec = outrec;
+    c.actives[e2 - 1].outrec = outrec;
+    if is_open_edge(&c, e1) {
+        c.outrecs[outrec - 1].owner = 0;
+        c.outrecs[outrec - 1].is_open = true;
+        if c.actives[e1 - 1].wind_dx > 0 {
+            set_sides(c, outrec, e1, e2);
+        } else {
+            set_sides(c, outrec, e2, e1);
+        }
+    } else {
+        prev_hot_edge := get_prev_hot_edge(&c, e1);
+        if prev_hot_edge != 0 {
+            if c.using_polytree {
+                phe_owner := c.actives[prev_hot_edge - 1].outrec;
+                set_owner(c, outrec, phe_owner);
+            }
+            if outrec_is_ascending(&c, prev_hot_edge) == is_new {
+                set_sides(c, outrec, e2, e1);
+            } else {
+                set_sides(c, outrec, e1, e2);
+            }
+        } else {
+            c.outrecs[outrec - 1].owner = 0;
+            if is_new {
+                set_sides(c, outrec, e1, e2);
+            } else {
+                set_sides(c, outrec, e2, e1);
+            }
+        }
+    }
+    op := c.outpts.len() + 1;
+    c.outpts.push(OutPt { pt: pt, next: op, prev: op, outrec: outrec, horz: 0 });
+    c.outrecs[outrec - 1].pts = op;
+    return op;
+}
+
+fn join_outrec_paths(c: &mut Clipper, e1: u64, e2: u64) {
+    outrec1 := c.actives[e1 - 1].outrec;
+    outrec2 := c.actives[e2 - 1].outrec;
+    p1_st := c.outrecs[outrec1 - 1].pts;
+    p2_st := c.outrecs[outrec2 - 1].pts;
+    p1_end := c.outpts[p1_st - 1].next;
+    p2_end := c.outpts[p2_st - 1].next;
+    if is_front(&c, e1) {
+        c.outpts[p2_end - 1].prev = p1_st;
+        c.outpts[p1_st - 1].next = p2_end;
+        c.outpts[p2_st - 1].next = p1_end;
+        c.outpts[p1_end - 1].prev = p2_st;
+        c.outrecs[outrec1 - 1].pts = p2_st;
+        fe2 := c.outrecs[outrec2 - 1].front_edge;
+        c.outrecs[outrec1 - 1].front_edge = fe2;
+        if c.outrecs[outrec1 - 1].front_edge != 0 {
+            c.actives[c.outrecs[outrec1 - 1].front_edge - 1].outrec = outrec1;
+        }
+    } else {
+        c.outpts[p1_end - 1].prev = p2_st;
+        c.outpts[p2_st - 1].next = p1_end;
+        c.outpts[p1_st - 1].next = p2_end;
+        c.outpts[p2_end - 1].prev = p1_st;
+        be2 := c.outrecs[outrec2 - 1].back_edge;
+        c.outrecs[outrec1 - 1].back_edge = be2;
+        if c.outrecs[outrec1 - 1].back_edge != 0 {
+            c.actives[c.outrecs[outrec1 - 1].back_edge - 1].outrec = outrec1;
+        }
+    }
+    c.outrecs[outrec2 - 1].front_edge = 0;
+    c.outrecs[outrec2 - 1].back_edge = 0;
+    c.outrecs[outrec2 - 1].pts = 0;
+    if is_open_end_edge(&c, e1) {
+        pts1 := c.outrecs[outrec1 - 1].pts;
+        c.outrecs[outrec2 - 1].pts = pts1;
+        c.outrecs[outrec1 - 1].pts = 0;
+    } else {
+        set_owner(c, outrec2, outrec1);
+    }
+    c.actives[e1 - 1].outrec = 0;
+    c.actives[e2 - 1].outrec = 0;
+    return ();
+}
+
+fn add_out_pt(c: &mut Clipper, e: u64, pt: Point64) -> u64 {
+    outrec := c.actives[e - 1].outrec;
+    to_front := is_front(&c, e);
+    op_front := c.outrecs[outrec - 1].pts;
+    op_back := c.outpts[op_front - 1].next;
+    if to_front {
+        if (pt.x == c.outpts[op_front - 1].pt.x) && (pt.y == c.outpts[op_front - 1].pt.y) {
+            return op_front;
+        }
+    } else if (pt.x == c.outpts[op_back - 1].pt.x) && (pt.y == c.outpts[op_back - 1].pt.y) {
+        return op_back;
+    }
+    new_op := c.outpts.len() + 1;
+    c.outpts.push(OutPt { pt: pt, next: 0, prev: 0, outrec: outrec, horz: 0 });
+    c.outpts[op_back - 1].prev = new_op;
+    c.outpts[new_op - 1].prev = op_front;
+    c.outpts[new_op - 1].next = op_back;
+    c.outpts[op_front - 1].next = new_op;
+    if to_front {
+        c.outrecs[outrec - 1].pts = new_op;
+    }
+    return new_op;
+}
+
+fn add_local_max_poly(c: &mut Clipper, e1: u64, e2: u64, pt: Point64) -> u64 {
+    if is_joined(&c, e1) {
+        split_edge(c, e1, pt.clone());
+    }
+    if is_joined(&c, e2) {
+        split_edge(c, e2, pt.clone());
+    }
+    if is_front(&c, e1) == is_front(&c, e2) {
+        if is_open_end_edge(&c, e1) {
+            or1 := c.actives[e1 - 1].outrec;
+            swap_front_back_sides(c, or1);
+        } else if is_open_end_edge(&c, e2) {
+            or2 := c.actives[e2 - 1].outrec;
+            swap_front_back_sides(c, or2);
+        } else {
+            c.succeeded = false;
+            return 0;
+        }
+    }
+    mut result = add_out_pt(c, e1, pt);
+    if c.actives[e1 - 1].outrec == c.actives[e2 - 1].outrec {
+        outrec := c.actives[e1 - 1].outrec;
+        c.outrecs[outrec - 1].pts = result;
+        if c.using_polytree {
+            e := get_prev_hot_edge(&c, e1);
+            if e == 0 {
+                c.outrecs[outrec - 1].owner = 0;
+            } else {
+                pe_owner := c.actives[e - 1].outrec;
+                set_owner(c, outrec, pe_owner);
+            }
+        }
+        uncouple_outrec(c, e1);
+        result = c.outrecs[outrec - 1].pts;
+        owner_now := c.outrecs[outrec - 1].owner;
+        if owner_now != 0 {
+            if c.outrecs[owner_now - 1].front_edge == 0 {
+                resolved := get_real_outrec(&c, owner_now);
+                c.outrecs[outrec - 1].owner = resolved;
+            }
+        }
+    } else if is_open_edge(&c, e1) {
+        if c.actives[e1 - 1].wind_dx < 0 {
+            join_outrec_paths(c, e1, e2);
+        } else {
+            join_outrec_paths(c, e2, e1);
+        }
+    } else if c
+        .outrecs[c.actives[e1 - 1].outrec - 1]
+        .idx < c
+        .outrecs[c.actives[e2 - 1].outrec - 1]
+        .idx {
+        join_outrec_paths(c, e1, e2);
+    } else {
+        join_outrec_paths(c, e2, e1);
+    }
+    return result;
+}
+
+fn clean_collinear(c: &mut Clipper, outrec_in: u64) {
+    outrec := get_real_outrec(&c, outrec_in);
+    if (outrec == 0) || c.outrecs[outrec - 1].is_open {
+        return ();
+    }
+    if is_valid_closed_path(&c, c.outrecs[outrec - 1].pts) == false {
+        dispose_out_pts(c, outrec);
+        return ();
+    }
+    mut start_op = c.outrecs[outrec - 1].pts;
+    mut op2 = start_op;
+    loop {
+        pv := c.outpts[op2 - 1].prev;
+        nx := c.outpts[op2 - 1].next;
+        if is_collinear(
+            c.outpts[pv - 1].pt.clone(),
+            c.outpts[op2 - 1].pt.clone(),
+            c.outpts[nx - 1].pt.clone()
+        )
+            && (
+                (
+                    (c.outpts[op2 - 1].pt.x == c.outpts[pv - 1].pt.x)
+                        && (c.outpts[op2 - 1].pt.y == c.outpts[pv - 1].pt.y)
+                )
+                    || (
+                        (c.outpts[op2 - 1].pt.x == c.outpts[nx - 1].pt.x)
+                            && (c.outpts[op2 - 1].pt.y == c.outpts[nx - 1].pt.y)
+                    )
+                    || (c.preserve_collinear == false)
+                    || (
+                        dot_product_points(
+                            c.outpts[pv - 1].pt.clone(),
+                            c.outpts[op2 - 1].pt.clone(),
+                            c.outpts[nx - 1].pt.clone()
+                        ) < 0.0
+                    )
+            ) {
+            if op2 == c.outrecs[outrec - 1].pts {
+                c.outrecs[outrec - 1].pts = pv;
+            }
+            op2 = dispose_out_pt(c, op2);
+            if is_valid_closed_path(&c, op2) == false {
+                dispose_out_pts(c, outrec);
+                return ();
+            }
+            start_op = op2;
+            continue;
+        }
+        op2 = c.outpts[op2 - 1].next;
+        if op2 == start_op {
+            break;
+        }
+    }
+    fix_self_intersects(c, outrec);
+    return ();
+}
+
+fn do_split_op(c: &mut Clipper, outrec: u64, split_op: u64) {
+    prev_op := c.outpts[split_op - 1].prev;
+    next_next_op := c.outpts[c.outpts[split_op - 1].next - 1].next;
+    c.outrecs[outrec - 1].pts = prev_op;
+    mut ip = Point64 { x: 0, y: 0 };
+    sop_next := c.outpts[split_op - 1].next;
+    match line_intersect_pt(
+        c.outpts[prev_op - 1].pt.clone(),
+        c.outpts[split_op - 1].pt.clone(),
+        c.outpts[sop_next - 1].pt.clone(),
+        c.outpts[next_next_op - 1].pt.clone()
+    ) {
+        Some(v) => {
+            ip = v;
+        },
+        None => {
+            return ();
+        }
+    }
+    area1 := area_outpts(&c, c.outrecs[outrec - 1].pts);
+    abs_area1 := area1.abs();
+    if abs_area1 < 2.0 {
+        dispose_out_pts(c, outrec);
+        return ();
+    }
+    split_next := c.outpts[split_op - 1].next;
+    area2 := area_triangle(
+        ip.clone(),
+        c.outpts[split_op - 1].pt.clone(),
+        c.outpts[split_next - 1].pt.clone()
+    );
+    abs_area2 := area2.abs();
+    if ((ip.x == c.outpts[prev_op - 1].pt.x) && (ip.y == c.outpts[prev_op - 1].pt.y))
+        || (
+            (ip.x == c.outpts[next_next_op - 1].pt.x) && (ip.y == c.outpts[next_next_op - 1].pt.y)
+        ) {
+        c.outpts[next_next_op - 1].prev = prev_op;
+        c.outpts[prev_op - 1].next = next_next_op;
+    } else {
+        new_op2 := c.outpts.len() + 1;
+        c.outpts.push(OutPt { pt: ip.clone(), next: 0, prev: 0, outrec: prev_op, horz: 0 });
+        c.outpts[new_op2 - 1].prev = prev_op;
+        c.outpts[new_op2 - 1].next = next_next_op;
+        prev_outrec := c.outpts[prev_op - 1].outrec;
+        c.outpts[new_op2 - 1].outrec = prev_outrec;
+        c.outpts[next_next_op - 1].prev = new_op2;
+        c.outpts[prev_op - 1].next = new_op2;
+    }
+    if (abs_area2 >= 1.0) && ((abs_area2 > abs_area1) || ((area2 > 0.0) == (area1 > 0.0))) {
+        new_or := new_outrec(c);
+        outrec_owner := c.outrecs[outrec - 1].owner;
+        c.outrecs[new_or - 1].owner = outrec_owner;
+        c.outpts[split_op - 1].outrec = new_or;
+        son := c.outpts[split_op - 1].next;
+        c.outpts[son - 1].outrec = new_or;
+        new_op := c.outpts.len() + 1;
+        c.outpts.push(OutPt { pt: ip.clone(), next: 0, prev: 0, outrec: new_or, horz: 0 });
+        split_next := c.outpts[split_op - 1].next;
+        c.outpts[new_op - 1].prev = split_next;
+        c.outpts[new_op - 1].next = split_op;
+        c.outrecs[new_or - 1].pts = new_op;
+        c.outpts[split_op - 1].prev = new_op;
+        c.outpts[split_next - 1].next = new_op;
+        if c.using_polytree {
+            if path2_contains_path1(&c, prev_op, new_op) {
+                c.outrecs[new_or - 1].splits = u64[];
+                c.outrecs[new_or - 1].splits.push(outrec);
+            } else {
+                c.outrecs[outrec - 1].splits.push(new_or);
+            }
+        }
+    }
+    return ();
+}
+
+fn fix_self_intersects(c: &mut Clipper, outrec: u64) {
+    mut op2 = c.outrecs[outrec - 1].pts;
+    if c.outpts[op2 - 1].prev == c.outpts[c.outpts[op2 - 1].next - 1].next {
+        return ();
+    }
+    loop {
+        pv := c.outpts[op2 - 1].prev;
+        nx := c.outpts[op2 - 1].next;
+        nn := c.outpts[nx - 1].next;
+        if segments_intersect(
+            c.outpts[pv - 1].pt.clone(),
+            c.outpts[op2 - 1].pt.clone(),
+            c.outpts[nx - 1].pt.clone(),
+            c.outpts[nn - 1].pt.clone(),
+            false
+        ) {
+            nnn := c.outpts[nn - 1].next;
+            if segments_intersect(
+                c.outpts[pv - 1].pt.clone(),
+                c.outpts[op2 - 1].pt.clone(),
+                c.outpts[nn - 1].pt.clone(),
+                c.outpts[nnn - 1].pt.clone(),
+                false
+            ) {
+                op2 = duplicate_op(c, op2, false);
+                nnn_pt := c.outpts[nnn - 1].pt.clone();
+                c.outpts[op2 - 1].pt = nnn_pt;
+                op2 = c.outpts[op2 - 1].next;
+            } else {
+                pts_now := c.outrecs[outrec - 1].pts;
+                if (op2 == pts_now) || (c.outpts[op2 - 1].next == pts_now) {
+                    prev_of_pts := c.outpts[pts_now - 1].prev;
+                    c.outrecs[outrec - 1].pts = prev_of_pts;
+                }
+                do_split_op(c, outrec, op2);
+                if c.outrecs[outrec - 1].pts == 0 {
+                    break;
+                }
+                op2 = c.outrecs[outrec - 1].pts;
+                if c.outpts[op2 - 1].prev == c.outpts[c.outpts[op2 - 1].next - 1].next {
+                    break;
+                }
+                continue;
+            }
+        } else {
+            op2 = c.outpts[op2 - 1].next;
+        }
+        if op2 == c.outrecs[outrec - 1].pts {
+            break;
+        }
+    }
+    return ();
+}
+
+fn update_outrec_owner(c: &mut Clipper, outrec: u64) {
+    mut op_curr = c.outrecs[outrec - 1].pts;
+    loop {
+        c.outpts[op_curr - 1].outrec = outrec;
+        op_curr = c.outpts[op_curr - 1].next;
+        if op_curr == c.outrecs[outrec - 1].pts {
+            return ();
+        }
+    }
+}
+
+fn start_open_path(c: &mut Clipper, e: u64, pt: Point64) -> u64 {
+    outrec := new_outrec(c);
+    c.outrecs[outrec - 1].is_open = true;
+    if c.actives[e - 1].wind_dx > 0 {
+        c.outrecs[outrec - 1].front_edge = e;
+        c.outrecs[outrec - 1].back_edge = 0;
+    } else {
+        c.outrecs[outrec - 1].front_edge = 0;
+        c.outrecs[outrec - 1].back_edge = e;
+    }
+    c.actives[e - 1].outrec = outrec;
+    op := c.outpts.len() + 1;
+    c.outpts.push(OutPt { pt: pt, next: op, prev: op, outrec: outrec, horz: 0 });
+    c.outrecs[outrec - 1].pts = op;
+    return op;
+}
+
+fn trim_horz(c: &mut Clipper, horz: u64, preserve_collinear: bool) {
+    mut was_trimmed = false;
+    nv := next_vertex(&c, horz);
+    mut pt = c.vertices[nv - 1].pt.clone();
+    while pt.y == c.actives[horz - 1].top.y {
+        if preserve_collinear
+            && (
+                (pt.x < c.actives[horz - 1].top.x)
+                    != (c.actives[horz - 1].bot.x < c.actives[horz - 1].top.x)
+            ) {
+            break;
+        }
+        vt := next_vertex(&c, horz);
+        c.actives[horz - 1].vertex_top = vt;
+        c.actives[horz - 1].top = pt.clone();
+        was_trimmed = true;
+        if is_maxima(&c, horz) {
+            break;
+        }
+        nv2 := next_vertex(&c, horz);
+        pt = c.vertices[nv2 - 1].pt.clone();
+    }
+    if was_trimmed {
+        set_dx(c, horz);
+    }
+    return ();
+}
+
+fn update_edge_into_ael(c: &mut Clipper, e: u64) {
+    top_now := c.actives[e - 1].top.clone();
+    c.actives[e - 1].bot = top_now.clone();
+    vt := next_vertex(&c, e);
+    c.actives[e - 1].vertex_top = vt;
+    vt_pt := c.vertices[vt - 1].pt.clone();
+    c.actives[e - 1].top = vt_pt;
+    bot_x := c.actives[e - 1].bot.x;
+    c.actives[e - 1].curr_x = bot_x;
+    set_dx(c, e);
+    if is_joined(&c, e) {
+        bot_now := c.actives[e - 1].bot.clone();
+        split_edge(c, e, bot_now);
+    }
+    if is_horizontal(&c, e) {
+        if is_open_edge(&c, e) == false {
+            pc := c.preserve_collinear;
+            trim_horz(c, e, pc);
+        }
+        return ();
+    }
+    ty := c.actives[e - 1].top.y;
+    insert_scanline(c, ty);
+    cjl_bot3 := c.actives[e - 1].bot.clone();
+    check_join_left(c, e, cjl_bot3, false);
+    cjr_bot2 := c.actives[e - 1].bot.clone();
+    check_join_right(c, e, cjr_bot2, true);
+    return ();
+}
+
+fn find_edge_with_matching_loc_min(c: &Clipper, e: u64) -> u64 {
+    mut result = c.actives[e - 1].next_in_ael;
+    while result != 0 {
+        if c.actives[result - 1].local_min == c.actives[e - 1].local_min {
+            return result;
+        } else if (is_horizontal(&c, result) == false)
+            && (
+                (c.actives[e - 1].bot.x != c.actives[result - 1].bot.x)
+                    || (c.actives[e - 1].bot.y != c.actives[result - 1].bot.y)
+            ) {
+            result = 0;
+        } else {
+            result = c.actives[result - 1].next_in_ael;
+        }
+    }
+    result = c.actives[e - 1].prev_in_ael;
+    while result != 0 {
+        if c.actives[result - 1].local_min == c.actives[e - 1].local_min {
+            return result;
+        } else if (is_horizontal(&c, result) == false)
+            && (
+                (c.actives[e - 1].bot.x != c.actives[result - 1].bot.x)
+                    || (c.actives[e - 1].bot.y != c.actives[result - 1].bot.y)
+            ) {
+            return 0;
+        } else {
+            result = c.actives[result - 1].prev_in_ael;
+        }
+    }
+    return result;
+}
+
+fn intersect_edges(c: &mut Clipper, e1: u64, e2: u64, pt: Point64) {
+    if c.has_open_paths && (is_open_edge(&c, e1) || is_open_edge(&c, e2)) {
+        if is_open_edge(&c, e1) && is_open_edge(&c, e2) {
+            return ();
+        }
+        mut edge_o: u64 = 0;
+        mut edge_c: u64 = 0;
+        if is_open_edge(&c, e1) {
+            edge_o = e1;
+            edge_c = e2;
+        } else {
+            edge_o = e2;
+            edge_c = e1;
+        }
+        if is_joined(&c, edge_c) {
+            split_edge(c, edge_c, pt.clone());
+        }
+        ec_wind := c.actives[edge_c - 1].wind_cnt;
+        if (if ec_wind < 0 { -ec_wind } else { ec_wind }) != 1 {
+            return ();
+        }
+        if c.cliptype == 2 {
+            if is_hot_edge(&c, edge_c) == false {
+                return ();
+            }
+        } else if poly_type(&c, edge_c) == POLY_SUBJECT {
+            return ();
+        }
+        ec_wind2 := c.actives[edge_c - 1].wind_cnt;
+        if c.fillrule == 2 {
+            if ec_wind2 != 1 {
+                return ();
+            }
+        } else if c.fillrule == 3 {
+            if ec_wind2 != -1 {
+                return ();
+            }
+        } else if (if ec_wind2 < 0 { -ec_wind2 } else { ec_wind2 }) != 1 {
+            return ();
+        }
+        if is_hot_edge(&c, edge_o) {
+            add_out_pt(c, edge_o, pt.clone());
+            if is_front(&c, edge_o) {
+                c.outrecs[c.actives[edge_o - 1].outrec - 1].front_edge = 0;
+            } else {
+                c.outrecs[c.actives[edge_o - 1].outrec - 1].back_edge = 0;
+            }
+            c.actives[edge_o - 1].outrec = 0;
+        } else if (
+            (pt.x == c.vertices[c.minima[c.actives[edge_o - 1].local_min - 1].vertex - 1].pt.x)
+                && (
+                    pt.y
+                        == c.vertices[c.minima[c.actives[edge_o - 1].local_min - 1].vertex - 1].pt.y
+                )
+        )
+            && (
+                is_open_end_vertex(&c, c.minima[c.actives[edge_o - 1].local_min - 1].vertex)
+                    == false
+            ) {
+            e3 := find_edge_with_matching_loc_min(&c, edge_o);
+            if (e3 != 0) && is_hot_edge(&c, e3) {
+                e3_outrec := c.actives[e3 - 1].outrec;
+                c.actives[edge_o - 1].outrec = e3_outrec;
+                if c.actives[edge_o - 1].wind_dx > 0 {
+                    e3_or := c.actives[e3 - 1].outrec;
+                    set_sides(c, e3_or, edge_o, e3);
+                } else {
+                    e3_or2 := c.actives[e3 - 1].outrec;
+                    set_sides(c, e3_or2, e3, edge_o);
+                }
+                return ();
+            } else {
+                start_open_path(c, edge_o, pt.clone());
+            }
+        } else {
+            start_open_path(c, edge_o, pt.clone());
+        }
+        return ();
+    }
+    // Closed paths from here on.
+    if is_joined(&c, e1) {
+        split_edge(c, e1, pt.clone());
+    }
+    if is_joined(&c, e2) {
+        split_edge(c, e2, pt.clone());
+    }
+    mut old_e1_windcnt: i64 = 0;
+    mut old_e2_windcnt: i64 = 0;
+    if c.minima[c.actives[e1 - 1].local_min - 1].polytype
+        == c.minima[c.actives[e2 - 1].local_min - 1].polytype {
+        if c.fillrule == 0 {
+            old_e1_windcnt = c.actives[e1 - 1].wind_cnt;
+            e2_wc := c.actives[e2 - 1].wind_cnt;
+            c.actives[e1 - 1].wind_cnt = e2_wc;
+            c.actives[e2 - 1].wind_cnt = old_e1_windcnt;
+        } else {
+            if c.actives[e1 - 1].wind_cnt + c.actives[e2 - 1].wind_dx == 0 {
+                wc_neg := c.actives[e1 - 1].wind_cnt;
+                c.actives[e1 - 1].wind_cnt = -wc_neg;
+            } else {
+                wc_a := c.actives[e1 - 1].wind_cnt;
+                dx_b := c.actives[e2 - 1].wind_dx;
+                c.actives[e1 - 1].wind_cnt = wc_a + dx_b;
+            }
+            if c.actives[e2 - 1].wind_cnt - c.actives[e1 - 1].wind_dx == 0 {
+                wc_neg2 := c.actives[e2 - 1].wind_cnt;
+                c.actives[e2 - 1].wind_cnt = -wc_neg2;
+            } else {
+                wc_a := c.actives[e2 - 1].wind_cnt;
+                dx_b := c.actives[e1 - 1].wind_dx;
+                c.actives[e2 - 1].wind_cnt = wc_a - dx_b;
+            }
+        }
+    } else {
+        if c.fillrule != 0 {
+            wc2_a := c.actives[e1 - 1].wind_cnt2;
+            dx2_b := c.actives[e2 - 1].wind_dx;
+            c.actives[e1 - 1].wind_cnt2 = wc2_a + dx2_b;
+            wc2_a := c.actives[e2 - 1].wind_cnt2;
+            dx2_b := c.actives[e1 - 1].wind_dx;
+            c.actives[e2 - 1].wind_cnt2 = wc2_a - dx2_b;
+        } else {
+            if c.actives[e1 - 1].wind_cnt2 == 0 {
+                c.actives[e1 - 1].wind_cnt2 = 1;
+            } else {
+                c.actives[e1 - 1].wind_cnt2 = 0;
+            }
+            if c.actives[e2 - 1].wind_cnt2 == 0 {
+                c.actives[e2 - 1].wind_cnt2 = 1;
+            } else {
+                c.actives[e2 - 1].wind_cnt2 = 0;
+            }
+        }
+    }
+    if (c.fillrule == 0) || (c.fillrule == 1) {
+        old_e1_windcnt = if c
+            .actives[e1 - 1]
+            .wind_cnt < 0 { -c.actives[e1 - 1].wind_cnt } else { c.actives[e1 - 1].wind_cnt };
+        old_e2_windcnt = if c
+            .actives[e2 - 1]
+            .wind_cnt < 0 { -c.actives[e2 - 1].wind_cnt } else { c.actives[e2 - 1].wind_cnt };
+    } else if c.fillrule == c.fillpos {
+        old_e1_windcnt = c.actives[e1 - 1].wind_cnt;
+        old_e2_windcnt = c.actives[e2 - 1].wind_cnt;
+    } else {
+        old_e1_windcnt = -c.actives[e1 - 1].wind_cnt;
+        old_e2_windcnt = -c.actives[e2 - 1].wind_cnt;
+    }
+    e1_windcnt_in_01 := (old_e1_windcnt == 0) || (old_e1_windcnt == 1);
+    e2_windcnt_in_01 := (old_e2_windcnt == 0) || (old_e2_windcnt == 1);
+    if ((is_hot_edge(&c, e1) == false) && (e1_windcnt_in_01 == false))
+        || ((is_hot_edge(&c, e2) == false) && (e2_windcnt_in_01 == false)) {
+        return ();
+    }
+    if is_hot_edge(&c, e1) && is_hot_edge(&c, e2) {
+        if ((old_e1_windcnt != 0) && (old_e1_windcnt != 1))
+            || ((old_e2_windcnt != 0) && (old_e2_windcnt != 1))
+            || (
+                (
+                    c.minima[c.actives[e1 - 1].local_min - 1].polytype
+                        != c.minima[c.actives[e2 - 1].local_min - 1].polytype
+                )
+                    && (c.cliptype != 4)
+            ) {
+            add_local_max_poly(c, e1, e2, pt.clone());
+        } else if is_front(&c, e1) || (c.actives[e1 - 1].outrec == c.actives[e2 - 1].outrec) {
+            add_local_max_poly(c, e1, e2, pt.clone());
+            add_local_min_poly(c, e1, e2, pt.clone(), false);
+        } else {
+            add_out_pt(c, e1, pt.clone());
+            add_out_pt(c, e2, pt.clone());
+            swap_outrecs(c, e1, e2);
+        }
+    } else if is_hot_edge(&c, e1) {
+        add_out_pt(c, e1, pt.clone());
+        swap_outrecs(c, e1, e2);
+    } else if is_hot_edge(&c, e2) {
+        add_out_pt(c, e2, pt.clone());
+        swap_outrecs(c, e1, e2);
+    } else {
+        mut e1_wc2: i64 = 0;
+        mut e2_wc2: i64 = 0;
+        if (c.fillrule == 0) || (c.fillrule == 1) {
+            e1_wc2 = if c
+                .actives[e1 - 1]
+                .wind_cnt2 < 0 {
+                    -c.actives[e1 - 1].wind_cnt2
+                } else { c.actives[e1 - 1].wind_cnt2 };
+            e2_wc2 = if c
+                .actives[e2 - 1]
+                .wind_cnt2 < 0 {
+                    -c.actives[e2 - 1].wind_cnt2
+                } else { c.actives[e2 - 1].wind_cnt2 };
+        } else if c.fillrule == c.fillpos {
+            e1_wc2 = c.actives[e1 - 1].wind_cnt2;
+            e2_wc2 = c.actives[e2 - 1].wind_cnt2;
+        } else {
+            e1_wc2 = -c.actives[e1 - 1].wind_cnt2;
+            e2_wc2 = -c.actives[e2 - 1].wind_cnt2;
+        }
+        if is_same_poly_type(&c, e1, e2) == false {
+            add_local_min_poly(c, e1, e2, pt.clone(), false);
+        } else if (old_e1_windcnt == 1) && (old_e2_windcnt == 1) {
+            if c.cliptype == 2 {
+                if (e1_wc2 <= 0) && (e2_wc2 <= 0) {
+                    add_local_min_poly(c, e1, e2, pt.clone(), false);
+                }
+            } else if c.cliptype == 3 {
+                if ((poly_type(&c, e1) == POLY_CLIP) && (e1_wc2 > 0) && (e2_wc2 > 0))
+                    || ((poly_type(&c, e1) == POLY_SUBJECT) && (e1_wc2 <= 0) && (e2_wc2 <= 0)) {
+                    add_local_min_poly(c, e1, e2, pt.clone(), false);
+                }
+            } else if c.cliptype == 4 {
+                add_local_min_poly(c, e1, e2, pt.clone(), false);
+            } else if (e1_wc2 > 0) && (e2_wc2 > 0) {
+                add_local_min_poly(c, e1, e2, pt.clone(), false);
+            }
+        }
+    }
+    return ();
+}
+
+fn delete_from_ael(c: &mut Clipper, e: u64) {
+    prev := c.actives[e - 1].prev_in_ael;
+    next := c.actives[e - 1].next_in_ael;
+    if (prev == 0) && (next == 0) && (e != c.actives_head) {
+        return ();
+    }
+    if prev != 0 {
+        c.actives[prev - 1].next_in_ael = next;
+    } else {
+        c.actives_head = next;
+    }
+    if next != 0 {
+        c.actives[next - 1].prev_in_ael = prev;
+    }
+    return ();
+}
+
+fn adjust_curr_x_and_copy_to_sel(c: &mut Clipper, top_y: i64) {
+    mut e = c.actives_head;
+    c.sel_head = e;
+    while e != 0 {
+        pa := c.actives[e - 1].prev_in_ael;
+        na := c.actives[e - 1].next_in_ael;
+        c.actives[e - 1].prev_in_sel = pa;
+        c.actives[e - 1].next_in_sel = na;
+        c.actives[e - 1].jump = na;
+        cx := top_x(&c, e, top_y);
+        c.actives[e - 1].curr_x = cx;
+        e = c.actives[e - 1].next_in_ael;
+    }
+    return ();
+}
+
+fn extract_from_sel(c: &mut Clipper, ae: u64) -> u64 {
+    res := c.actives[ae - 1].next_in_sel;
+    ae_prev := c.actives[ae - 1].prev_in_sel;
+    if res != 0 {
+        c.actives[res - 1].prev_in_sel = ae_prev;
+    }
+    c.actives[ae_prev - 1].next_in_sel = res;
+    return res;
+}
+
+fn insert1_before2_in_sel(c: &mut Clipper, ae1: u64, ae2: u64) {
+    ae2_prev := c.actives[ae2 - 1].prev_in_sel;
+    c.actives[ae1 - 1].prev_in_sel = ae2_prev;
+    if ae2_prev != 0 {
+        c.actives[ae2_prev - 1].next_in_sel = ae1;
+    }
+    c.actives[ae1 - 1].next_in_sel = ae2;
+    c.actives[ae2 - 1].prev_in_sel = ae1;
+    return ();
+}
+
+fn add_new_intersect_node(c: &mut Clipper, e1: u64, e2: u64, top_y: i64) {
+    mut ip = Point64 { x: 0, y: 0 };
+    e1bot := c.actives[e1 - 1].bot.clone();
+    e1top := c.actives[e1 - 1].top.clone();
+    e2bot := c.actives[e2 - 1].bot.clone();
+    e2top := c.actives[e2 - 1].top.clone();
+    match line_intersect_pt(e1bot.clone(), e1top.clone(), e2bot.clone(), e2top.clone()) {
+        Some(v) => {
+            ip = v;
+        },
+        None => {
+            ip = Point64 { x: c.actives[e1 - 1].curr_x, y: top_y };
+        }
+    }
+    if (ip.y > c.bot_y) || (ip.y < top_y) {
+        abs_dx1 := c.actives[e1 - 1].dx.abs();
+        abs_dx2 := c.actives[e2 - 1].dx.abs();
+        if (abs_dx1 > 100.0) && (abs_dx2 > 100.0) {
+            if abs_dx1 > abs_dx2 {
+                ip = closest_point_on_segment(ip.clone(), e1bot.clone(), e1top.clone());
+            } else {
+                ip = closest_point_on_segment(ip.clone(), e2bot.clone(), e2top.clone());
+            }
+        } else if abs_dx1 > 100.0 {
+            ip = closest_point_on_segment(ip.clone(), e1bot.clone(), e1top.clone());
+        } else if abs_dx2 > 100.0 {
+            ip = closest_point_on_segment(ip.clone(), e2bot.clone(), e2top.clone());
+        } else {
+            if ip.y < top_y {
+                ip.y = top_y;
+            } else {
+                ip.y = c.bot_y;
+            }
+            if abs_dx1 < abs_dx2 {
+                ip.x = top_x(&c, e1, ip.y);
+            } else {
+                ip.x = top_x(&c, e2, ip.y);
+            }
+        }
+    }
+    c.intersect_nodes.push(IntersectNode { pt: ip, edge1: e1, edge2: e2 });
+    return ();
+}
+
+fn build_intersect_list(c: &mut Clipper, top_y: i64) -> bool {
+    if (c.actives_head == 0) || (c.actives[c.actives_head - 1].next_in_ael == 0) {
+        return false;
+    }
+    adjust_curr_x_and_copy_to_sel(c, top_y);
+    mut left = c.sel_head;
+    loop {
+        if (left == 0) || (c.actives[left - 1].jump == 0) {
+            break;
+        }
+        mut prev_base: u64 = 0;
+        while (left != 0) && (c.actives[left - 1].jump != 0) {
+            mut curr_base = left;
+            mut right = c.actives[left - 1].jump;
+            mut l_end = right;
+            mut r_end = c.actives[right - 1].jump;
+            c.actives[left - 1].jump = r_end;
+            while (left != l_end) && (right != r_end) {
+                if c.actives[right - 1].curr_x < c.actives[left - 1].curr_x {
+                    mut tmp = c.actives[right - 1].prev_in_sel;
+                    loop {
+                        add_new_intersect_node(c, tmp, right, top_y);
+                        if tmp == left {
+                            break;
+                        }
+                        tmp = c.actives[tmp - 1].prev_in_sel;
+                    }
+                    tmp = right;
+                    right = extract_from_sel(c, tmp);
+                    l_end = right;
+                    insert1_before2_in_sel(c, tmp, left);
+                    if left == curr_base {
+                        curr_base = tmp;
+                        c.actives[curr_base - 1].jump = r_end;
+                        if prev_base == 0 {
+                            c.sel_head = curr_base;
+                        } else {
+                            c.actives[prev_base - 1].jump = curr_base;
+                        }
+                    }
+                } else {
+                    left = c.actives[left - 1].next_in_sel;
+                }
+            }
+            prev_base = curr_base;
+            left = r_end;
+        }
+        left = c.sel_head;
+    }
+    return c.intersect_nodes.len() > 0;
+}
+
+// ---- the libstdc++ introsort replica over the intersect list (std::sort's tie order is visible in
+// the output: records with equal (y, x) are equivalent under IntersectListSort) ----
+
+fn swap_nodes(a: &mut IntersectNode[], i: u64, j: u64) {
+    t := a[i].clone();
+    a[i] = a[j].clone();
+    a[j] = t;
+    return ();
+}
+
+fn insertion_sort_nodes(a: &mut IntersectNode[], first: u64, last: u64) {
+    if first == last {
+        return ();
+    }
+    mut i = first + 1;
+    while i < last {
+        if intersect_less(&a[i], &a[first]) {
+            val := a[i].clone();
+            mut j = i;
+            while j > first {
+                a[j] = a[j - 1].clone();
+                j -= 1;
+            }
+            a[first] = val;
+        } else {
+            val := a[i].clone();
+            mut j = i;
+            while intersect_less(&val, &a[j - 1]) {
+                a[j] = a[j - 1].clone();
+                j -= 1;
+            }
+            a[j] = val;
+        }
+        i += 1;
+    }
+    return ();
+}
+
+fn unguarded_insertion_sort_nodes(a: &mut IntersectNode[], first: u64, last: u64) {
+    mut i = first;
+    while i < last {
+        val := a[i].clone();
+        mut j = i;
+        while intersect_less(&val, &a[j - 1]) {
+            a[j] = a[j - 1].clone();
+            j -= 1;
+        }
+        a[j] = val;
+        i += 1;
+    }
+    return ();
+}
+
+fn final_insertion_sort_nodes(a: &mut IntersectNode[], first: u64, last: u64) {
+    if last - first > 16 {
+        insertion_sort_nodes(a, first, first + 16);
+        unguarded_insertion_sort_nodes(a, first + 16, last);
+    } else {
+        insertion_sort_nodes(a, first, last);
+    }
+    return ();
+}
+
+fn gcc_lg(n: u64) -> u64 {
+    mut k = 0;
+    mut v = n;
+    while v > 1 {
+        v = v >> 1;
+        k += 1;
+    }
+    return k;
+}
+
+fn move_median_to_first(a: &mut IntersectNode[], result: u64, x: u64, y: u64, z: u64) {
+    if intersect_less(&a[x], &a[y]) {
+        if intersect_less(&a[y], &a[z]) {
+            swap_nodes(a, y, result);
+        } else if intersect_less(&a[x], &a[z]) {
+            swap_nodes(a, z, result);
+        } else {
+            swap_nodes(a, x, result);
+        }
+    } else if intersect_less(&a[x], &a[z]) {
+        swap_nodes(a, x, result);
+    } else if intersect_less(&a[y], &a[z]) {
+        swap_nodes(a, z, result);
+    } else {
+        swap_nodes(a, y, result);
+    }
+    return ();
+}
+
+fn unguarded_partition_nodes(a: &mut IntersectNode[], first: u64, last: u64, pivot: u64) -> u64 {
+    mut i = first;
+    mut j = last;
+    loop {
+        while intersect_less(&a[i], &a[pivot]) {
+            i += 1;
+        }
+        j -= 1;
+        while intersect_less(&a[pivot], &a[j]) {
+            j -= 1;
+        }
+        if i >= j {
+            return i;
+        }
+        swap_nodes(a, i, j);
+        i += 1;
+    }
+}
+
+fn heap_push_nodes(a: &mut IntersectNode[], hole: i64, top: i64, value: IntersectNode) {
+    mut h = hole;
+    mut parent = (h - 1) / 2;
+    while (h > top) && intersect_less(&a[u64(parent)], &value) {
+        a[u64(h)] = a[u64(parent)].clone();
+        h = parent;
+        parent = (h - 1) / 2;
+    }
+    a[u64(h)] = value;
+    return ();
+}
+
+fn heap_adjust_nodes(
+    a: &mut IntersectNode[],
+    first: i64,
+    hole: i64,
+    len: i64,
+    value: IntersectNode
+) {
+    top := hole;
+    mut h = hole;
+    mut second = hole;
+    while second < (len - 1) / 2 {
+        second = 2 * (second + 1);
+        if intersect_less(&a[u64(first + second)], &a[u64(first + second - 1)]) {
+            second -= 1;
+        }
+        a[u64(first + h)] = a[u64(first + second)].clone();
+        h = second;
+    }
+    if ((len & 1) == 0) && (second == (len - 2) / 2) {
+        second = 2 * (second + 1);
+        a[u64(first + h)] = a[u64(first + second - 1)].clone();
+        h = second - 1;
+    }
+    heap_push_nodes(a, h, top, value);
+    return ();
+}
+
+fn heap_make_nodes(a: &mut IntersectNode[], first: i64, len: i64) {
+    if len < 2 {
+        return ();
+    }
+    mut parent = (len - 2) / 2;
+    loop {
+        value := a[u64(first + parent)].clone();
+        heap_adjust_nodes(a, first, parent, len, value);
+        if parent == 0 {
+            return ();
+        }
+        parent -= 1;
+    }
+}
+
+fn heap_pop_nodes(a: &mut IntersectNode[], first: i64, last: i64, result: i64) {
+    value := a[u64(result)].clone();
+    a[u64(result)] = a[u64(first)].clone();
+    heap_adjust_nodes(a, first, 0, last - first, value);
+    return ();
+}
+
+fn heap_partial_sort_nodes(a: &mut IntersectNode[], first: i64, last: i64) {
+    heap_make_nodes(a, first, last - first);
+    mut tail = last;
+    while tail - first > 1 {
+        tail -= 1;
+        heap_pop_nodes(a, first, tail, tail);
+    }
+    return ();
+}
+
+fn introsort_loop_nodes(a: &mut IntersectNode[], first: u64, last: u64, depth: u64) {
+    mut f = first;
+    mut l = last;
+    mut d = depth;
+    while l - f > 16 {
+        if d == 0 {
+            heap_partial_sort_nodes(a, i64(f), i64(l));
+            return ();
+        }
+        d -= 1;
+        mid := f + (l - f) / 2;
+        move_median_to_first(a, f, f + 1, mid, l - 1);
+        cut := unguarded_partition_nodes(a, f + 1, l, f);
+        introsort_loop_nodes(a, cut, l, d);
+        l = cut;
+    }
+    return ();
+}
+
+fn gcc_sort_nodes(a: &mut IntersectNode[]) {
+    n := a.len();
+    if n < 2 {
+        return ();
+    }
+    introsort_loop_nodes(a, 0, n, gcc_lg(n) * 2);
+    final_insertion_sort_nodes(a, 0, n);
+    return ();
+}
+
+fn process_intersect_list(c: &mut Clipper) {
+    gcc_sort_nodes(&mut c.intersect_nodes);
+    mut node_iter: u64 = 0;
+    while node_iter < c.intersect_nodes.len() {
+        node_here := c.intersect_nodes[node_iter].clone();
+        if edges_adjacent_in_ael(&c, node_here.clone()) == false {
+            mut node_iter2 = node_iter + 1;
+            while edges_adjacent_in_ael(&c, c.intersect_nodes[node_iter2].clone()) == false {
+                node_iter2 += 1;
+            }
+            t := c.intersect_nodes[node_iter].clone();
+            c.intersect_nodes[node_iter] = c.intersect_nodes[node_iter2].clone();
+            c.intersect_nodes[node_iter2] = t;
+        }
+        node := c.intersect_nodes[node_iter].clone();
+        intersect_edges(c, node.edge1, node.edge2, node.pt.clone());
+        swap_positions_in_ael(c, node.edge1, node.edge2);
+        c.actives[node.edge1 - 1].curr_x = node.pt.x;
+        c.actives[node.edge2 - 1].curr_x = node.pt.x;
+        check_join_left(c, node.edge2, node.pt.clone(), true);
+        check_join_right(c, node.edge1, node.pt.clone(), true);
+        node_iter += 1;
+    }
+    return ();
+}
+
+fn swap_positions_in_ael(c: &mut Clipper, e1: u64, e2: u64) {
+    next := c.actives[e2 - 1].next_in_ael;
+    if next != 0 {
+        c.actives[next - 1].prev_in_ael = e1;
+    }
+    prev := c.actives[e1 - 1].prev_in_ael;
+    if prev != 0 {
+        c.actives[prev - 1].next_in_ael = e2;
+    }
+    c.actives[e2 - 1].prev_in_ael = prev;
+    c.actives[e2 - 1].next_in_ael = e1;
+    c.actives[e1 - 1].prev_in_ael = e2;
+    c.actives[e1 - 1].next_in_ael = next;
+    if c.actives[e2 - 1].prev_in_ael == 0 {
+        c.actives_head = e2;
+    }
+    return ();
+}
+
+fn get_last_op(c: &Clipper, hot_edge: u64) -> u64 {
+    outrec := c.actives[hot_edge - 1].outrec;
+    mut result = c.outrecs[outrec - 1].pts;
+    if hot_edge != c.outrecs[outrec - 1].front_edge {
+        result = c.outpts[result - 1].next;
+    }
+    return result;
+}
+
+fn add_trial_horz_join(c: &mut Clipper, op: u64) {
+    if c.outrecs[c.outpts[op - 1].outrec - 1].is_open {
+        return ();
+    }
+    c.horz_segs.push(HorzSegment { left_op: op, right_op: 0, left_to_right: true });
+    return ();
+}
+
+fn horz_limits(c: &Clipper, horz: u64) -> (i64, i64) {
+    if c.actives[horz - 1].bot.x == c.actives[horz - 1].top.x {
+        return (c.actives[horz - 1].curr_x, c.actives[horz - 1].curr_x);
+    }
+    if c.actives[horz - 1].curr_x < c.actives[horz - 1].top.x {
+        return (c.actives[horz - 1].curr_x, c.actives[horz - 1].top.x);
+    }
+    return (c.actives[horz - 1].top.x, c.actives[horz - 1].curr_x);
+}
+
+// ResetHorzDirection's third behaviour: when the horizontal edge goes nowhere, the direction
+// result depends on whether an edge with the maxima vertex exists beyond it.
+fn reset_horz_direction_full(c: &Clipper, horz: u64, max_vertex: u64) -> bool {
+    if c.actives[horz - 1].bot.x != c.actives[horz - 1].top.x {
+        return c.actives[horz - 1].curr_x < c.actives[horz - 1].top.x;
+    }
+    mut e = c.actives[horz - 1].next_in_ael;
+    while (e != 0) && (c.actives[e - 1].vertex_top != max_vertex) {
+        e = c.actives[e - 1].next_in_ael;
+    }
+    return e != 0;
+}
+
+fn do_horizontal(c: &mut Clipper, horz_in: u64) {
+    mut horz = horz_in;
+    horz_is_open := is_open_edge(&c, horz);
+    y := c.actives[horz - 1].bot.y;
+    mut vertex_max: u64 = 0;
+    if horz_is_open {
+        vertex_max = get_curr_y_maxima_vertex_open(&c, horz);
+    } else {
+        vertex_max = get_curr_y_maxima_vertex(&c, horz);
+    }
+    mut is_left_to_right = reset_horz_direction_full(&c, horz, vertex_max);
+    lims := horz_limits(&c, horz);
+    mut horz_left = lims.0;
+    mut horz_right = lims.1;
+    if is_hot_edge(&c, horz) {
+        hx := c.actives[horz - 1].curr_x;
+        op := add_out_pt(c, horz, Point64 { x: hx, y: y });
+        add_trial_horz_join(c, op);
+    }
+    loop {
+        mut e: u64 = 0;
+        if is_left_to_right {
+            e = c.actives[horz - 1].next_in_ael;
+        } else {
+            e = c.actives[horz - 1].prev_in_ael;
+        }
+        while e != 0 {
+            if c.actives[e - 1].vertex_top == vertex_max {
+                if is_hot_edge(&c, horz) && is_joined(&c, e) {
+                    se_top := c.actives[e - 1].top.clone();
+                    split_edge(c, e, se_top);
+                }
+                if is_hot_edge(&c, horz) {
+                    while c.actives[horz - 1].vertex_top != vertex_max {
+                        doh_top := c.actives[horz - 1].top.clone();
+                        add_out_pt(c, horz, doh_top);
+                        update_edge_into_ael(c, horz);
+                    }
+                    dl_top := c.actives[horz - 1].top.clone();
+                    if is_left_to_right {
+                        add_local_max_poly(c, horz, e, dl_top.clone());
+                    } else {
+                        add_local_max_poly(c, e, horz, dl_top.clone());
+                    }
+                }
+                delete_from_ael(c, e);
+                delete_from_ael(c, horz);
+                return ();
+            }
+            if (vertex_max != c.actives[horz - 1].vertex_top) || is_open_end_edge(&c, horz) {
+                if (is_left_to_right && (c.actives[e - 1].curr_x > horz_right))
+                    || ((is_left_to_right == false) && (c.actives[e - 1].curr_x < horz_left)) {
+                    break;
+                }
+                if (c.actives[e - 1].curr_x == c.actives[horz - 1].top.x)
+                    && (is_horizontal(&c, e) == false) {
+                    nv := next_vertex(&c, horz);
+                    pt := c.vertices[nv - 1].pt.clone();
+                    if is_left_to_right {
+                        if is_open_edge(&c, e)
+                            && (is_same_poly_type(&c, e, horz) == false)
+                            && (is_hot_edge(&c, e) == false) {
+                            if top_x(&c, e, pt.y) > pt.x {
+                                break;
+                            }
+                        } else if top_x(&c, e, pt.y) >= pt.x {
+                            break;
+                        }
+                    } else {
+                        if is_open_edge(&c, e)
+                            && (is_same_poly_type(&c, e, horz) == false)
+                            && (is_hot_edge(&c, e) == false) {
+                            if top_x(&c, e, pt.y) < pt.x {
+                                break;
+                            }
+                        } else if top_x(&c, e, pt.y) <= pt.x {
+                            break;
+                        }
+                    }
+                }
+            }
+            pt := Point64 { x: c.actives[e - 1].curr_x, y: c.actives[horz - 1].bot.y };
+            if is_left_to_right {
+                intersect_edges(c, horz, e, pt.clone());
+                swap_positions_in_ael(c, horz, e);
+                check_join_left(c, e, pt.clone(), false);
+                e_cx := c.actives[e - 1].curr_x;
+                c.actives[horz - 1].curr_x = e_cx;
+                e = c.actives[horz - 1].next_in_ael;
+            } else {
+                intersect_edges(c, e, horz, pt.clone());
+                swap_positions_in_ael(c, e, horz);
+                check_join_right(c, e, pt.clone(), false);
+                e_cx := c.actives[e - 1].curr_x;
+                c.actives[horz - 1].curr_x = e_cx;
+                e = c.actives[horz - 1].prev_in_ael;
+            }
+            if c.actives[horz - 1].outrec != 0 {
+                last := get_last_op(&c, horz);
+                add_trial_horz_join(c, last);
+            }
+        }
+        if horz_is_open && is_open_end_edge(&c, horz) {
+            if is_hot_edge(&c, horz) {
+                dh_top := c.actives[horz - 1].top.clone();
+                add_out_pt(c, horz, dh_top);
+                if is_front(&c, horz) {
+                    c.outrecs[c.actives[horz - 1].outrec - 1].front_edge = 0;
+                } else {
+                    c.outrecs[c.actives[horz - 1].outrec - 1].back_edge = 0;
+                }
+                c.actives[horz - 1].outrec = 0;
+            }
+            delete_from_ael(c, horz);
+            return ();
+        } else {
+            nv := next_vertex(&c, horz);
+            if c.vertices[nv - 1].pt.y != c.actives[horz - 1].top.y {
+                break;
+            }
+        }
+        if is_hot_edge(&c, horz) {
+            doh_top2 := c.actives[horz - 1].top.clone();
+            add_out_pt(c, horz, doh_top2);
+        }
+        update_edge_into_ael(c, horz);
+        is_left_to_right = reset_horz_direction_full(&c, horz, vertex_max);
+        lims2 := horz_limits(&c, horz);
+        horz_left = lims2.0;
+        horz_right = lims2.1;
+    }
+    if is_hot_edge(&c, horz) {
+        doh_top3 := c.actives[horz - 1].top.clone();
+        op := add_out_pt(c, horz, doh_top3);
+        add_trial_horz_join(c, op);
+    }
+    update_edge_into_ael(c, horz);
+    return ();
+}
+
+fn do_top_of_scanbeam(c: &mut Clipper, y: i64) {
+    c.sel_head = 0;
+    mut e = c.actives_head;
+    while e != 0 {
+        if c.actives[e - 1].top.y == y {
+            topx := c.actives[e - 1].top.x;
+            c.actives[e - 1].curr_x = topx;
+            if is_maxima(&c, e) {
+                e = do_maxima(c, e);
+                continue;
+            } else {
+                if is_hot_edge(&c, e) {
+                    top_pt := c.actives[e - 1].top.clone();
+                    add_out_pt(c, e, top_pt);
+                }
+                update_edge_into_ael(c, e);
+                if is_horizontal(&c, e) {
+                    push_horz(c, e);
+                }
+            }
+        } else {
+            txc := top_x(&c, e, y);
+            c.actives[e - 1].curr_x = txc;
+        }
+        e = c.actives[e - 1].next_in_ael;
+    }
+    return ();
+}
+
+fn do_maxima(c: &mut Clipper, e: u64) -> u64 {
+    prev_e := c.actives[e - 1].prev_in_ael;
+    mut next_e = c.actives[e - 1].next_in_ael;
+    if is_open_end_edge(&c, e) {
+        if is_hot_edge(&c, e) {
+            top_pt := c.actives[e - 1].top.clone();
+            add_out_pt(c, e, top_pt);
+        }
+        if is_horizontal(&c, e) == false {
+            if is_hot_edge(&c, e) {
+                if is_front(&c, e) {
+                    c.outrecs[c.actives[e - 1].outrec - 1].front_edge = 0;
+                } else {
+                    c.outrecs[c.actives[e - 1].outrec - 1].back_edge = 0;
+                }
+                c.actives[e - 1].outrec = 0;
+            }
+            delete_from_ael(c, e);
+        }
+        return next_e;
+    }
+    max_pair := get_maxima_pair(&c, e);
+    if max_pair == 0 {
+        return next_e;
+    }
+    if is_joined(&c, e) {
+        se_top2 := c.actives[e - 1].top.clone();
+        split_edge(c, e, se_top2);
+    }
+    if is_joined(&c, max_pair) {
+        mp_top := c.actives[max_pair - 1].top.clone();
+        split_edge(c, max_pair, mp_top);
+    }
+    while next_e != max_pair {
+        dm_top5 := c.actives[e - 1].top.clone();
+        intersect_edges(c, e, next_e, dm_top5);
+        swap_positions_in_ael(c, e, next_e);
+        next_e = c.actives[e - 1].next_in_ael;
+    }
+    if is_open_edge(&c, e) {
+        if is_hot_edge(&c, e) {
+            dm_top3 := c.actives[e - 1].top.clone();
+            add_local_max_poly(c, e, max_pair, dm_top3);
+        }
+        delete_from_ael(c, max_pair);
+        delete_from_ael(c, e);
+        if prev_e != 0 {
+            return c.actives[prev_e - 1].next_in_ael;
+        }
+        return c.actives_head;
+    }
+    if is_hot_edge(&c, e) {
+        dm_top4 := c.actives[e - 1].top.clone();
+        add_local_max_poly(c, e, max_pair, dm_top4);
+    }
+    delete_from_ael(c, e);
+    delete_from_ael(c, max_pair);
+    if prev_e != 0 {
+        return c.actives[prev_e - 1].next_in_ael;
+    }
+    return c.actives_head;
+}
+
+fn split_edge(c: &mut Clipper, e: u64, pt: Point64) {
+    if c.actives[e - 1].join_with == JOIN_RIGHT {
+        c.actives[e - 1].join_with = JOIN_NONE;
+        nx := c.actives[e - 1].next_in_ael;
+        c.actives[nx - 1].join_with = JOIN_NONE;
+        sp_nx := c.actives[e - 1].next_in_ael;
+        add_local_min_poly(c, e, sp_nx, pt.clone(), true);
+    } else {
+        c.actives[e - 1].join_with = JOIN_NONE;
+        pvx := c.actives[e - 1].prev_in_ael;
+        c.actives[pvx - 1].join_with = JOIN_NONE;
+        sp_pv := c.actives[e - 1].prev_in_ael;
+        add_local_min_poly(c, sp_pv, e, pt.clone(), true);
+    }
+    return ();
+}
+
+fn check_join_left(c: &mut Clipper, e: u64, pt: Point64, check_curr_x: bool) {
+    prev := c.actives[e - 1].prev_in_ael;
+    if (prev == 0)
+        || (is_hot_edge(&c, e) == false)
+        || (is_hot_edge(&c, prev) == false)
+        || is_horizontal(&c, e)
+        || is_horizontal(&c, prev)
+        || is_open_edge(&c, e)
+        || is_open_edge(&c, prev) {
+        return ();
+    }
+    if ((pt.y < c.actives[e - 1].top.y + 2) || (pt.y < c.actives[prev - 1].top.y + 2))
+        && ((c.actives[e - 1].bot.y > pt.y) || (c.actives[prev - 1].bot.y > pt.y)) {
+        return ();
+    }
+    if check_curr_x {
+        if perpendic_dist_from_line_sqrd(
+            pt.clone(),
+            c.actives[prev - 1].bot.clone(),
+            c.actives[prev - 1].top.clone()
+        ) > 0.25 {
+            return ();
+        }
+    } else if c.actives[e - 1].curr_x != c.actives[prev - 1].curr_x {
+        return ();
+    }
+    if is_collinear(c.actives[e - 1].top.clone(), pt.clone(), c.actives[prev - 1].top.clone())
+        == false {
+        return ();
+    }
+    if c.actives[e - 1].outrec == c.actives[prev - 1].outrec {
+        add_local_max_poly(c, prev, e, pt);
+    } else if c.actives[e - 1].outrec < c.actives[prev - 1].outrec {
+        join_outrec_paths(c, e, prev);
+    } else {
+        join_outrec_paths(c, prev, e);
+    }
+    c.actives[prev - 1].join_with = JOIN_RIGHT;
+    c.actives[e - 1].join_with = JOIN_LEFT;
+    return ();
+}
+
+fn check_join_right(c: &mut Clipper, e: u64, pt: Point64, check_curr_x: bool) {
+    next := c.actives[e - 1].next_in_ael;
+    if (next == 0)
+        || (is_hot_edge(&c, e) == false)
+        || (is_hot_edge(&c, next) == false)
+        || is_horizontal(&c, e)
+        || is_horizontal(&c, next)
+        || is_open_edge(&c, e)
+        || is_open_edge(&c, next) {
+        return ();
+    }
+    if ((pt.y < c.actives[e - 1].top.y + 2) || (pt.y < c.actives[next - 1].top.y + 2))
+        && ((c.actives[e - 1].bot.y > pt.y) || (c.actives[next - 1].bot.y > pt.y)) {
+        return ();
+    }
+    if check_curr_x {
+        if perpendic_dist_from_line_sqrd(
+            pt.clone(),
+            c.actives[next - 1].bot.clone(),
+            c.actives[next - 1].top.clone()
+        ) > 0.35 {
+            return ();
+        }
+    } else if c.actives[e - 1].curr_x != c.actives[next - 1].curr_x {
+        return ();
+    }
+    if is_collinear(c.actives[e - 1].top.clone(), pt.clone(), c.actives[next - 1].top.clone())
+        == false {
+        return ();
+    }
+    if c.actives[e - 1].outrec == c.actives[next - 1].outrec {
+        add_local_max_poly(c, e, next, pt);
+    } else if c.actives[e - 1].outrec < c.actives[next - 1].outrec {
+        join_outrec_paths(c, e, next);
+    } else {
+        join_outrec_paths(c, next, e);
+    }
+    c.actives[e - 1].join_with = JOIN_RIGHT;
+    c.actives[next - 1].join_with = JOIN_LEFT;
+    return ();
+}
+
+// ---- trial horizontal segments and their joins ----
+
+fn fix_out_rec_pts(c: &mut Clipper, outrec: u64) {
+    op0 := c.outrecs[outrec - 1].pts;
+    mut op = op0;
+    loop {
+        c.outpts[op - 1].outrec = outrec;
+        op = c.outpts[op - 1].next;
+        if op == op0 {
+            break;
+        }
+    }
+    return ();
+}
+
+fn set_horz_seg_heading_forward(hs_idx: u64, op_p: u64, op_n: u64, c: &mut Clipper) -> bool {
+    if c.outpts[op_p - 1].pt.x == c.outpts[op_n - 1].pt.x {
+        return false;
+    }
+    if c.outpts[op_p - 1].pt.x < c.outpts[op_n - 1].pt.x {
+        c.horz_segs[hs_idx - 1].left_op = op_p;
+        c.horz_segs[hs_idx - 1].right_op = op_n;
+        c.horz_segs[hs_idx - 1].left_to_right = true;
+    } else {
+        c.horz_segs[hs_idx - 1].left_op = op_n;
+        c.horz_segs[hs_idx - 1].right_op = op_p;
+        c.horz_segs[hs_idx - 1].left_to_right = false;
+    }
+    return true;
+}
+
+fn update_horz_segment(c: &mut Clipper, hs_idx: u64) -> bool {
+    op := c.horz_segs[hs_idx - 1].left_op;
+    outrec := get_real_outrec(&c, c.outpts[op - 1].outrec);
+    outrec_has_edges := c.outrecs[outrec - 1].front_edge != 0;
+    curr_y := c.outpts[op - 1].pt.y;
+    mut op_p = op;
+    mut op_n = op;
+    if outrec_has_edges {
+        op_a := c.outrecs[outrec - 1].pts;
+        op_z := c.outpts[op_a - 1].next;
+        while (op_p != op_z) && (c.outpts[c.outpts[op_p - 1].prev - 1].pt.y == curr_y) {
+            op_p = c.outpts[op_p - 1].prev;
+        }
+        while (op_n != op_a) && (c.outpts[c.outpts[op_n - 1].next - 1].pt.y == curr_y) {
+            op_n = c.outpts[op_n - 1].next;
+        }
+    } else {
+        while (c.outpts[op_p - 1].prev != op_n)
+            && (c.outpts[c.outpts[op_p - 1].prev - 1].pt.y == curr_y) {
+            op_p = c.outpts[op_p - 1].prev;
+        }
+        while (c.outpts[op_n - 1].next != op_p)
+            && (c.outpts[c.outpts[op_n - 1].next - 1].pt.y == curr_y) {
+            op_n = c.outpts[op_n - 1].next;
+        }
+    }
+    result := set_horz_seg_heading_forward(hs_idx, op_p, op_n, c)
+        && (c.outpts[c.horz_segs[hs_idx - 1].left_op - 1].horz == 0);
+    if result {
+        left := c.horz_segs[hs_idx - 1].left_op;
+        c.outpts[left - 1].horz = hs_idx;
+    } else {
+        c.horz_segs[hs_idx - 1].right_op = 0; // for sorting
+    }
+    return result;
+}
+
+fn horz_seg_less(c: &mut Clipper, a_idx: u64, b_idx: u64) -> bool {
+    a := c.horz_segs[a_idx - 1].clone();
+    b := c.horz_segs[b_idx - 1].clone();
+    if (a.right_op == 0) || (b.right_op == 0) {
+        return a.right_op != 0;
+    }
+    return c.outpts[b.left_op - 1].pt.x > c.outpts[a.left_op - 1].pt.x;
+}
+
+// Stable sort of the horizontal segments (std::stable_sort with HorzSegSorter).
+fn stable_sort_horz_segs(c: &mut Clipper) {
+    n := c.horz_segs.len();
+    if n < 2 {
+        return ();
+    }
+    mut src = u64[0; n];
+    mut dst = u64[0; n];
+    for i in n {
+        src[i] = i + 1;
+    }
+    mut width: u64 = 1;
+    while width < n {
+        mut lo: u64 = 0;
+        while lo < n {
+            mut mid = lo + width;
+            if mid > n {
+                mid = n;
+            }
+            mut hi = lo + 2 * width;
+            if hi > n {
+                hi = n;
+            }
+            mut i = lo;
+            mut j = mid;
+            mut k = lo;
+            while (i < mid) && (j < hi) {
+                if horz_seg_less(c, src[i], src[j]) {
+                    dst[k] = src[i];
+                    i += 1;
+                } else {
+                    dst[k] = src[j];
+                    j += 1;
+                }
+                k += 1;
+            }
+            while i < mid {
+                dst[k] = src[i];
+                i += 1;
+                k += 1;
+            }
+            while j < hi {
+                dst[k] = src[j];
+                j += 1;
+                k += 1;
+            }
+            lo += 2 * width;
+        }
+        t := src;
+        src = dst;
+        dst = t;
+        width = width * 2;
+    }
+    mut reordered = HorzSegment[];
+    for i in n {
+        reordered.push(c.horz_segs[src[i] - 1].clone());
+    }
+    c.horz_segs = reordered;
+    return ();
+}
+
+fn convert_horz_segs_to_joins(c: &mut Clipper) {
+    mut j: u64 = 0;
+    for i in c.horz_segs.len() {
+        if update_horz_segment(c, i + 1) {
+            j += 1;
+        }
+    }
+    if j < 2 {
+        return ();
+    }
+    stable_sort_horz_segs(c);
+    mut hs1: u64 = 0;
+    hs_end := j;
+    hs_end1 := hs_end - 1;
+    while hs1 != hs_end1 {
+        mut hs2 = hs1 + 1;
+        while hs2 != hs_end {
+            s1 := c.horz_segs[hs1].clone();
+            s2 := c.horz_segs[hs2].clone();
+            if (c.outpts[s2.left_op - 1].pt.x >= c.outpts[s1.right_op - 1].pt.x)
+                || (s2.left_to_right == s1.left_to_right)
+                || (c.outpts[s2.right_op - 1].pt.x <= c.outpts[s1.left_op - 1].pt.x) {
+                hs2 += 1;
+                continue;
+            }
+            curr_y := c.outpts[c.horz_segs[hs1].left_op - 1].pt.y;
+            if c.horz_segs[hs1].left_to_right {
+                while (c.outpts[c.outpts[c.horz_segs[hs1].left_op - 1].next - 1].pt.y == curr_y)
+                    && (
+                        c.outpts[c.outpts[c.horz_segs[hs1].left_op - 1].next - 1].pt.x
+                            <= c.outpts[c.horz_segs[hs2].left_op - 1].pt.x
+                    ) {
+                    l := c.horz_segs[hs1].left_op;
+                    c.horz_segs[hs1].left_op = c.outpts[l - 1].next;
+                }
+                while (c.outpts[c.outpts[c.horz_segs[hs2].left_op - 1].prev - 1].pt.y == curr_y)
+                    && (
+                        c.outpts[c.outpts[c.horz_segs[hs2].left_op - 1].prev - 1].pt.x
+                            <= c.outpts[c.horz_segs[hs1].left_op - 1].pt.x
+                    ) {
+                    l := c.horz_segs[hs2].left_op;
+                    c.horz_segs[hs2].left_op = c.outpts[l - 1].prev;
+                }
+                l1 := c.horz_segs[hs1].left_op;
+                op1 := duplicate_op(c, l1, true);
+                l2 := c.horz_segs[hs2].left_op;
+                op2 := duplicate_op(c, l2, false);
+                c.horz_joins.push(HorzJoin { op1: op1, op2: op2 });
+            } else {
+                while (c.outpts[c.outpts[c.horz_segs[hs1].left_op - 1].prev - 1].pt.y == curr_y)
+                    && (
+                        c.outpts[c.outpts[c.horz_segs[hs1].left_op - 1].prev - 1].pt.x
+                            <= c.outpts[c.horz_segs[hs2].left_op - 1].pt.x
+                    ) {
+                    l := c.horz_segs[hs1].left_op;
+                    c.horz_segs[hs1].left_op = c.outpts[l - 1].prev;
+                }
+                while (c.outpts[c.outpts[c.horz_segs[hs2].left_op - 1].next - 1].pt.y == curr_y)
+                    && (
+                        c.outpts[c.outpts[c.horz_segs[hs2].left_op - 1].next - 1].pt.x
+                            <= c.outpts[c.horz_segs[hs1].left_op - 1].pt.x
+                    ) {
+                    l := c.horz_segs[hs2].left_op;
+                    c.horz_segs[hs2].left_op = c.outpts[l - 1].next;
+                }
+                l2b := c.horz_segs[hs2].left_op;
+                op1 := duplicate_op(c, l2b, true);
+                l1b := c.horz_segs[hs1].left_op;
+                op2 := duplicate_op(c, l1b, false);
+                c.horz_joins.push(HorzJoin { op1: op1, op2: op2 });
+            }
+            hs2 += 1;
+        }
+        hs1 += 1;
+    }
+    return ();
+}
+
+fn move_splits(c: &mut Clipper, from_or: u64, to_or: u64) {
+    for i in c.outrecs[from_or - 1].splits.len() {
+        s := c.outrecs[from_or - 1].splits[i];
+        if s != to_or {
+            c.outrecs[to_or - 1].splits.push(s);
+        }
+    }
+    c.outrecs[from_or - 1].splits = u64[];
+    return ();
+}
+
+fn process_horz_joins(c: &mut Clipper) {
+    for ji in c.horz_joins.len() {
+        j := c.horz_joins[ji].clone();
+        mut or1 = get_real_outrec(&c, c.outpts[j.op1 - 1].outrec);
+        mut or2 = get_real_outrec(&c, c.outpts[j.op2 - 1].outrec);
+        op1b := c.outpts[j.op1 - 1].next;
+        op2b := c.outpts[j.op2 - 1].prev;
+        c.outpts[j.op1 - 1].next = j.op2;
+        c.outpts[j.op2 - 1].prev = j.op1;
+        c.outpts[op1b - 1].prev = op2b;
+        c.outpts[op2b - 1].next = op1b;
+        if or1 == or2 {
+            or2 = new_outrec(c);
+            c.outrecs[or2 - 1].pts = op1b;
+            fix_out_rec_pts(c, or2);
+            if c.outpts[c.outrecs[or1 - 1].pts - 1].outrec == or2 {
+                c.outrecs[or1 - 1].pts = j.op1;
+                c.outpts[c.outrecs[or1 - 1].pts - 1].outrec = or1;
+            }
+            if c.using_polytree {
+                if path2_contains_path1(&c, c.outrecs[or1 - 1].pts, c.outrecs[or2 - 1].pts) {
+                    tmp := c.outrecs[or1 - 1].pts;
+                    or2_pts := c.outrecs[or2 - 1].pts;
+                    c.outrecs[or1 - 1].pts = or2_pts;
+                    c.outrecs[or2 - 1].pts = tmp;
+                    fix_out_rec_pts(c, or1);
+                    fix_out_rec_pts(c, or2);
+                    c.outrecs[or2 - 1].owner = or1;
+                } else if path2_contains_path1(&c, c.outrecs[or2 - 1].pts, c.outrecs[or1 - 1].pts) {
+                    c.outrecs[or2 - 1].owner = or1;
+                } else {
+                    or1_owner := c.outrecs[or1 - 1].owner;
+                    c.outrecs[or2 - 1].owner = or1_owner;
+                }
+                c.outrecs[or1 - 1].splits.push(or2);
+            } else {
+                c.outrecs[or2 - 1].owner = or1;
+            }
+        } else {
+            c.outrecs[or2 - 1].pts = 0;
+            if c.using_polytree {
+                set_owner(c, or2, or1);
+                if c.outrecs[or2 - 1].splits.len() > 0 {
+                    move_splits(c, or2, or1);
+                }
+            } else {
+                c.outrecs[or2 - 1].owner = or1;
+            }
+        }
+    }
+    return ();
+}
+
+// ---- point-in-path helpers (engine's own OutPt versions) ----
+
+fn point_in_op_polygon(c: &Clipper, pt: Point64, op_in: u64) -> PointInPolygonResult {
+    mut op = op_in;
+    if (op == c.outpts[op - 1].next) || (c.outpts[op - 1].prev == c.outpts[op - 1].next) {
+        return PointInPolygonResult::IsOutside;
+    }
+    mut op2 = op;
+    loop {
+        if c.outpts[op - 1].pt.y != pt.y {
+            break;
+        }
+        op = c.outpts[op - 1].next;
+        if op == op2 {
+            break;
+        }
+    }
+    if c.outpts[op - 1].pt.y == pt.y {
+        return PointInPolygonResult::IsOutside;
+    }
+    mut is_above = c.outpts[op - 1].pt.y < pt.y;
+    starting_above := is_above;
+    mut val: i64 = 0;
+    op2 = c.outpts[op - 1].next;
+    while op2 != op {
+        if is_above {
+            while (op2 != op) && (c.outpts[op2 - 1].pt.y < pt.y) {
+                op2 = c.outpts[op2 - 1].next;
+            }
+        } else {
+            while (op2 != op) && (c.outpts[op2 - 1].pt.y > pt.y) {
+                op2 = c.outpts[op2 - 1].next;
+            }
+        }
+        if op2 == op {
+            break;
+        }
+        if c.outpts[op2 - 1].pt.y == pt.y {
+            prev := c.outpts[op2 - 1].prev;
+            if (c.outpts[op2 - 1].pt.x == pt.x)
+                || (
+                    (c.outpts[op2 - 1].pt.y == c.outpts[prev - 1].pt.y)
+                        && ((pt.x < c.outpts[prev - 1].pt.x) != (pt.x < c.outpts[op2 - 1].pt.x))
+                ) {
+                return PointInPolygonResult::IsOn;
+            }
+            op2 = c.outpts[op2 - 1].next;
+            if op2 == op {
+                break;
+            }
+            continue;
+        }
+        prev := c.outpts[op2 - 1].prev;
+        if (pt.x < c.outpts[op2 - 1].pt.x) && (pt.x < c.outpts[prev - 1].pt.x) {
+            // Only edges crossing on the left matter.
+        } else if (pt.x > c.outpts[prev - 1].pt.x) && (pt.x > c.outpts[op2 - 1].pt.x) {
+            val = 1 - val;
+        } else {
+            i := cross_product_sign(
+                c.outpts[prev - 1].pt.clone(),
+                c.outpts[op2 - 1].pt.clone(),
+                pt.clone()
+            );
+            if i == 0 {
+                return PointInPolygonResult::IsOn;
+            }
+            if (i < 0) == is_above {
+                val = 1 - val;
+            }
+        }
+        is_above = !is_above;
+        op2 = c.outpts[op2 - 1].next;
+    }
+    if is_above != starting_above {
+        prev := c.outpts[op - 1].prev;
+        i := cross_product_sign(
+            c.outpts[prev - 1].pt.clone(),
+            c.outpts[op - 1].pt.clone(),
+            pt.clone()
+        );
+        if i == 0 {
+            return PointInPolygonResult::IsOn;
+        }
+        if (i < 0) == is_above {
+            val = 1 - val;
+        }
+    }
+    if val == 0 {
+        return PointInPolygonResult::IsOutside;
+    }
+    return PointInPolygonResult::IsInside;
+}
+
+fn get_clean_path(c: &Clipper, op: u64) -> Point64[] {
+    mut result = Point64[];
+    mut op2 = op;
+    while (c.outpts[op2 - 1].next != op)
+        && (
+            (
+                (c.outpts[op2 - 1].pt.x == c.outpts[c.outpts[op2 - 1].next - 1].pt.x)
+                    && (c.outpts[op2 - 1].pt.x == c.outpts[c.outpts[op2 - 1].prev - 1].pt.x)
+            )
+                || (
+                    (c.outpts[op2 - 1].pt.y == c.outpts[c.outpts[op2 - 1].next - 1].pt.y)
+                        && (c.outpts[op2 - 1].pt.y == c.outpts[c.outpts[op2 - 1].prev - 1].pt.y)
+                )
+        ) {
+        op2 = c.outpts[op2 - 1].next;
+    }
+    result.push(c.outpts[op2 - 1].pt.clone());
+    mut prev_op = op2;
+    op2 = c.outpts[op2 - 1].next;
+    while op2 != op {
+        if (
+            (c.outpts[op2 - 1].pt.x != c.outpts[c.outpts[op2 - 1].next - 1].pt.x)
+                || (c.outpts[op2 - 1].pt.x != c.outpts[prev_op - 1].pt.x)
+        )
+            && (
+                (c.outpts[op2 - 1].pt.y != c.outpts[c.outpts[op2 - 1].next - 1].pt.y)
+                    || (c.outpts[op2 - 1].pt.y != c.outpts[prev_op - 1].pt.y)
+            ) {
+            result.push(c.outpts[op2 - 1].pt.clone());
+            prev_op = op2;
+        }
+        op2 = c.outpts[op2 - 1].next;
+    }
+    return result;
+}
+
+fn path1_in_path2_clean(path1: Point64[], path2: Point64[]) -> bool {
+    mut pip = PointInPolygonResult::IsOn;
+    for i in path1.len() {
+        pip_now := point_in_polygon64(path1[i].clone(), &path2);
+        if pip_now == PointInPolygonResult::IsOutside {
+            if pip == PointInPolygonResult::IsOutside {
+                return false;
+            }
+            pip = PointInPolygonResult::IsOutside;
+        } else if pip_now == PointInPolygonResult::IsInside {
+            if pip == PointInPolygonResult::IsInside {
+                return true;
+            }
+            pip = PointInPolygonResult::IsInside;
+        }
+    }
+    return false;
+}
+
+// Path2ContainsPath1(OutPt*, OutPt*): equality of the walk verdicts, retried cleaned (#973).
+fn path2_contains_path1(c: &Clipper, op1: u64, op2: u64) -> bool {
+    mut pip = PointInPolygonResult::IsOn;
+    mut op = op1;
+    loop {
+        op_now := point_in_op_polygon(&c, c.outpts[op - 1].pt.clone(), op2);
+        if op_now == PointInPolygonResult::IsOutside {
+            if pip == PointInPolygonResult::IsOutside {
+                return false;
+            }
+            pip = PointInPolygonResult::IsOutside;
+        } else if op_now == PointInPolygonResult::IsInside {
+            if pip == PointInPolygonResult::IsInside {
+                return true;
+            }
+            pip = PointInPolygonResult::IsInside;
+        }
+        op = c.outpts[op - 1].next;
+        if op == op1 {
+            break;
+        }
+    }
+    clean1 := get_clean_path(&c, op1);
+    clean2 := get_clean_path(&c, op2);
+    return path1_in_path2_clean(clean1, clean2);
+}
+
+// ---- output building ----
+
+fn build_path64(
+    c: &Clipper,
+    op_in: u64,
+    reverse: bool,
+    is_open: bool,
+    path: &mut Point64[]
+) -> bool {
+    mut op = op_in;
+    if (op == 0)
+        || (c.outpts[op - 1].next == op)
+        || ((is_open == false) && (c.outpts[op - 1].next == c.outpts[op - 1].prev)) {
+        return false;
+    }
+    path.truncate(0);
+    mut last_pt = Point64 { x: 0, y: 0 };
+    mut op2: u64 = 0;
+    if reverse {
+        last_pt = c.outpts[op - 1].pt.clone();
+        op2 = c.outpts[op - 1].prev;
+    } else {
+        op = c.outpts[op - 1].next;
+        last_pt = c.outpts[op - 1].pt.clone();
+        op2 = c.outpts[op - 1].next;
+    }
+    path.push(last_pt.clone());
+    while op2 != op {
+        if (c.outpts[op2 - 1].pt.x != last_pt.x) || (c.outpts[op2 - 1].pt.y != last_pt.y) {
+            last_pt = c.outpts[op2 - 1].pt.clone();
+            path.push(last_pt.clone());
+        }
+        if reverse {
+            op2 = c.outpts[op2 - 1].prev;
+        } else {
+            op2 = c.outpts[op2 - 1].next;
+        }
+    }
+    if (is_open == false) && (path.len() == 3) && is_very_small_triangle(&c, op2) {
+        return false;
+    }
+    return true;
+}
+
+fn get_bounds_path(path: Point64[]) -> Rect64 {
+    mut xmin: i64 = 9223372036854775807;
+    mut ymin: i64 = 9223372036854775807;
+    mut xmax: i64 = -9223372036854775808;
+    mut ymax: i64 = -9223372036854775808;
+    for i in path.len() {
+        p := path[i].clone();
+        if p.x < xmin {
+            xmin = p.x;
+        }
+        if p.x > xmax {
+            xmax = p.x;
+        }
+        if p.y < ymin {
+            ymin = p.y;
+        }
+        if p.y > ymax {
+            ymax = p.y;
+        }
+    }
+    return Rect64 { left: xmin, top: ymin, right: xmax, bottom: ymax, valid: true };
+}
+
+fn check_bounds(c: &mut Clipper, outrec: u64) -> bool {
+    if c.outrecs[outrec - 1].pts == 0 {
+        return false;
+    }
+    if rect_is_empty(&c.outrecs[outrec - 1].bounds) == false {
+        return true;
+    }
+    clean_collinear(c, outrec);
+    pts_now := c.outrecs[outrec - 1].pts;
+    if pts_now == 0 {
+        return false;
+    }
+    rev := c.reverse_solution;
+    mut built = Point64[];
+    if build_path64(&c, pts_now, rev, false, &mut built) == false {
+        return false;
+    }
+    c.outrecs[outrec - 1].bounds = get_bounds_path(clone_path(&built));
+    c.outrecs[outrec - 1].path = built;
+    return true;
+}
+
+fn check_split_owner(c: &mut Clipper, outrec: u64, splits: u64[]) -> bool {
+    mut idx: u64 = 0;
+    while idx < splits.len() {
+        mut split = splits[idx];
+        if (c.outrecs[split - 1].pts == 0) && (c.outrecs[split - 1].splits.len() > 0) {
+            split_splits := c.outrecs[split - 1].splits.copy();
+            got := check_split_owner(c, outrec, split_splits);
+            if got {
+                return true;
+            }
+        }
+        split = get_real_outrec(&c, split);
+        if (split == 0) || (split == outrec) || (c.outrecs[split - 1].recursive_split == outrec) {
+            idx += 1;
+            continue;
+        }
+        c.outrecs[split - 1].recursive_split = outrec;
+        split_splits2 := c.outrecs[split - 1].splits.copy();
+        if (split_splits2.len() > 0) && check_split_owner(c, outrec, split_splits2) {
+            return true;
+        }
+        if (check_bounds(c, split) == false)
+            || (rect_contains(&c.outrecs[split - 1].bounds, &c.outrecs[outrec - 1].bounds) == false)
+            || (
+                path2_contains_path1(&c, c.outrecs[outrec - 1].pts, c.outrecs[split - 1].pts)
+                    == false
+            ) {
+            idx += 1;
+            continue;
+        }
+        if is_valid_owner(&c, outrec, split) == false {
+            split_new_owner := c.outrecs[outrec - 1].owner;
+            c.outrecs[split - 1].owner = split_new_owner;
+        }
+        c.outrecs[outrec - 1].owner = split;
+        return true;
+    }
+    return false;
+}
+
+fn recursive_check_owners(c: &mut Clipper, outrec: u64, tree: &mut PolyTree) {
+    if (c.outrecs[outrec - 1].polypath != 0) || rect_is_empty(&c.outrecs[outrec - 1].bounds) {
+        return ();
+    }
+    while c.outrecs[outrec - 1].owner != 0 {
+        owner := c.outrecs[outrec - 1].owner;
+        owner_splits := c.outrecs[owner - 1].splits.copy();
+        if (owner_splits.len() > 0) && check_split_owner(c, outrec, owner_splits) {
+            break;
+        }
+        mut owner_ok = false;
+        if c.outrecs[owner - 1].pts != 0 {
+            owner_ok = check_bounds(c, owner);
+        }
+        if owner_ok {
+            ob := c.outrecs[owner - 1].bounds.clone();
+            oub := c.outrecs[outrec - 1].bounds.clone();
+            if rect_contains(&ob, &oub)
+                && path2_contains_path1(&c, c.outrecs[outrec - 1].pts, c.outrecs[owner - 1].pts) {
+                break;
+            }
+        }
+        next_owner := c.outrecs[owner - 1].owner;
+        c.outrecs[outrec - 1].owner = next_owner;
+    }
+    mut parent_node: u64 = 0;
+    if c.outrecs[outrec - 1].owner != 0 {
+        owner := c.outrecs[outrec - 1].owner;
+        if c.outrecs[owner - 1].polypath == 0 {
+            recursive_check_owners(c, owner, tree);
+        }
+        parent_node = c.outrecs[owner - 1].polypath_node;
+    }
+    path := clone_path(&c.outrecs[outrec - 1].path);
+    node := poly_tree_add_child(tree, parent_node, path);
+    c.outrecs[outrec - 1].polypath = 1;
+    c.outrecs[outrec - 1].polypath_node = node;
+    return ();
+}
+
+fn build_paths64(c: &mut Clipper) -> Point64[][] {
+    mut solution = Point64[][];
+    mut i: u64 = 0;
+    while i < c.outrecs.len() {
+        outrec := i + 1;
+        if c.outrecs[outrec - 1].pts != 0 {
+            mut path = Point64[];
+            if c.outrecs[outrec - 1].is_open {
+                if build_path64(
+                    &c,
+                    c.outrecs[outrec - 1].pts,
+                    c.reverse_solution,
+                    true,
+                    &mut path
+                ) {
+                    solution.push(path);
+                }
+            } else {
+                clean_collinear(c, outrec);
+                if build_path64(
+                    &c,
+                    c.outrecs[outrec - 1].pts,
+                    c.reverse_solution,
+                    false,
+                    &mut path
+                ) {
+                    solution.push(path);
+                }
+            }
+        }
+        i += 1;
+    }
+    return solution;
+}
+
+fn build_tree64(c: &mut Clipper, tree: &mut PolyTree) {
+    mut i: u64 = 0;
+    while i < c.outrecs.len() {
+        outrec := i + 1;
+        if c.outrecs[outrec - 1].pts != 0 {
+            if c.outrecs[outrec - 1].is_open {
+                mut path = Point64[];
+                if build_path64(
+                    &c,
+                    c.outrecs[outrec - 1].pts,
+                    c.reverse_solution,
+                    true,
+                    &mut path
+                ) {
+                    tree.open_paths.push(path);
+                }
+            } else if check_bounds(c, outrec) {
+                recursive_check_owners(c, outrec, tree);
+            }
+        }
+        i += 1;
+    }
+    return ();
+}
+
+fn build_path_d(
+    c: &Clipper,
+    op_in: u64,
+    reverse: bool,
+    is_open: bool,
+    path: &mut PointD[],
+    inv_scale: f64
+) -> bool {
+    mut op = op_in;
+    if (op == 0)
+        || (c.outpts[op - 1].next == op)
+        || ((is_open == false) && (c.outpts[op - 1].next == c.outpts[op - 1].prev)) {
+        return false;
+    }
+    path.truncate(0);
+    mut last_pt = Point64 { x: 0, y: 0 };
+    mut op2: u64 = 0;
+    if reverse {
+        last_pt = c.outpts[op - 1].pt.clone();
+        op2 = c.outpts[op - 1].prev;
+    } else {
+        op = c.outpts[op - 1].next;
+        last_pt = c.outpts[op - 1].pt.clone();
+        op2 = c.outpts[op - 1].next;
+    }
+    path.push(PointD { x: f64(last_pt.x) * inv_scale, y: f64(last_pt.y) * inv_scale });
+    while op2 != op {
+        if (c.outpts[op2 - 1].pt.x != last_pt.x) || (c.outpts[op2 - 1].pt.y != last_pt.y) {
+            last_pt = c.outpts[op2 - 1].pt.clone();
+            path.push(PointD { x: f64(last_pt.x) * inv_scale, y: f64(last_pt.y) * inv_scale });
+        }
+        if reverse {
+            op2 = c.outpts[op2 - 1].prev;
+        } else {
+            op2 = c.outpts[op2 - 1].next;
+        }
+    }
+    if (is_open == false) && (path.len() == 3) && is_very_small_triangle(&c, op2) {
+        return false;
+    }
+    return true;
+}
+
+fn build_paths_d(c: &mut Clipper) -> PointD[][] {
+    mut solution = PointD[][];
+    mut i: u64 = 0;
+    while i < c.outrecs.len() {
+        outrec := i + 1;
+        if c.outrecs[outrec - 1].pts != 0 {
+            mut path = PointD[];
+            if c.outrecs[outrec - 1].is_open {
+                if build_path_d(
+                    &c,
+                    c.outrecs[outrec - 1].pts,
+                    c.reverse_solution,
+                    true,
+                    &mut path,
+                    c.inv_scale
+                ) {
+                    solution.push(path);
+                }
+            } else {
+                clean_collinear(c, outrec);
+                if build_path_d(
+                    &c,
+                    c.outrecs[outrec - 1].pts,
+                    c.reverse_solution,
+                    false,
+                    &mut path,
+                    c.inv_scale
+                ) {
+                    solution.push(path);
+                }
+            }
+        }
+        i += 1;
+    }
+    return solution;
+}
+
+fn build_tree_d(c: &mut Clipper, tree: &mut PolyTree) {
+    mut i: u64 = 0;
+    while i < c.outrecs.len() {
+        outrec := i + 1;
+        if c.outrecs[outrec - 1].pts != 0 {
+            if c.outrecs[outrec - 1].is_open {
+                mut path = PointD[];
+                if build_path_d(
+                    &c,
+                    c.outrecs[outrec - 1].pts,
+                    c.reverse_solution,
+                    true,
+                    &mut path,
+                    c.inv_scale
+                ) {
+                    tree.open_paths_d.push(path);
+                }
+            } else if check_bounds(c, outrec) {
+                recursive_check_owners(c, outrec, tree);
+            }
+        }
+        i += 1;
+    }
+    return ();
+}
+
+// ---- execution ----
+
+fn do_intersections(c: &mut Clipper, top_y: i64) {
+    if build_intersect_list(c, top_y) {
+        process_intersect_list(c);
+        c.intersect_nodes = IntersectNode[];
+    }
+    return ();
+}
+
+fn execute_internal(c: &mut Clipper, ct: u8, fr: u8, use_polytrees: bool) -> bool {
+    c.cliptype = ct;
+    c.fillrule = fr;
+    c.using_polytree = use_polytrees;
+    reset(c);
+    mut y: i64 = 0;
+    if ct == 0 {
+        return true;
+    }
+    match pop_scanline(c) {
+        Some(v) => {
+            y = v;
+        },
+        None => {
+            return true;
+        }
+    }
+    while c.succeeded {
+        insert_local_minima_into_ael(c, y);
+        loop {
+            e := pop_horz(c);
+            if e == 0 {
+                break;
+            }
+            do_horizontal(c, e);
+        }
+        if c.horz_segs.len() > 0 {
+            convert_horz_segs_to_joins(c);
+            c.horz_segs = HorzSegment[];
+        }
+        c.bot_y = y;
+        mut advanced = false;
+        match pop_scanline(c) {
+            Some(v) => {
+                y = v;
+                advanced = true;
+            },
+            None => {
+                advanced = false;
+            }
+        }
+        if advanced == false {
+            break;
+        }
+        do_intersections(c, y);
+        do_top_of_scanbeam(c, y);
+        loop {
+            e := pop_horz(c);
+            if e == 0 {
+                break;
+            }
+            do_horizontal(c, e);
+        }
+    }
+    if c.succeeded {
+        process_horz_joins(c);
+    }
+    return c.succeeded;
+}
+
+fn clean_up(c: &mut Clipper) {
+    c.actives_head = 0;
+    c.sel_head = 0;
+    c.scanlines = i64[];
+    c.scanline_count = 0;
+    c.intersect_nodes = IntersectNode[];
+    c.outrecs = OutRec[];
+    c.outpts = OutPt[];
+    c.actives = ActiveEdge[];
+    c.horz_segs = HorzSegment[];
+    c.horz_joins = HorzJoin[];
+    return ();
+}
+
+// ---- public input API ----
+
+fn clip_type_code(ct: ClipType) -> u8 {
+    match ct {
+        NoClip => {
+            return 0;
+        },
+        Intersection => {
+            return 1;
+        },
+        Union => {
+            return 2;
+        },
+        Difference => {
+            return 3;
+        },
+        Xor => {
+            return 4;
+        }
+    }
+}
+
+fn fill_rule_code(fr: FillRule) -> u8 {
+    match fr {
+        EvenOdd => {
+            return 0;
+        },
+        NonZero => {
+            return 1;
+        },
+        Positive => {
+            return 2;
+        },
+        Negative => {
+            return 3;
+        }
+    }
+}
+
+pub fn add_subject(c: &mut Clipper, paths: &Point64[][]) {
+    c.minima_sorted = false;
+    add_paths_(c, paths, POLY_SUBJECT, false);
+    return ();
+}
+
+pub fn add_clip(c: &mut Clipper, paths: &Point64[][]) {
+    c.minima_sorted = false;
+    add_paths_(c, paths, POLY_CLIP, false);
+    return ();
+}
+
+pub fn add_open_subject(c: &mut Clipper, paths: &Point64[][]) {
+    c.has_open_paths = true;
+    c.minima_sorted = false;
+    add_paths_(c, paths, POLY_SUBJECT, true);
+    return ();
+}
+
+pub struct Paths64Result {
+    paths: Point64[][],
+    open_paths: Point64[][],
+    succeeded: bool
+}
+
+pub struct PathsDResult {
+    paths: PointD[][],
+    open_paths: PointD[][],
+    succeeded: bool,
+    error_code: u64
+}
+
+pub fn set_preserve_collinear(c: &mut Clipper, value: bool) {
+    c.preserve_collinear = value;
+    return ();
+}
+
+pub fn set_reverse_solution(c: &mut Clipper, value: bool) {
+    c.reverse_solution = value;
+    return ();
+}
+
+pub fn execute_paths64(c: &mut Clipper, clip_type: ClipType, fill_rule: FillRule) -> Paths64Result {
+    ct := clip_type_code(clip_type);
+    fr := fill_rule_code(fill_rule);
+    mut result = Paths64Result { paths: Point64[][], open_paths: Point64[][], succeeded: false };
+    if execute_internal(c, ct, fr, false) {
+        result.paths = build_paths64(c);
+        // Open paths land in the tree variant in this port's surface; closed paths are what the
+        // callers ask for. (The C++ also splits open paths out of the same outrec walk.)
+    }
+    result.succeeded = c.succeeded;
+    clean_up(c);
+    return result;
+}
+
+pub fn execute_tree64(
+    c: &mut Clipper,
+    clip_type: ClipType,
+    fill_rule: FillRule,
+    tree: &mut PolyTree
+) -> bool {
+    ct := clip_type_code(clip_type);
+    fr := fill_rule_code(fill_rule);
+    tree.polygons = Point64[][];
+    tree.parent = u64[];
+    tree.first_child = u64[];
+    tree.last_child = u64[];
+    tree.next_sibling = u64[];
+    tree.level = u64[];
+    tree.root_first = 0;
+    tree.root_last = 0;
+    tree.inv_scale = c.inv_scale;
+    tree.open_paths = Point64[][];
+    tree.open_paths_d = PointD[][];
+    if execute_internal(c, ct, fr, true) {
+        build_tree64(c, tree);
+    }
+    succeeded := c.succeeded;
+    clean_up(c);
+    return succeeded;
+}
+
+// ---- the double-precision wrapper (ClipperD) ----
+
+pub struct ClipperD {
+    core: Clipper,
+    scale: f64,
+    inv_scale: f64,
+    error_code: u64
+}
+
+// ClipperD::ClipperD: the scale is 2^(ilogb(10^precision) + 1), so descaling is exact.
+pub fn new_d(precision_in: i64) -> ClipperD {
+    mut cd = ClipperD { core: new(), scale: 1.0, inv_scale: 1.0, error_code: 0 };
+    mut precision = precision_in;
+    if (precision < -8) || (precision > 8) {
+        cd.error_code = cd.error_code | PRECISION_ERROR;
+        precision = check_precision_range(precision);
+    }
+    pow10 := math::powi(10.0, precision);
+    e := i64((bits(pow10) >> 52) & 2047) - 1023;
+    cd.scale = math::powi(2.0, e + 1);
+    cd.inv_scale = 1.0 / cd.scale;
+    cd.core.inv_scale = cd.inv_scale;
+    return cd;
+}
+
+pub fn clipper_d_error(cd: &mut ClipperD) -> u64 {
+    return cd.error_code;
+}
+
+pub fn add_subject_d(cd: &mut ClipperD, paths: &PointD[][]) {
+    match scale_paths_d_to_64(paths, cd.scale) {
+        Some(scaled) => {
+            cd.core.minima_sorted = false;
+            add_paths_(&mut cd.core, &scaled, POLY_SUBJECT, false);
+        },
+        None => {
+            cd.error_code = cd.error_code | RANGE_ERROR;
+        }
+    }
+    return ();
+}
+
+pub fn add_clip_d(cd: &mut ClipperD, paths: &PointD[][]) {
+    match scale_paths_d_to_64(paths, cd.scale) {
+        Some(scaled) => {
+            cd.core.minima_sorted = false;
+            add_paths_(&mut cd.core, &scaled, POLY_CLIP, false);
+        },
+        None => {
+            cd.error_code = cd.error_code | RANGE_ERROR;
+        }
+    }
+    return ();
+}
+
+pub fn execute_paths_d(
+    cd: &mut ClipperD,
+    clip_type: ClipType,
+    fill_rule: FillRule
+) -> PathsDResult {
+    ct := clip_type_code(clip_type);
+    fr := fill_rule_code(fill_rule);
+    mut result = PathsDResult {
+        paths: PointD[][],
+        open_paths: PointD[][],
+        succeeded: false,
+        error_code: cd.error_code,
+    };
+    if execute_internal(&mut cd.core, ct, fr, false) {
+        result.paths = build_paths_d(&mut cd.core);
+    }
+    result.succeeded = cd.core.succeeded;
+    clean_up(&mut cd.core);
+    return result;
+}
+
+pub fn execute_tree_d(
+    cd: &mut ClipperD,
+    clip_type: ClipType,
+    fill_rule: FillRule,
+    tree: &mut PolyTree
+) -> bool {
+    ct := clip_type_code(clip_type);
+    fr := fill_rule_code(fill_rule);
+    tree.polygons = Point64[][];
+    tree.parent = u64[];
+    tree.first_child = u64[];
+    tree.last_child = u64[];
+    tree.next_sibling = u64[];
+    tree.level = u64[];
+    tree.root_first = 0;
+    tree.root_last = 0;
+    tree.inv_scale = cd.inv_scale;
+    tree.open_paths = Point64[][];
+    tree.open_paths_d = PointD[][];
+    if execute_internal(&mut cd.core, ct, fr, true) {
+        build_tree_d(&mut cd.core, tree);
+    }
+    succeeded := cd.core.succeeded;
+    clean_up(&mut cd.core);
+    return succeeded;
+}
+
+// ---- the free-function API of clipper.h ----
+
+pub fn boolean_op_paths64(
+    clip_type: ClipType,
+    fill_rule: FillRule,
+    subjects: &Point64[][],
+    clips: &Point64[][]
+) -> Point64[][] {
+    mut c = new();
+    add_subject(&mut c, subjects);
+    add_clip(&mut c, clips);
+    r := execute_paths64(&mut c, clip_type, fill_rule);
+    return r.paths;
+}
+
+pub fn boolean_op_tree64(
+    clip_type: ClipType,
+    fill_rule: FillRule,
+    subjects: &Point64[][],
+    clips: &Point64[][],
+    tree: &mut PolyTree
+) -> bool {
+    mut c = new();
+    add_subject(&mut c, subjects);
+    add_clip(&mut c, clips);
+    return execute_tree64(&mut c, clip_type, fill_rule, tree);
+}
+
+pub fn union_paths64(subjects: &Point64[][], fill_rule: FillRule) -> Point64[][] {
+    mut c = new();
+    add_subject(&mut c, subjects);
+    r := execute_paths64(&mut c, ClipType::Union, fill_rule);
+    return r.paths;
+}
+
+pub fn intersect_paths64(
+    subjects: &Point64[][],
+    clips: &Point64[][],
+    fill_rule: FillRule
+) -> Point64[][] {
+    return boolean_op_paths64(ClipType::Intersection, fill_rule, subjects, clips);
+}
+
+pub fn difference_paths64(
+    subjects: &Point64[][],
+    clips: &Point64[][],
+    fill_rule: FillRule
+) -> Point64[][] {
+    return boolean_op_paths64(ClipType::Difference, fill_rule, subjects, clips);
+}
+
+pub fn xor_paths64(
+    subjects: &Point64[][],
+    clips: &Point64[][],
+    fill_rule: FillRule
+) -> Point64[][] {
+    return boolean_op_paths64(ClipType::Xor, fill_rule, subjects, clips);
+}
+
+// BooleanOp(ClipType, FillRule, PathsD, PathsD, precision): out-of-range precision refuses with
+// an empty result and the precision error, exactly as clipper.h does with exceptions disabled.
+pub fn boolean_op_paths_d(
+    clip_type: ClipType,
+    fill_rule: FillRule,
+    subjects: &PointD[][],
+    clips: &PointD[][],
+    precision: i64
+) -> PathsDResult {
+    mut refused = PathsDResult {
+        paths: PointD[][],
+        open_paths: PointD[][],
+        succeeded: false,
+        error_code: 0,
+    };
+    if (precision < -8) || (precision > 8) {
+        refused.error_code = PRECISION_ERROR;
+        return refused;
+    }
+    mut cd = new_d(precision);
+    add_subject_d(&mut cd, subjects);
+    add_clip_d(&mut cd, clips);
+    mut r = execute_paths_d(&mut cd, clip_type, fill_rule);
+    r.error_code = r.error_code | cd.error_code;
+    return r;
+}
+
+pub fn boolean_op_tree_d(
+    clip_type: ClipType,
+    fill_rule: FillRule,
+    subjects: &PointD[][],
+    clips: &PointD[][],
+    precision: i64,
+    tree: &mut PolyTree
+) -> PathsDResult {
+    mut refused = PathsDResult {
+        paths: PointD[][],
+        open_paths: PointD[][],
+        succeeded: false,
+        error_code: 0,
+    };
+    if (precision < -8) || (precision > 8) {
+        refused.error_code = PRECISION_ERROR;
+        return refused;
+    }
+    mut cd = new_d(precision);
+    add_subject_d(&mut cd, subjects);
+    add_clip_d(&mut cd, clips);
+    ok := execute_tree_d(&mut cd, clip_type, fill_rule, tree);
+    refused.succeeded = ok;
+    refused.error_code = cd.error_code;
+    return refused;
+}
+
+pub fn union_paths_d(subjects: &PointD[][], fill_rule: FillRule, precision: i64) -> PathsDResult {
+    mut refused = PathsDResult {
+        paths: PointD[][],
+        open_paths: PointD[][],
+        succeeded: false,
+        error_code: 0,
+    };
+    if (precision < -8) || (precision > 8) {
+        refused.error_code = PRECISION_ERROR;
+        return refused;
+    }
+    mut cd = new_d(precision);
+    add_subject_d(&mut cd, subjects);
+    mut r = execute_paths_d(&mut cd, ClipType::Union, fill_rule);
+    r.error_code = r.error_code | cd.error_code;
+    return r;
+}
