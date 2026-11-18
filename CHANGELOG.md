@@ -1,5 +1,10 @@
 ## Unreleased
 
+- **Job bodies are handed the scheduler as an `rc::Arc` handle.** `submit`, `submit_deps`, `post`
+  and `executor_submit` take `Fn<Share, Owned>(rc::Arc<JobScheduler>, u64, u64) -> u64`, so a body
+  asks `job_cancelled`, `job_preempt_requested` and `job_yield` through the handle it is given. The
+  port's own `SchedulerRef` wrapper type is deleted. A plain `(&JobScheduler)` parameter is still
+  blocked by two compiler gaps, both reported.
 - **The dedicated server's datagram reliability layer is ported** (`abundance/src/net_datagram.grl`):
   `ab::server::DatagramConnection` - which the engine's own header documents as pure logic with no
   sockets - with packet sequence numbers and the wrap-safe newer-than compare plus a 32-bit ack
@@ -588,9 +593,9 @@
   and 100-run determinism. Its 64 lines match `parity/jobsched.cpp`, which runs the same scenarios
   on the engine's own `ab::JobScheduler` from libabundance_worldgen.a. `tools/abundance-test.mjs`
   compiles the threaded module (with lib/thread, sync, time, rc) only for that test. Job bodies own
-  their captures (`Fn<Share, Owned>(SchedulerRef, id, key)`, like the engine's `std::function`), and
-  the scheduler handle is passed in as an Arc clone. Storing a call-scoped `Fn<Share>` left a lent
-  environment dangling, which the compiler now refuses.
+  their captures (like the engine's `std::function`) and are handed the scheduler as an `rc::Arc`
+  handle. Storing a call-scoped `Fn<Share>` left a lent environment dangling, which the compiler now
+  refuses.
 - **The island's macro coastline plan is ported bit for bit.** `abundance/src/
   worldgen_macro_coast.grl` carries `terrain_shape.cpp`'s planner (lobes, bays, islets, valley axes
   and tributaries), `macro_land_field` and `protected_blend_weight`, with the file's own noise
