@@ -1,5 +1,13 @@
 ## Unreleased
 
+- **bintrees runs 21% fewer instructions in release and 18% fewer in dev.** Freeing a static object
+  (a payload-less variant such as a tree's `Leaf`, or a literal's) is answered in the free fast path;
+  it went through two slow-path calls, a third of the frees in bintrees. And with release builds the
+  allocator's fast paths are inlined where a program allocates and frees: the LLVM lifter keeps the
+  threaded paths out of line and hints `rt_alloc`, `rt_alloc_unlocked` and `rt_free` inline.
+  bench/bintrees: release 3.653 G -> 2.878 G, dev 12.168 G -> 9.931 G user instructions, output
+  unchanged.
+
 - **Development builds drop the register copies around float arithmetic.** The native backend
   computes every float operation in the %xmm0/%xmm1 scratch pair and copies values in and out; a new
   pass (`xmm_copies`) and the f32 constant rewrite now load straight into the destination, store
