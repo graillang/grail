@@ -11,6 +11,15 @@
   fluid verdicts. The weighted roll tables (`roll_world_loot`) and the placement pass are the next
   increment.
 
+- **The shader pipeline takes `lighting/`, 62 of its 63 entries.** Sun shadows and the VSM contract,
+  the radiance cache and its WMMA projection (`rc_sh_wmma`, through DXC's own
+  `vk/khr/cooperative_matrix.h`), GI, Fourier opacity maps, the brick BVH, the tiled deferred and
+  direct-lighting passes, characters' direct lighting, foliage layers and the AO chain: 2.5 MB of
+  SPIR-V at pin `ca1f1bc05b`, the layout pin growing from 23 to 37 structs. `voxel_terrain.cs` stays
+  recorded as skipped for the terrain mirror. The layout resolver now reads headers at any depth
+  (`lighting/common/abl_pass_common.hlsli` holds the shared push block) and structs another entry
+  declares (`direct_lighting_characters.cs` binds `DirectPush` from `direct_lighting.cs`), still
+  cross-checked against every block's own `OpMemberDecorate`.
 - **The construction catalogue is computed and ported, with the shape monument placement
   reads.** `abundance/src/construction_catalog.grl` carries the ConstructionModule record (id,
   kind, dimensions, sorted occupied cells), the material tiers and build modules, and the
