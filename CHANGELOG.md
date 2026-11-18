@@ -1,5 +1,13 @@
 ## Unreleased
 
+- **The subsurface probe's ore and oil indicators are ported, with `ab::pm`'s exp, log and pow.**
+  `worldgen_pm.grl` gains the portable-math exponentials the indicators ride: `exp` over the
+  header's 128-entry 2^(j/128) table (embedded as the exact bit patterns it compiles to), `log`
+  with its split2 decomposition, and `pow` through `exp(y log x)`. `worldgen_subsurface.grl`
+  computes `sample_subsurface`'s four indicators: the vein Gaussians at 440/620/760 m and the oil
+  layer at 790 m scaled by its trap's show halo, all in the C++'s f32/double split. The feature
+  parity fixture now probes 32 points (four positions at eight depths, every Gaussian centre
+  included) and all ten sample fields; `features.txt` carries 4974 bit-exact values.
 - **ab::CoherentField2D, the standard basis every coherent terrain field samples through, is
   ported.** The u64 world-seed fold into the noise seed, the generator's exact construction
   sequence over the FastNoiseLite port (noise type, frequency, fractal state; the warp object's
