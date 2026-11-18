@@ -1,5 +1,23 @@
 ## Unreleased
 
+- Abundance port: `abundance/src/lake_topology.grl` is the `<cache>.lake-topology` sidecar
+  (docs/BOOT_LAKE_TOPOLOGY_CACHE.md) in both directions: the "ABWLTSC1" magic with the writing
+  binary's generator version and reserved word, then LandscapeLakeModel's stored topology - the
+  geometry, surface and boundary outlets, the depression hierarchy (52-byte nodes with parent/child/
+  pit/spill ids and merge/spill/capacity/marginal storage, vertex and triangle owners, four capacity
+  ranges, 36-byte pieces) and the facet routing (primary/secondary/order receivers, fractions,
+  slopes, spill levels, terminals) - raw little-endian with the writer's block-wise FNV-1a checksum.
+  `decode` performs the sidecar wrapper check and every rule LandscapeLakeModel::read_topology
+  makes (versions, byte-order probe, lattice admission, packed-record shapes, every index range,
+  the capacity ranges, the checksum and exact consumption); doubles stay bit patterns. The reference
+  `abundance/tests/parity/lake_topology.cpp` compiles the engine's codec and save path: it
+  generates the suite's 64 x 64 landscape world, saves its cache with `save_world_cache` (which
+  writes the real sidecar through the engine's own writer), decodes it with the engine's
+  `read_topology`, and asserts its layout walk agrees with `read_topology` on every file. It also
+  builds a small synthetic model through LandscapeLakeModel's public constructor and mutates it.
+  `abundance/tests/lake_topology_test.grl` matches all 72 lines - the 235 KB real sidecar
+  round-trips byte for byte, and 24 malformed files reach their intended refusals.
+
 - **The subsurface probe's ore and oil indicators are ported, with `ab::pm`'s exp, log and pow.**
   `worldgen_pm.grl` gains the portable-math exponentials the indicators ride: `exp` over the
   header's 128-entry 2^(j/128) table (embedded as the exact bit patterns it compiles to), `log`
