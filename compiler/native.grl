@@ -24290,12 +24290,29 @@ fn ct_expr<a>(c: (&a mut C), min: u64) -> CVal {
     mut left = ct_primary(&mut c);
     bt := bool_type(&mut c);
     while true {
-        k := kind(&mut c);
+        mut k = kind(&mut c);
+        // The lexer emits `<<` and `>>` as two touching `<`/`>` tokens (so `>>` can close two
+        // generic argument lists); a shift is the touching pair, as in a body expression.
+        mut joined = false;
+        if (k == 60) || (k == 62) {
+            here := c.pos;
+            if (kind_at(&mut c, here + 1) == k) && (c.toks[here].end == c.toks[here + 1].start) {
+                joined = true;
+                if k == 60 {
+                    k = 271;
+                } else {
+                    k = 272;
+                }
+            }
+        }
         p := prec(k);
         if (p == 0) || (p <= min) {
             break;
         }
         advance(&mut c);
+        if joined {
+            advance(&mut c);
+        }
         right := ct_expr(&mut c, p);
         if (k == 274) || (k == 273) {
             a := ct_bool(&mut c, left, view("|| and && need bools"));

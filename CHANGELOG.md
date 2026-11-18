@@ -1,5 +1,9 @@
 ## Unreleased
 
+- Fixed: module-level integer constants fold `<<` and `>>` (`pub const A: u32 = 1 << 3;` was "expected a
+  compile-time constant expression"). The lexer emits a shift as two touching `<`/`>` tokens, which body
+  expressions already joined; the compile-time folder now joins them the same way. Cases
+  `const-int-shift-fold`, `const-int-shift-overflow`.
 - `abundance/README.md`: the parity section's hand-summed totals (two "currently compares" lines
   and four "All N values match" lines left by concurrent merges) are replaced by one sentence; the
   per-test bullets carry the counts and the suite prints them.
