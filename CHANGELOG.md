@@ -1,5 +1,17 @@
 ## Unreleased
 
+- **The dedicated server's datagram reliability layer is ported** (`abundance/src/net_datagram.grl`):
+  `ab::server::DatagramConnection` - which the engine's own header documents as pure logic with no
+  sockets - with packet sequence numbers and the wrap-safe newer-than compare plus a 32-bit ack
+  history, per-channel message ids, reliable-ordered Control/Terrain delivery with RTT-based
+  resend, State fire-and-forget, fragmentation and reassembly, the token-bucket send budget, and
+  the receive-buffer accounting that closes the connection on overflow. Gated by
+  `tests/parity/net_datagram.cpp` compiling `Private/server/datagram_connection.cpp` and driving a
+  scripted timeline with hand-built peer datagrams: 106 reference lines, all matched by
+  `abundance/tests/net_datagram_test.grl`. The README records what stays in the engine (sockets,
+  libsodium crypto, the anti-cheat wrapper, the chunk codecs, the server loop) and what a Grail
+  server needs from the platform layer.
+
 - **World loot's per-fill rules are ported.** `abundance/src/world_loot_rules.grl` carries
   `world_loot_sealed_mask` (each compartment sealed when mix64(site ^ cycle<<32 ^ 0x5EA1<<8 ^
   compartment) as a double in [0,1) falls below the kind's seal chance), `world_loot_work_seconds`
