@@ -135,7 +135,7 @@ export function targetName(target) {
 export function command(argv, options = {}) {
   // GRAIL_COMMAND_TIMEOUT (seconds) raises the limit for a step known to be long on a loaded host,
   // such as clang -O2 over the whole compiler's LLVM module in `release`.
-  const result = spawnSync(argv[0], argv.slice(1), { cwd: root, maxBuffer: 16 * 1024 * 1024, timeout: Number(process.env.GRAIL_COMMAND_TIMEOUT ?? 900) * 1000, ...options });
+  const result = spawnSync(argv[0], argv.slice(1), { cwd: root, maxBuffer: 16 * 1024 * 1024, timeout: Number(process.env.GRAIL_COMMAND_TIMEOUT ?? 2400) * 1000, ...options });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`${argv.join(' ')} failed (${result.signal ?? result.status})\n${result.stdout ?? ''}${result.stderr ?? ''}`);
   return result;

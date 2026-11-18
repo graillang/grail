@@ -1,5 +1,9 @@
 ## Unreleased
 
+- The command budget a build step gets (`GRAIL_COMMAND_TIMEOUT`) is 2400 s rather than 900 s: a self-host
+  stage on a machine carrying a 25-way swarm took longer than 15 minutes and the land gate read the SIGTERM
+  as a failed self-host, blocking a branch whose own tests were byte-identical. A slow compile is not a
+  wrong one; the budget only bounds a hang.
 - **Abundance's megaplants_batch extraction cache is ported.** `abundance/src/megaplants_batch.grl`
   reproduces `_file_sig` (a provenance-recorded sha256, else `size:mtime`), `_variant_sig` (archive,
   atlas and traced templates, extractor bytes), the `<species>_<tag>-<sig>` entry name and `_prune`'s
