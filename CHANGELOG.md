@@ -1,5 +1,13 @@
 ## Unreleased
 
+- **Fixed: the internal x86-64 assembler encoded `movq` between an SSE register and memory as a
+  general-register move.** `movq %xmmN, mem` was assembled as `mov %rN, mem` (and the load the same
+  way), so a C-callback entry that saves its float argument registers around `rt_adopt_record`
+  saved general registers instead, and the float arguments a callback received were whatever those
+  held. It is now `66 0F D6` / `F3 0F 7E`, as clang writes it. A tail `jmp` to a global or weak
+  symbol keeps its relocation, as clang's does, instead of being resolved in place: a weak
+  definition is the one the linker may replace. The assembler oracle (every corpus program's object
+  against clang's, byte for byte) passes again: 2156 programs.
 - **Fixed: a build could abort while another build collected the shared cache.** Every build on the
   machine shares the build store, and a collection folds the per-function use lists, removing each
   one it read; a second build collecting at the same moment read a list that had just gone, and
