@@ -14,9 +14,11 @@ and refreshes the files; the gate does the same as its last legs.
 
 Every program has a twin in each language: the same algorithm and the same output, written the way
 that language is usually written, not hand-vectorised, and built the way its users build it. Every
-output is checked against the C twin's. All of them target baseline x86-64 (SSE2), which is what
-clang, rustc, Go and Grail emit by default, so no column gets a newer instruction set than the
-others. The machine is shared, so wall time is never the figure: each chart says whether it
+output is checked against the C twin's. C++ twins are idiomatic C++20 built with `clang++ -O2`: the
+standard containers and algorithms (`std::vector`, `std::sort`, `std::merge`, `std::unordered_map`,
+`std::string`), virtual calls, ranges, and a mutex-and-condition channel where C++ has none. All of
+them target baseline x86-64 (SSE2), which is what clang, clang++, rustc, Go and Grail emit by
+default, so no column gets a newer instruction set than the others. The machine is shared, so wall time is never the figure: each chart says whether it
 shows CPU time from `getrusage` (the best of several runs) or, when the machine was heavily loaded,
 the user-space instructions executed (from `perf_event_open`, which load does not move). The
 scheduler's figures are wall time by nature, the median of several rounds, with the load beside
@@ -32,7 +34,11 @@ typically takes half as long again as the fastest. The release panel sets C, C++
 Grail's LLVM build side by side. The development panel sets Grail's native backend against the
 rivals' debug builds (Go has one build, so it appears in both panels). Each panel has its own
 linear scale. A language that has no twin of some program is averaged over the programs it has, and
-the table says which ones it lacks.
+the table says which ones it lacks. Read a bar with its programs in mind: C's, C++'s and Zig's `chan`
+twins are mutex-and-condition rings that take about fifteen times as long as Grail's and Go's
+channels, and Grail's `ffi_call` is the fastest by more than half, so those two rows weigh on the
+release panel; without them Grail and C are level (1.20x and 1.21x), then Zig (1.23x), C++
+(1.26x), Rust (1.30x) and Go (1.90x).
 
 {{perf:overview}}
 
@@ -55,6 +61,11 @@ with `clang -O2`, with integer overflow wrapping, as Rust's release profile does
 
 **Where Grail is behind, and why**, read from the generated code of the commit charted:
 
+- **C++ is the fastest of all on `sort` and `sieve`.** `std::merge` runs the merge loop in 63% of
+  C's time while executing more instructions than C: its loop suits random data, where a branch on
+  each comparison is mispredicted half the time. `std::vector<bool>` packs eight flags into a byte
+  where every other twin spends a byte on each. Against C, Grail's release build is 1.30x on `sort`
+  and 1.14x on `sieve`; against C++, 2.06x and 1.69x. The merge loop is the next target.
 - **A vector owned by the function re-reads its header on every store.** `sieve` and `sort` keep
   their data in vectors created in the same function, and each store through one is followed by a
   reload of its length and data pointer and a bounds check, because the IR given to LLVM does not
@@ -77,20 +88,21 @@ quickly, as Go's compiler and Zig's debug backend do. Go has one build mode and 
 
 {{perf:bench-rivals#dev}}
 
-**Why it is behind.** Grail's development build beats Rust's dev profile on every program and
-loses to Zig Debug and Go on most. Its integer widenings are now free (in `fnv` that took it from
-about 107 instructions per byte to 17, against Go's 11), and what remains in the native backend's
-code is:
+**Why it is behind.** Grail's development build beats Rust's dev profile and Zig Debug on every
+program, and runs at 1.06x to 1.78x Go's time. Its integer widenings are free (in `fnv` that took it
+from about 107 instructions per byte to 17, against Go's 11). A vector or slice a loop does not
+change keeps its data pointer and length in registers for the whole loop, with each element's
+address folded into the load or store; an `f32` parameter is rounded once at entry and the loop
+stays in single precision. That took `xform_f32` from 0.43 to 0.089 seconds (Go 0.084) and
+`xform_f64` from 0.16 to 0.10, and `sort`, whose merge loop now branches directly on its conditions
+instead of building booleans, from 1.53 to 1.17. What remains in the native backend's code:
 
-- every element access is checked against a length read again from memory, with the vector's data
-  pointer loaded again beside it;
-- loops test at the top and jump back unconditionally, and values move between registers on every
-  step, where Go's loops are laid out tight;
-- `f32` arithmetic still widens to `f64` where a value comes from a field or crosses a call
-  (`xform_f32`, `ecs`). Locals, elements and constants now stay in single precision in registers,
-  which took `dot_f32` from 0.67 to 0.17 seconds and `matmul` from 1.11 to 0.35, and a conversion
-  from a 64-bit integer is one instruction, where it was a runtime call that rounded bit by bit,
-  which took `ecs` from 0.73 to 0.46.
+- every element access is still checked, and loops test at the top and jump back unconditionally,
+  where Go's are laid out tight;
+- `nbody` (1.78x, the furthest) keeps its bodies in a record and moves `f64` values between general
+  and SSE registers on every step;
+- the native optimiser judges each function for inlining once, before its own calls are inlined, so
+  a chain of small closures (`iterchain`, 1.86x) is not flattened.
 
 {{perf:bench-rivals#instructions|cpu}}
 
@@ -101,8 +113,8 @@ code is:
 ## Engine-shaped programs
 
 Small kernels say what a loop costs; an engine is mostly other work. These seven programs are the
-shapes a game engine spends its frames on, each with the same algorithm and output in C, Rust, Go
-and Zig, written the way each language is usually written:
+shapes a game engine spends its frames on, each with the same algorithm and output in C, C++, Rust,
+Go and Zig, written the way each language is usually written:
 
 - `hashmap`: a million `u64` keys inserted into the standard map, all looked up, half removed, all
   looked up again (C has no standard map, so its twin is the open-addressing table a C program
@@ -121,26 +133,30 @@ and Zig, written the way each language is usually written:
 
 {{perf:engine#release}}
 
-**Why Grail is behind**, read from the code of the commit charted. `strings` is at parity and `json`
-executes the same number of instructions as C and Rust: strings are one block, enums keep their
-payloads inline, and a value written before it is read is not zeroed first. What remains:
+**Where Grail stands**, read from the code of the commit charted. `strings` and `json` are at
+parity with the fastest (C++ on both; `json` 0.99x, `strings` 1.00x): strings are one block, enums
+keep their payloads inline, and a value written before it is read is not zeroed first. `ecs` is
+within 1.07x of C, and `chan` is level with Go (0.087 seconds each). What remains:
 
-- **`chan`: threads against goroutines.** Grail's channel is crossbeam-channel's design (a ring
-  of stamped slots, a compare-exchange per hand-off, spin, then yield, then park). It executes
-  fewer instructions than C's, Rust's or Go's twin, second only to Zig's, and its CPU time is level
-  with crossbeam's and a quarter of C's and Zig's mutex rings. Go runs both ends as goroutines on
-  one scheduler: a hand-off never wakes another OS thread, and that is what remains. On a loaded
-  machine the spinning channels suffer most (crossbeam's figure rose fourfold in an earlier run).
+- **`chan`, from 2.4x Go to level with it.** Grail's channel is crossbeam-channel's design (a ring
+  of stamped slots, a compare-exchange per hand-off, spin, then yield, then park). A waiting side
+  now watches only its slot's stamp after each pause, where it re-read the other side's counter and
+  took that cache line away just before the other side's compare-exchange. Go runs both ends as
+  goroutines on one scheduler and Grail on two threads, so the development build's CPU time, which
+  counts the spinning side, is still 2.9x Go's.
 - **`bintrees`: the allocator.** Allocating and freeing the nodes are about three fifths of the
   run; Zig's release allocator executes the fewest instructions.
 - **`hashmap`: insertion order costs one memory touch.** Grail's map keeps its entries in insertion
   order in a dense vector beside the probe table, like Python's `dict` and Zig's `ArrayHashMap`, so
-  a lookup reads the slot and then the key. C's open-addressed table keeps keys in the slots.
+  a lookup reads the slot and then the key. C's open-addressed table keeps keys in the slots. This
+  row is bound by memory: in this run C's own time rose 14% over the previous run with the same
+  instructions, and Grail's moved with it (1.21x C, from 1.00x, with identical instructions).
+  C++'s `std::unordered_map`, a node per entry, takes 3x C's time.
 - **`iterchain`: a scalar loop.** The chain folds internally (`Map` and `Filter` override `fold`, as
   Rust's adapters do) over a slice iterator that counts an index, so it compiles to one loop with
   no calls, but it is not yet vectorised the way C's and Rust's are.
-- **`dyncall` and `ecs`** are bound by the indirect call and by a reload after each store in the
-  update loop respectively.
+- **`dyncall`** is bound by the indirect call. `ecs` no longer reloads a column after each store;
+  in the development build it now takes less CPU time than Go's (0.83x).
 
 {{perf:engine#dev}}
 
@@ -161,11 +177,12 @@ the final sum is serial, so every program prints the serial checksum at any work
 tool checks that it does: a build that prints another answer is not charted.
 
 A parallel loop is about time, so this chart is wall time, best of nine runs, with every runtime
-told the same number of threads, taken with the machine otherwise idle (load average under 3).
-Grail's release build is the fastest of all on one worker and on four (0.92x C's OpenMP), and 1.43x
-C's on eight, where it is no faster than on four. Timed inside the program, its hundred frames on
-eight workers are as fast as OpenMP's at best (8.5 against 8.9 ms) but vary from run to run by half
-again, where OpenMP's do not. Work stealing gives each frame's pieces to whichever worker asks
+told the same number of threads (C++ splits each frame across `std::jthread`s statically), taken
+with the machine otherwise idle (load average under 6). Grail's release build is the fastest of all
+on one worker (0.64x C's OpenMP) and on four (0.90x), and 1.21x C's on eight, where it is no faster
+than on four. Its development build is faster than Go at every worker count (0.67x to 0.83x). Timed
+inside the program, its hundred frames on eight workers are as fast as OpenMP's at best but vary
+from run to run, where OpenMP's do not. Work stealing gives each frame's pieces to whichever worker asks
 first; OpenMP's static schedule gives every thread the same slice every frame, which most likely
 keeps that slice in the thread's own cache. Handing a piece to the worker that ran it last is the
 next step. The development build's set-up loop was a serial third of its run until a conversion
@@ -258,28 +275,28 @@ rounds. The importer row counts how much work the importer got done, so higher i
 {{perf:sched-rivals#scheduler}}
 
 **Where Grail is ahead, and where it is behind.** Measured with the machine otherwise idle, Grail's
-frame loop has the best tail latency of the three (p99 0.67 ms against rayon's 0.70 and oneTBB's
-0.71, and the smallest worst frame): its Frame class runs ahead of the importer, as oneTBB's
+frame loop has the best tail latency of the three (p99 0.82 ms against rayon's 1.12 and oneTBB's
+1.67, and the smallest worst frame): its Frame class runs ahead of the importer, as oneTBB's
 high-priority arena does and as rayon, which has no priorities, cannot. A join from the main thread
-costs half of oneTBB's (141 ns against 288). On an oversubscribed machine (load average 37, an earlier
+costs less than oneTBB's (196 ns against 280). A worker that goes idle is woken by name: the
+waker takes one parked worker and counts it searching before waking it, so a burst of forks
+wakes one where it used to wake dozens (99.7% fewer futex wakes over the scheduler run). These
+rows are one session's medians; the join and spawn rows move by a third between sessions. On an oversubscribed machine (load average 37, an earlier
 run) oneTBB's worst frames barely moved while Grail's grew several times over: Grail's scheduler
 holds its tail while it has the cores to itself. Behind:
 
 - **A join allocates.** Each one makes about five heap allocations for its closures and its
   second result; rayon's join puts a job that lives on the caller's stack onto a deque and
   allocates nothing.
-- **A burst of spawns from `main` is handed across cores one task at a time.** The main thread is
-  not a worker, so each spawn goes into the shared injection ring and another core takes it out:
-  about 90 ns a spawn with one worker, 480 with 24, as each hand-off moves the ring's cache line and
-  the task's record between cores. oneTBB's main thread is a slot of its arena, so its spawns go
-  onto a deque of its own. Until an idle worker stopped reserving a Background slot on every empty
-  look - and waking a parked worker as it gave the slot back - the burst cost 1.1 us a spawn and a
-  join from `main` 0.5 us.
+- **A burst of spawns from `main` costs 1.6x oneTBB's** (269 ns a spawn on 24 workers against 168;
+  it was 1.1 us this morning). A task scope on the main thread spawns onto a deque of its own, as
+  oneTBB's arena slot does, with the deque's head on its own cache line. What remains is 24 workers
+  stealing one task at a time from that one deque.
 - **The `fib(32)` rows measure GCC's recursive inlining more than the scheduler.** oneTBB's twin is
   C++ built with g++, which inlines `fib` into itself: serial `fib(32)` takes 46 to 50 million
   instructions there. LLVM never inlines a recursive call into itself, so clang's C (67 million)
-  and rayon's Rust don't get this either, and neither does Grail's release build (75 million, the
-  same loop as clang's with one more register move). Per join, Grail's work-stealing join costs
+  and rayon's Rust don't get this either, and neither does Grail's release build (67 million, the
+  same code as clang's). Per join, Grail's work-stealing join costs
   about 1,050 instructions against oneTBB's 920, and its main thread runs fewer instructions than
   oneTBB's. What remains of the gap in the join rows is that serial difference plus the noise of
   wall time on a loaded machine.

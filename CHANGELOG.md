@@ -1,5 +1,15 @@
 ## Unreleased
 
+- **The Performance chapter is re-measured on this batch, with C++ in every chart.** Run time,
+  engine, parallel ECS and the scheduler were measured on 7d323131 with the machine otherwise idle,
+  and the new languages-at-a-glance chart sets C, C++, Rust, Go, Zig and Grail side by side
+  (geometric mean of each language's time over the fastest's, 19 programs): release Grail 1.17x,
+  Rust 1.42x, C and Zig 1.44x, C++ 1.50x, Go 2.13x; development Go 1.15x, Grail-native 1.32x, Zig
+  Debug 3.76x, Rust dev 6.44x. Grail ÷ the fastest rival, this morning -> now: dev xform_f32 5.18x
+  -> 1.06x, ecs 2.34x -> 0.83x, ecs_par x8 1.56x -> 0.83x, sort 1.84x -> 1.43x; release chan 2.44x
+  -> 1.00x, ecs_par x8 1.43x -> 1.21x, a 100k-spawn burst 2.96x -> 1.60x. C++ is now the fastest
+  rival on sort and sieve (std::merge, std::vector<bool>), so those release rows read 2.06x and
+  1.69x (1.30x and 1.14x of C).
 - **Compile-time values: one cache entry for builds with and without the function-unit store.** A
   run-tier value's cache key (R3) named the compiler by `--fn-cache-id` when the store was on and by
   its file otherwise, and hashed the store's options and the internal `--skip-body`/`--reported`
