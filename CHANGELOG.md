@@ -1,5 +1,13 @@
 ## Unreleased
 
+- **FastNoiseLite, the noise the world generator is built on, is a bit-exact Grail port.** All six
+  noise types, fBm/ridged/ping-pong, the cellular distance/return matrix, the 3D rotation types and
+  domain warp, in both template instantiations (the generator samples with doubles); the four
+  lookup tables are the compiled C++ tables' exact bits and the derived constants are the C++
+  compiler's. A new `fastnoise` suite gates 610 values against the vendored header built with
+  `-ffp-contract=off`, the flags its worldgen library uses: this is the substrate on which the
+  generator's terrain bytes are reproducible at all.
+
 - **The electrical grid's state machine and dispatch are ported, byte for byte against the
   engine.** `abundance/src/power_grid.grl` carries `power_grid.hpp/.cpp` of
   `cmake/tx/power.cmake` (minus the publication binding): the five record types and the EMP
