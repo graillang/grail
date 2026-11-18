@@ -1,5 +1,12 @@
 ## Unreleased
 
+- **Default `extern "C"` calls on AArch64 and RV64 Linux lost their atomic instruction too.** The
+  foreign-call marker counts out with a plain load, add and store (the `ldaxr`/`stlxr` loop and
+  `amoadd.d.aqrl` are gone) and reaches its counter in one load from the thread record; the
+  scheduler's monitor orders it with `membarrier` (system call 283), as on x86-64. A new FFI fixture,
+  `foreign_handoff`, checks on all three targets that a C call stuck for 120 ms still has its worker
+  handed on.
+
 - **Generic code over a type that owns nothing has no drop bookkeeping.** In a specialisation, a
   type parameter bound to a plain type (`A = u64`) answered "needs drop" like an unknown type, so
   every value of it carried a drop flag, a drop-helper call guarded by it, and a callee-saved register

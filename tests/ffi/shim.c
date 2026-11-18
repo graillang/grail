@@ -283,3 +283,29 @@ static int ca_ints[4] = {5, -6, 7, -8};
 const int *c_ca_ints(void) { return ca_ints; }
 static struct ca_pt ca_pts[2] = {{1, 0.5f}, {2, 1.5f}};
 const struct ca_pt *c_ca_pts(void) { return ca_pts; }
+
+/* A foreign call that holds its thread: sleeps `us` microseconds with the raw nanosleep system
+   call (no libc), for foreign_handoff - the scheduler's monitor must hand the worker on. */
+struct nap_ts { long s, ns; };
+long c_nap(long us) {
+    struct nap_ts t = { us / 1000000, (us % 1000000) * 1000 };
+#if defined(__aarch64__)
+    register long x8 __asm__("x8") = 101;
+    register long x0 __asm__("x0") = (long)&t;
+    register long x1 __asm__("x1") = 0;
+    __asm__ volatile("svc 0" : "+r"(x0) : "r"(x8), "r"(x1) : "memory");
+    return x0;
+#elif defined(__riscv)
+    register long a7 __asm__("a7") = 101;
+    register long a0 __asm__("a0") = (long)&t;
+    register long a1 __asm__("a1") = 0;
+    __asm__ volatile("ecall" : "+r"(a0) : "r"(a7), "r"(a1) : "memory");
+    return a0;
+#else
+    register long rax __asm__("rax") = 35;
+    register long rdi __asm__("rdi") = (long)&t;
+    register long rsi __asm__("rsi") = 0;
+    __asm__ volatile("syscall" : "+r"(rax) : "r"(rdi), "r"(rsi) : "rcx", "r11", "memory");
+    return rax;
+#endif
+}

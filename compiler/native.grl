@@ -3923,14 +3923,13 @@ fn ffi_marker_enter<a>(c: (&a mut C), slot: u64) -> unit {
         mark(&mut c, done);
         o(&mut c, view("movq %r11,"));
     } else {
-        // AArch64 and RV64 run Grail code on the record (the thread pointer is switched only for the
-        // call itself), and %rax is free before the arguments are loaded.
-        o(&mut c, view("tpget\ncmpq $2,24(%rax)\n"));
-        jump(&mut c, view("jne"), none);
-        o(&mut c, view("movq 32(%rax),%rax\nmovq 320(%rax),%rax\nincq (%rax)\n"));
-        jump(&mut c, view("jmp"), done);
+        // AArch64 and RV64 (Linux) run Grail code on the record (the thread pointer is switched
+        // only for the call itself), and %rax is free before the arguments are loaded. Record word
+        // 48 is the block's foreign-call pair, or 0 off a worker (rt_marker_cache).
+        o(&mut c, view("tpget\nmovq 48(%rax),%rax\ntestq %rax,%rax\n"));
+        jump(&mut c, view("je"), done);
+        o(&mut c, view("incq (%rax)\n"));
         mark(&mut c, none);
-        o(&mut c, view("xorl %eax,%eax\n"));
         mark(&mut c, done);
         o(&mut c, view("movq %rax,"));
     }
@@ -3940,9 +3939,8 @@ fn ffi_marker_enter<a>(c: (&a mut C), slot: u64) -> unit {
 }
 // After the call, with its result in memory: count the marker out and look at the pair's `retaken`
 // word (8 bytes on). x86-64 Linux does both with plain instructions - the monitor pays for the
-// ordering with membarrier (docs/design/concurrency-model.md, 2.4.1); Windows x64 keeps a locked
-// increment, and AArch64/RV64 a sequentially consistent one, as their full barrier until theirs is
-// wired in. A non-zero `retaken` goes to rt_foreign_return, which settles the retake with one
+// ordering with membarrier (docs/design/concurrency-model.md, 2.4.1), and so do AArch64 and RV64
+// Linux; Windows x64 keeps a locked increment until its barrier is wired in. A non-zero `retaken` goes to rt_foreign_return, which settles the retake with one
 // compare-and-swap. A `blocking` call has its own leave hook.
 fn ffi_hooks_leave<a, b>(c: (&a mut C), slot: u64, block_here: bool, symbol: &b [u8]) -> unit {
     if block_here {
@@ -3970,7 +3968,7 @@ fn ffi_hooks_leave<a, b>(c: (&a mut C), slot: u64, block_here: bool, symbol: &b 
         stack_slot(&mut c, slot);
         o(&mut c, view(",%rdi\ntestq %rdi,%rdi\n"));
         jump(&mut c, view("je"), done);
-        o(&mut c, view("movl $1,%eax\natom.rmw add seqcst u64\nmovq 8(%rdi),%rax\ntestq %rax,%rax\n"));
+        o(&mut c, view("incq (%rdi)\nmovq 8(%rdi),%rax\ntestq %rax,%rax\n"));
         jump(&mut c, view("je"), done);
         o(&mut c, view("movq %rdi,%rsi\n"));
     }
