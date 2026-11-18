@@ -1,5 +1,22 @@
 ## Unreleased
 
+- **The construction build jobs' pure scheduling half is ported, bit for bit against the engine.**
+  `abundance/src/construction_build_job.grl` carries the progressive build jobs of
+  `actions/construction/build_job.hpp` and the pure rules of `cmake/tx/construction.cmake`'s
+  `construction_build_job.cpp`: the tuning block (including the 3x-faster per-block rate the
+  engine static_asserts), `order_build_steps` (bottom layer first for Place/Upgrade, top layer
+  first for Remove, nearest to the builder first within a layer, ties by x, then y, then
+  instance, stable), one `advance_build_job` tick (the due-block pass with its lookahead window
+  and scan cursor, one block per block time for Place with no accumulated time debt and bounded
+  catch-up for modifications, the Materials pause and its retry cadence, the OutOfRange pause
+  with no burst on return, the Obstructed/Unsupported defers, the 30 s stall that gives up blocks
+  still unsupported, and the ten-minute abandon), `BuildJobBook::find` over ascending ids, and
+  `actor_overlaps_cells`'s capsule-against-cell-AABB predicate. `abundance/tests/
+  construction_build_job_test.grl` prints 105 lines that match a reference linked from
+  Abundance's own `construction_build_job.cpp` through `libabundance_gameplay_core.a`; the
+  fixtures follow `tests/construction_build_job_tests.cpp` and add the tie-break, capsule
+  touching and z-edge boundary cases. The saved table's codec and the three actions over `Tx`
+  stay with the tx kernel; the job entry's text is gated as the engine's `fnv1a64`.
 - `tools/abundance-test.mjs`: the references map had two identical `checkpoint` entries; the first
   was shadowed and dead, and is deleted. No behavior change.
 
