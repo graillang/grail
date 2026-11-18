@@ -1,0 +1,163 @@
+use earcut;
+use fs;
+use io;
+
+// Runs every case in tests/lib/earcut (made by the vendored mapbox earcut.hpp through
+// tests/lib/reference/earcut_corpus.cpp): reads the case's rings from <name>.in, triangulates with
+// the port, and compares the index stream vertex for vertex against <name>.out, the exact indices
+// the C++ emitted. The corpus covers real caller-produced water polygons (river buffers, raster
+// cell unions with holes) plus crossing/hole/touching/degenerate shapes and both sides of the
+// 80-vertex z-order hashing threshold. argv: the corpus directory. Returns the failure count.
+fn read_file(path: u8[]) -> u8[] {
+    match fs::read(&path) {
+        d: u8[] => {
+            return d;
+        },
+        e: fs::Error => {
+            println("cannot read {}", path.text());
+            return u8[];
+        }
+    }
+}
+
+// A whitespace-separated numeric token scanner over the whole file.
+struct Tokens {
+    data: u8[],
+    at: u64
+}
+
+fn skip_space(t: &mut Tokens) {
+    while t.at < t.data.len() {
+        b := t.data[t.at];
+        if (b == 32) || (b == 10) || (b == 13) || (b == 9) {
+            t.at += 1;
+        } else {
+            break;
+        }
+    }
+    return ();
+}
+
+fn next_u64(t: &mut Tokens) -> u64 {
+    skip_space(t);
+    start := t.at;
+    while t.at < t.data.len() {
+        b := t.data[t.at];
+        if ((b >= 48) && (b <= 57)) || (b == 45) {
+            t.at += 1;
+        } else {
+            break;
+        }
+    }
+    token := t.data[start: t.at];
+    match token.text().parse_u64() {
+        Some(v) => {
+            return v;
+        },
+        None => {
+            println("bad integer token in the corpus");
+            return 0;
+        }
+    }
+}
+
+fn next_f64(t: &mut Tokens) -> f64 {
+    skip_space(t);
+    start := t.at;
+    while t.at < t.data.len() {
+        b := t.data[t.at];
+        if ((b >= 48) && (b <= 57))
+            || (b == 45)
+            || (b == 46)
+            || (b == 101)
+            || (b == 69)
+            || (b == 43) {
+            t.at += 1;
+        } else {
+            break;
+        }
+    }
+    token := t.data[start: t.at];
+    match token.text().parse_f64() {
+        Some(v) => {
+            return v;
+        },
+        None => {
+            println("bad number token in the corpus");
+            return 0.0;
+        }
+    }
+}
+
+fn read_rings(t: &mut Tokens) -> f64[][] {
+    ring_count := next_u64(t);
+    mut rings = f64[][];
+    for r in ring_count {
+        n := next_u64(t);
+        mut ring = f64[];
+        for k in n {
+            x := next_f64(t);
+            y := next_f64(t);
+            ring.push(x);
+            ring.push(y);
+        }
+        rings.push(ring);
+    }
+    return rings;
+}
+
+fn path_of<a, b, c>(dir: &a [u8], name: &b [u8], suffix: &c [u8]) -> u8[] {
+    mut out = dir.copy();
+    out.push(47);
+    for i in name.len() {
+        out.push(name[i]);
+    }
+    for i in suffix.len() {
+        out.push(suffix[i]);
+    }
+    return out;
+}
+
+pub fn main(dir: &[u8]) -> u64 {
+    manifest := read_file(path_of(dir, "manifest", ".txt"));
+    mut cases: u64 = 0;
+    mut failures: u64 = 0;
+    mut at: u64 = 0;
+    while at < manifest.len() {
+        while (at < manifest.len()) && ((manifest[at] == 10) || (manifest[at] == 13)) {
+            at += 1;
+        }
+        if at >= manifest.len() {
+            break;
+        }
+        name_start := at;
+        while (at < manifest.len()) && (manifest[at] != 10) {
+            at += 1;
+        }
+        name := manifest[name_start: at].copy();
+        if name.len() == 0 {
+            continue;
+        }
+        cases += 1;
+        in_data := read_file(path_of(dir, &name, ".in"));
+        mut in_tokens = Tokens { data: in_data, at: 0 };
+        rings := read_rings(&mut in_tokens);
+        got := earcut::earcut(&rings);
+        out_data := read_file(path_of(dir, &name, ".out"));
+        mut out_tokens = Tokens { data: out_data, at: 0 };
+        want_count := next_u64(&mut out_tokens);
+        mut ok = got.len() == want_count;
+        mut i: u64 = 0;
+        while ok && (i < want_count) {
+            want := next_u64(&mut out_tokens);
+            ok = u64(got[i]) == want;
+            i += 1;
+        }
+        if ok == false {
+            println("FAIL {} ({} indices, expected {})", name.text(), got.len(), want_count);
+            failures += 1;
+        }
+    }
+    println("{} cases, {} failures", cases, failures);
+    return failures;
+}

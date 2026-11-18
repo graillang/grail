@@ -1,5 +1,21 @@
 ## Unreleased
 
+- **`lib/earcut.grl`: mapbox earcut triangulation, ported from the vendored C++.** The Abundance
+  water-geometry callers (`water_geometry.cpp`) triangulate their bank, island and raster-cell
+  polygons with `mapbox::earcut<std::uint32_t>` rather than Clipper2's experimental triangulator, so
+  this is that library's ear clipper in pure Grail: the ring winding pass, the hole-elimination
+  bridges (Eberly's leftmost-ray bridge), duplicate/collinear filtering, the three repair passes
+  (filter, local self-intersection cure, diagonal split), and the z-order hashing walk that starts
+  once a polygon passes 80 vertices. The emitted index stream is vertex-for-vertex identical to the
+  vendored library, including its `std::sort` tie order for holes that share a leftmost x (the port
+  replicates libstdc++'s introsort permutation) and its behaviour on inputs it cannot triangulate
+  (a self-crossing bowtie keeps only the triangle it can form; rings under three points and fully
+  collinear rings emit nothing). Gated as `lib-earcut` over `tests/lib/earcut`: 30 cases produced by
+  `tests/lib/reference/earcut_corpus.cpp`, which compiles the vendored earcut.hpp and the engine's
+  own `water_geometry.cpp` unmodified - real buffered river centrelines, hairpin buffers and raster
+  cell unions with holes, plus crossing, hole-touching, nested, duplicate and degenerate shapes on
+  both sides of the hashing threshold.
+
 - **The power domain's generation assessment is ported, bit for bit against the engine.**
   `abundance/src/power_generation.grl` carries `power_generation.hpp/.cpp` of
   `cmake/tx/power.cmake`: the seven limits, the canonical acceptance rules (finite, signbit-free,
