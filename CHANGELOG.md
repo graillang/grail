@@ -12,6 +12,21 @@
   libsodium crypto, the anti-cheat wrapper, the chunk codecs, the server loop) and what a Grail
   server needs from the platform layer.
 
+- **The offset engine's trig exactness is measured, not assumed; the sweep it ran found two engine
+  bugs.** Grail's `sin`/`cos`/`acos`/`atan2` are not glibc's (over a 24,000-value probe they differ on
+  3.0%, 3.3%, ~7% and 28% of inputs), and the Clipper2 arc code calls the doubles. Rather than port
+  glibc's table-driven routines, `tests/lib/reference/offset-trig-sweep.sh` proves insensitivity
+  directly: it builds the reference twice, the second with every `std::sin/cos/acos/atan2` in
+  `clipper.offset.cpp` moved one ulp upward (and a 1e-9 variant), and the two references agree on
+  all 600 randomized mixed-precision `InflatePaths` cases, so nothing in the fixture output depends
+  on the last trig bit. The Grail port is then checked against the same sweep, which it now passes:
+  600 mixed-precision cases and 6,500 caller-shaped ones (precision 3, round joins and ends,
+  0.5-10 m half-widths, 0.05-0.5 m arc tolerance, seeds 20261118/7/99/20261231). That sweep found
+  two real port bugs, both fixed and pinned as `minima-tie` and `adjacent-repair` fixtures in
+  `tests/lib/clipper2`: the "stable" merge sort used for the local minima and trial horizontal
+  segments took the right run on ties, inverting `std::stable_sort`'s order for coincident minima
+  and equal-x segments; and the adjacent-self-intersection repair copied its new point from the
+  wrong successor. `lib-clipper2` is 52 cases.
 - **World loot's per-fill rules are ported.** `abundance/src/world_loot_rules.grl` carries
   `world_loot_sealed_mask` (each compartment sealed when mix64(site ^ cycle<<32 ^ 0x5EA1<<8 ^
   compartment) as a double in [0,1) falls below the kind's seal chance), `world_loot_work_seconds`

@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstring>
 #include <functional>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -321,7 +322,66 @@ static void emit_inflate_64(const char* name, JoinType jt, EndType et, double mi
     mark("inflate64", name);
 }
 
+// ---- randomized offset sweep (not committed): `--sweep SEED COUNT DIR` writes COUNT random
+// InflatePaths cases in the corpus format. The trig-insensitivity proof runs this twice, once with
+// clipper.offset.cpp's std::sin/cos/acos/atan2 perturbed by one ulp, and requires identical output.
+#include <random>
+static int run_sweep(unsigned seed, int count, bool caller_shaped) {
+    std::mt19937 rng(seed);
+    std::uniform_real_distribution<double> u01(0.0, 1.0);
+    char name[32];
+    for (int c = 0; c < count; ++c) {
+        snprintf(name, sizeof name, "s%05d", c);
+        const bool closed = caller_shaped ? false : (u01(rng) < 0.25);
+        const int npts = closed ? 3 + int(u01(rng) * 8) : 2 + int(u01(rng) * 13);
+        PathD path;
+        const bool single = (!closed && u01(rng) < 0.05);
+        const int actual = single ? 1 : npts;
+        for (int i = 0; i < actual; ++i) {
+            const double x = std::round((u01(rng) * 400.0 - 100.0) * 1000.0) / 1000.0;
+            const double y = std::round((u01(rng) * 400.0 - 100.0) * 1000.0) / 1000.0;
+            path.push_back({x, y});
+        }
+        const double delta = std::round((0.5 + u01(rng) * (caller_shaped ? 9.5 : 11.5)) * 1000.0) / 1000.0;
+        const double signed_delta = closed ? (u01(rng) < 0.5 ? delta : -delta) : delta;
+        const double arc = std::round((0.05 + u01(rng) * 0.45) * 1000.0) / 1000.0;
+        const double miter = 1.0 + std::round(u01(rng) * 200.0) / 100.0;
+        // The callers' shape: precision 3, round joins and round ends (the river buffer).
+        const int precision = caller_shaped ? 3 : int(u01(rng) * 4.0);
+        JoinType jt = JoinType::Round;
+        EndType et = closed ? EndType::Polygon : EndType::Round;
+        const double pick = caller_shaped ? 1.0 : u01(rng);
+        if (!closed && pick < 0.10) et = EndType::Butt;
+        else if (!closed && pick < 0.16) et = EndType::Square;
+        else if (!closed && pick < 0.22) et = EndType::Joined;
+        const double jpick = caller_shaped ? 0.0 : u01(rng);
+        if (jpick < 0.06) jt = JoinType::Miter;
+        else if (jpick < 0.12) jt = JoinType::Square;
+        else if (jpick < 0.18) jt = JoinType::Bevel;
+        emit_inflate_d(name, jt, et, precision, miter, arc, signed_delta, std::vector<PathD>{path});
+    }
+    return 0;
+}
+
 int main(int argc, char** argv) {
+    if (argc > 4 && std::strcmp(argv[1], "--sweep") == 0) {
+        g_out = argv[4];
+        const int rc = run_sweep((unsigned)std::strtoul(argv[2], nullptr, 10), std::atoi(argv[3]), false);
+        std::string m = path_of("manifest", ".txt");
+        FILE* f = fopen(m.c_str(), "w");
+        for (const auto& n : g_names) fprintf(f, "%s\n", n.c_str());
+        fclose(f);
+        return rc;
+    }
+    if (argc > 4 && std::strcmp(argv[1], "--sweep-caller") == 0) {
+        g_out = argv[4];
+        const int rc = run_sweep((unsigned)std::strtoul(argv[2], nullptr, 10), std::atoi(argv[3]), true);
+        std::string m = path_of("manifest", ".txt");
+        FILE* f = fopen(m.c_str(), "w");
+        for (const auto& n : g_names) fprintf(f, "%s\n", n.c_str());
+        fclose(f);
+        return rc;
+    }
     g_out = argc > 1 ? argv[1] : ".";
     const char* abundance = argc > 2 ? argv[2] : "/home/shulgin/abundance";
 
@@ -375,6 +435,13 @@ int main(int argc, char** argv) {
     // Nested holes via difference.
     emit_bool64("nested-difference", ClipType::Difference, FillRule::EvenOdd,
                 {rect64(0, 0, 40, 40)}, {rect64(5, 5, 35, 35), rect64(10, 10, 30, 30)});
+    // Regression cases found by the randomized offset sweep (see offset-trig-sweep.sh): a path whose
+    // two coincident local minima are tied on (y, x) so the stable minima sort's tie order shows in
+    // the output, and one whose self-intersection triggers the adjacent-intersection repair.
+    emit_bool64("minima-tie", ClipType::Union, FillRule::Positive,
+                {Path64{{90, 159}, {39, 213}, {173, 89}, {173, 90}, {-30, 59}, {173, 89}, {39, 213}}}, {});
+    emit_bool64("adjacent-repair", ClipType::Union, FillRule::Positive,
+                {Path64{{90, 159}, {173, 89}, {173, 90}, {-72, 238}, {173, 89}, {39, 213}}}, {});
     // Many-cell raster union (the shape union_water_raster_cells feeds Clipper2).
     {
         std::vector<Path64> cells;
