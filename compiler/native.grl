@@ -20712,7 +20712,14 @@ fn fn_surface_now<a>(c: (&a mut C)) -> u8[] {
 // The option vector as the driver spelled it: every argument except the output path (which reaches
 // no emitted byte) and this layer's own directory. Hashing the words means a flag added later is in
 // every unit's key by construction - the same argument `build_argv` rests on at the module level.
-fn fn_flags_now<a>(c: (&a mut C)) -> u8[] {
+// With `value` set it is a compile-time value's view of them (ct_value_id): a value is the same
+// whether the build files units or not and in every re-run that reports the next error, so the
+// store's options and the internal re-run ones are not in it, and the compiler is always named by
+// its file (a value entry filed by a build with the store is the one a build without it reads).
+// The entry a build finds decides whether the call runs a probe, and a whole-program probe reports
+// the program's errors itself: a key that differed between the two would make their diagnostics
+// differ.
+fn fn_flags_now<a>(c: (&a mut C), value: u64) -> u8[] {
     mut out = u8[];
     argc := host::argc();
     mut i = 0;
@@ -20736,6 +20743,12 @@ fn fn_flags_now<a>(c: (&a mut C)) -> u8[] {
             if same(view(prev), view("--fn-cache")) || same(view(prev), view("--fn-cache-id")) || same(view(prev), view("--object")) {
                 skip = 1;
             }
+            if (value != 0) && (same(view(prev), view("--fn-pack")) || same(view(prev), view("--skip-body")) || same(view(prev), view("--reported")) || same(view(prev), view("--diagnostics-json"))) {
+                skip = 1;
+            }
+        }
+        if (value != 0) && (same(view(w), view("--fn-pack")) || same(view(w), view("--skip-body")) || same(view(w), view("--reported")) || same(view(w), view("--diagnostics-json"))) {
+            skip = 1;
         }
         if skip == 0 {
             iface_ws(&mut out, view(w));
@@ -20747,7 +20760,7 @@ fn fn_flags_now<a>(c: (&a mut C)) -> u8[] {
     // and replaying a previous compiler's would be exactly the stale splice this cache must not do.
     // With `--fn-cache-id` the driver has named the compiler by its content, and a binary renamed
     // into place again (same bytes, new time) is the same compiler.
-    if c.fn_id.len() != 0 {
+    if (c.fn_id.len() != 0) && (value == 0) {
         return fncache::hash(view(out));
     }
     exe := host::exe_path();
@@ -20879,7 +20892,7 @@ fn par_start<a>(c: (&a mut C), files: u64) -> unit {
         i += 1;
     }
     if c.fn_surface.len() == 0 {
-        exchange(&mut c.fn_flags, fn_flags_now(&mut c));
+        exchange(&mut c.fn_flags, fn_flags_now(&mut c, 0));
         // Every key carries the surface, so it carries its digest: the bytes are every declaration
         // of the run, and copying and hashing them once per body was most of what a unit that
         // missed cost. Empty stays empty - a surface that cannot be spelled makes no units.
@@ -25621,7 +25634,7 @@ fn ct_value_id<a, b>(c: (&a mut C), k: u64, ty: u64, std: &b [u8]) -> u8[] {
     t.push(10);
     push_bytes(&mut t, view(host::exe_path()));
     t.push(10);
-    push_bytes(&mut t, view(fn_flags_now(&mut c)));
+    push_bytes(&mut t, view(fn_flags_now(&mut c, 1)));
     t.push(10);
     decimal(&mut t, c.target);
     t.push(10);
@@ -63055,7 +63068,7 @@ pub fn main() -> u64 {
             // The declaration surface is final once every declaration is known. Both hashes are
             // computed once, here, before the first body is emitted: a declaration synthesised
             // while a body is emitted must not move the surface under the bodies that follow it.
-            exchange(&mut c.fn_flags, fn_flags_now(&mut c));
+            exchange(&mut c.fn_flags, fn_flags_now(&mut c, 0));
             exchange(&mut c.fn_surface, fn_surface_now(&mut c));
             fncache::ensure(view(c.fn_dir));
             fn_pack_open(&mut c);
