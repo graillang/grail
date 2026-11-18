@@ -1,5 +1,20 @@
 ## Unreleased
 
+- **Default `extern "C"` calls on AArch64 and RV64 Linux lost their atomic instruction too.** The
+  foreign-call marker counts out with a plain load, add and store (the `ldaxr`/`stlxr` loop and
+  `amoadd.d.aqrl` are gone) and reaches its counter in one load from the thread record; the
+  scheduler's monitor orders it with `membarrier` (system call 283), as on x86-64. A new FFI fixture,
+  `foreign_handoff`, checks on all three targets that a C call stuck for 120 ms still has its worker
+  handed on.
+
+- **The summary chart reads in words.** Its axis runs "32x, 8x, 2x, same, 2x, 8x, 32x" under
+  "◀ Grail faster / Grail slower ▶", and every note and table cell says "3.3x faster" or "1.96x
+  slower" instead of a bare ratio such as 0.31x.
+- **The performance chapter opens with every benchmark on one page.** A summary chart has one bar
+  per category (compile check and build, cold and after an edit; release and development run time;
+  release instructions; the scheduler): Grail's ratio to the fastest rival, the geometric mean of the
+  category's rows, with its best and worst rows marked. A table under it names them. It reads the
+  same committed results as the other charts (`{{perf:summary}}`).
 - **Generic code over a type that owns nothing has no drop bookkeeping.** In a specialisation, a
   type parameter bound to a plain type (`A = u64`) answered "needs drop" like an unknown type, so
   every value of it carried a drop flag, a drop-helper call guarded by it, and a callee-saved register

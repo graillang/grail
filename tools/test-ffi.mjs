@@ -309,6 +309,15 @@ const fixtures = [
     hostOnly: true,
   },
   {
+    // An undeclared C call that sleeps 120 ms holds the only worker; the monitor hands the worker
+    // to a spare (the call's marker is plain stores, ordered by membarrier) and says so once.
+    name: 'foreign_handoff',
+    stdout: '42\n',
+    stderr: 'the foreign call `c_nap` held a worker for more than 10 ms',
+    symbols: ['c_nap'],
+    env: { GRAIL_WORKERS: '1' },
+  },
+  {
     // A failed check inside a callback C called, on a dedicated thread: contained, the C frames
     // discarded with the stack, and a value at try_join (lib/thread.grl).
     name: 'thread_callback_fail',
@@ -378,7 +387,7 @@ for (const target of selected) {
     if (threadShim.status !== 0) throw new Error(`thread_shim.c for ${target} failed: ${threadShim.stderr}`);
   }
   for (const { name, stdout, symbols, defines = [], linkNote = '// grail-link: shim.o', hostOnly = false,
-    modules = [], signal = null, targets: onlyTargets = null, env = null, extra = [] } of fixtures) {
+    modules = [], signal = null, targets: onlyTargets = null, env = null, extra = [], stderr = null } of fixtures) {
     // A fixture whose shape one target refuses is compiled and executed only where it is valid; the
     // refusal itself is asserted at the end of this file.
     if (onlyTargets && !onlyTargets.includes(target)) continue;
@@ -436,6 +445,10 @@ for (const target of selected) {
     }
     assert.equal(result.status, 0, `${target}/${name}: exit ${result.status}: ${result.stderr}`);
     assert.equal(result.stdout.toString(), stdout, `${target}/${name}: calls returned wrong values`);
+    if (stderr) {
+      const seen = result.stderr.toString().split(stderr).length - 1;
+      assert.equal(seen, 1, `${target}/${name}: stderr should say ${JSON.stringify(stderr)} once: ${result.stderr}`);
+    }
     executed++;
   }
 }
