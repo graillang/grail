@@ -1,5 +1,11 @@
 ## Unreleased
 
+- **The rock kit's shingle mesh is ported, closing the one gap the earlier landing named.**
+  `build_shingle_mesh` (the exponent-shaped sliver, its wave-softened worn faces, two relief octaves,
+  the asymmetric taper, bounding-box normalisation and the UV seam duplication) rides
+  `lib/math.grl`'s glibc-exact f32 `powf`/`asinf`, so it is bit for bit the engine's. 216 new parity
+  values (six variants, both windings); procgen is 576.
+
 - **The frame loop is wired headless: session, job scheduler and render graph's plan in one
   frame boundary.** `abundance/src/frame_loop.grl` runs a frame as `engine/core/engine.cpp` does —
   the session's boundary commits the authority step, the frame's payload goes to one scheduler job
