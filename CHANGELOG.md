@@ -11,6 +11,16 @@
 - **The job scheduler test calls methods on captured `Arc`s directly.** Since the compiler treats a
   `&self` method on a captured value as a shared call, the free-function helpers `jobsched_test.grl`
   used to reach its shared counters are deleted.
+- **The post area's optics and the display's CPU half are ported.** `abundance/src/
+  render_policy_optics.grl` carries `render_policy/bloom.hpp` (the paired Gaussian scatter kernel
+  post.bloom uploads, its half-sample edge reflection, its sigma/scatter sanitation) and
+  `render_policy/depth_of_field.hpp` (the thin-lens circle of confusion and its tile halo, the
+  player's eye as a lens with its accommodation blend and autofocus kernel, the aperture coverage
+  weight), plus the display's only CPU work: `kDisplayMiddleGreyScale` and the `g_frame.exposure`
+  packing. `abundance/src/render_float.grl` gains a correctly rounded `tan` (100 000 inputs match
+  glibc exactly), which the field-of-view focal length needs. The AgX display transform, its looks
+  and night vision are shader-only (`core/display.ps.hlsl`) and the .cube grade parse writes
+  straight into a Vulkan buffer, so neither is a render policy. 947 reference lines, bit exact.
 - Fixed: a struct partly moved before a loop (`f := r.inner;`) no longer makes the loop refuse with "loop
   backedge consumes entry storage: `r` is moved out of it" when the body only reads it. The backedge check
   now counts what the body consumes: a place that dies in the body, one that was whole at entry and is
