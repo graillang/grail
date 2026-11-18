@@ -45,6 +45,12 @@
   link input now counts like `-l`. Found by the audio shim, which is the first binding linked only
   by path.
 
+- **Programs are not rebuilt when nothing they read has changed**: `tools/native.mjs`'s `compileProgram` stamps
+  each build with a digest of what can change the binary — the compiler image, every input file's size and
+  mtime, the target, flags and interface mode — and skips the compile and link when the stamp still matches
+  (a `name.stamp` beside the artefact; `GRAIL_NO_BUILD_CACHE=1` opts out). The parity suite builds over sixty
+  programs, so a gate now pays only for what moved: a single-test run measured 176 s cold and 106 s warm on
+  the loaded machine.
 - **Abundance: the palette classifier is gated cell-for-cell on a generated world.** The palette
   test generates the feature pass's own world (seed 1, 64 cells of 250 m, exactly as
   `tests/parity/features.cpp` does), dumps every input the classifier reads
