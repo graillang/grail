@@ -108,12 +108,12 @@ and Zig, written the way each language is usually written:
 executes the same number of instructions as C and Rust: strings are one block, enums keep their
 payloads inline, and a value written before it is read is not zeroed first. What remains:
 
-- **`chan`: a loaded machine.** Grail's channel is crossbeam-channel's design (a ring of stamped
-  slots, a compare-exchange per hand-off, spin, then yield, then park) and executes fewer
-  instructions than C's, Rust's or Go's twin, second only to Zig's. Its CPU time depends on the
-  machine: a spinning thread whose partner has been descheduled burns time, and on the shared
-  machine charted crossbeam's own figure rose to four times its quiet one beside Grail's. Go runs
-  both ends as goroutines on one scheduler and never spins on another thread, so its figure holds.
+- **`chan`: threads against goroutines.** Grail's channel is crossbeam-channel's design (a ring
+  of stamped slots, a compare-exchange per hand-off, spin, then yield, then park). It executes
+  fewer instructions than C's, Rust's or Go's twin, second only to Zig's, and its CPU time is level
+  with crossbeam's and a quarter of C's and Zig's mutex rings. Go runs both ends as goroutines on
+  one scheduler: a hand-off never wakes another OS thread, which is the remaining 3x. On a loaded
+  machine the spinning channels suffer most (crossbeam's figure rose fourfold in an earlier run).
 - **`bintrees`: the allocator.** Allocating and freeing the nodes are about three fifths of the
   run; Zig's release allocator executes the fewest instructions.
 - **`hashmap`: insertion order costs one memory touch.** Grail's map keeps its entries in insertion
@@ -143,10 +143,11 @@ zip of at most four columns, hence one call per axis. Each entity's arithmetic i
 the final sum is serial, so every program prints the serial checksum at any worker count, and the
 tool checks that it does: a build that prints another answer is not charted.
 
-A parallel loop is about time, so this chart is wall time, best of several runs, with every runtime
-told the same number of threads. It needs a machine doing nothing else, and the figures charted
-until the next quiet window were taken on a shared one: read the instruction table under it for
-what each runtime does, and the chart only for the shape.
+A parallel loop is about time, so this chart is wall time, best of nine runs, with every runtime
+told the same number of threads, taken with the machine otherwise idle (load average under 3).
+Grail's release build is the fastest of all on one worker, but it gains little past four: at 8
+workers it is 1.7x C's OpenMP. Its searching workers yield the processor where OpenMP's spin, and a
+frame's three loops of 62 pieces each are short enough for that to show.
 
 {{perf:parallel#release}}
 
@@ -171,9 +172,9 @@ compiler's columns, so a change is measured on the engine the same way.
 (the ImGui program is left out where its library is not built). The figures charted were taken with
 the release compiler of the commit named. After a one-statement edit to `main` a rebuild costs a
 twentieth or less of a cold build, because the store replays every unchanged module and function:
-`abgeo`, the largest, builds cold in 9.5 billion instructions and again after an edit in 0.22.
+`abgeo`, the largest, builds cold in 8.4 billion instructions and again after an edit in 0.21.
 
-The release runs are short. `abgeo` (the cluster builder and its reader) takes 0.30 billion
+The release runs are short. `abgeo` (the cluster builder and its reader) takes 0.27 billion
 instructions, most of it the mesh simplifier's own work; constant tables that it once rebuilt on
 every call are now read-only data.
 
@@ -206,19 +207,17 @@ A second chart shows wall time with four jobs each, this machine's cap.
 
 {{perf:compile#compile-wall}}
 
-**Where Grail is ahead, and where it is behind.** On the commit charted, counting instructions,
-Grail is the fastest on every row but one: hello world, the seven engine programs, every check and
-build after an edit, every rebuild with nothing changed (a twentieth of the others' cost or less),
-and the cold check and cold build of both generated programs except one. The exception is the
-cold check of the 104,000-line program (1.7x Zig). Both programs call every function they
-declare, so Zig's lazy analysis skips nothing; Zig's cost per line is lower and it pays a fixed cost
-for its standard library once, which is why its total grows more slowly. The profiles of the
-compiler (`docs/design/compile-speed.md`) place Grail's per-line cost in parsing, the allocator and
-the per-function units written to the store.
+**Where Grail is ahead.** On the commit charted, counting instructions, Grail is the fastest on
+every row: hello world, the engine programs, every check and build after an edit, every rebuild
+with nothing changed (a twentieth of the others' cost or less), and the cold check and cold build of
+both generated programs. The closest row is the cold check of the 104,000-line program, 0.93x
+Zig's (3.05 against 3.28 billion instructions, 0.31 against 0.33 seconds). Both programs call every
+function they declare, so Zig's lazy analysis skips nothing. The profiles that got the check there
+are in `docs/design/compile-speed.md`: allocator fast paths, one cache file per module, no drop calls
+on literal string views, and a frame cleared only where a slot is read before it is written.
 
-The chart is the release compiler of the commit named, built with ThinLTO. The wall times were
-taken with the machine loaded (the load average is recorded with the run), so they favour the
-instruction counts as the measure.
+The chart is the release compiler of the commit named, built with ThinLTO and profile-guided
+optimisation, and measured with the machine otherwise idle.
 
 {{perf:compile#compile-go-check}}
 
@@ -235,13 +234,12 @@ rounds. The importer row counts how much work the importer got done, so higher i
 
 {{perf:sched-rivals#scheduler}}
 
-**Where Grail is behind, and what load does to it.** In a quieter run (load average about 20 on
-24 CPUs, recorded in `docs/design/runtime-parity.md`), Grail's frame loop had the best tail latency
-of the three: its Frame class runs ahead of the importer, as oneTBB's high-priority arena does and
-as rayon, which has no priorities, cannot. The run charted here was taken with the machine
-oversubscribed (load average 37), and there oneTBB's worst frames barely moved while Grail's grew
-several times over. Grail's scheduler holds its tail only while it has the cores to itself, and
-that is a finding in its own right. Everything else is behind under either load:
+**Where Grail is ahead, and where it is behind.** Measured with the machine otherwise idle, Grail's
+frame loop has the best tail latency of the three (p99 0.65 ms against rayon's 0.83 and oneTBB's
+1.45): its Frame class runs ahead of the importer, as oneTBB's high-priority arena does and as
+rayon, which has no priorities, cannot. On an oversubscribed machine (load average 37, an earlier
+run) oneTBB's worst frames barely moved while Grail's grew several times over: Grail's scheduler
+holds its tail while it has the cores to itself. Behind:
 
 - **A join allocates.** Each one makes about five heap allocations for its closures and its
   second result; rayon's join puts a job that lives on the caller's stack onto a deque and

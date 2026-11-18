@@ -1,5 +1,11 @@
 ## Unreleased
 
+- **Every performance chart is re-measured with the machine idle** (load average under 3; release
+  compiler with PGO on main bcf78e5a). Every compile row now beats the fastest rival: the cold
+  check of the 104,000-line program is 0.93x Zig's instructions (3.05 against 3.28 billion). Channels
+  are level with crossbeam's CPU time; parallel ECS is the fastest of all on one worker and 1.7x C
+  at eight; the scheduler's frame loop has the best p99 of the three. The chapter's text follows.
+
 - **A direct call to a closure that captures nothing passes no environment.** It was handed the
   address of a stack copy of the closure value, which nothing reads and which kept the calling
   function from being inlined. bench/iterchain (native): 1320M to 1310M instructions. The plan for
