@@ -2023,7 +2023,11 @@ fn unit_file_check<a, b, e, g>(store: (&a mut Cache), key: &b [u8], ifaces: &e [
 }
 // A check's restore: a build's record of the module (the same key) or a check's, of which only the
 // interface and the facts are put back.
-fn unit_restore_check<a, b, e, g>(store: (&a mut Cache), key: &b [u8], ifaces: &e [u8], name: &g [u8]) -> bool {
+//
+// `needed`: another run of this program reads what this one writes (its interface, or the runtime's
+// effect summary), so a record with neither - a check of a module nothing read, which writes none -
+// is a miss.
+fn unit_restore_check<a, b, e, g>(store: (&a mut Cache), key: &b [u8], ifaces: &e [u8], name: &g [u8], needed: bool) -> bool {
     for kind in 2 {
         mut what = copy(view("unit"));
         if kind == 1 {
@@ -2053,7 +2057,7 @@ fn unit_restore_check<a, b, e, g>(store: (&a mut Cache), key: &b [u8], ifaces: &
                 dests.push(path_join(view(ifaces), view(cat(view(name), view(suffix)))));
             }
         }
-        if !ok {
+        if !ok || (needed && (blobs.len() == 0)) {
             continue;
         }
         mut restored = true;
@@ -2537,10 +2541,31 @@ fn per_module_build<a, d, e, g, k, m, n, x, y, jb, ev>(
                 state[g] = 4;
                 continue;
             }
+            // Whether another module of the program reads this one. A check of a module nothing reads -
+            // the program's root - writes no interface: no run of this build reads it, the interface
+            // directory is cleared by the next build, and the user's `grail check --interface DIR`
+            // takes its own path. Its run then records effects only for claims it checks (fx_begin).
+            mut read_by = false;
+            for o in groups.len() {
+                if (o != g) && !read_by {
+                    other := unit_reads(&groups, &base, o);
+                    for r in other.len() {
+                        if eq(view(other[r]), view(name)) {
+                            read_by = true;
+                        }
+                    }
+                }
+            }
+            // The runtime is read by no group but writes `runtime.facts`, which every other run's
+            // effect summaries and cache key are computed from.
+            if eq(view(name), view("runtime")) {
+                read_by = true;
+            }
+            emits := !checking || read_by;
             if cache != 0 {
                 keys[g] = unit_key(&mut store, id, view(target), view(name), &groups[g].files, view(ifaces), &reads);
                 if checking {
-                    if unit_restore_check(&mut store, view(keys[g]), view(ifaces), view(name)) {
+                    if unit_restore_check(&mut store, view(keys[g]), view(ifaces), view(name), read_by) {
                         state[g] = 2;
                         continue;
                     }
@@ -2576,8 +2601,10 @@ fn per_module_build<a, d, e, g, k, m, n, x, y, jb, ev>(
                     }
                 }
             }
-            compile.push(copy(view("--emit-interface")));
-            compile.push(ifaces.copy());
+            if emits {
+                compile.push(copy(view("--emit-interface")));
+                compile.push(ifaces.copy());
+            }
             compile.push(copy(view("--separate")));
             // `GRAIL_FN_CACHE=0` turns the per-function layer off and leaves the module store on: every
             // body of a module run that misses is compiled, as a build with no unit store compiles
@@ -2592,6 +2619,18 @@ fn per_module_build<a, d, e, g, k, m, n, x, y, jb, ev>(
                 // compiler must not replay the previous one's.
                 compile.push(copy(view("--fn-cache-id")));
                 compile.push(id.compiler.copy());
+                // The module's unit pack: one file for all its units, named by what the module is
+                // (target and name, and the files it is built from), not by its contents, so an
+                // edit refiles the module's own pack and no other (fncache "Packs").
+                mut pack_id = copy(view(target));
+                pack_id.push(10);
+                push_bytes(&mut pack_id, view(name));
+                for f in groups[g].files.len() {
+                    pack_id.push(10);
+                    push_bytes(&mut pack_id, view(groups[g].files[f]));
+                }
+                compile.push(copy(view("--fn-pack")));
+                compile.push(cat(view("pk-"), view(store_hash(view(pack_id))[0..32])));
                 if store.quiet != 0 {
                     compile.push(copy(view("--fn-cache-quiet")));
                 }

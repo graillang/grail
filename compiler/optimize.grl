@@ -217,6 +217,10 @@ fn opname<a>(o: (&a mut ir::Body), op: u64) {
         app(&mut o.out, view("movsd"));
         return ();
     }
+    if op == 78 {
+        app(&mut o.out, view("movss"));
+        return ();
+    }
     if op == 98 {
         app(&mut o.out, view("movl"));
         return ();
@@ -2061,6 +2065,41 @@ fn emit_line<a, b>(o: (&a mut ir::Body), s: &b [u8], i: u64) {
         o.out.push(10);
         return ();
     }
+    // A general register's f32-exact double into a narrow SSE register (xmm_narrow): the move, then
+    // the (exact) rounding to binary32 in place.
+    if op == 121 {
+        app(&mut o.out, view("movq "));
+        emit_operand(&mut o, view(s), i, 0);
+        o.out.push(44);
+        emit_operand(&mut o, view(s), i, 1);
+        app(&mut o.out, view("\ncvtsd2ss "));
+        emit_operand(&mut o, view(s), i, 1);
+        o.out.push(44);
+        emit_operand(&mut o, view(s), i, 1);
+        o.out.push(10);
+        return ();
+    }
+    // A binary32 register widened into a general one (xmm_narrow): `cvtss2sd` into the free
+    // %xmm15, then the 64 bits across.
+    if op == 120 {
+        app(&mut o.out, view("cvtss2sd "));
+        emit_operand(&mut o, view(s), i, 0);
+        app(&mut o.out, view(",%xmm15\nmovq %xmm15,"));
+        emit_operand(&mut o, view(s), i, 1);
+        o.out.push(10);
+        return ();
+    }
+    // `movq $0` into an SSE register (a promoted float slot set to zero) has no encoding: it is
+    // `xorps` of the register with itself, the same 64 zero bits.
+    if (op == 1) && (o.k0[i] == 3) && is_zero_imm(view(s), o.s0[i], o.e0[i])
+        && ((o.k1[i] == 7) || ((o.k1[i] == 6) && is_xmm_text(view(s), o.s1[i], o.e1[i]))) {
+        app(&mut o.out, view("xorps "));
+        emit_operand(&mut o, view(s), i, 1);
+        o.out.push(44);
+        emit_operand(&mut o, view(s), i, 1);
+        o.out.push(10);
+        return ();
+    }
     opname(&mut o, o.op[i]);
     if o.k0[i] != 0 {
         o.out.push(32);
@@ -3156,6 +3195,10 @@ fn sw_subst<a>(op: &a [u8], from: (&u8[][]), to: (&u8[][])) -> u8[] {
     return found;
 }
 // Whether an operand's text is an SSE register: `%xmm<n>`.
+// The immediate `$0`: zero in any width, so also +0.0 as f32 or f64.
+fn is_zero_imm<b>(s: &b [u8], a: u64, e: u64) -> bool {
+    return (e - a == 2) && (s[a] == 36) && (s[a + 1] == 48);
+}
 fn is_xmm_text<b>(s: &b [u8], a: u64, e: u64) -> bool {
     return (e - a > 4) && ir::at(view(s), a, view("%xmm"));
 }
@@ -3265,8 +3308,8 @@ fn xmm_live<a, b>(o: (&a ir::Body), s: &b [u8], cands: (&u64[]), lin: (&mut u64[
     }
     return changed;
 }
-// Frame slots that hold floats, kept in SSE registers instead (xmm8..xmm14; xmm5 and xmm15 are the
-// foreign-call sequences' scratch). A slot qualifies when every access is a plain `movq` between it
+// Frame slots that hold floats, kept in SSE registers instead (xmm8..xmm14, less any the body names
+// itself; xmm5 and xmm15 are the foreign-call sequences' scratch). A slot qualifies when every access is a plain `movq` between it
 // and a general register - so the same `movq` with %xmmK in its place is the same 64 bits - when it
 // carries float traffic (stored from `movq %xmmN,%R`, or loaded into a register that goes on to
 // `movq %R,%xmmN`), and when it is not live across a call that returns. `regs`/`slots` receive the
@@ -3276,6 +3319,8 @@ fn xmm_choose<a, b, c>(o: (&a ir::Body), s: &b [u8], f: (&c mut F), ns: u64, pro
     last := o.op.len();
     mut ok = u64[];
     mut fl = u64[];
+    // The SSE registers (bit per register number) the body already uses by name.
+    mut named = 0;
     for n in ns {
         ok.push(1);
         fl.push(0);
@@ -3298,14 +3343,20 @@ fn xmm_choose<a, b, c>(o: (&a ir::Body), s: &b [u8], f: (&c mut F), ns: u64, pro
                 v = o.v1[i];
                 other = o.k0[i];
             }
-            // A body that names the registers this would use is left as it is.
+            // A register the body names itself (the f32 sequences' %xmm8/%xmm9 scratch) is not
+            // handed out; the others still are.
             if (k == 6) && is_xmm_text(view(s), a, e) {
-                if (e - a == 6) || (s[a + 4] > 55) {
-                    return ();
+                if e - a == 6 {
+                    named = named | (1 << (10 + u64(s[a + 5]) - 48));
+                } else if s[a + 4] > 55 {
+                    named = named | (1 << (u64(s[a + 4]) - 48));
                 }
             }
             if (k == 2) && (v / 8 < ns) {
-                if (op != 1) || (other != 1) {
+                // A plain move with a general register, or a store of `$0` (`mut s: f32 = 0.0`),
+                // which becomes `xorps` on the register (emit_line).
+                zero := (op == 1) && (j == 1) && (o.k0[i] == 3) && is_zero_imm(view(s), o.s0[i], o.e0[i]);
+                if ((op != 1) || (other != 1)) && !zero {
                     ir::put(&mut ok, v / 8, 0);
                 }
             }
@@ -3461,6 +3512,7 @@ fn xmm_choose<a, b, c>(o: (&a ir::Body), s: &b [u8], f: (&c mut F), ns: u64, pro
                 used = used | (1 << (color[d] - 1));
             }
         }
+        used = used | ((named >> 8) & 127);
         mut k = 0;
         while (k < 7) && (((used >> k) & 1) != 0) {
             k += 1;
@@ -3620,7 +3672,7 @@ fn xmm_dead_after<a, b>(o: (&a ir::Body), s: &b [u8], i: u64, r: u64, depth: u64
         }
         if xmm_no(&o, view(s), j, 1) == r {
             // Whole-register writes; the arithmetic and the compare read their destination too.
-            return (op == 1) || (op == 68) || (op == 70) || (op == 71) || (op == 65) || (op == 66) || (op == 77);
+            return (op == 1) || (op == 68) || (op == 70) || (op == 71) || (op == 65) || (op == 66) || (op == 77) || (op == 78);
         }
     }
     return false;
@@ -3639,10 +3691,103 @@ fn slot_index(xslots: (&u64[]), tag: u64) -> u64 {
     }
     return c;
 }
+// A decimal immediate `$N` or `$-N` (operand text a..e) as its 64 bits (wrapping), for f32
+// exactness tests; imm_digits says whether the text is one.
+fn imm_digits<b>(s: &b [u8], a: u64, e: u64) -> bool {
+    if (e < a + 2) || (s[a] != 36) {
+        return false;
+    }
+    mut i = a + 1;
+    if s[i] == 45 {
+        i += 1;
+    }
+    if (i >= e) || (e - i > 20) {
+        return false;
+    }
+    while i < e {
+        if (s[i] < 48) || (57 < s[i]) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+fn imm_bits<b>(s: &b [u8], a: u64, e: u64) -> u64 {
+    mut i = a + 1;
+    neg := s[i] == 45;
+    if neg {
+        i += 1;
+    }
+    mut n = 0;
+    while i < e {
+        n = wrapping_add(wrapping_mul(n, 10), u64(s[i]) - 48);
+        i += 1;
+    }
+    if neg {
+        return wrapping_sub(0, n);
+    }
+    return n;
+}
+// No live line strictly between `from` and `to` names SSE register r (as either operand).
+fn xmm_quiet<a, b>(o: (&a ir::Body), s: &b [u8], from: u64, to: u64, r: u64) -> bool {
+    mut j = from + 1;
+    while j < to {
+        if (o.del[j] == 0) && (o.op[j] != 101) {
+            if (xmm_no(&o, view(s), j, 0) == r) || (xmm_no(&o, view(s), j, 1) == r) {
+                return false;
+            }
+        }
+        j += 1;
+    }
+    return true;
+}
+// The line `cvtss2sd %A,%B` that defines u's source operand B (text a..e) within the three lines
+// before u, with nothing between writing A or B; `last` (the body's length) when there is none.
+fn widened_from<a, b>(o: (&a ir::Body), s: &b [u8], u: u64, a: u64, e: u64) -> u64 {
+    last := o.op.len();
+    mut p = u;
+    for step in 3 {
+        mut q = p;
+        mut moved = false;
+        while 0 < q {
+            q -= 1;
+            if (o.del[q] == 0) && (o.op[q] != 101) {
+                moved = true;
+                break;
+            }
+        }
+        if !moved {
+            return last;
+        }
+        p = q;
+        op := o.op[p];
+        if (op == 100) || (op == 0) || (op == 15) || ir::is_jump(op) {
+            return last;
+        }
+        if (op == 65) && (o.k0[p] == 6) && xmm_is(&o, view(s), p, 1, a, e) {
+            return p;
+        }
+        // Anything else that writes B ends the search; a write of A is checked below.
+        if xmm_is(&o, view(s), p, 1, a, e) {
+            return last;
+        }
+    }
+    return last;
+}
 fn xmm_narrow<a, b>(o: (&a mut ir::Body), s: &b [u8], lsrc: (&u64[]), ldst: (&u64[]), xslots: (&u64[]), last: u64) {
     mut ok = u64[];
     for c in xslots.len() {
         ok.push(1);
+    }
+    // The constant stores to round once the slot is known to be narrow.
+    mut kconst = u64[];
+    // A load into a general register (`movq %xmmS,%rax`, a returned accumulator) widens through
+    // %xmm15, so it is allowed only when the body uses %xmm15 for nothing else.
+    mut free15 = true;
+    for i in last {
+        if (o.del[i] == 0) && ((xmm_no(&o, view(s), i, 0) == 15) || (xmm_no(&o, view(s), i, 1) == 15)) {
+            free15 = false;
+        }
     }
     for i in last {
         if o.del[i] != 0 {
@@ -3663,11 +3808,22 @@ fn xmm_narrow<a, b>(o: (&a mut ir::Body), s: &b [u8], lsrc: (&u64[]), ldst: (&u6
                 && xmm_is(&o, view(s), p, 1, o.s0[i], o.e0[i]) && xmm_is(&o, view(s), p, 0, o.s0[i], o.e0[i]) {
                 good = true;
             }
+            // `movq $0` straight into the register (xmm_choose's zero store): +0.0 in binary32 too.
+            if (op == 1) && (o.k0[i] == 3) && is_zero_imm(view(s), o.s0[i], o.e0[i]) {
+                good = true;
+            }
             if (op == 1) && (o.k0[i] == 1) && (p < i) && (o.k1[p] == 1) && (o.v1[p] == o.v0[i]) {
                 // imm_value is the value + 1, and 0 for an immediate it cannot read (wider than 18
                 // digits, as 2.0's bits are): only a 1 is a zero.
                 if ((o.op[p] == 1) || (o.op[p] == 2)) && (o.k0[p] == 3) && (imm_value(&o, view(s), p) == 1) {
                     good = true;
+                } else if ((o.op[p] == 1) || (o.op[p] == 2)) && (o.k0[p] == 3) && imm_digits(view(s), o.s0[p], o.e0[p])
+                    && (f32_exact_bits(imm_bits(view(s), o.s0[p], o.e0[p])) != 0) {
+                    // A constant that is an f32 value widened (`dt: f32 := 0.016` hoisted out of a
+                    // loop): the store also rounds it (op 121, below), exactly, so the register
+                    // then holds the binary32 value like any narrow store.
+                    good = true;
+                    kconst.push(i);
                 }
                 if (o.op[p] == 10) && (o.k0[p] == 1) && (o.v0[p] == o.v0[i]) {
                     good = true;
@@ -3679,7 +3835,8 @@ fn xmm_narrow<a, b>(o: (&a mut ir::Body), s: &b [u8], lsrc: (&u64[]), ldst: (&u6
         }
         if lsrc[i] != 0 {
             c := slot_index(xslots, lsrc[i]);
-            if !((op == 68) && (o.k0[i] == 7) && (o.k1[i] == 6)) && (c < ok.len()) {
+            gpr := free15 && (op == 1) && (o.k0[i] == 7) && (o.k1[i] == 1);
+            if !((op == 68) && (o.k0[i] == 7) && (o.k1[i] == 6)) && !gpr && (c < ok.len()) {
                 ir::put(&mut ok, c, 0);
             }
         }
@@ -3692,6 +3849,15 @@ fn xmm_narrow<a, b>(o: (&a mut ir::Body), s: &b [u8], lsrc: (&u64[]), ldst: (&u6
     }
     if !any {
         return ();
+    }
+    for k in kconst.len() {
+        i := kconst[k];
+        c := slot_index(xslots, ldst[i]);
+        if (c < xslots.len()) && (ok[c] != 0) {
+            ir::put(&mut o.op, i, 121);
+            bump(&mut o);
+            ir::put(&mut o.chg, i, 1);
+        }
     }
     // Narrow loads, each with the line that consumes its scratch register (last: none usable).
     mut loads = u64[];
@@ -3744,6 +3910,8 @@ fn xmm_narrow<a, b>(o: (&a mut ir::Body), s: &b [u8], lsrc: (&u64[]), ldst: (&u6
             // The operands: both from narrow loads consumed here.
             mut both = true;
             mut mine = u64[];
+            mut wline = last;
+            mut dline = last;
             for j in 2 {
                 mut a = o.s0[u];
                 mut e = o.e0[u];
@@ -3758,7 +3926,29 @@ fn xmm_narrow<a, b>(o: (&a mut ir::Body), s: &b [u8], lsrc: (&u64[]), ldst: (&u6
                     }
                 }
                 if found == loads.len() {
-                    both = false;
+                    // An operand may instead be `cvtss2sd %A,%B` just before: B is A widened, and A is
+                    // binary32 by the instruction's definition. Nothing between may name A or B.
+                    w := widened_from(&o, view(s), u, a, e);
+                    if w == last {
+                        both = false;
+                    } else {
+                        ra := xmm_no(&o, view(s), w, 0);
+                        rb := xmm_no(&o, view(s), w, 1);
+                        if (ra == 99) || (rb == 99) || !xmm_quiet(&o, view(s), w, u, ra) || !xmm_quiet(&o, view(s), w, u, rb) {
+                            both = false;
+                        } else if j == 0 {
+                            // The source: read A in B's place, so B must be dead after u (A == B
+                            // included: the widening line then goes).
+                            if xmm_dead_after(&o, view(s), u, rb, 3) {
+                                wline = w;
+                            } else {
+                                both = false;
+                            }
+                        } else {
+                            // The destination: copy A's bits instead of widening them.
+                            dline = w;
+                        }
+                    }
                 } else {
                     mine.push(found);
                 }
@@ -3768,17 +3958,41 @@ fn xmm_narrow<a, b>(o: (&a mut ir::Body), s: &b [u8], lsrc: (&u64[]), ldst: (&u6
             if r1 < last {
                 r2 = next_live(&o, r1, last);
             }
-            if both && (r2 < last) && (o.op[r1] == 66) && (o.op[r2] == 65)
-                && xmm_is(&o, view(s), r1, 0, o.s1[u], o.e1[u]) && xmm_is(&o, view(s), r1, 1, o.s1[u], o.e1[u])
-                && xmm_is(&o, view(s), r2, 0, o.s1[u], o.e1[u]) && xmm_is(&o, view(s), r2, 1, o.s1[u], o.e1[u]) {
+            // The result must be rounded to binary32 at once (`cvtsd2ss %D,%D`); what follows it -
+            // a widening again or a binary32 use - reads the same low 32 bits either way (the bits
+            // above are no value's after a cvtsd2ss).
+            if both && (r1 < last) && (o.op[r1] == 66)
+                && xmm_is(&o, view(s), r1, 0, o.s1[u], o.e1[u]) && xmm_is(&o, view(s), r1, 1, o.s1[u], o.e1[u]) {
                 ir::put(&mut o.op, u, op + 12);
                 bump(&mut o);
                 ir::put(&mut o.chg, u, 1);
                 kill(&mut o, r1);
+                if wline != last {
+                    // Read A itself; B is dead after u, so its widening goes.
+                    set_range(&mut o, u, 0, o.s0[wline], o.e0[wline]);
+                    kill(&mut o, wline);
+                }
+                if dline != last {
+                    ir::put(&mut o.op, dline, 68);
+                    bump(&mut o);
+                    ir::put(&mut o.chg, dline, 1);
+                }
                 for m in mine.len() {
                     ir::put(&mut narrowed, mine[m], 1);
                 }
             }
+        }
+    }
+    // A load into a general register widens through %xmm15 (op 120, emit_line).
+    for i in last {
+        if (o.del[i] != 0) || (lsrc[i] == 0) || (o.op[i] != 1) || (o.k0[i] != 7) || (o.k1[i] != 1) {
+            continue;
+        }
+        c := slot_index(xslots, lsrc[i]);
+        if (c < xslots.len()) && (ok[c] != 0) {
+            ir::put(&mut o.op, i, 120);
+            bump(&mut o);
+            ir::put(&mut o.chg, i, 1);
         }
     }
     // Every other narrow load widens.
@@ -4278,7 +4492,7 @@ fn array_regs<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
         }
         // The load right after, through (%rax).
         j := next_live(&o, i, last);
-        if (j < last) && ((o.op[j] == 1) || (o.op[j] == 28) || (o.op[j] == 98) || (o.op[j] == 77)) && (o.k0[j] == 4)
+        if (j < last) && ((o.op[j] == 1) || (o.op[j] == 28) || (o.op[j] == 98) || (o.op[j] == 77) || (o.op[j] == 78)) && (o.k0[j] == 4)
             && ir::same_range(view(s), o.s0[j], o.e0[j], view("(%rax)")) && ((w == 1) || (w == 2) || (w == 4) || (w == 8)) {
             overwrites := (o.k1[j] == 1) && (o.v1[j] == 0);
             if overwrites || dead_after(&o, j, 0, 6) {
@@ -4920,6 +5134,38 @@ fn xmm_loads<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
         set_range(&mut o, p, 1, o.s1[j], o.e1[j]);
         kill(&mut o, j);
     }
+    // The binary32 form: `movl MEM,%eax; movd %eax,%xmmN` with %rax dead after is `movss MEM,%xmmN`
+    // (an f32 element). Both zero the register above the low 32 bits.
+    for j in last {
+        if (o.del[j] != 0) || (o.op[j] != 70) || (o.k0[j] != 6) || (o.m0[j] != 1) {
+            continue;
+        }
+        if !((o.k1[j] == 7) || ((o.k1[j] == 6) && is_xmm_text(view(s), o.s1[j], o.e1[j]))) {
+            continue;
+        }
+        if !ir::same_range(view(s), o.s0[j], o.e0[j], view("%eax")) {
+            continue;
+        }
+        p := prev_live(&o, j);
+        if (p >= j) || (o.op[p] != 98) || !((o.k0[p] == 4) || (o.k0[p] == 5)) || (o.k1[p] != 6) {
+            continue;
+        }
+        if !ir::same_range(view(s), o.s1[p], o.e1[p], view("%eax")) {
+            continue;
+        }
+        if (o.k0[p] == 5) && (o.m0[p] == 0) {
+            continue;
+        }
+        if !dead_after(&o, j, 0, 6) {
+            continue;
+        }
+        ir::put(&mut o.op, p, 78);
+        bump(&mut o);
+        set_operand(&mut o, p, 1, o.k1[j], o.v1[j]);
+        set_range(&mut o, p, 1, o.s1[j], o.e1[j]);
+        ir::put(&mut o.chg, p, 1);
+        kill(&mut o, j);
+    }
 }
 // The store side: `movq %xmmN,%rax; movq %rax,MEM` with %rax dead after is `movsd %xmmN,MEM`. It runs
 // last, after every pass that reads a memory destination's kind.
@@ -4954,6 +5200,44 @@ fn xmm_stores<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
         bump(&mut o);
         set_operand(&mut o, j, 0, o.k0[p], o.v0[p]);
         set_range(&mut o, j, 0, o.s0[p], o.e0[p]);
+        kill(&mut o, p);
+    }
+    // The binary32 form: `movd %xmmN,%eax; ...; movl %eax,MEM` with %rax dead after is
+    // `movss %xmmN,MEM`.
+    for p in last {
+        if (o.del[p] != 0) || (o.op[p] != 70) || (o.k1[p] != 6) || (o.m1[p] != 1) {
+            continue;
+        }
+        if !ir::same_range(view(s), o.s1[p], o.e1[p], view("%eax")) {
+            continue;
+        }
+        if !((o.k0[p] == 7) || ((o.k0[p] == 6) && is_xmm_text(view(s), o.s0[p], o.e0[p]))) {
+            continue;
+        }
+        mut j = next_live(&o, p, last);
+        mut steps = 0;
+        while (j < last) && (steps < 3) && (o.op[j] == 1) && (o.k1[j] == 1)
+            && ((((ir::reads(&o, j) | ir::writes(&o, j)) & 1) == 0)) {
+            j = next_live(&o, j, last);
+            steps += 1;
+        }
+        if (j >= last) || (o.op[j] != 98) || (o.k0[j] != 6) || (o.k1[j] != 4) {
+            continue;
+        }
+        if !ir::same_range(view(s), o.s0[j], o.e0[j], view("%eax")) {
+            continue;
+        }
+        if (o.m1[j] & 1) != 0 {
+            continue;
+        }
+        if !dead_after(&o, j, 0, 6) {
+            continue;
+        }
+        ir::put(&mut o.op, j, 78);
+        bump(&mut o);
+        set_operand(&mut o, j, 0, o.k0[p], o.v0[p]);
+        set_range(&mut o, j, 0, o.s0[p], o.e0[p]);
+        ir::put(&mut o.chg, j, 1);
         kill(&mut o, p);
     }
 }

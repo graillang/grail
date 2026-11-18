@@ -523,7 +523,10 @@ to know which. Lists are guarded by a word lock held for a few instructions.
   a migration is the worker-affine-guard problem `concurrency-v1.md` leaves open; a callback makes
   it unrepresentable. `Condition` follows the same shape, which also removes the "forgot to re-test
   the predicate" bug.
-- Channels allocate once, at creation. A `bounded(0)` channel is a rendezvous. A task's result is
+- Channels allocate once, at creation. `lib/chan.grl` is crossbeam-channel's array flavour: per-slot
+  stamps, padded `head`/`tail` counters, spin then yield then park, and a gate taken only when a
+  waiter is parked. `bounded(0)` holds one value, as `bounded(1)` does; there is no rendezvous
+  channel yet. A task's result is
   already the one-shot channel (`Task<R>`, `Job<R>`, `Thread<R>`), so there is no separate oneshot.
 - Every parking wait takes the enclosing scope's cancel token and has an `_until(deadline)` form.
 - Holding a mutex while waiting is allowed and no longer burns CPU; `@no_wait` on the callback is

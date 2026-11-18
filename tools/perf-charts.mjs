@@ -171,33 +171,37 @@ export function summaryRows(files) {
 
 export function summary(files) {
   const cats = summaryRows(files).filter(c => c.rows.length);
-  const left = 300, width = 420, right = 380, rowH = 26, top = 58, bottom = 34;
+  // A ratio read as words: below 1 Grail is faster, above 1 slower.
+  const rel = r => r <= 1 ? `${(1 / r).toFixed(r < 0.1 ? 0 : 1)}x faster` : `${r.toFixed(2)}x slower`;
+  const left = 300, width = 420, right = 560, rowH = 26, top = 74, bottom = 34;
   const lo = Math.log(1 / 32), hi = Math.log(32);
   const px = r => left + ((Math.min(Math.max(Math.log(r), lo), hi) - lo) / (hi - lo)) * width;
   const one = px(1);
   const height = top + cats.length * rowH + bottom;
   const parts = [];
-  parts.push(`<text x="0" y="13" class="perf-axis perf-direction">Grail's time or instructions over the fastest rival's, per category: the geometric mean of its rows.</text>`);
-  parts.push(`<text x="0" y="27" class="perf-axis">Left of 1x Grail is ahead, right of it behind; logarithmic axis. ◆ the worst row, ○ the best.</text>`);
+  parts.push(`<text x="0" y="13" class="perf-axis perf-direction">How Grail compares with the fastest rival in each category (the geometric mean of the category's rows).</text>`);
+  parts.push(`<text x="0" y="27" class="perf-axis">A green bar to the left: Grail is faster. A red bar to the right: Grail is slower. ◆ the category's worst row, ○ its best.</text>`);
+  parts.push(`<text x="${(one - 6).toFixed(1)}" y="${top - 26}" class="perf-met" text-anchor="end">◀ Grail faster</text><text x="${(one + 6).toFixed(1)}" y="${top - 26}" class="perf-missed">Grail slower ▶</text>`);
   for (const t of [1 / 32, 1 / 8, 1 / 2, 1, 2, 8, 32]) {
     const x = px(t);
-    parts.push(`<line x1="${x.toFixed(1)}" x2="${x.toFixed(1)}" y1="${top - 6}" y2="${height - bottom + 4}" class="perf-grid"${t === 1 ? ' stroke-width="2"' : ''}/><text x="${x.toFixed(1)}" y="${top - 10}" class="perf-tick" text-anchor="middle">${t < 1 ? `1/${Math.round(1 / t)}` : t}x</text>`);
+    const label = t === 1 ? 'same' : t < 1 ? `${Math.round(1 / t)}x` : `${t}x`;
+    parts.push(`<line x1="${x.toFixed(1)}" x2="${x.toFixed(1)}" y1="${top - 6}" y2="${height - bottom + 4}" class="perf-grid"${t === 1 ? ' stroke-width="2"' : ''}/><text x="${x.toFixed(1)}" y="${top - 10}" class="perf-tick" text-anchor="middle">${label}</text>`);
   }
   cats.forEach((c, i) => {
     const y = top + i * rowH;
     const ahead = c.mean <= 1;
     const x0 = Math.min(one, px(c.mean)), w = Math.max(2, Math.abs(px(c.mean) - one));
     parts.push(`<text x="${left - 8}" y="${y + 15}" class="perf-label" text-anchor="end">${escape(c.label)}</text>`);
-    parts.push(`<rect x="${x0.toFixed(1)}" y="${y + 5}" width="${w.toFixed(1)}" height="14" fill="${ahead ? '#2b8a3e' : '#c92a2a'}" opacity="0.85"><title>${escape(`${c.label}: geometric mean ${c.mean.toFixed(2)}x over ${c.rows.length} rows`)}</title></rect>`);
-    if (c.best) parts.push(`<circle cx="${px(c.best.ratio).toFixed(1)}" cy="${y + 12}" r="4" fill="none" stroke="#212529"><title>${escape(`best: ${c.best.name} ${c.best.ratio.toFixed(2)}x`)}</title></circle>`);
-    if (c.worst) parts.push(`<path d="M ${px(c.worst.ratio).toFixed(1)} ${y + 7} l 5 5 l -5 5 l -5 -5 z" fill="#212529"><title>${escape(`worst: ${c.worst.name} ${c.worst.ratio.toFixed(2)}x`)}</title></path>`);
-    const note = `${c.mean.toFixed(2)}x · ${c.behind ? `${c.behind}/${c.rows.length} behind, worst ${c.worst.name} ${c.worst.ratio.toFixed(2)}x` : `all ${c.rows.length} ahead`}`;
-    parts.push(`<text x="${left + width + 8}" y="${y + 15}" class="${ahead ? 'perf-met' : 'perf-missed'}">${escape(note.length > 60 ? note.slice(0, 59) + '…' : note)}</text>`);
+    parts.push(`<rect x="${x0.toFixed(1)}" y="${y + 5}" width="${w.toFixed(1)}" height="14" fill="${ahead ? '#2b8a3e' : '#c92a2a'}" opacity="0.85"><title>${escape(`${c.label}: ${rel(c.mean)} over ${c.rows.length} rows`)}</title></rect>`);
+    if (c.best) parts.push(`<circle cx="${px(c.best.ratio).toFixed(1)}" cy="${y + 12}" r="4" fill="none" stroke="#212529"><title>${escape(`best: ${c.best.name}, ${rel(c.best.ratio)}`)}</title></circle>`);
+    if (c.worst) parts.push(`<path d="M ${px(c.worst.ratio).toFixed(1)} ${y + 7} l 5 5 l -5 5 l -5 -5 z" fill="#212529"><title>${escape(`worst: ${c.worst.name}, ${rel(c.worst.ratio)}`)}</title></path>`);
+    const note = c.behind ? `${rel(c.mean)} · slower on ${c.behind} of ${c.rows.length}; worst ${c.worst.name}, ${rel(c.worst.ratio)}` : `${rel(c.mean)} · faster on all ${c.rows.length}`;
+    parts.push(`<text x="${left + width + 8}" y="${y + 15}" class="${ahead ? 'perf-met' : 'perf-missed'}">${escape(note.length > 96 ? note.slice(0, 95) + '…' : note)}</text>`);
   });
   const sources = [...new Set(cats.map(c => `${c.file} ${String(c.commit).slice(0, 8)} ${c.date}`))].join('; ');
   parts.push(`<text x="0" y="${height - 8}" class="perf-axis perf-source">${escape(`From bench/results: ${sources}.`)}</text>`);
-  const svg = `<figure class="perf-chart" id="chart-summary"><svg viewBox="0 0 ${left + width + right} ${height}" width="100%" role="img" aria-label="Summary: Grail against the fastest rival in every category" xmlns="http://www.w3.org/2000/svg">${parts.join('')}</svg><figcaption>Every benchmark on one page: per category, Grail's ratio to the fastest rival, the geometric mean of the category's rows (left of 1x is ahead). The charts further down have every row.</figcaption></figure>`;
-  const body = cats.map(c => `<tr><td>${escape(c.label)}</td><td class="${c.mean <= 1 ? 'perf-met' : 'perf-missed'}">${c.mean.toFixed(2)}x</td><td>${c.behind}/${c.rows.length}</td><td>${escape(c.best.name)} ${c.best.ratio.toFixed(2)}x</td><td>${escape(c.worst.name)} ${c.worst.ratio.toFixed(2)}x</td><td><code>${escape(String(c.commit).slice(0, 8))}</code> ${escape(c.date)}</td></tr>`).join('');
-  const table = `<div class="perf-table"><table><caption>Every category: Grail over the fastest rival (geometric mean), how many rows it is behind on, and its best and worst rows</caption><thead><tr><th>category</th><th>Grail / fastest rival</th><th>rows behind</th><th>best row</th><th>worst row</th><th>measured on</th></tr></thead><tbody>${body}</tbody></table></div>`;
+  const svg = `<figure class="perf-chart" id="chart-summary"><svg viewBox="0 0 ${left + width + right} ${height}" width="100%" role="img" aria-label="Summary: Grail against the fastest rival in every category" xmlns="http://www.w3.org/2000/svg">${parts.join('')}</svg><figcaption>Every benchmark on one page: per category, how much faster or slower Grail is than the fastest rival (the geometric mean of the category's rows). The charts further down have every row.</figcaption></figure>`;
+  const body = cats.map(c => `<tr><td>${escape(c.label)}</td><td class="${c.mean <= 1 ? 'perf-met' : 'perf-missed'}">${rel(c.mean)}</td><td>${c.behind} of ${c.rows.length}</td><td>${escape(c.best.name)}: ${rel(c.best.ratio)}</td><td>${escape(c.worst.name)}: ${rel(c.worst.ratio)}</td><td><code>${escape(String(c.commit).slice(0, 8))}</code> ${escape(c.date)}</td></tr>`).join('');
+  const table = `<div class="perf-table"><table><caption>Every category: how Grail compares with the fastest rival (geometric mean), the rows where it is slower, and its best and worst rows</caption><thead><tr><th>category</th><th>Grail vs the fastest rival</th><th>rows where Grail is slower</th><th>best row</th><th>worst row</th><th>measured on</th></tr></thead><tbody>${body}</tbody></table></div>`;
   return `<section class="perf-results perf-summary">${svg}${table}</section>`.replace(/\n/g, ' ');
 }

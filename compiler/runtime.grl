@@ -2423,14 +2423,17 @@ fn rt_copy(src: u64) -> u64 {
     rt_copy_bytes(dst + 24, raw_load(src), n);
     return dst;
 }
-// A copy of a vector of plain words (elements that need no drop).
+// A copy of a vector of plain words (elements that need no drop): one buffer of exactly its length,
+// copied in one call.
 fn rt_vec_copy(src: u64) -> u64 {
     dst := rt_new();
     n := raw_load(src + 8);
-    mut i = 0;
-    while i < n {
-        rt_push(dst, raw_load(raw_load(src) + i * 8));
-        i = i + 1;
+    if n != 0 {
+        ptr := rt_grow(raw_load(dst), 0, n * 8);
+        rt_copy_bytes(ptr, raw_load(src), n * 8);
+        raw_store(dst, ptr);
+        raw_store(wrapping_add(dst, 8), n);
+        raw_store(wrapping_add(dst, 16), n);
     }
     return dst;
 }
@@ -4725,6 +4728,10 @@ fn rt_uthread_enter() -> u64 {
     rt_os_ctx_leave(rec);
     rt_abort();
     return 0;
+}
+// host::yield_now: give up the processor for a moment (lib/chan.grl's backoff).
+fn f_host_yield_now() -> u64 {
+    return rt_yield();
 }
 // The record of the dedicated thread that is running, for the wrapper; 0 anywhere else.
 fn f_host_thread_self() -> u64 {

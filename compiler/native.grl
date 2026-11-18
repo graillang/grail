@@ -1027,6 +1027,9 @@ struct C {
     drop_names_by_ty: u8[][],
     // framable's answer by type (0 not asked, 1 no, 2 yes), and layout_bits' nesting depth.
     framable_memo: u64[],
+    // Per type: 1 when no type parameter occurs in it (bind_types returns it as it is), 2 when one
+    // may, 0 not yet asked (ty_closed).
+    ty_closed: u8[],
     // A type's interface encoding by type id, and the dependency pairs encoding it adds: a type is
     // spelled once per run and copied after that (iface_w_type). Empty bytes: not encoded yet.
     wty_bytes: u8[][],
@@ -1160,6 +1163,16 @@ struct C {
     // Empty for a hand-run compiler; the option vector then carries the executable's own path, size
     // and modification time instead.
     fn_id: u8[],
+    // The module's unit pack (fncache "Packs"): its name in the store when the driver named one
+    // (`--fn-pack`), the pack this run read, and the units this run will file in its place.
+    fn_pack: u8[],
+    fn_pk: fncache::Pack,
+    fn_pk_read: u64,
+    fn_wnames: u8[][],
+    fn_woffs: u64[],
+    fn_wlens: u64[],
+    fn_wdata: u8[],
+    fn_wslots: u64[],
     // `--fn-cache-quiet`: use the store, print no report line.
     fn_quiet: u64,
     // `--object PATH`: assemble in this process (compiler/asm_x86.grl) and write the object to PATH;
@@ -5743,9 +5756,8 @@ fn return_bonds<a>(c: (&a mut C), src: u64, dst: u64, aggregate: u64) -> unit {
             }
         }
     } else {
-        // Marked in a byte map and read back in index order: the bond list's order, as before.
-        mut hit = u8[0; n];
-        mut any = false;
+        // Put back in the bond list's order (an insertion sort: a source holds few bonds, and the
+        // list can be long, so nothing proportional to it is built).
         mut stack = u64[];
         stack.push(src);
         while let Some(p) = stack.pop() {
@@ -5755,8 +5767,14 @@ fn return_bonds<a>(c: (&a mut C), src: u64, dst: u64, aggregate: u64) -> unit {
             }
             while j != 0 {
                 if j - 1 < n {
-                    hit[j - 1] = 1;
-                    any = true;
+                    found.push(j - 1);
+                    mut q = found.len() - 1;
+                    while (q != 0) && (found[q - 1] > found[q]) {
+                        swap := found[q - 1];
+                        found[q - 1] = found[q];
+                        found[q] = swap;
+                        q -= 1;
+                    }
                 }
                 j = c.bond_hnext[j - 1];
             }
@@ -5766,13 +5784,6 @@ fn return_bonds<a>(c: (&a mut C), src: u64, dst: u64, aggregate: u64) -> unit {
                     stack.push(k);
                 }
                 k = c.check.places[k - 1].next;
-            }
-        }
-        if any {
-            for i in n {
-                if hit[i] != 0 {
-                    found.push(i);
-                }
             }
         }
     }
@@ -8143,12 +8154,38 @@ fn advance<a>(c: (&a mut C)) -> unit {
     // cursor may step onto the end-of-file token, but stepping past it is a truncated program, not
     // a token to skip. Without this the scan spun forever on an unfinished declaration.
     if c.toks.len() <= c.pos {
-        if c.toks.len() != 0 {
-            exchange(&mut c.pos, c.toks.len() - 1);
-        }
-        fail(&mut c, view("unexpected end of file"));
+        past_end(&mut c);
     }
     exchange(&mut c.pos, c.pos + 1);
+    return ();
+}
+// The parser's refusals, out of line: a refusal's message is an owned value, and one in a hot
+// function made every call of it save, clear and drop-test registers for it (advance, ident and
+// expect run for every token).
+fn past_end<a>(c: (&a mut C)) -> unit {
+    if c.toks.len() != 0 {
+        exchange(&mut c.pos, c.toks.len() - 1);
+    }
+    fail(&mut c, view("unexpected end of file"));
+    return ();
+}
+fn not_a_name<a>(c: (&a mut C)) -> unit {
+    mut msg = copy_bytes(view("expected a name here"));
+    push_bytes(&mut msg, view(found_msg(&mut c)));
+    fail(&mut c, view(msg));
+    return ();
+}
+fn truth_not_a_name<a>(c: (&a mut C)) -> unit {
+    fail(&mut c, view("truth keyword is not an identifier"));
+    return ();
+}
+fn expected_token<a, b>(c: (&a mut C), s: &b [u8]) -> unit {
+    want := s.copy();
+    mut msg = copy_bytes(view("expected `"));
+    push_bytes(&mut msg, view(want));
+    msg.push(96);
+    push_bytes(&mut msg, view(found_msg(&mut c)));
+    fail(&mut c, view(msg));
     return ();
 }
 // The cursor's token text. Past the last token is the end of the file, which has no text.
@@ -8812,12 +8849,7 @@ fn eat<a, b>(c: (&a mut C), s: &b [u8]) -> bool {
 }
 fn expect<a, b>(c: (&a mut C), s: &b [u8]) -> unit {
     if !eat(&mut c, s) {
-        want := s.copy();
-        mut msg = copy_bytes(view("expected `"));
-        push_bytes(&mut msg, view(want));
-        msg.push(96);
-        push_bytes(&mut msg, view(found_msg(&mut c)));
-        fail(&mut c, view(msg));
+        expected_token(&mut c, s);
     }
     return ();
 }
@@ -11617,17 +11649,6 @@ fn pv_ir_atoms<a>(c: (&a mut C), lo: u64, hi: u64) -> Atom[] {
     return out;
 }
 // A statement keyword whose own conditions and statements report what they do as they are compiled.
-fn pv_compound<a, b>(t: &b [u8]) -> bool {
-    if (t.len() < 2) || (6 < t.len()) {
-        return false;
-    }
-    return same(view(t), view("if"))
-        || same(view(t), view("match"))
-        || same(view(t), view("while"))
-        || same(view(t), view("loop"))
-        || same(view(t), view("for"))
-        || same(view(t), view("unsafe"));
-}
 // A statement that calls may write through the names it mentions, so what they meant before it is
 // forgotten after it. A compound statement is not scanned here: its condition and its own statements
 // report themselves, which is the precision the token walk could not have.
@@ -11642,11 +11663,10 @@ fn pv_ir_statement<a>(c: (&a mut C), lo: u64, hi: u64) -> unit {
     if k == 123 {
         return ();
     }
-    if k == 1 {
-        t := tok_text(&mut c, lo);
-        if pv_compound(view(t)) {
-            return ();
-        }
+    // A compound statement (if, match, while, loop, for, unsafe) is read part by part, not here.
+    if (k == 1) && (is_at(&mut c, lo, view("if")) || is_at(&mut c, lo, view("match")) || is_at(&mut c, lo, view("while"))
+        || is_at(&mut c, lo, view("loop")) || is_at(&mut c, lo, view("for")) || is_at(&mut c, lo, view("unsafe"))) {
+        return ();
     }
     if !pv_span_calls(&mut c, lo, hi) {
         return ();
@@ -11853,13 +11873,14 @@ fn pv_unwritten<a, b>(c: (&a mut C), open: u64, end: u64, name: &b [u8]) -> bool
     }
     mut i = open + 1;
     while i < end {
+        // The tokens are compared where they are (is_at): this scan runs per statement and name.
         if kind_at(&mut c, i) == 1 {
-            if same(view(tok_text(&mut c, i)), view(name)) {
+            if is_at(&mut c, i, view(name)) {
                 nk := kind_at(&mut c, i + 1);
                 if (nk == 61) || ((261 < nk) & (nk < 269)) {
                     return false;
                 }
-                if (2 <= i) && (kind_at(&mut c, i - 2) == 38) && same(view(tok_text(&mut c, i - 1)), view("mut")) {
+                if (2 <= i) && (kind_at(&mut c, i - 2) == 38) && is_at(&mut c, i - 1, view("mut")) {
                     return false;
                 }
             }
@@ -12418,13 +12439,11 @@ fn pv_strict_fail_why<a, b, d>(c: (&a mut C), pred: Pred, pos: u64, need: &b [u8
 }
 fn ident<a>(c: (&a mut C)) -> u8[] {
     if kind(&mut c) != 1 {
-        mut msg = copy_bytes(view("expected a name here"));
-        push_bytes(&mut msg, view(found_msg(&mut c)));
-        fail(&mut c, view(msg));
+        not_a_name(&mut c);
     }
     t := tok_text(&mut c, c.pos);
     if same(view(t), view("true")) || same(view(t), view("false")) {
-        fail(&mut c, view("truth keyword is not an identifier"));
+        truth_not_a_name(&mut c);
     }
     advance(&mut c);
     return t;
@@ -13345,7 +13364,7 @@ fn callable_formal<a>(c: (&a mut C), f: u64, formal: u64) -> u64 {
 // The environment record of a closure type, or 0 when it carries no captures.
 fn ty_env<a>(c: (&a mut C), ty: u64) -> u64 {
     if !is_type_id(ty) {
-        fail(&mut c, view("internal: no type where one is required"));
+        no_type(&mut c);
     }
     t := &c.types[ty];
     return t.env;
@@ -13356,7 +13375,7 @@ fn intern_full<a>(c: (&a mut C), k: u64, arg: u64, mode: u64, regions: u64[]) ->
 fn type_args<a>(c: (&a mut C), ty: u64) -> u64[] {
     mut args = u64[];
     if !is_type_id(ty) {
-        fail(&mut c, view("internal: no type where one is required"));
+        no_type(&mut c);
     }
     t := &c.types[ty];
     for i in t.args.len() {
@@ -14706,23 +14725,30 @@ fn nominal_type<a>(c: (&a mut C), d: u64) -> u64 {
     require_interfaces(&mut c, &args, &declaration_constraints(&c, d));
     return intern_args(&mut c, 8, d, 0, rs, args);
 }
+// The type accessors' refusal, kept out of line: the message is an owned value, and building it in
+// each accessor gave every call - ten million in a large check - a frame that saved, cleared and
+// tested callee-saved registers for a drop that only the failing path can need.
+fn no_type<a>(c: (&a mut C)) -> unit {
+    fail(&mut c, view("internal: no type where one is required"));
+    return ();
+}
 fn ty_kind<a>(c: (&a mut C), ty: u64) -> u64 {
     if !is_type_id(ty) {
-        fail(&mut c, view("internal: no type where one is required"));
+        no_type(&mut c);
     }
     t := &c.types[ty];
     return t.kind;
 }
 fn ty_arg<a>(c: (&a mut C), ty: u64) -> u64 {
     if !is_type_id(ty) {
-        fail(&mut c, view("internal: no type where one is required"));
+        no_type(&mut c);
     }
     t := &c.types[ty];
     return t.arg;
 }
 fn ty_mode<a>(c: (&a mut C), ty: u64) -> u64 {
     if !is_type_id(ty) {
-        fail(&mut c, view("internal: no type where one is required"));
+        no_type(&mut c);
     }
     t := &c.types[ty];
     return t.mode;
@@ -14730,7 +14756,7 @@ fn ty_mode<a>(c: (&a mut C), ty: u64) -> u64 {
 fn type_regions<a>(c: (&a mut C), ty: u64) -> u64[] {
     mut rs = u64[];
     if !is_type_id(ty) {
-        fail(&mut c, view("internal: no type where one is required"));
+        no_type(&mut c);
     }
     t := &c.types[ty];
     for i in t.regions.len() {
@@ -15387,7 +15413,51 @@ fn project<a>(c: (&a mut C), base: u64, mode: u64) -> u64 {
     fail(&mut c, view("missing associated type in an interface implementation"));
     return 0;
 }
+// Whether no type parameter occurs in `ty`, so binding it gives `ty` back. Unions (binding checks their
+// members again), projections and arrays (binding puts their length in canonical form) are never
+// counted closed: bind_types takes the whole path for them.
+fn ty_closed<a>(c: (&a mut C), ty: u64) -> bool {
+    if !is_type_id(ty) {
+        return false;
+    }
+    if ty < c.ty_closed.len() {
+        known := c.ty_closed[ty];
+        if known != 0 {
+            return known == 1;
+        }
+    }
+    k := ty_kind(&mut c, ty);
+    mut closed = (k != 9) && (k != 30) && (k != 32);
+    if closed && (k == 8) && is_union(&mut c, ty) {
+        closed = false;
+    }
+    if closed
+        && ((k == 6) || (k == 27) || (k == 28) || (k == 7) || (k == 12) || (k == 13) || (k == 14) || (k == 16) || (k == 20) || (k == 29)
+            || (k == 34) || (k == 35) || (k == 36)) {
+        closed = ty_closed(&mut c, ty_arg(&mut c, ty));
+    }
+    n := c.types[ty].args.len();
+    mut i = 0;
+    while closed && (i < n) {
+        a := c.types[ty].args[i];
+        closed = ty_closed(&mut c, a);
+        i += 1;
+    }
+    while c.ty_closed.len() <= ty {
+        c.ty_closed.push(0);
+    }
+    mut mark = 2;
+    if closed {
+        mark = 1;
+    }
+    c.ty_closed[ty] = mark;
+    return closed;
+}
 fn bind_types<a, b>(c: (&a mut C), ty: u64, map: (&b u64[])) -> u64 {
+    // A type no parameter occurs in binds to itself: nothing to copy, rebuild or intern again.
+    if ty_closed(&mut c, ty) {
+        return ty;
+    }
     k := ty_kind(&mut c, ty);
     mode := ty_mode(&mut c, ty);
     mut arg = ty_arg(&mut c, ty);
@@ -15445,12 +15515,17 @@ fn bind_types<a, b>(c: (&a mut C), ty: u64, map: (&b u64[])) -> u64 {
 fn field_type<a>(c: (&a mut C), ty: u64, index: u64) -> u64 {
     d := ty_arg(&mut c, ty);
     mut t = field_ty(&mut c, d, index);
-    mut rs = type_regions(&mut c, ty);
-    mut args = type_args(&mut c, ty);
-    field := bind_types(&mut c, t, &args);
-    if rs.len() == 0 {
+    // The record's arguments and regions are copied out only when they are used: a field whose type
+    // no parameter occurs in is that type, and most records have no regions.
+    mut field = t;
+    if !ty_closed(&mut c, t) {
+        args := type_args(&mut c, ty);
+        field = bind_types(&mut c, t, &args);
+    }
+    if !is_type_id(ty) || (c.types[ty].regions.len() == 0) {
         return field;
     }
+    rs := type_regions(&mut c, ty);
     return substitute(&mut c, field, &rs);
 }
 fn concrete_type<a>(c: (&a mut C), ty: u64) -> bool {
@@ -21134,7 +21209,7 @@ fn dr_load<a>(c: (&a mut C), files: u64) -> unit {
     exchange(&mut c.dr_key, key.copy());
     mut name = copy_bytes(view("dr-"));
     push_bytes(&mut name, view(fncache::hash(view(key))));
-    u := fncache::load_checked(view(c.fn_dir), view(name));
+    u := fn_load_unit(&mut c, view(name), true);
     if (u.key.len() == 0) || !same(view(u.key), view(key)) {
         return ();
     }
@@ -21234,8 +21309,125 @@ fn dr_save<a>(c: (&a mut C)) -> unit {
     mut name = copy_bytes(view("dr-"));
     push_bytes(&mut name, view(fncache::hash(view(c.dr_key))));
     u := fncache::Unit { key: c.dr_key.copy(), text: text, facts: u8[], regs: u8[] };
-    fncache::save(view(c.fn_dir), view(name), &u);
+    fn_save_unit(&mut c, view(name), &u);
     c.fn_used.push(name);
+    return ();
+}
+// ---- The store's units: through the module's pack when the driver named one -------------------
+fn fn_packed<a>(c: &a C) -> bool {
+    return (c.fn_pack.len() != 0) & (c.fn_dir.len() != 0);
+}
+// The pack's file: the driver's name for the module, and the run's mode - a check and a build (or a
+// debug build) of one module file different units, and each must keep its own pack rather than
+// overwrite the other's.
+fn fn_pack_file<a>(c: &a C) -> u8[] {
+    mut name = copy_bytes(view(c.fn_pack));
+    if c.check_only != 0 {
+        push_bytes(&mut name, view("-check"));
+    }
+    if c.debug != 0 {
+        push_bytes(&mut name, view("-debug"));
+    }
+    return name;
+}
+// Reads the module's pack, once, before any body (and before body workers fork, so they share it).
+fn fn_pack_open<a>(c: (&a mut C)) -> unit {
+    if !fn_packed(&c) || (c.fn_pk_read != 0) {
+        return ();
+    }
+    exchange(&mut c.fn_pk_read, 1);
+    file := fn_pack_file(&c);
+    pk := fncache::pack_read(view(c.fn_dir), view(file));
+    exchange(&mut c.fn_pk, pk);
+    return ();
+}
+// The bytes of the unit filed under `name`: the pack's, else a one-file entry (a store written before
+// packs, or by a run that named none).
+fn fn_unit_bytes<a, b>(c: (&a mut C), name: &b [u8]) -> u8[] {
+    if fn_packed(&c) {
+        fn_pack_open(&mut c);
+        got := fncache::pack_get(&c.fn_pk, name);
+        if got.len() != 0 {
+            return got;
+        }
+    }
+    mut file = copy_bytes(view(c.fn_dir));
+    file.push(47);
+    push_bytes(&mut file, name);
+    if host::exists(view(file)) == 0 {
+        return u8[];
+    }
+    return host::read_file(view(file));
+}
+fn fn_load_unit<a, b>(c: (&a mut C), name: &b [u8], checked: bool) -> fncache::Unit {
+    bytes := fn_unit_bytes(&mut c, name);
+    if bytes.len() == 0 {
+        return fncache::none();
+    }
+    if checked {
+        return fncache::decode_piped(bytes);
+    }
+    return fncache::decode(bytes);
+}
+// A unit this run applied, kept for the pack the run will file: its encoding appended to one buffer.
+fn fn_pack_keep<a, b, d>(c: (&a mut C), name: &b [u8], u: (&d fncache::Unit)) -> unit {
+    if !fn_packed(&c) || (c.par_me != 0) {
+        return ();
+    }
+    if fncache::index_find(&c.fn_wslots, &c.fn_wnames, name) != 0 {
+        return ();
+    }
+    bytes := fncache::encode(u);
+    c.fn_woffs.push(c.fn_wdata.len());
+    c.fn_wlens.push(bytes.len());
+    c.fn_wdata.append(view(bytes));
+    c.fn_wnames.push(copy_bytes(name));
+    i := c.fn_wnames.len() - 1;
+    fncache::index_put(&mut c.fn_wslots, &c.fn_wnames, i);
+    return ();
+}
+// A unit replayed straight from the store, kept for the run's pack as the bytes it was filed as.
+fn fn_pack_keep_raw<a, b>(c: (&a mut C), name: &b [u8]) -> unit {
+    if !fn_packed(&c) || (c.par_me != 0) {
+        return ();
+    }
+    if fncache::index_find(&c.fn_wslots, &c.fn_wnames, name) != 0 {
+        return ();
+    }
+    bytes := fn_unit_bytes(&mut c, name);
+    if bytes.len() == 0 {
+        return ();
+    }
+    c.fn_woffs.push(c.fn_wdata.len());
+    c.fn_wlens.push(bytes.len());
+    c.fn_wdata.append(view(bytes));
+    c.fn_wnames.push(copy_bytes(name));
+    i := c.fn_wnames.len() - 1;
+    fncache::index_put(&mut c.fn_wslots, &c.fn_wnames, i);
+    return ();
+}
+// Files a unit: into the pack when the run has one, else as a file of its own.
+fn fn_save_unit<a, b, d>(c: (&a mut C), name: &b [u8], u: (&d fncache::Unit)) -> unit {
+    if fn_packed(&c) {
+        fn_pack_keep(&mut c, name, u);
+        return ();
+    }
+    fncache::save(view(c.fn_dir), name, u);
+    return ();
+}
+// The module's pack, written once at the end of the run, over the previous one.
+fn fn_pack_flush<a>(c: (&a mut C)) -> unit {
+    if !fn_packed(&c) || (c.par_me != 0) || (c.fn_wnames.len() == 0) {
+        return ();
+    }
+    names := exchange(&mut c.fn_wnames, u8[][]);
+    offs := exchange(&mut c.fn_woffs, u64[]);
+    lens := exchange(&mut c.fn_wlens, u64[]);
+    data := exchange(&mut c.fn_wdata, u8[]);
+    file := fn_pack_file(&c);
+    fncache::pack_write(view(c.fn_dir), view(file), &names, &offs, &lens, view(data));
+    c.fn_used.push(file);
+    fn_note_used(&mut c);
     return ();
 }
 // The entries this run used, written once (fncache::note_used): at the end of the bodies pass, and
@@ -21300,7 +21492,8 @@ fn dr_fast<a>(c: (&a mut C), position: u64, claim_alloc: u64, claim_panic: u64, 
     mut u = fncache::Unit { key: c.dr_name[k].copy(), text: u8[], facts: u8[], regs: rbytes.copy() };
     if c.check_only == 0 {
         // A build needs the text: the unit itself, as filed (a check unit has none and is a miss).
-        u = fncache::load(view(c.fn_dir), view(c.dr_name[k]));
+        dname := c.dr_name[k].copy();
+        u = fn_load_unit(&mut c, view(dname), false);
         if u.key.len() == 0 {
             return false;
         }
@@ -21318,6 +21511,8 @@ fn dr_fast<a>(c: (&a mut C), position: u64, claim_alloc: u64, claim_panic: u64, 
     c.dr_hits = c.dr_hits + 1;
     name := c.dr_name[k].copy();
     c.fn_used.push(name.copy());
+    // A body replayed through the body record is still one of this run's units: its pack keeps it.
+    fn_pack_keep_raw(&mut c, view(name));
     dr_note(&mut c, position, last, ord, view(unit), view(name), view(rbytes));
     exchange(&mut c.pos, last + 1);
     return true;
@@ -21864,11 +22059,8 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             from_worker := par_unit.key.len() != 0;
             mut hit = par_unit;
             if (hit.key.len() == 0) & (c.fn_dir.len() != 0) {
-                if c.check_only != 0 {
-                    hit = fncache::load_checked(view(c.fn_dir), view(fncache::hash(view(key))));
-                } else {
-                    hit = fncache::load(view(c.fn_dir), view(fncache::hash(view(key))));
-                }
+                hname := fncache::hash(view(key));
+                hit = fn_load_unit(&mut c, view(hname), c.check_only != 0);
                 par_outcome = 2;
             }
             if hit.key.len() != 0 {
@@ -21891,6 +22083,9 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                         fn_apply(&mut c, &hit, &regs, fn_line, position, claimed_alloc, claimed_panic, claimed_block);
                         hit_name := fncache::hash(view(key));
                         c.fn_used.push(hit_name.copy());
+                        // Every unit the run applied - a store hit or a body worker's - goes into
+                        // the pack the run files.
+                        fn_pack_keep(&mut c, view(hit_name), &hit);
                         hit_regs := hit.regs.copy();
                         dr_note(&mut c, position, end, hit_ord, view(unit), view(hit_name), view(hit_regs));
                         if par_outcome == 1 {
@@ -22339,7 +22534,11 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             // so two keys that collide make a miss and never a wrong hit.
             if c.fn_dir.len() != 0 {
                 filed_name := fncache::hash(view(produced.key));
-                fncache::save(view(c.fn_dir), view(filed_name), &produced);
+                // A body worker files nothing when the run packs its units: it hands the unit to
+                // the parent, which keeps it.
+                if !(fn_packed(&c) & (c.par_me != 0)) {
+                    fn_save_unit(&mut c, view(filed_name), &produced);
+                }
                 c.fn_used.push(filed_name);
                 c.fn_filed = c.fn_filed + 1;
             }
@@ -37308,263 +37507,459 @@ fn indirect_call<a>(c: (&a mut C), value: Val, opened: u64) -> Val {
     return val(slot, resulttype);
 }
 fn builtin_id<a>(n: &a [u8]) -> u64 {
-    if same(view(n), view("Atomic")) {
-        return 30;
-    }
-    if same(view(n), view("Mutex")) {
-        return 31;
-    }
-    if same(view(n), view("parallel_map")) {
-        return 32;
-    }
-    if same(view(n), view("parallel_split")) {
-        return 43;
-    }
-    if same(view(n), view("parallel_for_zip")) {
-        return 67;
-    }
-    if same(view(n), view("parallel_spawn")) {
-        return 44;
-    }
-    if same(view(n), view("parallel_join")) {
-        return 45;
-    }
-    if same(view(n), view("parallel_with")) {
-        return 58;
-    }
-    if same(view(n), view("thread_spawn_raw")) {
-        return 59;
-    }
-    if same(view(n), view("parallel_class")) {
-        return 60;
-    }
-    if same(view(n), view("task_scope")) {
-        return 33;
-    }
-    if same(view(n), view("spawn")) {
-        return 34;
-    }
-    if same(view(n), view("join")) {
-        return 35;
-    }
-    if same(view(n), view("try_join")) {
-        return 55;
-    }
-    if same(view(n), view("fence")) {
-        return 63;
-    }
-    if same(view(n), view("fence_acquire")) {
-        return 64;
-    }
-    if same(view(n), view("fence_release")) {
-        return 65;
-    }
-    if same(view(n), view("spin_hint")) {
-        return 66;
-    }
-    if same(view(n), view("task_fail")) {
-        return 56;
-    }
-    if same(view(n), view("ignore_failure")) {
-        return 57;
-    }
-    if same(view(n), view("format")) {
-        return 36;
-    }
-    if same(view(n), view("view")) {
-        return 37;
-    }
-    if same(view(n), view("cstr")) {
-        return 39;
-    }
-    if same(view(n), view("cptr")) {
-        return 40;
-    }
-    if same(view(n), view("cptr_mut")) {
-        return 41;
-    }
-    if same(view(n), view("cnull")) {
-        return 42;
-    }
-    if same(view(n), view("cstr_bytes")) {
-        return 46;
-    }
-    if same(view(n), view("cslice")) {
-        return 47;
-    }
-    if same(view(n), view("ptr_of")) {
-        return 48;
-    }
-    if same(view(n), view("alloc")) {
-        return 49;
-    }
-    if same(view(n), view("free")) {
-        return 50;
-    }
-    if same(view(n), view("ptr_from_addr")) {
-        return 51;
-    }
-    if same(view(n), view("view_mut")) {
-        return 38;
-    }
-    if same(view(n), view("borrow")) {
-        return 13;
-    }
-    if same(view(n), view("borrow_mut")) {
-        return 14;
-    }
-    if same(view(n), view("load")) {
-        return 15;
-    }
-    if same(view(n), view("exchange")) {
-        return 16;
-    }
-    if same(view(n), view("wrapping_add")) {
-        return 19;
-    }
-    if same(view(n), view("wrapping_sub")) {
-        return 20;
-    }
-    if same(view(n), view("wrapping_mul")) {
-        return 21;
-    }
-    if same(view(n), view("wrapping_pow")) {
-        return 22;
-    }
-    if same(view(n), view("print")) {
-        return 17;
-    }
-    if same(view(n), view("println")) {
-        return 18;
-    }
-    if same(view(n), view("raw_load")) {
-        return 101;
-    }
-    if same(view(n), view("raw_store")) {
-        return 102;
-    }
-    if same(view(n), view("raw_byte")) {
-        return 103;
-    }
-    if same(view(n), view("raw_putbyte")) {
-        return 104;
-    }
-    if same(view(n), view("raw_load32")) {
-        return 136;
-    }
-    if same(view(n), view("raw_store32")) {
-        return 137;
-    }
-    if same(view(n), view("raw_map")) {
-        return 105;
-    }
-    if same(view(n), view("raw_state")) {
-        return 106;
-    }
-    if same(view(n), view("raw_syscall")) {
-        return 107;
-    }
-    if same(view(n), view("raw_target")) {
-        return 108;
-    }
-    if same(view(n), view("raw_win32")) {
-        return 133;
-    }
-    if same(view(n), view("raw_win_local")) {
-        return 134;
-    }
-    if same(view(n), view("raw_win_call")) {
-        return 135;
-    }
-    if same(view(n), view("raw_syscall4")) {
-        return 109;
-    }
-    if same(view(n), view("raw_atomic_load")) {
-        return 110;
-    }
-    if same(view(n), view("raw_atomic_store")) {
-        return 111;
-    }
-    if same(view(n), view("raw_atomic_cas")) {
-        return 112;
-    }
-    if same(view(n), view("raw_atomic_load_relaxed")) {
-        return 113;
-    }
-    if same(view(n), view("raw_atomic_load_acquire")) {
-        return 114;
-    }
-    if same(view(n), view("raw_atomic_store_relaxed")) {
-        return 115;
-    }
-    if same(view(n), view("raw_atomic_store_release")) {
-        return 116;
-    }
-    if same(view(n), view("raw_atomic_fetch_add")) {
-        return 138;
-    }
-    if same(view(n), view("raw_atomic_fetch_sub")) {
-        return 139;
-    }
-    if same(view(n), view("raw_atomic_swap")) {
-        return 140;
-    }
-    if same(view(n), view("raw_spin_hint")) {
-        return 141;
-    }
-    if same(view(n), view("raw_atomic_fence")) {
-        return 142;
-    }
-    if same(view(n), view("raw_thread_clone")) {
-        return 117;
-    }
-    if same(view(n), view("raw_call2")) {
-        return 118;
-    }
-    if same(view(n), view("raw_call3")) {
-        return 119;
-    }
-    if same(view(n), view("raw_tp_get")) {
-        return 120;
-    }
-    if same(view(n), view("raw_tp_set")) {
-        return 121;
-    }
-    if same(view(n), view("raw_switch")) {
-        return 122;
-    }
-    if same(view(n), view("raw_fadd")) {
-        return 123;
-    }
-    if same(view(n), view("raw_fsub")) {
-        return 124;
-    }
-    if same(view(n), view("raw_fmul")) {
-        return 125;
-    }
-    if same(view(n), view("raw_fdiv")) {
-        return 126;
-    }
-    if same(view(n), view("raw_flt")) {
-        return 127;
-    }
-    if same(view(n), view("raw_feq")) {
-        return 128;
-    }
-    if same(view(n), view("raw_fsqrt")) {
-        return 129;
-    }
-    if same(view(n), view("raw_f64_from_i64")) {
-        return 130;
-    }
-    if same(view(n), view("raw_i64_from_f64")) {
-        return 131;
-    }
-    if same(view(n), view("raw_import")) {
-        return 133;
-    }
-    if same(view(n), view("raw_sites")) {
-        return 143;
+    // Asked of every call's name: the length and first byte pick the few builtins it can be, so a
+    // name is compared with at most a handful of them, not all of them in turn.
+    k := n.len();
+    if k == 0 {
+        return 0;
+    }
+    f := n[0];
+    if k == 4 {
+        if f == 99 {
+            if same(view(n), view("cstr")) {
+                return 39;
+            }
+            if same(view(n), view("cptr")) {
+                return 40;
+            }
+            return 0;
+        }
+        if f == 102 {
+            if same(view(n), view("free")) {
+                return 50;
+            }
+            return 0;
+        }
+        if f == 106 {
+            if same(view(n), view("join")) {
+                return 35;
+            }
+            return 0;
+        }
+        if f == 108 {
+            if same(view(n), view("load")) {
+                return 15;
+            }
+            return 0;
+        }
+        if f == 118 {
+            if same(view(n), view("view")) {
+                return 37;
+            }
+            return 0;
+        }
+        return 0;
+    }
+    if k == 5 {
+        if f == 77 {
+            if same(view(n), view("Mutex")) {
+                return 31;
+            }
+            return 0;
+        }
+        if f == 97 {
+            if same(view(n), view("alloc")) {
+                return 49;
+            }
+            return 0;
+        }
+        if f == 99 {
+            if same(view(n), view("cnull")) {
+                return 42;
+            }
+            return 0;
+        }
+        if f == 102 {
+            if same(view(n), view("fence")) {
+                return 63;
+            }
+            return 0;
+        }
+        if f == 112 {
+            if same(view(n), view("print")) {
+                return 17;
+            }
+            return 0;
+        }
+        if f == 115 {
+            if same(view(n), view("spawn")) {
+                return 34;
+            }
+            return 0;
+        }
+        return 0;
+    }
+    if k == 6 {
+        if f == 65 {
+            if same(view(n), view("Atomic")) {
+                return 30;
+            }
+            return 0;
+        }
+        if f == 98 {
+            if same(view(n), view("borrow")) {
+                return 13;
+            }
+            return 0;
+        }
+        if f == 99 {
+            if same(view(n), view("cslice")) {
+                return 47;
+            }
+            return 0;
+        }
+        if f == 102 {
+            if same(view(n), view("format")) {
+                return 36;
+            }
+            return 0;
+        }
+        if f == 112 {
+            if same(view(n), view("ptr_of")) {
+                return 48;
+            }
+            return 0;
+        }
+        return 0;
+    }
+    if k == 7 {
+        if f == 112 {
+            if same(view(n), view("println")) {
+                return 18;
+            }
+            return 0;
+        }
+        if f == 114 {
+            if same(view(n), view("raw_map")) {
+                return 105;
+            }
+            if same(view(n), view("raw_flt")) {
+                return 127;
+            }
+            if same(view(n), view("raw_feq")) {
+                return 128;
+            }
+            return 0;
+        }
+        return 0;
+    }
+    if k == 8 {
+        if f == 99 {
+            if same(view(n), view("cptr_mut")) {
+                return 41;
+            }
+            return 0;
+        }
+        if f == 101 {
+            if same(view(n), view("exchange")) {
+                return 16;
+            }
+            return 0;
+        }
+        if f == 114 {
+            if same(view(n), view("raw_load")) {
+                return 101;
+            }
+            if same(view(n), view("raw_byte")) {
+                return 103;
+            }
+            if same(view(n), view("raw_fadd")) {
+                return 123;
+            }
+            if same(view(n), view("raw_fsub")) {
+                return 124;
+            }
+            if same(view(n), view("raw_fmul")) {
+                return 125;
+            }
+            if same(view(n), view("raw_fdiv")) {
+                return 126;
+            }
+            return 0;
+        }
+        if f == 116 {
+            if same(view(n), view("try_join")) {
+                return 55;
+            }
+            return 0;
+        }
+        if f == 118 {
+            if same(view(n), view("view_mut")) {
+                return 38;
+            }
+            return 0;
+        }
+        return 0;
+    }
+    if k == 9 {
+        if f == 114 {
+            if same(view(n), view("raw_store")) {
+                return 102;
+            }
+            if same(view(n), view("raw_state")) {
+                return 106;
+            }
+            if same(view(n), view("raw_win32")) {
+                return 133;
+            }
+            if same(view(n), view("raw_call2")) {
+                return 118;
+            }
+            if same(view(n), view("raw_call3")) {
+                return 119;
+            }
+            if same(view(n), view("raw_fsqrt")) {
+                return 129;
+            }
+            if same(view(n), view("raw_sites")) {
+                return 143;
+            }
+            return 0;
+        }
+        if f == 115 {
+            if same(view(n), view("spin_hint")) {
+                return 66;
+            }
+            return 0;
+        }
+        if f == 116 {
+            if same(view(n), view("task_fail")) {
+                return 56;
+            }
+            return 0;
+        }
+        return 0;
+    }
+    if k == 10 {
+        if f == 98 {
+            if same(view(n), view("borrow_mut")) {
+                return 14;
+            }
+            return 0;
+        }
+        if f == 99 {
+            if same(view(n), view("cstr_bytes")) {
+                return 46;
+            }
+            return 0;
+        }
+        if f == 114 {
+            if same(view(n), view("raw_load32")) {
+                return 136;
+            }
+            if same(view(n), view("raw_target")) {
+                return 108;
+            }
+            if same(view(n), view("raw_tp_get")) {
+                return 120;
+            }
+            if same(view(n), view("raw_tp_set")) {
+                return 121;
+            }
+            if same(view(n), view("raw_switch")) {
+                return 122;
+            }
+            if same(view(n), view("raw_import")) {
+                return 133;
+            }
+            return 0;
+        }
+        if f == 116 {
+            if same(view(n), view("task_scope")) {
+                return 33;
+            }
+            return 0;
+        }
+        return 0;
+    }
+    if k == 11 {
+        if f == 114 {
+            if same(view(n), view("raw_putbyte")) {
+                return 104;
+            }
+            if same(view(n), view("raw_store32")) {
+                return 137;
+            }
+            if same(view(n), view("raw_syscall")) {
+                return 107;
+            }
+            return 0;
+        }
+        return 0;
+    }
+    if k == 12 {
+        if f == 112 {
+            if same(view(n), view("parallel_map")) {
+                return 32;
+            }
+            return 0;
+        }
+        if f == 114 {
+            if same(view(n), view("raw_win_call")) {
+                return 135;
+            }
+            if same(view(n), view("raw_syscall4")) {
+                return 109;
+            }
+            return 0;
+        }
+        if f == 119 {
+            if same(view(n), view("wrapping_add")) {
+                return 19;
+            }
+            if same(view(n), view("wrapping_sub")) {
+                return 20;
+            }
+            if same(view(n), view("wrapping_mul")) {
+                return 21;
+            }
+            if same(view(n), view("wrapping_pow")) {
+                return 22;
+            }
+            return 0;
+        }
+        return 0;
+    }
+    if k == 13 {
+        if f == 102 {
+            if same(view(n), view("fence_acquire")) {
+                return 64;
+            }
+            if same(view(n), view("fence_release")) {
+                return 65;
+            }
+            return 0;
+        }
+        if f == 112 {
+            if same(view(n), view("parallel_join")) {
+                return 45;
+            }
+            if same(view(n), view("parallel_with")) {
+                return 58;
+            }
+            if same(view(n), view("ptr_from_addr")) {
+                return 51;
+            }
+            return 0;
+        }
+        if f == 114 {
+            if same(view(n), view("raw_win_local")) {
+                return 134;
+            }
+            if same(view(n), view("raw_spin_hint")) {
+                return 141;
+            }
+            return 0;
+        }
+        return 0;
+    }
+    if k == 14 {
+        if f == 105 {
+            if same(view(n), view("ignore_failure")) {
+                return 57;
+            }
+            return 0;
+        }
+        if f == 112 {
+            if same(view(n), view("parallel_split")) {
+                return 43;
+            }
+            if same(view(n), view("parallel_spawn")) {
+                return 44;
+            }
+            if same(view(n), view("parallel_class")) {
+                return 60;
+            }
+            return 0;
+        }
+        if f == 114 {
+            if same(view(n), view("raw_atomic_cas")) {
+                return 112;
+            }
+            return 0;
+        }
+        return 0;
+    }
+    if k == 15 {
+        if f == 114 {
+            if same(view(n), view("raw_atomic_load")) {
+                return 110;
+            }
+            if same(view(n), view("raw_atomic_swap")) {
+                return 140;
+            }
+            return 0;
+        }
+        return 0;
+    }
+    if k == 16 {
+        if f == 112 {
+            if same(view(n), view("parallel_for_zip")) {
+                return 67;
+            }
+            return 0;
+        }
+        if f == 114 {
+            if same(view(n), view("raw_atomic_store")) {
+                return 111;
+            }
+            if same(view(n), view("raw_atomic_fence")) {
+                return 142;
+            }
+            if same(view(n), view("raw_thread_clone")) {
+                return 117;
+            }
+            if same(view(n), view("raw_f64_from_i64")) {
+                return 130;
+            }
+            if same(view(n), view("raw_i64_from_f64")) {
+                return 131;
+            }
+            return 0;
+        }
+        if f == 116 {
+            if same(view(n), view("thread_spawn_raw")) {
+                return 59;
+            }
+            return 0;
+        }
+        return 0;
+    }
+    if k == 20 {
+        if f == 114 {
+            if same(view(n), view("raw_atomic_fetch_add")) {
+                return 138;
+            }
+            if same(view(n), view("raw_atomic_fetch_sub")) {
+                return 139;
+            }
+            return 0;
+        }
+        return 0;
+    }
+    if k == 23 {
+        if f == 114 {
+            if same(view(n), view("raw_atomic_load_relaxed")) {
+                return 113;
+            }
+            if same(view(n), view("raw_atomic_load_acquire")) {
+                return 114;
+            }
+            return 0;
+        }
+        return 0;
+    }
+    if k == 24 {
+        if f == 114 {
+            if same(view(n), view("raw_atomic_store_relaxed")) {
+                return 115;
+            }
+            if same(view(n), view("raw_atomic_store_release")) {
+                return 116;
+            }
+            return 0;
+        }
+        return 0;
     }
     return 0;
 }
@@ -41609,6 +42004,10 @@ fn int_type<a>(c: (&a mut C), bits: u64, signed: u64) -> u64 {
     return intern_full(&mut c, 18, bits, signed, u64[]);
 }
 fn int_name<a>(n: &a [u8]) -> u64 {
+    // Every name below is two to five bytes and starts with `u` or `i`: anything else is no integer.
+    if (n.len() < 2) || (5 < n.len()) || ((n[0] != 117) && (n[0] != 105)) {
+        return 0;
+    }
     if same(view(n), view("u8")) {
         return 8;
     }
@@ -61359,6 +61758,7 @@ pub fn main() -> u64 {
         drop_walked: u64[],
         drop_names_by_ty: u8[][],
         framable_memo: u64[],
+        ty_closed: u8[],
         wty_bytes: u8[][],
         wty_deps: u64[][],
         layout_busy: 0,
@@ -61435,6 +61835,14 @@ pub fn main() -> u64 {
         fx_body_calls: u64[],
         fn_dir: u8[],
         fn_id: u8[],
+        fn_pack: u8[],
+        fn_pk: fncache::pack_none(),
+        fn_pk_read: 0,
+        fn_wnames: u8[][],
+        fn_woffs: u64[],
+        fn_wlens: u64[],
+        fn_wdata: u8[],
+        fn_wslots: u64[],
         object: u8[],
         fn_quiet: 0,
         fn_flags: u8[],
@@ -61532,6 +61940,9 @@ pub fn main() -> u64 {
     // Dedicated threads. The ones that take a record's address are `unsafe`: lib/thread.grl is
     // their caller, and nothing checks the address.
     host_fn(&mut c, view("thread_self"), 0);
+    // Give up the processor for a moment (sched_yield on a thread; on a pool task, the worker goes
+    // to another task): lib/chan.grl's backoff between spinning and parking.
+    host_fn(&mut c, view("yield_now"), 0);
     host_fn(&mut c, view("thread_plain"), 0);
     host_fn(&mut c, view("thread_local_key"), 0);
     host_fn(&mut c, view("sleep_until_ms"), 0);
@@ -61768,6 +62179,14 @@ pub fn main() -> u64 {
             // says nothing about it: no per-module report line.
             exchange(&mut c.fn_quiet, 1);
             offset += 1;
+        } else if same(view(option), view("--fn-pack")) {
+            // The name of this module's unit pack in the store: one file for the run's units
+            // instead of one per function (fncache "Packs"). Without it units are one file each.
+            if argc < offset + 3 {
+                fail_option(&mut c, view("--fn-pack needs a name"));
+            }
+            exchange(&mut c.fn_pack, host::arg(offset + 2));
+            offset += 2;
         } else if same(view(option), view("--fn-cache-id")) {
             // The compiler's own digest, as the driver computed it (`cache_build_id`). A unit is
             // code this compiler emitted, so a new compiler is a new key for every function.
@@ -62181,6 +62600,7 @@ pub fn main() -> u64 {
             exchange(&mut c.fn_flags, fn_flags_now(&mut c));
             exchange(&mut c.fn_surface, fn_surface_now(&mut c));
             fncache::ensure(view(c.fn_dir));
+            fn_pack_open(&mut c);
         }
     }
     // Every definition has been emitted by now, so an --export name that never matched is a typo.
@@ -62515,6 +62935,7 @@ pub fn main() -> u64 {
         line.push(10);
         host::print(view(line));
     }
+    fn_pack_flush(&mut c);
     jobs::phase(view("front-end-done"));
     if c.check_only != 0 {
         return 0;
