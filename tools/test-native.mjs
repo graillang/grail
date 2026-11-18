@@ -237,7 +237,7 @@ function proveMutations(test, files, directory, options) {
   const list = [edit, ...files.slice(1)];
   const store = join(directory, 'units-edit');
   const run = withStore => {
-    const extra = [...options.extra, ...(withStore ? ['--fn-cache', store, '--fn-cache-id', 'unit-identity'] : [])];
+    const extra = [...options.extra, ...(withStore ? ['--fn-cache', store, '--fn-cache-id', 'unit-identity', '--fn-pack', 'pk-unit-identity'] : [])];
     try {
       compileProgram(compiler, list, directory, { ...options, name: 'edit', extra });
       return { ok: true, text: readFileSync(join(directory, 'edit.s')) };
@@ -422,7 +422,7 @@ function runCase(test, position, context) {
       const store = join(directory, 'units');
       const withStore = () => {
         const output = [];
-        compileProgram(compiler, files, directory, { target, overflow: test.overflow ?? 'checked', runtime, osRuntime, extra: [...caseRoots, ...(test.flags ?? []), '--fn-cache', store, '--fn-cache-id', 'unit-identity'], output });
+        compileProgram(compiler, files, directory, { target, overflow: test.overflow ?? 'checked', runtime, osRuntime, extra: [...caseRoots, ...(test.flags ?? []), '--fn-cache', store, '--fn-cache-id', 'unit-identity', '--fn-pack', 'pk-unit-identity'], output });
         // `why` is the compiler's own account of the rules that kept bodies out, summed per rule.
         const account = { hits: 0, filed: 0, kept: 0, why: {} };
         for (const m of output.join('').matchAll(/grail: fn-cache: \S+: (\d+) hit, (\d+) filed, (\d+) not units(?: \(([^)]*)\))?/g)) {
@@ -477,7 +477,7 @@ function runCase(test, position, context) {
         const plainDebug = debug([]);
         {
           const debugStore = join(directory, 'units-debug');
-          const unitFlags = ['--fn-cache', debugStore, '--fn-cache-id', 'unit-identity'];
+          const unitFlags = ['--fn-cache', debugStore, '--fn-cache-id', 'unit-identity', '--fn-pack', 'pk-unit-identity'];
           const emptyDebug = debug(unitFlags);
           const warmDebug = debug(unitFlags);
           assert.ok(plainDebug.equals(emptyDebug), `${test.name}: --debug with an empty unit store is not --debug with no store (${describeDifference(plainDebug, emptyDebug)})`);

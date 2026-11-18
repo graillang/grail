@@ -10,6 +10,14 @@
 - **Fixed: a zeroed f32 local in an AArch64 development build failed to assemble** (`movi` was
   missing from `grail asm`), and RV64/AArch64 had no register for `%xmm15`.
 
+- **The per-function store files one pack per module run.** A cold compile used to file one store
+  entry per function (16,126 files for a 4,000-function module, each a create, write and rename); a
+  module run now writes all its units into one pack, once, with one rename, and reads its module's
+  pack once before any body. Units are still keyed per function, so an edit refiles only its own
+  module's pack and replays every other body; entries filed one per file by an older compiler are
+  still read; `grail cache gc` stamps and evicts packs like any entry; a check and a build (and a
+  debug build) of a module keep separate packs. Cold check of a 104k-line module: system time 0.82 s
+  to 0.16 s; cold build: 1.62 s to 1.12 s.
 - **`grail check` is about 9% faster on a large program: the root module writes no interface.** A
   check wrote every module's interface, including the program's root, which no other module reads.
   The root's run now skips it, and with it the effect recording that only fed that interface. A
@@ -53,6 +61,14 @@
   release instructions; the scheduler): Grail's ratio to the fastest rival, the geometric mean of the
   category's rows, with its best and worst rows marked. A table under it names them. It reads the
   same committed results as the other charts (`{{perf:summary}}`).
+- **The release compiler is built with profile-guided optimisation.** `tools/native.mjs release`
+  compiles the compiler's LLVM code with `-fprofile-use` and the profile in
+  `tools/pgo/grail.profdata.xz`: a training run of the instrumented compiler (a cold check and build
+  of a 26 000-line program and the compiler's own check), regenerated with `bun tools/native.mjs
+  pgo-train`. The compiler's output is unchanged (byte-identical text and objects); it runs 7-9% fewer
+  instructions per compile: check of a 104 000-line program 5.06 G -> 4.60 G, its build 26.5 G ->
+  24.7 G. `GRAIL_PGO=0` builds without the profile.
+
 - **Generic code over a type that owns nothing has no drop bookkeeping.** In a specialisation, a
   type parameter bound to a plain type (`A = u64`) answered "needs drop" like an unknown type, so
   every value of it carried a drop flag, a drop-helper call guarded by it, and a callee-saved register
