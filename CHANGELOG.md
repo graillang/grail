@@ -1,5 +1,9 @@
 ## Unreleased
 
+- **The shader pipeline takes `vfx/`, 12 of its 14 entries.** The blast, dust and glass vertex/pixel
+  pairs, both sorts, the dust motion pass, the glass scene copy, surface decals and thermal heat:
+  265 KB of SPIR-V at pin `ca1f1bc05b`, the layout pin growing from 54 to 61 structs. The two
+  simulation compute passes stay recorded as skipped for the terrain mirror.
 - **The Jolt surface closes with the overlap query.** `gr_jolt_overlap_capsule` is one `CollideShape`
   of the same capsule the cast sweeps, stopped at the first hit: `abundance/src/jolt.grl` now answers
   the core's `overlap` contract (a boolean, with `invalid_request` for a capsule shorter than its own
