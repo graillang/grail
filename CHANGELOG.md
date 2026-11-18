@@ -1,5 +1,10 @@
 ## Unreleased
 
+- **The shader pipeline takes `characters/`, all 10 entries.** Cluster bounds, skin and cloth
+  deformation, tangents, the hair strands/raster/resolve chain and the subsurface
+  Burley/resolve/temporal passes, plus the fixture irradiance: 131 KB of SPIR-V at pin
+  `ca1f1bc05b`, the layout pin growing from 46 to 54 structs. No character entry reaches the mirror
+  trees.
 - **The damage domain's placed-object entry points are ported.** `abundance/src/damage_actions.grl`
   carries `actions/damage/placed_damage` (cmake/tx/damage): the book rows, `strike_placed`'s skips,
   refusal wording ("damage.placed_energy") and wreck threshold, `first_placed_hit`'s box slab test and
