@@ -3940,7 +3940,7 @@ fn ffi_marker_enter<a>(c: (&a mut C), slot: u64) -> unit {
 // After the call, with its result in memory: count the marker out and look at the pair's `retaken`
 // word (8 bytes on). x86-64 Linux does both with plain instructions - the monitor pays for the
 // ordering with membarrier (docs/design/concurrency-model.md, 2.4.1), and so do AArch64 and RV64
-// Linux; Windows x64 keeps a locked increment until its barrier is wired in. A non-zero `retaken` goes to rt_foreign_return, which settles the retake with one
+// Linux; Windows x64 the same, with FlushProcessWriteBuffers. A non-zero `retaken` goes to rt_foreign_return, which settles the retake with one
 // compare-and-swap. A `blocking` call has its own leave hook.
 fn ffi_hooks_leave<a, b>(c: (&a mut C), slot: u64, block_here: bool, symbol: &b [u8]) -> unit {
     if block_here {
@@ -3955,11 +3955,7 @@ fn ffi_hooks_leave<a, b>(c: (&a mut C), slot: u64, block_here: bool, symbol: &b 
         stack_slot(&mut c, slot);
         o(&mut c, view(",%r11\ntestq %r11,%r11\n"));
         jump(&mut c, view("je"), done);
-        if c.target == 0 {
-            o(&mut c, view("incq (%r11)\n"));
-        } else {
-            o(&mut c, view("lock incq (%r11)\n"));
-        }
+        o(&mut c, view("incq (%r11)\n"));
         o(&mut c, view("cmpq $0,8(%r11)\n"));
         jump(&mut c, view("je"), done);
         o(&mut c, view("movq %r11,%rsi\n"));
@@ -4487,6 +4483,9 @@ fn win32_arity<a>(name: (&a [u8])) -> u64 {
         return 1;
     }
     if same(view(name), view("SwitchToThread")) {
+        return 0;
+    }
+    if same(view(name), view("FlushProcessWriteBuffers")) {
         return 0;
     }
     if same(view(name), view("DeleteFileW")) {

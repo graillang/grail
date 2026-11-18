@@ -495,8 +495,8 @@ table; registered once with `MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED`; without
 4.14 - undeclared calls are never handed off, while declared `blocking` calls still are). The
 argument above does not depend on the hardware's ordering: `membarrier` is a full barrier in every
 running thread on every architecture, which is all the Dekker pair needs. Windows x64:
-`FlushProcessWriteBuffers` is the same tool; until it is wired in the call keeps a locked increment,
-which is its own barrier. On Linux the entry also reaches the pair in one load: thread-record word 48
+`FlushProcessWriteBuffers` is the same tool, and the call's side is plain there too (its entry keeps
+the record's kind test: record word 48 is WaitOnAddress's compare value on Windows). On Linux the entry also reaches the pair in one load: thread-record word 48
 caches the running block's pair (rt_marker_cache).
 
 ### 2.5 Coordination

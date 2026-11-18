@@ -1,5 +1,10 @@
 ## Unreleased
 
+- **Default `extern "C"` calls on Windows x64 lost their locked instruction.** The foreign-call
+  marker counts out with a plain increment and one load; the scheduler's monitor orders it with
+  `FlushProcessWriteBuffers` before it hands a stuck call's worker on (docs/design/concurrency-model.md,
+  2.4.1). With this every target has the asymmetric-fence marker.
+
 - **Default `extern "C"` calls on AArch64 and RV64 Linux lost their atomic instruction too.** The
   foreign-call marker counts out with a plain load, add and store (the `ldaxr`/`stlxr` loop and
   `amoadd.d.aqrl` are gone) and reaches its counter in one load from the thread record; the
