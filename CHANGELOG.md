@@ -1,5 +1,12 @@
 ## Unreleased
 
+- **Abundance's megaplants_batch extraction cache is ported.** `abundance/src/megaplants_batch.grl`
+  reproduces `_file_sig` (a provenance-recorded sha256, else `size:mtime`), `_variant_sig` (archive,
+  atlas and traced templates, extractor bytes), the `<species>_<tag>-<sig>` entry name and `_prune`'s
+  least-recently-used order to the cap. The suite imports the reference module in a driver that
+  instruments `shutil.rmtree` to record the prune order; the port prints the same signatures, entry
+  names, prune order, summary and held size. Extraction itself (usd_assembly.py under `usd-core`) is
+  the recorded boundary; the port never extracts or deletes.
 - **Inventory: the stock authority, the slot authority and the never-blocks overflow rule are
   ported.** `abundance/src/logistics_registry.grl` carries the catalog (sorted, five refusals, its
   FNV content hash, `extends`), the container/lot/crop-genome records with their acceptance rules
