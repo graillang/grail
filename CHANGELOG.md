@@ -1,5 +1,9 @@
 ## Unreleased
 
+- Fixed (main red, bootstrap): `compiler/pkg.grl`'s SHA-256 round constants are built inside `sha_k()` instead of a
+  module-level array `static`. The bootstrap seed cannot parse a vector-literal static, so `grail-c6 compiler/*.grl`
+  failed with "expected `fn`, found `static`" and the gate could not build the compiler for any branch. Same 64
+  constants, read the same way.
 - **The Jolt surface closes with the overlap query.** `gr_jolt_overlap_capsule` is one `CollideShape`
   of the same capsule the cast sweeps, stopped at the first hit: `abundance/src/jolt.grl` now answers
   the core's `overlap` contract (a boolean, with `invalid_request` for a capsule shorter than its own
