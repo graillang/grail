@@ -1211,7 +1211,13 @@ fn rt_free(p: u64) -> u64 {
     }
     if ((p & 8) == 0) & (raw_load(wrapping_add(raw_state(), 3416)) == 0) {
         block := wrapping_sub(p, 16);
-        if raw_load(wrapping_add(block, 8)) == 1 {
+        st := raw_load(wrapping_add(block, 8));
+        if st == 2 {
+            // A static object (a literal's, or a payload-less variant's like bintrees' `Leaf`):
+            // never freed. Answered here - inlined, a free of one went through two slow calls.
+            return 0;
+        }
+        if st == 1 {
             size := raw_load(block);
             if size < 257 {
                 // The block sizes here are 32, 64, 128 and 256; (size >> 6) - (size >> 8) is their
