@@ -1,5 +1,22 @@
 ## Unreleased
 
+- **`abundance/src/water_geometry.grl`: the water renderer's CPU half, ported from the engine's own
+  callers.** `water_geometry.cpp` and `water_volume_split.cpp` compiled unchanged are the reference
+  for `buffer_waterway_centerline` (round-join, round-cap buffering of a centreline at the caller's
+  millimetre precision), `union_water_raster_cells` (whole cells unioned on the integer grid, holes
+  nested), `triangulate_water_region` (earcut over outer plus holes), `water_region_area_m2`,
+  `smooth_water_region_for_presentation` (the blended outline re-normalised through Clipper2, with
+  its fallbacks), and the tile layer - `clip_water_region_to_rect`,
+  `split_water_region_to_budget` (adaptive quadtree subdivision that returns over-budget pieces at
+  the depth bound rather than dropping them) and `water_region_vertex_count`. Region order is the
+  engine's area-then-first-point `std::sort`, including its permutation for equal keys, so the
+  pieces come out in the same order. `abundance/tests/water_geometry_test.grl` prints 14 lines that
+  match `parity/water_geometry.cpp`, which compiles both engine sources unmodified against the
+  vendored Clipper2 and earcut and hashes every result canonically: 1 meander buffer, 1 hairpin
+  buffer, 2 cell-union regions, the triangulations, the smoothed outline, the clipped tile, the two
+  subdivision budgets, the vertex count and area, and the four refusal paths. Porting it caught one
+  more arithmetic-order bug of the kind these ports keep finding: the ring area accumulated
+  `(sum + a) - b` where the C++ evaluates `sum + (a - b)`.
 - **The Jolt surface closes with the overlap query.** `gr_jolt_overlap_capsule` is one `CollideShape`
   of the same capsule the cast sweeps, stopped at the first hit: `abundance/src/jolt.grl` now answers
   the core's `overlap` contract (a boolean, with `invalid_request` for a capsule shorter than its own
