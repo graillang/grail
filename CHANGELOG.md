@@ -22,6 +22,18 @@
   to rest, a rocket impact and blast occlusion. Found on the way: the built
   libabundance_gameplay_core.a carries a collision_chunk object older than its source (it lacks the
   shared-contact tie-break), so the reference compiles collision_chunk.cpp from the checkout.
+- **The engine's job scheduler runs in Grail.** `abundance/src/job_scheduler.grl` ports
+  `engine/base/job_scheduler.cpp`'s runtime on real threads. It covers the near/far tiered keys
+  and need rank, the foci registry and rekey, worker and lane formulas, far-share admission,
+  dependencies with the class loan, cancellation, keep_alive expiry, preemption, `job_yield`,
+  quiesce, post, `fork_join` and executors. `jobsched_test.grl` checks the near-first invariant
+  under a far flood at 1/2/4/8 workers, plus fork under flood, the teleport re-rank, keep_alive
+  and 100-run determinism. Its 64 lines match `parity/jobsched.cpp`, which runs the same scenarios
+  on the engine's own `ab::JobScheduler` from libabundance_worldgen.a. `tools/abundance-test.mjs`
+  compiles the threaded module (with lib/thread, sync, time, rc) only for that test. Job bodies own
+  their captures (`Fn<Share, Owned>(SchedulerRef, id, key)`, like the engine's `std::function`), and
+  the scheduler handle is passed in as an Arc clone. Storing a call-scoped `Fn<Share>` left a lent
+  environment dangling, which the compiler now refuses.
 - **The island's macro coastline plan is ported bit for bit.** `abundance/src/
   worldgen_macro_coast.grl` carries `terrain_shape.cpp`'s planner (lobes, bays, islets, valley axes
   and tributaries), `macro_land_field` and `protected_blend_weight`, with the file's own noise
