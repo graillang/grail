@@ -1,5 +1,15 @@
 ## Unreleased
 
+- **Abundance: the palette classifier is gated cell-for-cell on a generated world.** The palette
+  test generates the feature pass's own world (seed 1, 64 cells of 250 m, exactly as
+  `tests/parity/features.cpp` does), dumps every input the classifier reads
+  (`tests/parity/feature_world.bin`) and the engine's primary at every cell centre
+  (`feature_world_primary.bin`), and requires agreement at all 4096 cells: the port matches, same
+  digest, 1027 soil cells. A count is not a gate; the cell is. The feature inventory fixture cannot
+  gate this — it carries none of the biome, secondary-biome, feature/material-mask, rainfall,
+  lake-depth or water-table inputs — and an earlier reading of that gap as stale fixtures was wrong:
+  the fixtures stand and nothing in them changed.
+
 - **The procedural rock kit's pebble and rock-node meshes are ported, bit for bit.**
   `abundance/src/procgen_rock_kit.grl` carries `build_pebble_mesh` and `build_rock_node_mesh` with
   `procgen_math.hpp`'s Rng and vector maths and the shared Soup pipeline (position-welded smooth
