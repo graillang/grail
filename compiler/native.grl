@@ -5887,11 +5887,13 @@ fn close_loans<a>(c: (&a mut C)) -> unit {
         // a function has made thousands of loans and bonds by its last statement and nearly all of
         // them are over.
         bonds_sync(&mut c);
-        ids := ownership::live_ids(&mut c.check);
-        mut n = ids.len();
+        // Read in place, newest first (live_count / live_at): ending the loan at `n` removes only
+        // that entry, so the ones below it stay where they were. Copying the list made every
+        // statement's close an allocation.
+        mut n = ownership::live_count(&mut c.check);
         while n != 0 {
             n = n - 1;
-            id := ids[n];
+            id := ownership::live_at(&c.check, n);
             mut held = 0;
             mut j = 0;
             if id < c.bond_head.len() {
@@ -5923,9 +5925,9 @@ fn close_loans<a>(c: (&a mut C)) -> unit {
                 ostate := ownership::status(&c.check, root);
                 if (ostate == 1) || (ostate == 3) {
                     mut reached = 0;
-                    alive := ownership::live_ids(&mut c.check);
-                    for k in alive.len() {
-                        source := c.check.loans[alive[k] - 1].source;
+                    alive := ownership::live_count(&mut c.check);
+                    for k in alive {
+                        source := c.check.loans[ownership::live_at(&c.check, k) - 1].source;
                         if ownership::ancestor(&c.check, root, source) {
                             reached = 1;
                             break;
@@ -15544,9 +15546,10 @@ fn concrete_type<a>(c: (&a mut C), ty: u64) -> bool {
             return false;
         }
     }
-    mut args = type_args(&mut c, ty);
-    for i in args.len() {
-        a := args[i];
+    // Read in place, not copied out (type_args): only the arguments' ids are needed.
+    n := c.types[ty].args.len();
+    for i in n {
+        a := c.types[ty].args[i];
         if !concrete_type(&mut c, a) {
             return false;
         }
@@ -15687,6 +15690,11 @@ fn same_type<a>(c: (&a mut C), x: u64, y: u64) -> u64 {
         mut map = u64[];
         return callable_contract(&mut c, x, y, &mut map, 0);
     }
+    // Types are interned: one id is one type, and every comparison below holds of a type and
+    // itself (the callable kinds above keep their own contract check).
+    if x == y {
+        return 1;
+    }
     aa := ty_arg(&mut c, x);
     bb := ty_arg(&mut c, y);
     // An `Atomic<T>` is its element's (`Atomic<u8>` is not `Atomic<u64>`); a SIMD vector is its
@@ -15711,15 +15719,15 @@ fn same_type<a>(c: (&a mut C), x: u64, y: u64) -> u64 {
         if aa != bb {
             return 0;
         }
-        ax := type_args(&mut c, x);
-        bx := type_args(&mut c, y);
-        if ax.len() != bx.len() {
+        // The arguments are read in place, not copied out (type_args).
+        n := c.types[x].args.len();
+        if n != c.types[y].args.len() {
             return 0;
         }
-        for i in ax.len() {
-            x := ax[i];
-            y := bx[i];
-            if same_type(&mut c, x, y) == 0 {
+        for i in n {
+            ex := c.types[x].args[i];
+            ey := c.types[y].args[i];
+            if same_type(&mut c, ex, ey) == 0 {
                 return 0;
             }
         }
