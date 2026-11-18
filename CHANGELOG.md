@@ -10,6 +10,11 @@
   lake-depth or water-table inputs — and an earlier reading of that gap as stale fixtures was wrong:
   the fixtures stand and nothing in them changed.
 
+- **The Abundance pin is reproducible**: `abundance/tools/build-pin.sh [COMMIT] [PIN_DIR]` exports a
+  commit of the read-only checkout with `git archive`, symlinks the checkout's generated ISPC headers in,
+  configures once and builds the seven reference libraries, so `ABUNDANCE_ROOT=<pin>/src
+  ABUNDANCE_BUILD=<pin>/build` gates the suite against that commit. The README records the current pin
+  (`ca1f1bc05b`, generator 123) and the invocation.
 - **The procedural rock kit's pebble and rock-node meshes are ported, bit for bit.**
   `abundance/src/procgen_rock_kit.grl` carries `build_pebble_mesh` and `build_rock_node_mesh` with
   `procgen_math.hpp`'s Rng and vector maths and the shared Soup pipeline (position-welded smooth
