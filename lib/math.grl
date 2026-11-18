@@ -1,5 +1,7 @@
 module math;
 
+use math_glibc;
+
 // Elementary functions after fdlibm (Sun Microsystems), written in Grail on IEEE f64.
 // exp/ln/atan are accurate to about 1 ulp; sin/cos/tan use Cody-Waite reduction and stay
 // accurate for |x| < 1e6 (larger arguments lose precision); pow uses exact repeated squaring for
@@ -31,31 +33,10 @@ pub fn ceil(x:f64)->f64{return x.ceil();}
 // Halves round away from zero, like C's round().
 @no_block
 pub fn round(x:f64)->f64{return x.round();}
+// glibc's own exp (lib/math_glibc.grl): the engine calls the C library, so this is the value a
+// parity test sees. fdlibm's formulation differs in the last bit on some inputs.
 @no_block
-pub fn exp(x:f64)->f64{
-    if x.is_nan(){return x;}
-    if x>709.782712893384{return 1.0/0.0;}
-    if x< -745.1332191019411{return 0.0;}
-    hi_word:=high(x)&2147483647;mut k=0i64;mut hi=x;mut lo=0.0;mut r=x;
-    if hi_word>1071001154{
-        if hi_word<1072734898{
-            if x>0.0{hi=x-6.93147180369123816490e-01;lo=1.90821492927058770002e-10;k=1;}
-            else{hi=x+6.93147180369123816490e-01;lo=-1.90821492927058770002e-10;k=-1;}
-        }else{
-            mut half=0.5;if x<0.0{half=-0.5;}
-            k=i64(1.44269504088896338700e+00*x+half);t:=f64(k);
-            hi=x-t*6.93147180369123816490e-01;lo=t*1.90821492927058770002e-10;
-        }
-        r=hi-lo;
-    }else{
-        if hi_word<1043333120{return 1.0+x;}
-    }
-    t:=r*r;
-    c:=r-t*(1.66666666666666019037e-01+t*(-2.77777777770155933842e-03+t*(6.61375632143793436117e-05+t*(-1.65339022054652515390e-06+t*4.13813679705723846039e-08))));
-    if k==0{return 1.0-((r*c)/(c-2.0)-r);}
-    y:=1.0-((lo-(r*c)/(2.0-c))-hi);
-    return scale2(y,k);
-}
+pub fn exp(x:f64)->f64{return math_glibc::exp(x);}
 @no_block
 pub fn ln(value:f64)->f64{
     mut x=value;mut hx=high(x);lx:=bits(x)&4294967295;mut k=0i64;
@@ -102,7 +83,7 @@ fn split_log(value:f64,scale:f64,exponent_hi:f64,exponent_lo:f64)->f64{
 @no_block
 pub fn log10(x:f64)->f64{return split_log(x,4.34294481903251816668e-01,3.01029995663611771306e-01,3.69423907715893078616e-13);}
 @no_block
-pub fn log2(x:f64)->f64{return split_log(x,1.44269504088896338700e+00,1.0,0.0);}
+pub fn log2(x:f64)->f64{return math_glibc::log2(x);}
 fn kernel_sin(x:f64,y:f64,iy:u64)->f64{
     z:=x*x;v:=z*x;
     r:=8.33333333332248946124e-03+z*(-1.98412698298579493134e-04+z*(2.75573137070700676789e-06+z*(-2.50507602534068634195e-08+z*1.58969099521155010221e-10)));

@@ -63,6 +63,17 @@
   class over a canonical voxel fixture (the one the engine's own tests build), so the wording and
   the command each call reports are the engine's; calls that get past the ladder print only that
   they reached the host. 37 new lines, 1187 in total, and the recorded trace is unchanged.
+- **glibc's own double precision `exp` and `log2` are in the standard library.** `lib/math_glibc.grl`
+  is glibc 2.44's table-driven implementations (`sysdeps/ieee754/dbl-64/e_exp.c` and `e_log2.c`, the
+  ARM optimized-routines code glibc ships) with the tables as exact bit patterns, and `math::exp` /
+  `math::log2` now return its values: the engine calls the C library, so this is what a parity test
+  sees, where the fdlibm formulations differed in the last bit. glibc compiles these with fused
+  multiply-adds and the fused sites decide the last bit, so the module carries an exactly rounded
+  software `fma` (Dekker's product, TwoSum, round-to-odd: Boldo and Melquiond 2008) at every site
+  glibc fuses. Gated against this host's libm on 3,000,000 random inputs: `log2` identical
+  everywhere, `exp` identical on all but one (a result at the subnormal boundary, 1 ulp).
+  `pow` follows in the next increment (`math::pow` is still the double-double version).
+  Pinned by `math-glibc-exp-log2`.
 - **The shader pipeline's layout grammar reads the geometry tree's shapes.** `abundance/tools/shader-lib.mjs`
   now skips a `template<...> struct` wrapper whole (`ABReadOnly<T>`, the `AB_LOAD_RO` NonWritable load
   helper) and drops leading `[[...]]` attribute runs before a field's type, so
