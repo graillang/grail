@@ -74,7 +74,9 @@ code is:
   step, where Go's loops are laid out tight;
 - `f32` arithmetic still widens to `f64` where a value comes from a field or crosses a call
   (`xform_f32`, `ecs`). Locals, elements and constants now stay in single precision in registers,
-  which took `dot_f32` from 0.67 to 0.17 seconds and `matmul` from 1.11 to 0.35.
+  which took `dot_f32` from 0.67 to 0.17 seconds and `matmul` from 1.11 to 0.35, and a conversion
+  from a 64-bit integer is one instruction, where it was a runtime call that rounded bit by bit,
+  which took `ecs` from 0.73 to 0.46.
 
 {{perf:bench-rivals#instructions|cpu}}
 
@@ -98,7 +100,8 @@ and Zig, written the way each language is usually written:
 - `dyncall`: a million shapes of three kinds behind an interface object, one indirect call each;
 - `iterchain`: ten million numbers through `map`, `filter` and a sum (Go and Zig have no iterator
   adapters in their standard libraries, so their twins are the loop; Go's uses range-over-func);
-- `ecs`: a million entities as structure-of-arrays `f32` columns, a hundred frames of integration;
+- `ecs`: a million entities as structure-of-arrays `f32` columns, each made at its full length and
+  then filled, a hundred frames of integration;
 - `chan`: bounded channels between threads, one to one, many to one, many to many and a ping-pong
   of round trips (Rust's twin uses crossbeam-channel; C's and Zig's are a mutex-and-condition ring).
 
@@ -112,7 +115,7 @@ payloads inline, and a value written before it is read is not zeroed first. What
   of stamped slots, a compare-exchange per hand-off, spin, then yield, then park). It executes
   fewer instructions than C's, Rust's or Go's twin, second only to Zig's, and its CPU time is level
   with crossbeam's and a quarter of C's and Zig's mutex rings. Go runs both ends as goroutines on
-  one scheduler: a hand-off never wakes another OS thread, which is the remaining 3x. On a loaded
+  one scheduler: a hand-off never wakes another OS thread, and that is what remains. On a loaded
   machine the spinning channels suffer most (crossbeam's figure rose fourfold in an earlier run).
 - **`bintrees`: the allocator.** Allocating and freeing the nodes are about three fifths of the
   run; Zig's release allocator executes the fewest instructions.
@@ -134,8 +137,8 @@ payloads inline, and a value written before it is read is not zeroed first. What
 ## Parallel loops
 
 The `ecs` program above, run on several cores: the same million entities and hundred frames, the
-update split across workers each frame, at 1, 4 and 8 workers. Grail uses `pool::zip3` over the
-position and velocity columns, one call per axis, in pieces of 16,384 entities; C uses OpenMP
+update split across workers each frame, at 1, 4 and 8 workers. Grail uses `parallel_for_zip` over
+each axis's velocity and position columns, one call per axis, in pieces of 16,384 entities; C uses OpenMP
 (`parallel for schedule(static)`), Rust uses rayon (`par_iter_mut().zip(..)` over all six columns,
 pieces of at least 16,384), Go one goroutine per core, and Zig one `std.Thread` per core. The
 others fuse the six columns into one loop, the usual way to write it in each; Grail's library has a
@@ -145,9 +148,15 @@ tool checks that it does: a build that prints another answer is not charted.
 
 A parallel loop is about time, so this chart is wall time, best of nine runs, with every runtime
 told the same number of threads, taken with the machine otherwise idle (load average under 3).
-Grail's release build is the fastest of all on one worker, but it gains little past four: at 8
-workers it is 1.7x C's OpenMP. Its searching workers yield the processor where OpenMP's spin, and a
-frame's three loops of 62 pieces each are short enough for that to show.
+Grail's release build is the fastest of all on one worker and on four (0.92x C's OpenMP), and 1.43x
+C's on eight, where it is no faster than on four. Timed inside the program, its hundred frames on
+eight workers are as fast as OpenMP's at best (8.5 against 8.9 ms) but vary from run to run by half
+again, where OpenMP's do not. Work stealing gives each frame's pieces to whichever worker asks
+first; OpenMP's static schedule gives every thread the same slice every frame, which most likely
+keeps that slice in the thread's own cache. Handing a piece to the worker that ran it last is the
+next step. The development build's set-up loop was a serial third of its run until a conversion
+from a 64-bit integer to `f32` became one instruction; on four workers it went from 0.36 to 0.11
+seconds.
 
 {{perf:parallel#release}}
 
@@ -235,17 +244,23 @@ rounds. The importer row counts how much work the importer got done, so higher i
 {{perf:sched-rivals#scheduler}}
 
 **Where Grail is ahead, and where it is behind.** Measured with the machine otherwise idle, Grail's
-frame loop has the best tail latency of the three (p99 0.65 ms against rayon's 0.83 and oneTBB's
-1.45): its Frame class runs ahead of the importer, as oneTBB's high-priority arena does and as
-rayon, which has no priorities, cannot. On an oversubscribed machine (load average 37, an earlier
+frame loop has the best tail latency of the three (p99 0.67 ms against rayon's 0.70 and oneTBB's
+0.71, and the smallest worst frame): its Frame class runs ahead of the importer, as oneTBB's
+high-priority arena does and as rayon, which has no priorities, cannot. A join from the main thread
+costs half of oneTBB's (141 ns against 288). On an oversubscribed machine (load average 37, an earlier
 run) oneTBB's worst frames barely moved while Grail's grew several times over: Grail's scheduler
 holds its tail while it has the cores to itself. Behind:
 
 - **A join allocates.** Each one makes about five heap allocations for its closures and its
   second result; rayon's join puts a job that lives on the caller's stack onto a deque and
   allocates nothing.
-- **The main thread is not a worker.** Joining from `main` posts the work and waits to be woken,
-  as rayon does; oneTBB's main thread is a slot of its arena and joins directly.
+- **A burst of spawns from `main` is handed across cores one task at a time.** The main thread is
+  not a worker, so each spawn goes into the shared injection ring and another core takes it out:
+  about 90 ns a spawn with one worker, 480 with 24, as each hand-off moves the ring's cache line and
+  the task's record between cores. oneTBB's main thread is a slot of its arena, so its spawns go
+  onto a deque of its own. Until an idle worker stopped reserving a Background slot on every empty
+  look - and waking a parked worker as it gave the slot back - the burst cost 1.1 us a spawn and a
+  join from `main` 0.5 us.
 - **The `fib(32)` rows measure GCC's recursive inlining more than the scheduler.** oneTBB's twin is
   C++ built with g++, which inlines `fib` into itself: serial `fib(32)` takes 46 to 50 million
   instructions there. LLVM never inlines a recursive call into itself, so clang's C (67 million)

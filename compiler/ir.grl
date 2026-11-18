@@ -212,10 +212,10 @@ pub fn arg_regs() -> u64 {
     return 4038;
 }
 
-// The SSE instructions the front end writes, numbered 60..71, and the single-precision arithmetic
-// the optimiser narrows f32 operations to, 72..76: the optimiser knows they touch no
-// general register except the ones named (the integer side of `movd`, `cvttsd2si`, `cvtsi2sdq`)
-// and no memory. Before they had numbers they were unknown instructions, after which every
+// The SSE instructions the front end writes, numbered 60..71 and 79, and the single-precision
+// arithmetic the optimiser narrows f32 operations to, 72..76: the optimiser knows they touch no
+// general register except the ones named (the integer side of `movd`, `cvttsd2si`, `cvtsi2sdq` and
+// `cvtsi2ssq`) and no memory. Before they had numbers they were unknown instructions, after which every
 // register was live and nothing could be removed across them.
 // The argument registers a call reads, when the callee is one whose arguments are known: the runtime
 // exits (llvm.grl `never_returns`, and `rt_abort`; rdi, rsi, rdx by arity, runtime.grl and
@@ -309,6 +309,10 @@ pub fn float_opcode<b>(s: &b [u8], a: u64, space: u64) -> u64 {
     if same_range(view(s), a, space, view("cvtsi2sdq")) {
         return 71;
     }
+    // A signed 64-bit integer to binary32 in one rounding (native.grl, `f32(x)` of a wide integer).
+    if same_range(view(s), a, space, view("cvtsi2ssq")) {
+        return 79;
+    }
     // A float element loaded straight into an SSE register (optimize.grl `xmm_loads`).
     if same_range(view(s), a, space, view("movsd")) {
         return 77;
@@ -337,8 +341,9 @@ pub fn is_desc_op(op: u64) -> bool {
     return (88 < op) && (op < 98);
 }
 pub fn is_float_op(op: u64) -> bool {
-    // 78 is `movss` (optimize.grl `xmm_loads`/`xmm_stores`): never parsed, only made.
-    return (59 < op) && (op < 79);
+    // 78 is `movss` (optimize.grl `xmm_loads`/`xmm_stores`): never parsed, only made. 79 is
+    // `cvtsi2ssq`.
+    return (59 < op) && (op < 80);
 }
 
 pub fn opcode_key(k: u64) -> u64 {
@@ -1369,8 +1374,8 @@ pub fn reads<a>(o: (&a Body), i: u64) -> u64 {
         return 64 | src | dst;
     }
     if is_float_op(op) {
-        // movd, cvttsd2si, cvtsi2sdq: the destination is written, not read.
-        if (op == 69) || (op == 70) || (op == 71) {
+        // movd, cvttsd2si, cvtsi2sdq, cvtsi2ssq: the destination is written, not read.
+        if (op == 69) || (op == 70) || (op == 71) || (op == 79) {
             return src;
         }
         return src | dst;

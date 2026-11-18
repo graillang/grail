@@ -18492,6 +18492,22 @@ fn f32_round<a>(c: (&a mut C), value: u64) -> u64 {
     o(&mut c, view("movq %rax,%xmm0\ncvtsd2ss %xmm0,%xmm0\ncvtss2sd %xmm0,%xmm0\nmovq %xmm0,%rax\n"));
     return save(&mut c);
 }
+// A 64-bit integer to the nearest f32, rounded once (x86 only): `cvtsi2ssq` converts a signed word
+// straight to binary32. A u64 at or above 2^63 is halved first with its low bit kept as a sticky
+// bit, which cannot change the rounding of a 24-bit result, then doubled exactly - the sequence C
+// compilers use, here without a branch: `s` is the top bit, the word is shifted right by `s` and
+// or'ed with its own low bit masked by `s`, and the product is scaled by 1 + s.
+fn f32_from_wide<a>(c: (&a mut C), value: u64, signed: bool) -> u64 {
+    get(&mut c, value, view("%rax"));
+    if signed {
+        o(&mut c, view("cvtsi2ssq %rax,%xmm0\ncvtss2sd %xmm0,%xmm0\nmovq %xmm0,%rax\n"));
+        return save(&mut c);
+    }
+    o(&mut c, view("movq %rax,%rcx\nshrq $63,%rcx\nmovq %rax,%rdx\nandq %rcx,%rdx\nshrq %cl,%rax\norq %rdx,%rax\n"));
+    o(&mut c, view("cvtsi2ssq %rax,%xmm0\naddq $1,%rcx\ncvtsi2ssq %rcx,%xmm1\nmulss %xmm1,%xmm0\n"));
+    o(&mut c, view("cvtss2sd %xmm0,%xmm0\nmovq %xmm0,%rax\n"));
+    return save(&mut c);
+}
 // `op(lhs, rhs)` on floats. With `single` (both operands' static type is f32) the call carries the
 // fact the LLVM lifter rewrites into real `f* float` arithmetic; an f64 call gets none and keeps
 // the word lowering. `invoke` has just recorded which call this is, and the opcode travels with
@@ -49205,10 +49221,14 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
                 from := int_code(&mut c, source);
                 fv := imm(&mut c, from);
                 // At most 32 bits is exact in binary64, so converting and then rounding rounds once.
-                // A wider source could round twice that way; the runtime rounds it once.
+                // A wider source could round twice that way: x86 converts it straight to binary32,
+                // and elsewhere the runtime rounds it once.
                 if float_inline(&c) && ((from & 255) <= 32) {
                     wide := float_emit(&mut c, 130, value.t, 0);
                     return val(f32_round(&mut c, wide), ty);
+                }
+                if float_inline(&c) && ((c.target == 0) || (c.target == 3)) {
+                    return val(f32_from_wide(&mut c, value.t, (((from / 256) & 1) != 0) || ((from & 255) < 64)), ty);
                 }
                 slot := invoke(&mut c, view("rt_f32_from_int"), two(value.t, fv));
                 return val(slot, ty);
@@ -52140,6 +52160,24 @@ fn index_assignment<a>(c: (&a mut C)) -> unit {
     chain := assign_chain(&mut c);
     if (capability != 0) & (chain[2] == 1) {
         base = primary(&mut c, NO_TYPE);
+    } else if (l != 0) && (chain[2] == 1) && (chain[3] == 0) && (kind_at(&mut c, start + 1) == 91)
+        && (ty_kind(&mut c, local_ty(&mut c, l - 1)) == 6) {
+        // `v[i] = x` with `v` a vector binding of this function: the element is reached from the
+        // binding's value, as a read of `v[i]` is, and index_view takes the element's mutable loan
+        // from `v`'s place. Borrowing the binding first (`place`) took the slot's address, and a
+        // slot whose address is taken stays in the frame: every store reloaded the vector from it.
+        id := local_id(&mut c, l - 1);
+        lty := local_ty(&mut c, l - 1);
+        commit_flex(&mut c, l - 1);
+        advance(&mut c);
+        require_mutable_binding(&mut c, id, 1);
+        // The borrow `place` took, made and released here and emitting nothing, so a conflicting
+        // loan is reported at the bracket as it always was; index_view takes the element's own.
+        quiet := exchange(&mut c.quiet, 1);
+        probe := place_slot(&mut c, id, lty, 1);
+        exchange(&mut c.quiet, quiet);
+        release_temporary(&mut c, probe.t);
+        base = val(id, lty);
     } else {
         base = place(&mut c, 1, 0);
         base = chain_walk(&mut c, base, chain[1]);

@@ -342,6 +342,21 @@ should, and rayon cannot, having no priorities.
   jobs (`docs/design/concurrency-model.md`), where oneTBB lets its low-priority arena take every
   idle thread.
 
+**Re-measured 2026-11-18** (commit 4ab4767a against main f59c4cee, the same tool one run after the
+other, machine idle; `bench/results/sched-rivals.json`). Release build, main -> 4ab4767a: a join
+from the main thread 528 -> 141 ns (oneTBB 288), spawn and wait 862 -> 456 ns (oneTBB 372), a burst
+1110 -> 483 ns a spawn (oneTBB 163), fib(32) by nested join from main 1419 -> 878 us; the whole
+sched run's CPU time 6.3 -> 1.8 s. Every row that runs while workers are idle had been paying for
+the idle workers themselves: each empty look reserved a Background slot (a compare-and-swap on jobs
+word 400), found nothing, gave it back and notified - which, on a worker's last look before
+parking, woke another parked worker to do the same - and word 400 shares its line with the
+searching count `rt_notify` reads on every push. A worker now reserves only when Background work is
+queued (`rt_job_background_queued`). The steal scans also read the worker count and block array
+from the worker's own block, and the task injection ring moved to its own lines (scheduler word
+1024), off the line of the worker count and the parked count. What remains of the burst is the
+hand-off itself: 90 ns a spawn on one worker, rising with the number of workers as the ring's line
+and each task record move between cores.
+
 ## What safety costs, and what was decided about it
 
 - **Bounds checks stay**, in every build. They are removed where the refinement prover has the fact,

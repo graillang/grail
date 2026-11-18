@@ -759,6 +759,55 @@
   segments, persistent imports and `transient_report()`. A reference that compiles the engine's own
   file against a mocked device prints the compiled plan for eight declaration programs, and the port
   matches all 2131 lines (`just abundance-test`).
+- **`v[i] = x` on a vector binding no longer takes the binding's address.** The store borrowed the
+  whole binding first, which emitted a `lea` of its frame slot; a slot whose address is taken stays
+  in memory, so every store reloaded the vector from it, and the optimiser could not keep a stable
+  vector's data in a register across the loop either. The element is now reached from the binding's
+  value, as a read of `v[i]` is; the same borrow is still checked at the bracket, so every refusal
+  and its location are unchanged. bench/ecs (native): 0.47 to 0.29 s, output identical.
+- **Fixed: queued work could wait for ever behind a worker that searched first.** A push wakes no
+  parked worker while another is searching, because the searcher will find the work; but it finds
+  one entry, and that one may spin until the next runs (two tasks that meet), with every other
+  worker parked. The last searcher to find work now wakes another to look, as Go's scheduler does.
+  task-scopes-join-cancel-abandon hung in 5 of 300 runs on main and in none of 300 now.
+- **A task scope on the main thread spawns onto a deque of its own.** Its spawns went through the
+  shared injection ring, whose lock every idle worker polls. The scope now takes the external slot
+  (the worker-shaped block the main thread's parallel calls already use) and pushes onto its task
+  deque, which every worker's steal scan visits; each spawn still wakes a parked worker as before,
+  because a task may wait for another to run. Job forks and wakes are unchanged. bench/sched.grl on
+  24 workers (release): a burst of 100k spawns about 480 to 290 ns a spawn; the other rows and the
+  frame loop within noise against the committed runtime.
+- **Performance charts re-measured on 4ab4767a**, machine idle: run time, engine, parallel ECS and
+  the scheduler (the compile and Abundance charts are unchanged). Parallel ECS in development builds
+  is 1.3x to 1.6x Go (it was 2.6x to 6.4x); in release it is level with C's OpenMP on four workers
+  (0.92x) and 1.43x on eight (1.7x). A burst of spawns is 3.0x oneTBB (6.5x) and a join from the main
+  thread half of oneTBB's. `just bench-results` and the gate measure `chan` in the engine chart
+  again: the command had lost it, so a refresh dropped the row the chapter discusses.
+- **Development builds convert a 64-bit integer to `f32` in one instruction.** `f32(x)` of an `i64`
+  (or a `u64`, or any integer wider than 32 bits) called the runtime, which converted in software and
+  then rounded bit by bit; on x86-64 it is now `cvtsi2ssq`, one rounding as the language requires,
+  and a `u64` from 2^63 up is halved with a sticky bit and doubled again, the sequence C compilers
+  use, without a branch. The runtime's own rounding (the other targets) finds the top bit with one
+  conversion instead of a loop. bench/ecs_par (native): 0.47 to 0.23 s on one worker and 0.35 to
+  0.13 s on four - the set-up loop's six million conversions were a serial third of the run;
+  bench/ecs (native) 0.73 to 0.49 s. Results agree bit for bit with the old code and the LLVM build
+  over 8 million random signed and unsigned values.
+- **Idle workers stop costing the threads that give them work.** An idle worker reserved a
+  Background slot on every empty look before looking for Background work, then gave it back and
+  notified - which, on its last look before parking, woke another parked worker to do the same - and
+  the slot count shares a cache line with the searching count every push reads. It now reserves only
+  when Background work is queued. Steal scans read the worker count and the block array from the
+  worker's own block, and the task injection ring has cache lines of its own. Against the
+  scheduler's rivals (release, main -> this change, the same tool one run after the other): a join
+  from the main thread 528 to 141 ns (oneTBB 288), spawn and wait 862 to 456 ns, a burst of 100k
+  spawns 1110 to 483 ns a spawn, fib(32) by nested join from main 1419 to 878 us; the sched run's CPU
+  time 6.3 to 1.8 s. The frame loop is unchanged (28 interleaved rounds) and the I/O task wakes
+  later by 0.58 ms at worst instead of 0.92.
+- **`T[0; n]` into a new vector writes nothing.** An allocation comes back cleared, so copies of a
+  zero word are already there and the pages of a large buffer are first touched by the program's own
+  writes. bench/ecs and bench/ecs_par now make their columns at full length (`f32[0.0; n]`) and fill
+  them by index, as every twin sizes its columns once (malloc, `Vec::with_capacity`, `make`,
+  `alloc`); their set-up loop is level with C's (7.2 ms against 7.2 in ecs_par).
 
 - **Every performance chart is re-measured with the machine idle** (load average under 3; release
   compiler with PGO on main bcf78e5a). Every compile row now beats the fastest rival: the cold
