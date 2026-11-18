@@ -1,5 +1,9 @@
 ## Unreleased
 
+- `tools/test-native.mjs`: the legacy-reference-syntax source check no longer fires on a function
+  named `read` (`fn read<a, b>(...)` in `abundance/src/abtex.grl`) or on prose in line comments
+  (`read through a borrow (` in `combat_core.grl`); both false positives had stopped every corpus
+  leg before its first case.
 - **Abundance's megaplants_import is ported as a plan, byte-identical to the reference's
   invocations.** `abundance/src/megaplants_import.grl` discovers the extracted variants, names the
   canopy family, picks the bark set and tile size, applies the leaf-atlas rule (with its flat-colour
