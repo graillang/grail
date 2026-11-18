@@ -1,5 +1,8 @@
 ## Unreleased
 
+- Fixed (main red): `abundance/src/frame_loop.grl` moved to the harness's `threadedModules`. It drives the
+  thread-backed scheduler, and leaving it in the general port set made every other test fail to resolve
+  `abundance_job_scheduler`; only the tests that list the threaded modules compile it now.
 - **Abundance's file/OS services land on Grail, matching `content_paths.hpp` 35/35 lines.**
   `abundance/src/platform_os.grl` carries the engine core's content paths (`packaged`, `root` including
   the `$HOME/.cache` and `/tmp` fallbacks, `shader_root`, `resolve`) as rules over the environment
