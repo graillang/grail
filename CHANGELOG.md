@@ -1,5 +1,12 @@
 ## Unreleased
 
+- Performance: a fork/join (`pool::join`, `parallel_map`'s splits, `pool::with_class`) costs fewer
+  instructions and two fewer full barriers. A job record's pending and free states are now written
+  with release stores (each was an `xchg` on x86-64); the stack a fork goes on is looked up once per
+  join instead of three times; the trampoline that called a join's first branch is gone (the record
+  calls the callback directly). The record maker also stays within six arguments, so the release
+  build keeps it on the optimised path. Measured with one worker on fib(32) with nested joins: 1434 ->
+  1318 user instructions per join in the development build, 561 -> 503 in release.
 - Performance: a burst of spawns from a main thread's task scope costs the spawning thread about 30%
   less CPU (24 workers: main-thread user time over 6M spawns and joins 0.84 s -> 0.57 s; user cycles
   of five 100k bursts 300M -> 225M, median of 7). A spawn touches fewer contended lines: a
