@@ -1,5 +1,9 @@
 ## Unreleased
 
+- The skip-rebuild cache also writes a shared store (`$GRAIL_BUILD_CACHE`, default
+  `~/.cache/grail-builds/<stamp>/<name>`), so twenty worktrees with identical inputs keep one copy of each
+  artefact instead of twenty; `/home` filled to 100 % twice under the swarm's disk load. A build that
+  cannot copy into the store still succeeds.
 - **The Jolt surface closes with the overlap query.** `gr_jolt_overlap_capsule` is one `CollideShape`
   of the same capsule the cast sweeps, stopped at the first hit: `abundance/src/jolt.grl` now answers
   the core's `overlap` contract (a boolean, with `invalid_request` for a capsule shorter than its own
