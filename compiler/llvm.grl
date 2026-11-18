@@ -4681,6 +4681,23 @@ fn instruction<a, b, c>(l: (&a mut L), line: &b [u8], facts: (&c Facts)) -> unit
             }
             return ();
         }
+        if eq(view(op), view("cmpq")) {
+            // A compare's flags from its operands, not from `ssub.with.overflow`: that call is the
+            // same as a later `subq` of the same operands, so GVN made fib's `n - 2` at the guard
+            // `n < 2` and kept it live across the first recursive call. Exact still: OF of x - y is
+            // SF xor (x <s y), so a `jl` folds to one `icmp slt`, and unused S and O die early.
+            c := def(&mut l, view("icmp ult i64 {}, {}"), &u8[][copy(view(x)), copy(view(y))]);
+            set_flag(&mut l, view("C"), view(c));
+            z := def(&mut l, view("icmp eq i64 {}, {}"), &u8[][copy(view(x)), copy(view(y))]);
+            set_flag(&mut l, view("Z"), view(z));
+            d := def(&mut l, view("sub i64 {}, {}"), &u8[][copy(view(x)), copy(view(y))]);
+            sg := def(&mut l, view("icmp slt i64 {}, 0"), &u8[][d]);
+            set_flag(&mut l, view("S"), view(sg));
+            lt := def(&mut l, view("icmp slt i64 {}, {}"), &u8[][copy(view(x)), copy(view(y))]);
+            ov := op1(&mut l, view("xor"), view(sg), view(lt));
+            set_flag(&mut l, view("O"), view(ov));
+            return ();
+        }
         r := arith(&mut l, view("ssub"), view(x), view(y));
         c := def(&mut l, view("icmp ult i64 {}, {}"), &u8[][copy(view(x)), copy(view(y))]);
         set_flag(&mut l, view("C"), view(c));

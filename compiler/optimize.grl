@@ -818,7 +818,12 @@ fn dead_after<a>(o: (&a ir::Body), i: u64, r: u64, budget: u64) -> bool {
                 }
             }
         }
-        if op == 29 || op == 30 {
+        // At `ret` the caller reads only the result registers and the callee-saved ones: a
+        // caller-saved register's value dies there. `leave` touches only %rsp and %rbp.
+        if op == 30 {
+            return (((ir::caller_saved() & (all_regs_mask() ^ ir::result_live(&o))) >> r) & 1) != 0;
+        }
+        if (op == 29) && ((r == 4) || (r == 5)) {
             return false;
         }
     }
@@ -2878,6 +2883,9 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
     xmm_memops(&mut o, view(s), last);
     xmm_copies(&mut o, view(s), last);
     index_cse(&mut o, view(s), last);
+    // Last, so the SSE and addressing patterns above still see the `%rax` moves they match.
+    lea_moves(&mut o, view(s), last);
+    commuted_loads(&mut o, view(s), last);
     dead_defs(&mut o, view(s), first, last);
     // Slots read only by text emitted outside the lines: a stable sequence's slot (item 6).
     mut keep = u64[];
@@ -3323,24 +3331,36 @@ fn shrink_wrap<a>(o: (&a mut ir::Body), start: u64) {
             out.push(10);
         }
     }
-    // The remainder usually opens with the original guard's own dead `jmp L` (or with `L:`):
-    // falling into it is the jump.
+    // The remainder opens with what followed the original guard's `ret`: up to the next label no
+    // path reaches it (the guard's own `jmp` past its `else`, usually), so its instructions are
+    // dropped. When `L:` is among the labels that follow, falling into them is the jump.
     mut jl = copy_line(view("jmp "));
     put_line(&mut jl, view(target));
     mut ll = copy_line(view(target));
     ll.push(58);
-    mut first = r;
-    while (first < lines.len()) && sw_site(view(lines[first])) {
+    mut dead = r;
+    while (dead < lines.len()) && !sw_label(view(lines[dead])) {
+        dead += 1;
+    }
+    mut falls = false;
+    mut first = dead;
+    while (first < lines.len()) && (sw_label(view(lines[first])) || (lines[first].len() == 0) || (lines[first][0] == 46)) {
+        if sw_is(view(lines[first]), view(ll)) {
+            falls = true;
+        }
         first += 1;
     }
-    falls := (first < lines.len()) && (sw_is(view(lines[first]), view(jl)) || sw_is(view(lines[first]), view(ll)));
     if !falls {
         put_line(&mut out, view(jl));
         out.push(10);
     }
     while r < lines.len() {
-        put_line(&mut out, view(lines[r]));
-        out.push(10);
+        l := view(lines[r]);
+        // Before `dead` only directives and site labels are kept: the instructions are unreachable.
+        if (dead <= r) || (l.len() == 0) || (l[0] == 46) {
+            put_line(&mut out, l);
+            out.push(10);
+        }
         r += 1;
     }
     while o.out.len() > start {
@@ -3371,6 +3391,10 @@ fn sw_starts<a, b>(l: &a [u8], t: &b [u8]) -> bool {
 }
 fn sw_ends<a, b>(l: &a [u8], t: &b [u8]) -> bool {
     return (t.len() <= l.len()) && ir::at(view(l), l.len() - t.len(), t);
+}
+// A label a jump can name: one that ends in `:` and is not a site label.
+fn sw_label<a>(l: &a [u8]) -> bool {
+    return (l.len() != 0) && (l[l.len() - 1] == 58) && !sw_site(l);
 }
 // A statement marker the site table reads (`.gpos`, `.gposa`, `.gbase`, `.gkind`; or the
 // `.Lgs<n>:` label it makes of one): no jump targets it, and it moves with what it marks.
@@ -5746,6 +5770,114 @@ fn const_muls<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
         kill(&mut o, i);
     }
 }
+// A register plus a constant through %rax: `movq %A,%rax; addq/subq $k,%rax; movq %rax,%D` - an
+// argument `n - 1` the prover showed cannot wrap - is `leaq [-]k(%A),%D` when %rax is dead after it
+// and nothing reads the flags the `addq`/`subq` set (flags_dead_after).
+fn lea_moves<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
+    for i in last {
+        if (o.del[i] != 0) || (o.op[i] != 1) || (o.k0[i] != 1) || (o.k1[i] != 1) || (o.v1[i] != 0) {
+            continue;
+        }
+        a := o.v0[i];
+        if (a == 0) || (a == 4) || (15 < a) {
+            continue;
+        }
+        j := next_live(&o, i, last);
+        if (j >= last) || !((o.op[j] == 4) || (o.op[j] == 5)) || (o.k1[j] != 1) || (o.v1[j] != 0) {
+            continue;
+        }
+        k1 := imm_value(&o, view(s), j);
+        if (k1 == 0) || (k1 - 1 > 2147483647) {
+            continue;
+        }
+        m := next_live(&o, j, last);
+        if (m >= last) || (o.op[m] != 1) || (o.k0[m] != 1) || (o.v0[m] != 0) || (o.k1[m] != 1) {
+            continue;
+        }
+        d := o.v1[m];
+        if (d == 0) || (d == 4) || (15 < d) {
+            continue;
+        }
+        if !flags_dead_after(&o, m, last) || !dead_after(&o, m, 0, 6) {
+            continue;
+        }
+        start := o.gen.len();
+        if o.op[j] == 5 {
+            o.gen.push(45);
+        }
+        gen_number(&mut o, k1 - 1);
+        app_gen(&mut o, view("(%"));
+        gen_reg(&mut o, a);
+        o.gen.push(41);
+        end := o.gen.len();
+        ir::put(&mut o.op, j, 3);
+        bump(&mut o);
+        set_operand(&mut o, j, 0, 5, 0);
+        ir::put(&mut o.m0, j, 1 << a);
+        bump(&mut o);
+        set_range(&mut o, j, 0, start, end);
+        set_operand(&mut o, j, 1, 1, d);
+        kill(&mut o, i);
+        kill(&mut o, m);
+    }
+}
+// A call's result combined with an earlier value: `movq %rax,%R; movq X,%rax; addq %R,%rax` (X a
+// frame slot or another register) is `addq X,%rax` when %R is dead after it - the operation
+// commutes, and so do the flags it sets (`addq`, `andq`, `orq`, `xorq`).
+fn commuted_loads<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
+    for i in last {
+        if (o.del[i] != 0) || (o.op[i] != 1) || (o.k0[i] != 1) || (o.v0[i] != 0) || (o.k1[i] != 1) {
+            continue;
+        }
+        r := o.v1[i];
+        if (r == 0) || (r == 4) || (r == 5) || (15 < r) {
+            continue;
+        }
+        j := next_live(&o, i, last);
+        if (j >= last) || (o.op[j] != 1) || (o.k1[j] != 1) || (o.v1[j] != 0) {
+            continue;
+        }
+        if !((o.k0[j] == 2) || ((o.k0[j] == 1) && (o.v0[j] != 0) && (o.v0[j] != r) && (o.v0[j] < 16))) {
+            continue;
+        }
+        m := next_live(&o, j, last);
+        if m >= last {
+            continue;
+        }
+        op := o.op[m];
+        if !((op == 4) || (op == 8) || (op == 9) || (op == 10)) || (o.k0[m] != 1) || (o.v0[m] != r) || (o.k1[m] != 1) || (o.v1[m] != 0) {
+            continue;
+        }
+        if !dead_after(&o, m, r, 6) {
+            continue;
+        }
+        copy_operand(&mut o, m, 0, j, 0);
+        kill(&mut o, i);
+        kill(&mut o, j);
+    }
+}
+// Whether the flags after line i are written before anything could read them, in the straight
+// line that follows (labels pass: a reader after one reads what this path set). A jump, an
+// unparsed line or `incq` (which keeps CF) ends the search without a proof.
+fn flags_dead_after<a>(o: (&a ir::Body), i: u64, last: u64) -> bool {
+    mut j = i;
+    mut steps = 0;
+    while steps < 8 {
+        steps += 1;
+        j = next_insn(&o, j, last);
+        if j >= last {
+            return false;
+        }
+        op := o.op[j];
+        if (op == 15) || ((3 < op) && (op < 11)) {
+            return true;
+        }
+        if !((op == 1) || (op == 2) || (op == 3)) {
+            return false;
+        }
+    }
+    return false;
+}
 // Scaled indices kept in scratch registers (CSE of `i*3`): nbody's element accesses each compute
 // `leaq (%rX,%rX,2),%rax; [addq $k,%rax;] movq %rax,%rsi` and load `(%rB,%rsi,8)`. In one straight
 // line (no jump, call, unknown instruction or jump-target label) the first such index for a given X
@@ -6062,6 +6194,12 @@ fn inline_candidate<a, b, c>(o: (&a mut ir::Body), s: &b [u8], prologue: u64, ch
                         return ();
                     }
                     used = used | m;
+                    // What an instruction touches without naming it (`mulq` and `divq` write
+                    // %rdx:%rax) is no free register either. A call here never returns, or ends the
+                    // body, so what it clobbers is not live after it.
+                    if op != 15 {
+                        used = used | ir::reads(&o, i) | ir::writes(&o, i);
+                    }
                 }
             }
         }

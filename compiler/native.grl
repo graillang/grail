@@ -54451,7 +54451,8 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
         mark(&mut c, no);
         ownership::restore(&mut c.check, &before);
         exchange(&mut c.terminated, 0);
-        if eat(&mut c, view("else")) {
+        had_else := eat(&mut c, view("else"));
+        if had_else {
             if is(&mut c, view("if")) {
                 // `else if`: the failed condition still holds while the next one is tested.
                 pv_ir_open(&mut c);
@@ -54474,6 +54475,13 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
         exchange(&mut c.terminated, yt & nt);
         mark(&mut c, end);
         pv_clamp(&mut c, cond_at, cond_end);
+        // A guard with no `else` whose block never falls through leaves the failed condition to the
+        // rest of the enclosing block: after `if n < 2 { return n; }`, `2 <= n` holds, so `n - 1` and
+        // `n - 2` cannot wrap. Not with an `else`, which could write what the condition read. The
+        // enclosing block's `}` drops them, as it drops pv_clamp's.
+        if (yt != 0) && !had_else {
+            pv_ir_add_all(&mut c, &gains);
+        }
         return ();
     }
     if statement_builtin(&mut c, view("drop")) {

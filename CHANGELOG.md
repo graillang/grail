@@ -1,5 +1,18 @@
 ## Unreleased
 
+- Faster: plain recursive calls (`fib(32)`, the scheduler chart's serial row) in both builds. Native:
+  after a guard with no `else` whose block never falls through (`if n < 2 { return n; }`) the prover
+  keeps the failed condition, so `n - 1` and `n - 2` carry no overflow check; shrink-wrapping drops the
+  unreachable `jmp` it left at the head of the body; `movq %A,%rax; subq $k,%rax; movq %rax,%D` becomes
+  `leaq -k(%A),%D` and `movq %rax,%R; movq X,%rax; addq %R,%rax` becomes `addq X,%rax`; and a
+  caller-saved register other than the result is dead at `ret`. fib(32): 105.8M -> 74.0M instructions.
+  Release: the LLVM lifter derives a `cmpq`'s flags from `icmp`s of its operands instead of
+  `ssub.with.overflow`, which GVN merged with the later `n - 2` and kept live across the recursive call;
+  fib now compiles to clang -O2's code for the C twin, 77.0M -> 67.0M instructions (C: 67.1M).
+- Fixed (native): the inliner could hand a small body's copy a scratch register the body writes
+  without naming it (`mulq` and `divq` write %rdx:%rax), corrupting a value kept there; seen as a
+  segfault in `llvm-escaped-multiword-slots` once `sum3` became small enough to inline. Such
+  registers now count as used.
 - Fixed: a closure type written outside a parameter list (a struct field, a local's type) can take a
   reference parameter: `struct S { body: Fn<Owned>(&T) -> u64 }` was "elided output reference needs one
   input lifetime". Its elided lifetime is a fresh input of each call, as inside a function's parameter
