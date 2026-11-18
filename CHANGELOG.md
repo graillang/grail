@@ -1,5 +1,14 @@
 ## Unreleased
 
+- **Fixed: a build could abort while another build collected the shared cache.** Every build on the
+  machine shares the build store, and a collection folds the per-function use lists, removing each
+  one it read; a second build collecting at the same moment read a list that had just gone, and
+  `host::read_file` aborts on a missing file (SIGABRT, no message). The collection now reads use
+  lists, use marks and records with a read that answers nothing for a file that has gone - which only
+  weakens the recency that orders eviction. The front-end fuzzer, four jobs at a time, hit it on
+  most runs; it is now clean, and it no longer counts the other targets' platform modules
+  (`darwin.grl`, `os-windows.grl`), which are refused as they stand on this host, as baseline
+  regressions.
 - **The electrical grid's state machine and dispatch are ported, byte for byte against the
   engine.** `abundance/src/power_grid.grl` carries `power_grid.hpp/.cpp` of
   `cmake/tx/power.cmake` (minus the publication binding): the five record types and the EMP

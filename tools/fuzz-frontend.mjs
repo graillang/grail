@@ -517,6 +517,7 @@ function firstErrorFile(output) {
 // says that file fails as it is: the original is checked once, and if it is refused too the compiler
 // regressed or the harness is broken - a bug of kind `baseline`, never a fine refusal. (A library that
 // stopped checking made every mutated case that used it look like a fine refusal; nothing was loud.)
+const OTHER_TARGET_MODULES = new Set(['darwin.grl', 'os-windows.grl']);
 async function baselines(results, options, compiler) {
   const suspects = new Map();
   for (const result of results) {
@@ -527,6 +528,10 @@ async function baselines(results, options, compiler) {
   }
   const found = [];
   for (const [path, sample] of suspects) {
+    // The platform modules of other targets are compiled only for those targets: checked on this
+    // host, beside os-linux.grl's definitions of the same runtime functions, they are refused as
+    // they stand. That says nothing about a mutation, and it is no regression.
+    if (dirname(path) === join(root, 'compiler') && OTHER_TARGET_MODULES.has(basename(path))) continue;
     const bytes = readFileSync(path);
     // A fixture that is meant to be refused as it stands (a strict-mode refusal, a rejection case's
     // input) says so on its first line - `// fuzz: refused`, or those words in the comment already
