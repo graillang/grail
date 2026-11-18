@@ -1,5 +1,9 @@
 ## Unreleased
 
+- Interfaces record the source they describe by the build store's fast hash (`source-hash`) rather
+  than SHA-256 (interface format 14): digesting every source byte with SHA-256 was a twelfth of
+  checking a large module. Interfaces written by an older compiler are refused as a different format
+  and rebuilt.
 - **Capture-free and named-function callbacks to generic functions cost no allocation, and named
   functions are accepted.** A closure given for a lent `Fn(..)` parameter of a generic function was
   boxed whenever the call's type arguments were not all fixed yet - `Condition::wait_with`'s two

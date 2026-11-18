@@ -18,8 +18,8 @@
 //  (d) no leakage   - an interface carries no body, no local name, no synthetic module and no other
 //                     module's declarations.
 //
-// Interfaces are also checked against `sha256sum`: every `sha256` line must be the real SHA-256 of
-// the source file, which keeps the compiler's own digest honest.
+// Interfaces are also checked against an independent hash: every `source-hash` line must be the store
+// digest (tools/store-hash.mjs) of the source file, which keeps the compiler's own digest honest.
 //
 // Usage: bun tools/interface-test.mjs [--full] [--target T]
 //
@@ -302,11 +302,11 @@ function proveDigests(directory) {
   for (const path of interfaceFiles(directory)) {
     const text = dump(path);
     const source = /^source "(.*)"$/m.exec(text);
-    const digest = /^sha256 "(.*)"$/m.exec(text);
-    assert.ok(source && digest, `${path}: missing source or sha256 record`);
+    const digest = /^source-hash "(.*)"$/m.exec(text);
+    assert.ok(source && digest, `${path}: missing source or source-hash record`);
     const file = resolve(dirname(dirname(path)), source[1]);
     assert.ok(existsSync(file), `${path}: names a source that does not exist: ${source[1]}`);
-    assert.equal(digest[1], sha256(readFileSync(file)), `${path}: sha256 record is not the SHA-256 of ${source[1]}`);
+    assert.equal(digest[1], fastDigest(readFileSync(file)).toString('hex'), `${path}: source-hash record is not the store digest of ${source[1]}`);
     // The trailer's digest covers every byte before it.
     const bytes = readFileSync(path);
     assert.ok(bytes.length > 32, `${path}: too short to carry a trailer`);
@@ -388,7 +388,7 @@ function proveNoLeakage(directory, module) {
     const declaration = rows.filter(row => !row.trimStart().startsWith('|')).join('\n');
     for (const line of rows) {
       if (line.length === 0) continue;
-      if (/^(grail-interface|module|source|mode|sha256|digest) /.test(line)) continue;
+      if (/^(grail-interface|module|source|mode|source-hash|digest) /.test(line)) continue;
       if (/^(std|unsafe|host) \d+$/.test(line)) continue;
       // A body row: the template's own text, one `|` row per source line and nothing else.
       if (line.trimStart().startsWith('|')) continue;
@@ -559,7 +559,7 @@ function proveStale() {
   const stale = compile(files, join(directory, 'build'), ['--interface', ifaces]);
   assert.equal(stale.status, 1, 'a stale interface must refuse to build');
   assert.match(stale.output, /module `util` changed since this interface was written/, `the refusal must name the module: ${stale.output}`);
-  assert.match(stale.output, /sha256/, 'the refusal must show the digests');
+  assert.match(stale.output, /source-hash/, 'the refusal must show the digests');
   assert.match(stale.output, /util\.grl/, 'the refusal must name the source');
   return stale.output.trim().split('\n')[0];
 }
@@ -662,17 +662,17 @@ pub fn twice(x: u64) -> u64 {
   const version = compile(files, join(directory, 'version'), ['--interface', ifaces]);
   assert.equal(version.status, 1, 'an interface written by another compiler must be refused');
   assert.match(version.output, /was written in interface format 3/, `the version refusal must name the version it found: ${version.output}`);
-  assert.match(version.output, /this compiler reads format 13/, 'the version refusal must name the version this compiler reads');
+  assert.match(version.output, /this compiler reads format 14/, 'the version refusal must name the version this compiler reads');
 
   // ... and a file from a *newer* compiler is refused by name as well: a version this compiler
   // does not know is never half-read.
   const future = Buffer.from(original);
-  future[4] = 14;
+  future[4] = 15;
   repin(future);
   const ahead = compile(files, join(directory, 'future'), ['--interface', ifaces]);
   assert.equal(ahead.status, 1, 'an interface written by a newer compiler must be refused');
-  assert.match(ahead.output, /was written in interface format 14 by a newer compiler/, `the future-version refusal must name the version it found: ${ahead.output}`);
-  assert.match(ahead.output, /this one reads format 13/, 'the future-version refusal must name the version this compiler reads');
+  assert.match(ahead.output, /was written in interface format 15 by a newer compiler/, `the future-version refusal must name the version it found: ${ahead.output}`);
+  assert.match(ahead.output, /this one reads format 14/, 'the future-version refusal must name the version this compiler reads');
 
   // ... a truncated file is refused as truncated.
   repin(Buffer.from(original.subarray(0, Math.floor(original.length * 0.6))));
@@ -1048,7 +1048,7 @@ function proveGenericBodies() {
   const ifaces = emit(all, directory);
   const generic = join(ifaces, 'generic.iface');
   const text = dump(generic);
-  assert.match(text, /^grail-interface 13$/m, 'generics: the interface does not carry the current format version');
+  assert.match(text, /^grail-interface 14$/m, 'generics: the interface does not carry the current format version');
   assert.match(text, /^fn generic::twice <1> /m, 'generics: generic.iface does not declare the template');
   assert.match(text, /^\s*body$/m, 'generics: generic.iface carries no body section');
   // The body is the template's own source text, one `|` row per line, readable in a diff.
