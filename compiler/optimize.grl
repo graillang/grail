@@ -6130,6 +6130,14 @@ fn inline_candidate<a, b, c>(o: (&a mut ir::Body), s: &b [u8], prologue: u64, ch
             }
         }
     }
+    // The copy is the body's lines with its slots in registers, and what forwarding could not do
+    // through a slot it can do through a register: a value stored and loaded back is the register
+    // it was stored from, so the loads go, and then the stores nothing reads.
+    if chosen.len() == 0 {
+        mut g = new_facts(o.maxslot / 8 + 1);
+        forward(&mut o, &mut g, view(s), 0, last);
+        dead_defs(&mut o, view(s), 0, last);
+    }
     // A scratch register for each promoted register.
     mut moved = u64[];
     for c in chosen.len() {
@@ -6164,9 +6172,10 @@ fn inline_candidate<a, b, c>(o: (&a mut ir::Body), s: &b [u8], prologue: u64, ch
             o.out.push(10);
         }
     }
-    // Cleared (non-parameter) slots start at zero, as the frame zeroing guaranteed.
+    // Cleared (non-parameter) slots start at zero, as the frame zeroing guaranteed - those whose
+    // register the copy still names.
     for x in slots.len() {
-        if o.zfrom * 8 < slots[x] + 1 {
+        if (o.zfrom * 8 < slots[x] + 1) && copy_names(&o, view(s), prologue, &dead, regs[x]) {
             app(&mut o.out, view("movq $0,%"));
             reg_name(&mut o, regs[x]);
             o.out.push(10);
@@ -6220,6 +6229,23 @@ fn inline_candidate<a, b, c>(o: (&a mut ir::Body), s: &b [u8], prologue: u64, ch
     absolute := ir::absolute_positions(view(body), o.gbase);
     exchange(&mut o.inl_rel, body);
     inl_file(&mut o, name, absolute, unit);
+}
+// Whether a line of the copy (after the prologue, live and reachable) names register `r`. A call
+// that does not return (a failed check's report) is handed its arguments by lines that name them,
+// so what else it could read is not counted.
+fn copy_names<a, b, c>(o: (&a ir::Body), s: &c [u8], prologue: u64, dead: (&b u64[]), r: u64) -> bool {
+    for i in o.op.len() {
+        if (prologue < i) && (o.del[i] == 0) && (dead[i] == 0) && (o.op[i] != 100) && (o.op[i] != 101) {
+            mut m = ir::mask_of(o.k0[i], o.v0[i], o.m0[i]) | ir::mask_of(o.k1[i], o.v1[i], o.m1[i]);
+            if !((o.op[i] == 15) && never_returns(&o, view(s), i)) {
+                m = m | ir::reads(&o, i) | ir::writes(&o, i);
+            }
+            if ((m >> r) & 1) != 0 {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 // The 64-bit name of register `r`, as reg_name spells it.
 fn reg_text<a>(out: (&a mut u8[]), r: u64) {
