@@ -1,5 +1,8 @@
 ## Unreleased
 
+- **The job scheduler test calls methods on captured `Arc`s directly.** Since the compiler treats a
+  `&self` method on a captured value as a shared call, the free-function helpers `jobsched_test.grl`
+  used to reach its shared counters are deleted.
 - Fixed: a struct partly moved before a loop (`f := r.inner;`) no longer makes the loop refuse with "loop
   backedge consumes entry storage: `r` is moved out of it" when the body only reads it. The backedge check
   now counts what the body consumes: a place that dies in the body, one that was whole at entry and is
