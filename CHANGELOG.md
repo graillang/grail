@@ -1,5 +1,12 @@
 ## Unreleased
 
+- **The island generator's gradient noise kernels are ported bit for bit.** `abundance/src/
+  worldgen_noise.grl` carries `gradient_noise`, `gradient_fbm` and `ridged_multifractal` from the
+  shared `engine/base/worldgen_noise_impl.hpp` (rotated mix64 lattice mixes, the eight-entry
+  gradient table, ab::pm's straddle lerp, f64 octave accumulators narrowed once); 144 values
+  matched against the header compiled with the worldgen library's `-ffp-contract=off`. These are
+  the bands the coherent terrain relief is built from.
+
 - Abundance port: `abundance/src/lake_topology.grl` is the `<cache>.lake-topology` sidecar
   (docs/BOOT_LAKE_TOPOLOGY_CACHE.md) in both directions: the "ABWLTSC1" magic with the writing
   binary's generator version and reserved word, then LandscapeLakeModel's stored topology - the
