@@ -1,5 +1,16 @@
 ## Unreleased
 
+- **Development builds drop the register copies around float arithmetic.** The native backend
+  computes every float operation in the %xmm0/%xmm1 scratch pair and copies values in and out; a new
+  pass (`xmm_copies`) and the f32 constant rewrite now load straight into the destination, store
+  straight from it and do two-address arithmetic in place, wherever the scratch is dead after.
+  Development builds, outputs identical: ecs_par 18.3G to 15.2G instructions (-17%), dot_f32 -10%,
+  xform_f32 -9%, ecs -8%, matmul -7%; f64 code unchanged.
+- **Release builds lift the `dyn` adapter thunks.** A thunk (`.C<hash>_N`) adjusts the receiver and
+  tail-calls the method with `jmp *%r11`; the lifter refused it, so every `dyn` call went through a
+  native thunk and a second jump. It is now a call and a return in IR, which LLVM inlines the method
+  into: bench/dyncall release 503.8 M -> 443.8 M instructions, output identical.
+
 - **A payload-less variant of a boxed enum allocates nothing.** `Tree::Leaf` is now one static
   `{tag, 0}` object with a static object's header, which every free path already skips, instead of a
   16-byte allocation per value. bench/bintrees release: 3.78 G -> 3.59 G instructions, 0.28 s ->
