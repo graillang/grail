@@ -1,5 +1,10 @@
 ## Unreleased
 
+- **Release builds lift the `dyn` adapter thunks.** A thunk (`.C<hash>_N`) adjusts the receiver and
+  tail-calls the method with `jmp *%r11`; the lifter refused it, so every `dyn` call went through a
+  native thunk and a second jump. It is now a call and a return in IR, which LLVM inlines the method
+  into: bench/dyncall release 503.8 M -> 443.8 M instructions, output identical.
+
 - **A payload-less variant of a boxed enum allocates nothing.** `Tree::Leaf` is now one static
   `{tag, 0}` object with a static object's header, which every free path already skips, instead of a
   16-byte allocation per value. bench/bintrees release: 3.78 G -> 3.59 G instructions, 0.28 s ->
