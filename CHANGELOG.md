@@ -1,5 +1,12 @@
 ## Unreleased
 
+- **Development builds drop the register copies around float arithmetic.** The native backend
+  computes every float operation in the %xmm0/%xmm1 scratch pair and copies values in and out; a new
+  pass (`xmm_copies`) and the f32 constant rewrite now load straight into the destination, store
+  straight from it and do two-address arithmetic in place, wherever the scratch is dead after.
+  Development builds, outputs identical: ecs_par 18.3G to 15.2G instructions (-17%), dot_f32 -10%,
+  xform_f32 -9%, ecs -8%, matmul -7%; f64 code unchanged.
+
 - **The performance charts are measured again** on main bd532104 (kernels, engine programs, parallel
   ECS; compile on 66e3b3b6 with PGO). `tools/bench-rivals.mjs` now takes the best of 7 runs by default
   (it was 3) and `just bench-results` the best of 9 for the parallel chart (it was 5), so the next
