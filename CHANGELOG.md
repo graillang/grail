@@ -1,5 +1,14 @@
 ## Unreleased
 
+- **Release builds: a function of more than six words in an `unsafe module` is optimised.** Such a
+  body reads its seventh and later arguments from the caller's stack, which the LLVM lifter names
+  through the body's signature fact - but an `unsafe module` recorded none, so the body and every
+  caller that filled an outgoing argument area stayed native: unoptimised, frame zeroed with
+  `rep stos`, every value spilled. That module now records the one fact it can (the word count; no
+  types), and both are lifted. The runtime is such a module: with `rt_job_make` given a seventh
+  parameter, a one-worker `pfib(27)` fork/join ran 299M user-space instructions against 166M with six;
+  it now runs 165M either way, so runtime functions need no longer be packed into six words. Output is
+  unchanged; ordinary modules already recorded the fact.
 - **Scheduler: precise wake-ups** - a fork that finds a parked worker and nobody searching now takes
   one specific worker off an idle list and counts it as searching *before* waking it (Go/rayon
   style), so while the wake lands every other fork sees a searcher on its way and wakes nobody;
