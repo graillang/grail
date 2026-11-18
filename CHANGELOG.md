@@ -1,5 +1,20 @@
 ## Unreleased
 
+- **The Abundance UI design system and shape tessellator are ported, vertex for vertex.** `abundance/src/
+  ui_design.grl` carries `Public/abundance/ui/design_system.hpp`: linear `Rgba` with `srgb`/`mix`/
+  `fade`/`visible`, the palette (and its high-contrast variant), the type scale, the 4 px spacing
+  grid, corner radii, `ShapeStyle` with its scale, the five elevations and the five grade frames.
+  `abundance/src/ui_shape_mesh.grl` carries `ui/shape_mesh.hpp`: `Mesh`/`Rect`, the rounded-rectangle
+  outline, `fill_rounded`, `ring` with its vertical fade, `shadow`, `glow`, `shape`, `radial`,
+  `quad`, `arc`, `polyline`, `stroke_path` with mitred joins and round caps, `disc` and `bar`.
+  The float maths goes through lib/math's glibc-exact `cosf`/`sinf` (a float operand in the C++ is
+  the single-precision call), so vertices agree bit for bit. `abundance/tests/parity/ui_shapes.cpp`
+  compiles the two headers and prints 360 values; `abundance/tests/ui_shapes_test.grl` reproduces
+  every one - palette and grade colours, the elevation surfaces, the type scale, and per-shape
+  vertex/index counts with FNV-1a hashes over the whole vertex stream (x, y, r, g, b, a as binary32
+  patterns) and the index list, across 60 fixtures including the degenerate ones (invalid rects,
+  invisible colours, a zero-length polyline, a hairpin stroke, fractional and out-of-range bar
+  values).
 - **The Jolt surface closes with the overlap query.** `gr_jolt_overlap_capsule` is one `CollideShape`
   of the same capsule the cast sweeps, stopped at the first hit: `abundance/src/jolt.grl` now answers
   the core's `overlap` contract (a boolean, with `invalid_request` for a capsule shorter than its own
