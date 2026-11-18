@@ -1,5 +1,14 @@
 ## Unreleased
 
+- **The logistics route model is ported.** `abundance/src/logistics_network.grl` carries
+  `logistics_network.hpp/.cpp` of `cmake/tx/logistics.cmake`: the rover and cargo-drone specs,
+  the dispatcher (what busy carriers took and bring counts against both sides; an idle carrier
+  dispatches only from home, at its dock, with at least half a cell; the first unmet demand its
+  owner's stations cannot serve within reach, at most capacity and both sides' amounts, when the
+  whole round trip fits the cell; deterministic by station and item order) and the mover
+  (exact step at the kind's speed, arrival within half a metre, the cell as the step's cap, the
+  atan2 yaw, and charging to a full cell). `abundance/tests/logistics_network_test.grl` prints 86
+  lines that match a reference compiling the engine's own `logistics_network.cpp`.
 - **The island generator's province layer is ported.** `abundance/src/worldgen_provinces.grl`
   carries the six-type lithospheric recipe table (and the rock inverse), ab::ProvinceSummary, the
   splitmix64 Random helper with its bounded/shuffle draws, and make_provinces' shuffle plus
