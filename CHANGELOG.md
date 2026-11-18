@@ -8,6 +8,10 @@
   prints as the ` --> ` line. Measured: no instruction changes on bench/ecs, sort, sieve, xform_f32 or
   nbody. Failures inside a runtime helper that is not lifted in place still report no location, and a
   contained task failure keeps the location it had.
+- Interfaces record the source they describe by the build store's fast hash (`source-hash`) rather
+  than SHA-256 (interface format 14): digesting every source byte with SHA-256 was a twelfth of
+  checking a large module. Interfaces written by an older compiler are refused as a different format
+  and rebuilt.
 - **A failed check inside a parallel job no longer aborts silently now and then.** The joiner that
   re-raises a job's failure took one from the contained-failure count with a checked subtraction,
   which trapped - inside the failure path, so without a report - when it ran before the failing stack

@@ -661,7 +661,7 @@ struct C {
     fmod_ids: u64[][],
     fmod_n: u64,
     // The digest of each source file the interface writer has read this run, by path, and the
-    // file's length: one sha256 per source instead of one per question (iface_source_digest).
+    // file's length: one digest per source instead of one per question (iface_source_digest).
     srcdig_paths: u8[][],
     srcdig_vals: u8[][],
     srcdig_lens: u64[],
@@ -55211,7 +55211,7 @@ fn emit_exit<a, b>(c: (&a mut C), argument: &b [u8]) -> unit {
 // SHA-256 (FIPS 180-4). The interface digests are what make "refuses to proceed when the sources it
 // was built from changed" checkable, so they are a real cryptographic hash and not a checksum.
 // The compiler is built without the standard library, so it carries its own; `lib/sha256.grl` is the
-// user-facing twin with an incremental API. `tools/interface-test.mjs` checks every `source-sha256`
+// user-facing twin with an incremental API. `tools/interface-test.mjs` checks every `source-hash`
 // line against the host's `sha256sum`, which is what keeps this copy honest.
 const S256MASK: u64 = 4294967295;
 fn s256_k() -> u64[] {
@@ -55572,6 +55572,14 @@ pub fn iface_digest<a>(data: &a [u8]) -> u8[] {
     d := sha256(data);
     return iface_hex(&d);
 }
+// The digest an interface records of the source it describes, as 64 lowercase hex characters: the
+// build store's fast_hash. It tells a changed source from an unchanged one, as the trailer's digest
+// tells a damaged interface from a whole one; neither stands against a writer who means harm, and
+// SHA-256 of every source byte was a twelfth of checking a large module.
+pub fn source_digest<a>(data: &a [u8]) -> u8[] {
+    d := fast_hash(data);
+    return iface_hex(&d);
+}
 
 // ---- the interface format (format 4) ----
 //
@@ -55595,7 +55603,7 @@ pub fn iface_digest<a>(data: &a [u8]) -> u8[] {
 // Format 7 added the effect summary rows of every listed function; format 8 gives an `Atomic<T>`
 // its element type; format 9 carries a `dyn` type's bounds; format 10 adds the SIMD vector types
 // (kind 36: the element, and the lane count in the mode).
-const IFACE_VERSION: u64 = 13;
+const IFACE_VERSION: u64 = 14;
 const IFACE_TAG_MODULE: u64 = 1;
 const IFACE_TAG_TRAILER: u64 = 2;
 const IFACE_TAG_LINK: u64 = 3;
@@ -57506,7 +57514,7 @@ fn iface_is_section(tag: u64) -> bool {
 }
 // The bytes of one module's interface. One writer, driven by the declaration store: the header, then
 // one length-counted record per declaration of the public surface, then the trailer that carries the
-// source digest and the digest of every byte before it. `digest` is the source's SHA-256, or empty to
+// source digest and the digest of every byte before it. `digest` is the source's source_digest, or empty to
 // read the source this module was built from; the round-trip command passes the digest the file
 // already records, so re-encoding a loaded module reproduces its bytes exactly.
 fn iface_module_bytes<a, b, d>(c: (&a mut C), m: &b [u8], path: &d [u8], in_std: u64, unsafe_flag: u64, host_opt: u64, digest: &a [u8]) -> u8[] {
@@ -59385,12 +59393,12 @@ fn iface_decode<a, b>(c: (&a mut C), path: &a [u8], bytes: &a [u8], source_path:
         // (the definition sweep) has no source to check: phase 1 has already done it, once.
         if (phase != 2) & (source_path.len() != 0) {
             source := host::read_file(view(source_path));
-            got := iface_digest(&source);
+            got := source_digest(&source);
             if !same(view(got), view(head.digest)) {
                 mut msg = u8[];
                 push_bytes(&mut msg, view("module `"));
                 push_bytes(&mut msg, view(module));
-                push_bytes(&mut msg, view("` changed since this interface was written: the interface records source-sha256 "));
+                push_bytes(&mut msg, view("` changed since this interface was written: the interface records source-hash "));
                 push_bytes(&mut msg, view(head.digest));
                 push_bytes(&mut msg, view(" for \""));
                 push_bytes(&mut msg, view(head.source));
@@ -59441,7 +59449,7 @@ fn iface_decode<a, b>(c: (&a mut C), path: &a [u8], bytes: &a [u8], source_path:
     if p.phase == 0 {
         iface_walk(&mut c, &mut p, view(module), 0, head.unsafe);
         iface_rt_indent(&mut p, view(""));
-        push_bytes(&mut p.rtext, view("sha256 \""));
+        push_bytes(&mut p.rtext, view("source-hash \""));
         push_bytes(&mut p.rtext, view(head.digest));
         push_bytes(&mut p.rtext, view("\""));
         iface_rt_indent(&mut p, view(""));
@@ -59657,12 +59665,12 @@ fn iface_verify_module<a>(c: (&a mut C), index: u64) -> unit {
     }
     // A changed source is staleness, said as such, before any declaration of the surface is compared.
     head := iface_r_head(view(file), view(want));
-    actual := iface_digest(&host::read_file(view(path)));
+    actual := source_digest(&host::read_file(view(path)));
     if !same(view(head.digest), view(actual)) {
         mut msg = u8[];
         push_bytes(&mut msg, view("module `"));
         push_bytes(&mut msg, view(m));
-        push_bytes(&mut msg, view("` changed since this interface was written: the interface records source-sha256 "));
+        push_bytes(&mut msg, view("` changed since this interface was written: the interface records source-hash "));
         push_bytes(&mut msg, view(head.digest));
         push_bytes(&mut msg, view(", but "));
         push_bytes(&mut msg, view(path));
@@ -60858,7 +60866,7 @@ fn iface_source_digest<a, b>(c: (&a mut C), path: &b [u8]) -> u8[] {
         }
     }
     source := host::read_file(view(path));
-    digest := iface_digest(&source);
+    digest := source_digest(&source);
     c.srcdig_paths.push(copy_bytes(view(path)));
     c.srcdig_vals.push(digest.copy());
     c.srcdig_lens.push(source.len());
