@@ -1,5 +1,25 @@
 ## Unreleased
 
+- Abundance port: `abundance/src/tx_sections.grl` carries the checkpoint section payloads of a
+  host-bound `ab::tx::World` (tx/host_sections.hpp, Private/tx/tx_world.cpp): the 'ABTX' engine state
+  (clock, next engine id, the entity rows, the scheduled effects and the action ledger through the
+  field codec) and the 'ABTW' domain-table envelope (one id/blob per registered table, ascending),
+  with store_host_sections/load_host_sections. Decoding follows the engine: paged rows strictly
+  ascending by key with C++20 pair semantics (a NaN due time compares unordered, so it refuses, and
+  the tie break applies only to equal seconds), unique effect ids, next_id at or above 2^62, exact
+  consumption, and the engine's refusal text for the envelope ("malformed table envelope",
+  "unsorted (table N )", "unknown to this build (table N )"). The reference
+  `abundance/tests/parity/tx_sections.cpp` drives the engine's own test actions through
+  ab::tx::Engine - three arms, a dud, two due effects run, then commits past the ledger's retention
+  window so the ledger prunes into its watermark - writes the sections with store_host_sections and
+  the ABCP2 checkpoint with encode_checkpoint, and mutates the payloads into a 30-case refusal
+  matrix. `abundance/tests/tx_sections_test.grl` matches it line for line: 125 lines; the 376-byte
+  engine state and the 1798-byte envelope re-encode byte for byte, the envelope carries all 65
+  registered tables (the build's ids and names; ::ab::tx::actions::trade::CrossWorldTable registers
+  under an id that is not fnv1a64 of its name), and the checkpoint's sections re-encode under the
+  existing ABCP2 port. The reference links the pinned gameplay-core build whole so every table's
+  static registrar is present.
+
 - **The procedural rock kit's pebble and rock-node meshes are ported, bit for bit.**
   `abundance/src/procgen_rock_kit.grl` carries `build_pebble_mesh` and `build_rock_node_mesh` with
   `procgen_math.hpp`'s Rng and vector maths and the shared Soup pipeline (position-welded smooth
