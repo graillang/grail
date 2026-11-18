@@ -1,5 +1,14 @@
 ## Unreleased
 
+- **Performance: a task woken by a timer or a ready descriptor runs at the next scheduling step.**
+  Every worker step now looks at the task injection ring (the reactor's wakes, spawns from other
+  threads) before taking jobs; it looked only every 61st step, so while frame jobs kept the workers
+  busy a woken I/O task waited in the ring. In bench/frame.grl the time from the reactor's wake to
+  the I/O task running fell from a worst of about 940 us to 140 us in the development build (126 to
+  38 us in release, the median of eight runs' worst, load ~25 on 24 CPUs); the median round's
+  lateness from 189 to 76 us (dev) and 103 to 73 us (release). Frame times are unchanged. What is
+  left of the worst lateness is the kernel waking the reactor thread and the file read itself.
+
 - Fixed: a closure type written outside a parameter list (a struct field, a local's type) can take a
   reference parameter: `struct S { body: Fn<Owned>(&T) -> u64 }` was "elided output reference needs one
   input lifetime". Its elided lifetime is a fresh input of each call, as inside a function's parameter

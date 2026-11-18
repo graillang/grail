@@ -5527,7 +5527,7 @@ fn rt_env_is(name: u64, value: u64) -> u64 {
 // 128..208 the job deque, laid out as the task deque is from word 0 (buffer, head, tail, mask, and
 //     the capacity at +80), so the same three deque functions serve both
 // 224 this worker's runner (0 none)  232 the job handed to the runner  240 free job records
-// 248 their count  264 help-depth high-water mark  272 steps taken (the fairness tick)
+// 248 their count  264 help-depth high-water mark
 // 280 1 while this worker is counted as searching (rt_worker_loop, rt_worker_run)
 // 296 link in the jobs block's list of blocks waiting for a thread (rt_block_give)
 // 304..312 the first foreign-call pair {seq, retaken}, 320 the pair the owner uses now (`seq` odd:
@@ -6157,21 +6157,21 @@ fn rt_full_fence() -> u64 {
 fn rt_worker_search_rounds() -> u64 {
     return 64;
 }
-// One unit of work, or 0 when there is none. The order: this worker's jobs (LIFO - they are what a
-// join on some stack is waiting for), its tasks, injected jobs, injected tasks, then a steal pass
-// for jobs and one for tasks, each starting at a random victim. A job is not run on the scheduler
-// stack: it is handed to the worker's runner (rt_runner_main).
+// One unit of work, or 0 when there is none. The order: injected tasks, Frame jobs, Normal jobs
+// (each: this worker's own, LIFO - they are what a join on some stack is waiting for - then the
+// class's ring, then a steal pass; rt_job_take), this worker's tasks, a steal pass for tasks
+// starting at a random victim, then Background jobs. A job is not run on the scheduler stack: it is
+// handed to the worker's runner (rt_runner_main).
 fn rt_worker_step(s: u64, w: u64) -> u64 {
-    // Every 61st step looks at the task ring first, so a worker that keeps finding its own work
-    // cannot leave injected tasks (wakes from the reactor, spawns from other threads) waiting.
-    tick := raw_load(w + 272) + 1;
-    raw_store(w + 272, tick);
-    if tick % 61 == 0 {
-        t := rt_inject_pop(rt_task_ring(s));
-        if t != 0 {
-            rt_worker_run(s, w, t);
-            return 1;
-        }
+    // The task ring first, on every step: it holds the reactor's wakes (a timer that fired, a
+    // descriptor that became ready) and spawns from other threads, and its empty look is two loads.
+    // Looked at only every 61st step, behind the jobs, a woken I/O task sat in the ring while every
+    // worker kept finding frame jobs: bench/frame.grl's I/O task woke up to a millisecond late in
+    // the development build, where it now waits at most about one job.
+    injected := rt_inject_pop(rt_task_ring(s));
+    if injected != 0 {
+        rt_worker_run(s, w, injected);
+        return 1;
     }
     mut j = rt_job_take(s, w, 0);
     if j == 0 {
@@ -6179,9 +6179,6 @@ fn rt_worker_step(s: u64, w: u64) -> u64 {
     }
     if j == 0 {
         mut t = rt_deque_pop(w);
-        if t == 0 {
-            t = rt_inject_pop(rt_task_ring(s));
-        }
         if t == 0 {
             t = rt_worker_steal(w);
         }
