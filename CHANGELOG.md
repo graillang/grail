@@ -1,14 +1,23 @@
 ## Unreleased
 
+- **`v[i] = x` on a vector binding no longer takes the binding's address.** The store borrowed the
+  whole binding first, which emitted a `lea` of its frame slot; a slot whose address is taken stays
+  in memory, so every store reloaded the vector from it, and the optimiser could not keep a stable
+  vector's data in a register across the loop either. The element is now reached from the binding's
+  value, as a read of `v[i]` is; the same borrow is still checked at the bracket, so every refusal
+  and its location are unchanged. bench/ecs (native): 0.47 to 0.29 s, output identical.
+- **Fixed: queued work could wait for ever behind a worker that searched first.** A push wakes no
+  parked worker while another is searching, because the searcher will find the work; but it finds
+  one entry, and that one may spin until the next runs (two tasks that meet), with every other
+  worker parked. The last searcher to find work now wakes another to look, as Go's scheduler does.
+  task-scopes-join-cancel-abandon hung in 5 of 300 runs on main and in none of 300 now.
 - **A task scope on the main thread spawns onto a deque of its own.** Its spawns went through the
-  shared injection ring - a lock the idle workers poll - and every one notified, reading the parked
-  and searching counts those workers keep writing. The scope now takes the external slot (the
-  worker-shaped block the main thread's parallel calls already use) and pushes onto its task deque,
-  which every worker's steal scan visits; a push notifies only when the deque was empty, with a
-  barrier and a second look at the head so that a thief that emptied it and parked meanwhile is
-  still woken. Job forks and wakes are unchanged. bench/sched.grl on 24 workers (release): a burst
-  of 100k spawns 500 to 225 ns a spawn; the other rows and the frame loop within noise (20
-  interleaved rounds, and 60 timed `fib(32)` joins from main against the committed runtime).
+  shared injection ring, whose lock every idle worker polls. The scope now takes the external slot
+  (the worker-shaped block the main thread's parallel calls already use) and pushes onto its task
+  deque, which every worker's steal scan visits; each spawn still wakes a parked worker as before,
+  because a task may wait for another to run. Job forks and wakes are unchanged. bench/sched.grl on
+  24 workers (release): a burst of 100k spawns about 480 to 290 ns a spawn; the other rows and the
+  frame loop within noise against the committed runtime.
 - **Performance charts re-measured on 4ab4767a**, machine idle: run time, engine, parallel ECS and
   the scheduler (the compile and Abundance charts are unchanged). Parallel ECS in development builds
   is 1.3x to 1.6x Go (it was 2.6x to 6.4x); in release it is level with C's OpenMP on four workers

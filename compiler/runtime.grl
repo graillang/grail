@@ -5898,32 +5898,6 @@ fn rt_deque_push(w: u64, t: u64) -> u64 {
     raw_atomic_store_release(w + 16, tail + 1);
     return 1;
 }
-// rt_deque_push for a deque only thieves drain - the external slot's, which a main thread's task
-// scope fills (rt_spawn_enqueue). 0 when the deque is full; else 1 when a worker may have to be
-// woken for this entry, 2 when the deque still held older work after the entry landed: a worker is
-// bound for that work and takes this entry after it, so no other need be woken.
-//
-// The first look at the head can be stale: a thief may take the last older entry, look once more
-// and park before this entry is published. So when that look saw work, a full barrier follows the
-// publication and the head is read again; it pairs with the barrier a parking worker puts between
-// counting itself parked and its last look (rt_worker_loop). Either that look sees this entry, or
-// this read sees the head at this entry and the push reports 1, and rt_notify sees the parked count.
-fn rt_deque_push_seen(w: u64, t: u64) -> u64 {
-    tail := raw_atomic_load(w + 16);
-    head := raw_atomic_load(w + 8);
-    if head + raw_load(w + 80) <= tail {
-        return 0;
-    }
-    raw_store(raw_load(w) + (tail & raw_load(w + 24)) * 8, t);
-    raw_atomic_store_release(w + 16, tail + 1);
-    if head < tail {
-        rt_full_fence();
-        if raw_atomic_load(w + 8) < tail {
-            return 2;
-        }
-    }
-    return 1;
-}
 fn rt_deque_pop(w: u64) -> u64 {
     mut tail = raw_atomic_load(w + 16);
     if tail == 0 {
@@ -6061,23 +6035,19 @@ fn rt_enqueue_in(s: u64, t: u64) -> u64 {
 }
 // A spawn. On a thread that is not a worker and holds the external slot - a main thread's task scope
 // takes it (rt_scope_take) - the task goes onto the slot's deque: its owner pushes, every worker
-// steals (rt_worker_steal), and no lock is taken. The push notifies only when the deque was empty
-// (rt_deque_push_seen): one into a deque that held work wakes nobody, because a worker is already
-// bound for that work - none parks while its last look still sees it (rt_worker_loop), and one that
-// takes an entry comes back for the next. Through the injection ring every spawn of a burst took
-// the ring's lock against the polling workers and notified, reading the parked and searching counts
-// that two dozen idle workers keep writing: about 500 ns a spawn on 24 workers.
+// steals (rt_worker_steal), and no lock is taken. Through the injection ring every spawn of a burst
+// took the ring's lock against the workers polling it. Every spawn still notifies: a task may
+// spin until another runs (two tasks that meet), so queued work must never wait behind a busy
+// worker while another sleeps - waking only into an empty deque hung exactly that
+// (task-scopes-join-cancel-abandon).
 fn rt_spawn_enqueue(s: u64, t: u64) -> u64 {
     if rt_worker_self() == 0 {
         x := rt_job_block();
         if x != 0 {
-            placed := rt_deque_push_seen(x, t);
-            if placed == 0 {
+            if rt_deque_push(x, t) == 0 {
                 rt_inject_push(s, t);
             }
-            if placed != 2 {
-                rt_notify(s);
-            }
+            rt_notify(s);
             return 0;
         }
     }
@@ -6236,7 +6206,14 @@ fn rt_worker_step(s: u64, w: u64) -> u64 {
 fn rt_worker_run(s: u64, w: u64, t: u64) -> u64 {
     if raw_load(w + 280) != 0 {
         raw_store(w + 280, 0);
-        raw_atomic_fetch_sub(raw_load(rt_state_jobs()) + 416, 1);
+        // The last searcher found work: wake another to look for what may be queued behind it.
+        // A push wakes nobody while someone searches (rt_notify), on the understanding that the
+        // searcher finds the work; but it finds one entry, and that entry may spin until the
+        // next one runs (two tasks that meet). Without this the next one waited, every other
+        // worker parked, for ever (task-scopes-join-cancel-abandon, about once in 60 runs).
+        if raw_atomic_fetch_sub(raw_load(rt_state_jobs()) + 416, 1) == 1 {
+            rt_notify(s);
+        }
     }
     tp := raw_tp_get();
     raw_store(tp + 16, t);

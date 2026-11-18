@@ -51991,6 +51991,24 @@ fn index_assignment<a>(c: (&a mut C)) -> unit {
     chain := assign_chain(&mut c);
     if (capability != 0) & (chain[2] == 1) {
         base = primary(&mut c, NO_TYPE);
+    } else if (l != 0) && (chain[2] == 1) && (chain[3] == 0) && (kind_at(&mut c, start + 1) == 91)
+        && (ty_kind(&mut c, local_ty(&mut c, l - 1)) == 6) {
+        // `v[i] = x` with `v` a vector binding of this function: the element is reached from the
+        // binding's value, as a read of `v[i]` is, and index_view takes the element's mutable loan
+        // from `v`'s place. Borrowing the binding first (`place`) took the slot's address, and a
+        // slot whose address is taken stays in the frame: every store reloaded the vector from it.
+        id := local_id(&mut c, l - 1);
+        lty := local_ty(&mut c, l - 1);
+        commit_flex(&mut c, l - 1);
+        advance(&mut c);
+        require_mutable_binding(&mut c, id, 1);
+        // The borrow `place` took, made and released here and emitting nothing, so a conflicting
+        // loan is reported at the bracket as it always was; index_view takes the element's own.
+        quiet := exchange(&mut c.quiet, 1);
+        probe := place_slot(&mut c, id, lty, 1);
+        exchange(&mut c.quiet, quiet);
+        release_temporary(&mut c, probe.t);
+        base = val(id, lty);
     } else {
         base = place(&mut c, 1, 0);
         base = chain_walk(&mut c, base, chain[1]);
