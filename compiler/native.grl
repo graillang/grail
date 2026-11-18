@@ -15662,11 +15662,25 @@ fn callable_contract<a, b>(
     for i in ax.len() {
         left := ax[i];
         right := ex[i];
-        // A closure's reference parameter is a fresh input lifetime on every call, so an expected
-        // parameter that names no lifetime - a type argument bound to a reference (`C` of
-        // `Fn((&T), C)` given `&a K`), whose lifetime the binding does not carry - accepts any: only
-        // the referent and the mode must match. Result positions are not relaxed.
-        if (ak == 20) || (ak == 12) {
+        // A closure's reference parameter is a fresh input lifetime on every call, so the
+        // reference's own life is not part of the contract: only the referent and the mode are.
+        // Two spellings of one closure type must agree whatever region each was parsed with - a
+        // parameter list names one, a generic substitution may drop it (`C` of `Fn((&T), C)` given
+        // `&a K`), and a field or a local's type carries one of its own - so the region is not
+        // compared here. The referent is: `(&[u64])` and `(&[f64])` are different signatures.
+        if ak == 20 {
+            lk := ty_kind(&mut c, left);
+            if ((lk == 5) || (lk == 7) || (lk == 27)) && (ty_kind(&mut c, right) == lk)
+                && (ty_mode(&mut c, left) == ty_mode(&mut c, right)) {
+                if callable_contract(&mut c, ty_arg(&mut c, left), ty_arg(&mut c, right), &mut map, depth + 1) {
+                    continue;
+                }
+                return false;
+            }
+        }
+        // A `dyn` method's reference parameter keeps the same relaxation, in the one direction a
+        // binding without a lifetime asks for. Result positions are not relaxed.
+        if ak == 12 {
             lk := ty_kind(&mut c, left);
             if ((lk == 5) || (lk == 7) || (lk == 27)) && (ty_kind(&mut c, right) == lk)
                 && (type_regions(&mut c, right).len() == 0) && (type_regions(&mut c, left).len() == 1)
