@@ -71,6 +71,19 @@
   sources and runs the scope against a real LocalStore: 121 reference lines, all matched by
   `abundance/tests/host_test.grl`.
 
+- **The job scheduler port covers its production surface.** `jobsched_test.grl` and
+  `parity/jobsched.cpp` now also gate:
+  - `terrain_jobs_executor` forks and submits under a far flood;
+  - cancellation of running jobs through their cooperative exit, and of queued ones;
+  - post order;
+  - keep_alive with 32 jobs under load;
+  - quiesce;
+  - near-first at 16 workers and determinism at 16 and 23 workers on a loaded machine.
+
+  The two sides match on 80 lines. Job ids are no longer capped at 64 per scheduler: cancel and
+  yield move from 64-bit masks to the running record, with a lock-free fast path. `quiesce` now
+  matches the engine and waits for running jobs instead of cancelling them. `job_done` answers
+  `Handle::done`. The determinism gate's blocker release no longer races at high worker counts.
 - **The job scheduler test calls methods on captured `Arc`s directly.** Since the compiler treats a
   `&self` method on a captured value as a shared call, the free-function helpers `jobsched_test.grl`
   used to reach its shared counters are deleted.
