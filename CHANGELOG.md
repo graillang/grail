@@ -10,6 +10,13 @@
   to 50 cases with 21 offset fixtures from the vendored C++, every vertex compared exactly. The arc
   steps go through Grail's own sin/cos/acos/atan2 rather than glibc's, so a fixture whose arc vertex
   lands within an ulp of a rounding boundary could in principle differ; none of the 21 does.
+- **The shader pipeline takes post/ and sky/.** 34 more entries are built with the engine's pinned
+  DXC (post 9, sky 25; 2.6 MB of SPIR-V), so the pin now holds 21 structs, including the sky's
+  `SkyPush` with its `uint res[12]` slot array. `vendor-shaders.mjs` now skips an entry whose include
+  closure reaches the engine's CMake-mirrored trees and records it in `upstream.json`, rather than
+  refusing its whole area. Today that is only `sky/rain_splash.cs` (`AbundanceTerrain/`). The layout
+  grammar gained fixed arrays with literal lengths and interpolation modifiers. The
+  `shader_inventory` probe and the suite now cover all three areas.
 - **Abundance's item_icons_check is ported, byte-identical to the built reference.**
   `abundance/src/item_icons.grl` reads `ui/icons/index.json`, applies the UI's stem rule and reports
   every catalogue item without a picture; the catalogue (the gameplay economy, stage 6) is an input
