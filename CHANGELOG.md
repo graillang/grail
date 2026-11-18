@@ -53,6 +53,16 @@
   slow-stage naming. Gated by `tests/parity/sim.cpp` compiling the engine's own Private/sim TUs
   and step_work_profile.cpp: 125 reference lines, all matched by `abundance/tests/sim_test.grl`.
 
+- **`scarab`, the headless Abundance session driver, replays a recorded 30 Hz trace in lockstep
+  with the engine's own HostCore.** `abundance/src/app_session.grl` ports the app/session seam:
+  `abe::gameplay::Session`'s boundary adapter (epoch, pending-boundary retry and refusal texts, the
+  publish gate), HostCore/Simulation's fixed-step acceptance and publication tick, and the
+  `FrameContext` stamps the engine fills from the published frame. `abundance/tests/scarab_test.grl`
+  is the program (`scarab`, `world`, `ticks [N]`, `replay [TRACE]`; no window, no device). Its
+  reference, `tests/parity/scarab.cpp`, creates a real `ab::host::HostCore` through
+  `libabundance_gameplay_core.a`, records `tests/parity/scarab_trace.bin` (48 boundaries, including
+  the stale/earlier-pending/retry refusals) and replays it; 1150 per-tick lines and digests match.
+  Saving through the checkpoint container is the next increment.
 - **Abundance's megaplants_import is ported as a plan, byte-identical to the reference's
   invocations.** `abundance/src/megaplants_import.grl` discovers the extracted variants, names the
   canopy family, picks the bark set and tile size, applies the leaf-atlas rule (with its flat-colour
