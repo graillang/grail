@@ -1,5 +1,11 @@
 ## Unreleased
 
+- **The island's macro coastline plan is ported bit for bit.** `abundance/src/
+  worldgen_macro_coast.grl` carries `terrain_shape.cpp`'s planner (lobes, bays, islets, valley axes
+  and tributaries), `macro_land_field` and `protected_blend_weight`, with the file's own noise
+  (mix/unit salts, 256 irrational-angle gradients, rotated fBm); `worldgen_pm.grl` gains ab::pm's
+  `atan`/`atan2`. 3170 values matched against the worldgen library over eight plans.
+
 - **`lib/clipper2.grl` gains the offset engine (`ClipperOffset`, `InflatePaths`), and `lib/math.grl`
   gains `acos`.** The water-geometry callers buffer river centrelines with
   `InflatePaths(..., JoinType::Round, EndType::Round, 2.0, 3, arcTol)`; the port carries all of
