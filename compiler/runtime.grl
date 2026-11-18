@@ -1205,12 +1205,19 @@ fn rt_zero(p: u64, n: u64) -> u64 {
 // record, a static or large block, a double free, a process with threads - is rt_free_any_slow,
 // out of line and cold.
 fn rt_free(p: u64) -> u64 {
-    if ((p & 8) == 0) & (p != 0) & (raw_load(wrapping_add(raw_state(), 3416)) == 0) {
+    // Freeing nothing is common (an empty vector's buffer): answered before anything is loaded.
+    if p == 0 {
+        return 0;
+    }
+    if ((p & 8) == 0) & (raw_load(wrapping_add(raw_state(), 3416)) == 0) {
         block := wrapping_sub(p, 16);
         if raw_load(wrapping_add(block, 8)) == 1 {
             size := raw_load(block);
             if size < 257 {
-                head := wrapping_add(raw_state(), wrapping_add(256, ((197136 >> ((size >> 6) << 2)) & 15) << 3));
+                // The block sizes here are 32, 64, 128 and 256; (size >> 6) - (size >> 8) is their
+                // class, 0..3, with two constant shifts and no lookup.
+                class := wrapping_sub(size >> 6, size >> 8);
+                head := wrapping_add(raw_state(), wrapping_add(256, class << 3));
                 raw_store(wrapping_add(block, 8), raw_load(head));
                 raw_store(head, block);
                 live := wrapping_add(raw_state(), 24);
@@ -1608,25 +1615,52 @@ fn rt_block_bin(size: u64) -> u64 {
 // the block is the head of that class's free list, and it is cleared for the words asked for.
 // Everything else - an empty list, a larger request - is rt_alloc_slow.
 fn rt_alloc_unlocked(n: u64) -> u64 {
-    if n < 241 {
-        bin := (4294945360 >> (((n + 15) >> 4) << 1)) & 3;
-        head := wrapping_add(raw_state(), wrapping_add(256, bin << 3));
+    // The class and the clearing in one test chain, with no variable shift and no checked add (each
+    // would be a range check and a call to rt_abort in the hottest function the compiler runs), and
+    // the two smallest classes - most allocations - cleared with fixed stores. Class k's head is
+    // state word 256 + 8k; its blocks hold 16 << ... bytes of payload: 16, 48, 112, 240.
+    if n < 17 {
+        head := wrapping_add(raw_state(), 256);
+        block := raw_load(head);
+        if block != 0 {
+            raw_store(head, raw_load(wrapping_add(block, 8)));
+            raw_store(wrapping_add(block, 8), 1);
+            raw_store(wrapping_add(block, 16), 0);
+            raw_store(wrapping_add(block, 24), 0);
+            live := wrapping_add(raw_state(), 24);
+            raw_store(live, wrapping_add(raw_load(live), 1));
+            return wrapping_add(block, 16);
+        }
+    } else if n < 49 {
+        head := wrapping_add(raw_state(), 264);
+        block := raw_load(head);
+        if block != 0 {
+            raw_store(head, raw_load(wrapping_add(block, 8)));
+            raw_store(wrapping_add(block, 8), 1);
+            raw_store(wrapping_add(block, 16), 0);
+            raw_store(wrapping_add(block, 24), 0);
+            raw_store(wrapping_add(block, 32), 0);
+            raw_store(wrapping_add(block, 40), 0);
+            raw_store(wrapping_add(block, 48), 0);
+            raw_store(wrapping_add(block, 56), 0);
+            live := wrapping_add(raw_state(), 24);
+            raw_store(live, wrapping_add(raw_load(live), 1));
+            return wrapping_add(block, 16);
+        }
+    } else if n < 241 {
+        mut head = wrapping_add(raw_state(), 280);
+        if n < 113 {
+            head = wrapping_add(raw_state(), 272);
+        }
         block := raw_load(head);
         if block != 0 {
             raw_store(head, raw_load(wrapping_add(block, 8)));
             raw_store(wrapping_add(block, 8), 1);
             ptr := wrapping_add(block, 16);
-            // The smallest bin holds every request up to 16 bytes in at least 16, so its blocks
-            // are cleared with two fixed stores (a tree node, a box) rather than the loop.
-            if n < 17 {
-                raw_store(ptr, 0);
-                raw_store(wrapping_add(ptr, 8), 0);
-            } else {
-                mut i = 0;
-                while i < n {
-                    raw_store(wrapping_add(ptr, i), 0);
-                    i = wrapping_add(i, 8);
-                }
+            mut i = 0;
+            while i < n {
+                raw_store(wrapping_add(ptr, i), 0);
+                i = wrapping_add(i, 8);
             }
             live := wrapping_add(raw_state(), 24);
             raw_store(live, wrapping_add(raw_load(live), 1));
@@ -2010,14 +2044,18 @@ fn rt_reserveb(s: u64, need: u64) -> u64 {
 }
 // Copies n bytes, a word at a time while possible.
 fn rt_copy_bytes(dst: u64, src: u64, n: u64) -> u64 {
+    // Wrapping arithmetic: every checked add here was a range test and an rt_abort call in a loop the
+    // compiler runs about a million times per thousand-function check. A copy cannot overflow an
+    // address: both ranges exist.
     mut i = 0;
-    while i + 8 < n + 1 {
-        raw_store(dst + i, raw_load(src + i));
-        i = i + 8;
+    words := n & 18446744073709551608;
+    while i < words {
+        raw_store(wrapping_add(dst, i), raw_load(wrapping_add(src, i)));
+        i = wrapping_add(i, 8);
     }
     while i < n {
-        raw_putbyte(dst + i, raw_byte(src + i));
-        i = i + 1;
+        raw_putbyte(wrapping_add(dst, i), raw_byte(wrapping_add(src, i)));
+        i = wrapping_add(i, 1);
     }
     return 0;
 }
@@ -2449,11 +2487,11 @@ fn rt_drop_seq(s: u64) -> u64 {
         // A literal's static object (block state 2) owns nothing and is never freed. Most of what
         // is dropped is one of those - every `view("text")` has one - so it is settled here and
         // not by two calls of rt_free that each find the same thing out.
-        if raw_load(s - 8) == 2 {
+        if raw_load(wrapping_sub(s, 8)) == 2 {
             return 0;
         }
         // Bytes that share the header's block (rt_copy) go with it.
-        if raw_load(s) != s + 24 {
+        if raw_load(s) != wrapping_add(s, 24) {
             rt_free(raw_load(s));
         }
         rt_free(s);

@@ -1,5 +1,12 @@
 ## Unreleased
 
+- **The compiler checks about 5% faster: the allocator's and copy's hot paths lost their checks.**
+  `rt_alloc_unlocked` finds the class and clears the block in one compare chain (no variable shift,
+  no checked add, the two smallest classes cleared with fixed stores); `rt_free` answers a null
+  pointer before loading anything and finds the class with two constant shifts; `rt_copy_bytes` and
+  `rt_drop_seq` use wrapping arithmetic. A cold `grail check` of the 26k-line syn1000 runs 4.247 G
+  -> 4.040 G instructions (-4.9%), with identical output.
+
 - **A release build's runtime error says where it failed.** A failing check in a release (LLVM)
   build printed its message without the ` --> file:line:col` line a development build prints, because
   that line came from the native backend's site table. The front end now records statement positions
