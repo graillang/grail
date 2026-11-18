@@ -1,5 +1,20 @@
 ## Unreleased
 
+- **The Abundance procedural impact/predator/pickup synthesiser is ported, sample for sample.**
+  `abundance/src/audio_procedural.grl` carries `ABSynthesiseProceduralImpact`,
+  `ABSynthesisePredatorVoice` and `ABSynthesisePickupTick` of
+  `Private/audio/procedural_synthesis_detail.cpp` (cmake/tx/character.cmake's audio side): the
+  engine's FRandomStream LCG and its float construction, the impact's pitch-swept body with the
+  low-passed contact crunch, the predator voice's howl and rough pulsed growl (Square of a double
+  sine, harmonics through sinf), and the pickup tick's soft thump, inharmonic stone partials or
+  brighter metal ring with its click, each peak-normalised and truncated to PCM16 as the C++ casts
+  it. The float maths uses lib/math's glibc-exact `sinf` where the engine calls `std::sin` on a
+  float and its double kernels elsewhere, with the C++'s float/double widths kept apart.
+  `abundance/tests/parity/audio_procedural.cpp` compiles the engine's synthesiser with
+  `-ffp-contract=off` and prints 195 values; `abundance/tests/audio_procedural_test.grl`
+  reproduces every one - 7 intensities (including out-of-range and NaN) and 2 howl modes across
+  three seeds each, four sound classes across three seeds, each compared by sample count, an
+  FNV-1a hash over the int16 stream and its first/last/peak samples.
 - **The Abundance UI design system and shape tessellator are ported, vertex for vertex.** `abundance/src/
   ui_design.grl` carries `Public/abundance/ui/design_system.hpp`: linear `Rgba` with `srgb`/`mix`/
   `fade`/`visible`, the palette (and its high-contrast variant), the type scale, the 4 px spacing
