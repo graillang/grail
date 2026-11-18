@@ -1,5 +1,11 @@
 ## Unreleased
 
+- **The Abundance tools lane records the last five tools' boundaries.** `abundance/README.md` now
+  states exactly what each remaining tool needs: ui_snapshot's engine frame-stream format and
+  rasteriser arithmetic, soundscape_render's audio/sky cores and ffmpeg rain loops,
+  megaplants_batch's extraction-cache signature/prune design and its usd-core extraction boundary,
+  usd_assembly's USD reader, and content.py's flock/liveness/nlink-only subcommands.
+
 - **Abundance's build_piece_meshes writer is ported: glTF, .bin and pieces.json byte-identical.**
   `abundance/src/piece_meshes.grl` reproduces the Y-up re-centred glTF text (per-surface material,
   tint, roughness, the glass transmission extensions, texture set and relative URIs), the .bin layout
