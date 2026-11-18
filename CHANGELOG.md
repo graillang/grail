@@ -1,8 +1,23 @@
 ## Unreleased
 
-- Fixed (main red): `abundance/src/frame_loop.grl` moved to the harness's `threadedModules`. It drives the
-  thread-backed scheduler, and leaving it in the general port set made every other test fail to resolve
-  `abundance_job_scheduler`; only the tests that list the threaded modules compile it now.
+- **The Jolt surface closes with the overlap query.** `gr_jolt_overlap_capsule` is one `CollideShape`
+  of the same capsule the cast sweeps, stopped at the first hit: `abundance/src/jolt.grl` now answers
+  the core's `overlap` contract (a boolean, with `invalid_request` for a capsule shorter than its own
+  caps), and the Jolt parity program grew four overlap cases - the ground, an empty column of air, a
+  prop and an invalid capsule - all matching the direct-Jolt reference (381 values now). docs/jolt.md
+  records the closure: `engine/physics` holds only `world.cpp` and `physics_module.cpp`, a kinematic
+  capsule over terrain chunks, and **the engine has no ragdoll, articulation or vehicle physics** to
+  bind. Also: the abundance suite's `--only=NAME` accepts a probe name on its own
+  (`--only=jolt_layout`), where it used to fail looking for a test program to match it.
+- **The abundance suite's `frame_loop` wiring no longer breaks every other port test.** `frame_loop.grl`
+  names `abundance_job_scheduler`, which `portSources` deliberately leaves out (it is the one port
+  module with real threads, added only for the tests that ask); `frame_loop.grl` itself was still in
+  the glob, so every other test compiled it and failed with `cannot resolve module
+  abundance_job_scheduler`. Two lines: `frame_loop.grl` leaves the glob and joins its own test's
+  modules. Found while landing the platform OS increment (which no longer touches frame_loop, but its
+  tests hit the same glob); `frame_loop_test` still matches its 83 lines.
+
+
 - **Abundance's file/OS services land on Grail, matching `content_paths.hpp` 35/35 lines.**
   `abundance/src/platform_os.grl` carries the engine core's content paths (`packaged`, `root` including
   the `$HOME/.cache` and `/tmp` fallbacks, `shader_root`, `resolve`) as rules over the environment
@@ -15,6 +30,25 @@
   `gr_sdl_pref_path`: SDL allocates the pref path with SDL_malloc and Grail has no CPtr-to-CStr cast,
   so the shim copies the text out and frees the buffer.
 
+- `abundance/PORTING.md` records the evaluation-order trap that cost a byte-identical fill: gcc
+  sequences a call's arguments right to left, braced-init lists left to right, and a draw hoisted
+  out of its branch changes the stream — with the grep that audits a module for it.
+- **Abundance: the mesa country planner is ported and bit-exact.** `src/coherent_mesa.grl` carries
+  `plan_mesa_regions` and `mesa_region_weight`: the ~128 m summary grid, the 128 m block means and
+  land share, the summary slope, the two-round chamfer distance fields (sea, mountain belt,
+  keep-outs), the province suitability, the warmth/dryness/elevation/ruggedness/coast/belt gates and
+  the seeded jitter that score every other cell, and the ranked, kept-apart selection that seeds
+  each region. `tests/coherent_mesa_test.grl` matches Abundance's own `coherent_mesa.cpp`
+  (`-ffp-contract=off`) over a synthetic 8 km sedimentary world in four configurations (natural,
+  forced, canyonlands, small footprint): 12 of 12 lines. The builder — the plateau cap, scarp
+  retreat from the washes, slot canyons, spires and the stepped-hills coupling — and the mark and
+  biome hooks are not ported yet.
+
+- **The shader pipeline takes `characters/`, all 10 entries.** Cluster bounds, skin and cloth
+  deformation, tangents, the hair strands/raster/resolve chain and the subsurface
+  Burley/resolve/temporal passes, plus the fixture irradiance: 131 KB of SPIR-V at pin
+  `ca1f1bc05b`, the layout pin growing from 46 to 54 structs. No character entry reaches the mirror
+  trees.
 - **The damage domain's placed-object entry points are ported.** `abundance/src/damage_actions.grl`
   carries `actions/damage/placed_damage` (cmake/tx/damage): the book rows, `strike_placed`'s skips,
   refusal wording ("damage.placed_energy") and wreck threshold, `first_placed_hit`'s box slab test and
@@ -69,6 +103,17 @@
   passes: 185 KB of SPIR-V at pin `ca1f1bc05b`, the layout pin growing from 37 to 46 structs. Six
   entries stay recorded as skipped for the terrain mirror, including `water_surface.ms` — so water
   contributes no mesh stage to the inventory yet.
+- **Job bodies are handed the scheduler as an `rc::Arc` handle.** `submit`, `submit_deps`, `post`
+  and `executor_submit` take `Fn<Share, Owned>(rc::Arc<JobScheduler>, u64, u64) -> u64`, so a body
+  asks `job_cancelled`, `job_preempt_requested` and `job_yield` through the handle it is given. The
+  port's own `SchedulerRef` wrapper type is deleted. A plain `(&JobScheduler)` parameter is still
+  blocked by two compiler gaps, both reported.
+- Fixed: a compound assignment on an `f64` no longer multiplies by a float literal rounded to `f32`.
+  `mut y = 0.0044444444444444444; y *= 2.03;` gave `0.009022222095065646` (bits `4576354578717423552`)
+  where `y * 2.03` gives `0.009022222222222221` (bits `4576354578790724327`): the literal was rounded
+  to binary32 and widened back. Only an `f32` context rounds a literal from its text now, so the
+  compound forms (`*=`, `+=`, ...) agree bit for bit with `y = y * lit`; an `f32` target is unchanged.
+  Case `compound-f64-literal-keeps-its-bits`.
 - **The dedicated server's datagram reliability layer is ported** (`abundance/src/net_datagram.grl`):
   `ab::server::DatagramConnection` - which the engine's own header documents as pure logic with no
   sockets - with packet sequence numbers and the wrap-safe newer-than compare plus a 32-bit ack
@@ -611,6 +656,25 @@
   `rhi_swapchain_probe`'s eight validation messages are fixed: the instance now asks for Vulkan 1.2
   through a real `VkApplicationInfo`, and teardown waits for the last present. The suite validates
   it against Abundance's pinned layer.
+- **Abundance's localisation Catalog is ported: JSON tables and draw-time translation.** `abundance/src/
+  localization_catalog.grl` carries `ab::loc::Catalog` of `cmake/tx/localization.cmake`'s
+  localization.cpp: per-language tables loaded from JSON (nlohmann's accepted language over
+  `lib/json` - `//` and `/* */` comments and a BOM outside strings, std::map key order, a repeated
+  key keeping its last value), the loader's exact refusals ("not a JSON object", "bad plural form
+  '<k>' in <id>", "value of <id> is neither text nor plural forms", "duplicate id <id> (also in
+  <source>)", a failed load keeping the rows it already inserted), ids/size/source_of, text and
+  plural lookups with English fallback, and `translate()`: exact then case-folded English, the
+  closing-punctuation and ellipsis core, named-placeholder templates ordered by specificity,
+  number+unit pairs, the eleven " · "/": "/newline separators, recursive capture translation with
+  number detection (strtod over the digits), localised punctuation, the memo (including
+  output-as-input) and the recorded misses. The process-wide catalog/active-language globals are
+  host glue and stay unported. `abundance/tests/parity/localization_catalog.cpp` compiles the
+  engine's localization.cpp and prints 495 lines; `localization_catalog_test.grl` reproduces them
+  byte for byte.
+- Reported, not fixed here: `lib/json`'s `allow_duplicate_keys` path leaks one allocation (a
+  ten-line `json::parse_with` of `{"a":"1","a":"2"}` aborts in `rt_leak_exit`), so the Catalog's
+  parity fixtures use no file with a repeated key even though the loader keeps the flag, because
+  the engine accepts such files.
 - Fixed: a struct partly moved before a loop (`f := r.inner;`) no longer makes the loop refuse with "loop
   backedge consumes entry storage: `r` is moved out of it" when the body only reads it. The backedge check
   now counts what the body consumes: a place that dies in the body, one that was whole at entry and is
@@ -711,9 +775,9 @@
   and 100-run determinism. Its 64 lines match `parity/jobsched.cpp`, which runs the same scenarios
   on the engine's own `ab::JobScheduler` from libabundance_worldgen.a. `tools/abundance-test.mjs`
   compiles the threaded module (with lib/thread, sync, time, rc) only for that test. Job bodies own
-  their captures (`Fn<Share, Owned>(SchedulerRef, id, key)`, like the engine's `std::function`), and
-  the scheduler handle is passed in as an Arc clone. Storing a call-scoped `Fn<Share>` left a lent
-  environment dangling, which the compiler now refuses.
+  their captures (like the engine's `std::function`) and are handed the scheduler as an `rc::Arc`
+  handle. Storing a call-scoped `Fn<Share>` left a lent environment dangling, which the compiler now
+  refuses.
 - **The island's macro coastline plan is ported bit for bit.** `abundance/src/
   worldgen_macro_coast.grl` carries `terrain_shape.cpp`'s planner (lobes, bays, islets, valley axes
   and tributaries), `macro_land_field` and `protected_blend_weight`, with the file's own noise
