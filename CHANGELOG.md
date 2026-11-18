@@ -340,6 +340,16 @@
   flags (`abundance/tools/build-pull-shader.mjs`); `abundance-test` finds Abundance's
   pinned validation layer and skips every device probe while the human's game is running.
 
+- **BC7/BC6H reference capture: the ISPC dispatch is pinned and shown to be ISA-invariant.**
+  The block-compression parity program now reports the vector width its ISPC dispatchers select
+  from CPUID and emits BC7 (linear and sRGB) and BC6H blocks under argv `all`
+  (`abundance/tests/parity/bc_encode_all.txt`), with the same binary under
+  `qemu-x86_64-static -cpu Haswell` producing `bc_encode_all_avx2.txt` — identical block for
+  block, so those fixtures are reproducible on a machine without AVX-512. The encoders themselves
+  stay unported: bc7e's mode search (4 952 ISPC lines; modes 0-5 appear on these fixtures,
+  including partitioned two-subset modes whose error metric also picks the mode) and texcomp's
+  BC6H `veryslow` search would have to be ported whole for byte-exact output; recorded in
+  abundance/README.md rather than approximated.
 
 - **msdfgen, the UI's font SDF generator, is bound to Grail and gated at 143 values.**
   `abundance/src/msdfgen.grl` calls msdfgen v1.12 - the release `engine/third_party/msdfgen` vendors
