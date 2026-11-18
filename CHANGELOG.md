@@ -511,6 +511,14 @@
   on the live session (1 491 reference lines). The section producers — the JSON/HUD documents —
   remain the gameplay lanes' work, since they need the state those lanes port.
 
+- **Abundance port: a render graph plan runs on the engine RHI, and the windowed probe is
+  validation-clean.** `rhi_engine_graph` executes `render_graph`'s plan. It allocates the heaps, binds
+  the aliased transients after checking the driver's requirements, binds the imports, and records the
+  synchronisation2 barriers, dynamic rendering and copy bodies on the graphics timeline.
+  `rhi_graph_probe` reads back two aliased transients exactly, with synchronisation validation on.
+  `rhi_swapchain_probe`'s eight validation messages are fixed: the instance now asks for Vulkan 1.2
+  through a real `VkApplicationInfo`, and teardown waits for the last present. The suite validates
+  it against Abundance's pinned layer.
 - Fixed: a struct partly moved before a loop (`f := r.inner;`) no longer makes the loop refuse with "loop
   backedge consumes entry storage: `r` is moved out of it" when the body only reads it. The backedge check
   now counts what the body consumes: a place that dies in the body, one that was whole at entry and is
