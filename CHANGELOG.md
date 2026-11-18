@@ -49,6 +49,21 @@
   Burley/resolve/temporal passes, plus the fixture irradiance: 131 KB of SPIR-V at pin
   `ca1f1bc05b`, the layout pin growing from 46 to 54 structs. No character entry reaches the mirror
   trees.
+- **The derelict monument layouts' M1 is ported: the builder, the derelict pass and the Farm
+  template.** `abundance/src/monument_layout.grl` carries `Private/monuments/monument_layout.cpp`'s
+  anonymous-namespace Builder (the site Rng, `LocalPiece`/`Bounds`, `put`, `wall` with its four-cell
+  panels and door/window/garage openings, `RoomSpec`/`room`/`slab`, the gabled cottage with its loft,
+  `fence`/`fence_ring` with grades and gates, `stairs`, `cache`/`wreck`/`tree`), the derelict pass
+  (collapse centres, the per-role base rates, crumbled wall tops, `settle`, `settle_slabs` and
+  `rubble`), `finish` (the world transform, the point rotation and `yaw + 90 T0 mod 360`),
+  `monument_weathering_rgb`, the cache kind names and `build_farm`. Pieces resolve through a
+  committed catalogue table (`tests/parity/monuments_catalog.bin`, magic "ABMN" v1: 266 modules'
+  occupied cells and 1280 (kind, tier, turns) rows of module and material ids) that the reference
+  dumps from the engine's own `ConstructionCatalog`, so this stage carries no construction domain;
+  when `abundance/src/construction_catalog.grl` lands the table becomes its cross-check. 10 118
+  reference lines match over eight Farm sites (three at the 1400-piece cap), each piece digested
+  field by field with the first six per site printed exactly.
+
 - **The damage domain's placed-object entry points are ported.** `abundance/src/damage_actions.grl`
   carries `actions/damage/placed_damage` (cmake/tx/damage): the book rows, `strike_placed`'s skips,
   refusal wording ("damage.placed_energy") and wreck threshold, `first_placed_hit`'s box slab test and
