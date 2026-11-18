@@ -5085,16 +5085,17 @@ fn rt_job_split(d: u64, lo: u64, hi: u64, kind: u64) -> u64 {
         return rt_job_chunk_leaf(d, lo);
     }
     mid := lo + (hi - lo) / 2;
+    t := rt_job_stack();
     mut r = 0;
     if kind == 0 {
-        r = rt_job_fork(rt_job_split_map, d, mid, hi);
+        r = rt_job_make(t, rt_job_split_map, d, mid, hi, 7);
     } else if kind == 2 {
-        r = rt_job_fork(rt_job_split_zip, d, mid, hi);
+        r = rt_job_make(t, rt_job_split_zip, d, mid, hi, 7);
     } else {
-        r = rt_job_fork(rt_job_split_chunks, d, mid, hi);
+        r = rt_job_make(t, rt_job_split_chunks, d, mid, hi, 7);
     }
     left := rt_job_split(d, lo, mid, kind);
-    return left + rt_job_join(r);
+    return left + rt_job_join(r, t);
 }
 fn rt_job_split_map(d: u64, lo: u64, hi: u64) -> u64 {
     return rt_job_split(d, lo, hi, 0);
@@ -5343,7 +5344,7 @@ fn rt_parallel_split_at(s: u64, grain: u64, f: u64, env: u64, width: u64, at: u6
 // same call the frame would have made - before it publishes the result.
 fn rt_parallel_spawn(f: u64, object: u64) -> u64 {
     rt_jobs_sched();
-    return rt_job_make(rt_job_boxed, 0, f, object, 0);
+    return rt_job_make(rt_job_stack(), rt_job_boxed, 0, f, object, 6);
 }
 // The one-word heap slot the closure ABI reads, for a closure handed to a thread
 // (thread_spawn_raw): the thread's entry passes its address as the callee's first argument.
@@ -5365,7 +5366,7 @@ fn rt_job_boxed(unused: u64, f: u64, object: u64) -> u64 {
 // `parallel_join(handle)` and a handle's drop: the result word, and the record goes back.
 fn rt_job_wait(j: u64) -> u64 {
     rt_region_enter();
-    rt_job_await(j);
+    rt_job_await(j, rt_job_stack());
     rt_region_leave();
     r := raw_load(j + 40);
     f := raw_load(j + 80);
@@ -5382,6 +5383,8 @@ fn rt_job_wait(j: u64) -> u64 {
 // address otherwise.
 fn rt_parallel_with(f1: u64, env1: u64, f2: u64, env2: u64, combine: u64) -> u64 {
     rt_jobs_sched();
+    // The stack whose list the fork goes on, looked up once for the fork, the join and the run.
+    t := rt_job_stack();
     // A green stack counts its region through the stack list (the fork is on it); only a thread
     // that is not running a task keeps a count of its own (rt_region_step), and takes the external
     // slot as it enters - before the fork, so the fork goes on the slot's deque.
@@ -5389,24 +5392,16 @@ fn rt_parallel_with(f1: u64, env1: u64, f2: u64, env2: u64, combine: u64) -> u64
     if plain {
         rt_region_enter();
     }
-    r := rt_job_fork(rt_job_call0, f1, env1, 0);
-    mut second = 0;
-    if env2 == 0 {
-        second = raw_call2(f2, 0, 0);
-    } else {
-        second = raw_call2(f2, env2, 0);
-    }
-    first := rt_job_join(r);
+    // The job calls `first` itself: the record's function is called with (a, b, c) = (env1, 0, 0),
+    // which is the closure ABI's call of a callback with no arguments - its first argument is the
+    // environment slot (0 for a plain function), and the words after it are ignored.
+    r := rt_job_make(t, f1, env1, 0, 0, 7);
+    second := raw_call2(f2, env2, 0);
+    first := rt_job_join(r, t);
     if plain {
         rt_region_leave();
     }
     return raw_call2(combine, first, second);
-}
-fn rt_job_call0(f: u64, env: u64, unused: u64) -> u64 {
-    if env == 0 {
-        return raw_call2(f, 0, 0);
-    }
-    return raw_call2(f, env, 0);
 }
 
 // ---- colourless tasks: stackful green threads on the scheduler's workers, with a reactor ----
@@ -6530,7 +6525,10 @@ fn rt_job_release(r: u64) -> u64 {
     if raw_atomic_load(r + 32) != 3 {
         rt_abort();
     }
-    raw_atomic_store(r + 32, 0);
+    // A release store, not a sequentially consistent one (an `xchg` on x86-64, a full barrier on
+    // every join): nothing waits on the record now, and the only other readers are holders of a
+    // stale entry, whose claim (a CAS from pending) fails on 0 as it did on done.
+    raw_atomic_store_release(r + 32, 0);
     w := rt_job_block();
     if (w != 0) && (raw_load(w + 248) < 1024) {
         raw_store(r + 48, raw_load(w + 240));
@@ -6565,9 +6563,12 @@ fn rt_list_set(t: u64, head: u64) -> u64 {
     raw_store(t + 152, (raw_load(t + 152) & 18446462598732840960) | head);
     return 0;
 }
-// The claim word a caller writes: which worker's deque the job's own forks will land on.
+// The claim word a caller writes: which worker's deque the job's own forks will land on, for a
+// caller whose block (rt_job_block) is `w`.
 fn rt_job_claim_word() -> u64 {
-    w := rt_job_block();
+    return rt_job_claim_on(rt_job_block());
+}
+fn rt_job_claim_on(w: u64) -> u64 {
     if w == 0 {
         return 2;
     }
@@ -6577,15 +6578,14 @@ fn rt_job_claim_word() -> u64 {
 // in the injection ring from any other thread. When neither has room the job is simply not queued;
 // it stays pending and its forker runs it at the join. `listed` forks are the structured ones - the
 // forker joins them before its frame returns - and go on the forker's stack list; a job handle is
-// not listed, because it owns its captures and may be joined by anyone.
-fn rt_job_fork(f: u64, a: u64, b: u64, c: u64) -> u64 {
-    return rt_job_make(f, a, b, c, 1);
-}
-fn rt_job_make(f: u64, a: u64, b: u64, c: u64, listed: u64) -> u64 {
-    return rt_job_make_class(f, a, b, c, listed, 3);
-}
-// `class` 3: inherit (the parent's class, else the stack's, else Normal).
-fn rt_job_make_class(f: u64, a: u64, b: u64, c: u64, listed: u64, class: u64) -> u64 {
+// not listed, because it owns its captures and may be joined by anyone. `t` is the caller's
+// rt_job_stack(), which a structured fork passes on to its join. `how` is listed (bit 0) plus twice
+// the class, class 3 meaning inherit (the parent's class, else the stack's, else Normal): 7 is a
+// structured fork, 6 a job handle. Six words, not seven: a seventh argument goes on the stack, and
+// the release build then compiles this function and its callers without the optimiser.
+fn rt_job_make(t: u64, f: u64, a: u64, b: u64, c: u64, how: u64) -> u64 {
+    listed := how & 1;
+    class := how / 2;
     w := rt_job_block();
     r := rt_job_new_on(w);
     raw_store(r, f);
@@ -6593,7 +6593,6 @@ fn rt_job_make_class(f: u64, a: u64, b: u64, c: u64, listed: u64, class: u64) ->
     raw_store(r + 16, b);
     raw_store(r + 24, c);
     mut parent = 0;
-    t := rt_job_stack();
     if t != 0 {
         head := rt_list_head(t);
         if (head & 1) != 0 {
@@ -6627,7 +6626,10 @@ fn rt_job_make_class(f: u64, a: u64, b: u64, c: u64, listed: u64, class: u64) ->
     if k == 2 {
         raw_store(r + 104, rt_now_us());
     }
-    raw_atomic_store(r + 32, 1);
+    // Pending, with a release store: whoever claims the job (a CAS, acquiring) sees the words above,
+    // and the deque push below is a release of its own. A sequentially consistent store here was a
+    // second full barrier on every fork, beside the one rt_notify needs.
+    raw_atomic_store_release(r + 32, 1);
     mut placed = 0;
     if w != 0 {
         placed = rt_deque_push(rt_job_deque(w, k), r);
@@ -6805,19 +6807,18 @@ fn rt_job_steal(w: u64, class: u64) -> u64 {
 // task had registered as the waiter: that task is woken and then told so, because it must not carry
 // a wake that arrives after it has moved on.
 fn rt_job_exec(r: u64) -> u64 {
-    return rt_job_exec_by(r, 0);
+    return rt_job_exec_by(r, 0, rt_job_stack());
 }
 // `own` is 1 when the forker runs its own job (claimed by pointer at its join): then nobody else
 // can be waiting on the record - the only waiter a job has is its forker - so publishing is a
 // release store, not a swap that would look for a waiter to wake.
-fn rt_job_exec_by(r: u64, own: u64) -> u64 {
+fn rt_job_exec_by(r: u64, own: u64, t: u64) -> u64 {
     // An address in this frame (word 96): frames above it are the job's forker's, when the forker
     // ran the job itself; a failure's join site is looked for there (rt_job_fail).
     mut mark = 0;
     here := &mut mark;
     raw_store(r + 96, here);
     background := raw_load(r + 88) == 1;
-    t := rt_job_stack();
     if t != 0 {
         raw_store(r + 72, rt_list_head(t));
         rt_list_set(t, r + 1);
@@ -6953,7 +6954,7 @@ fn rt_job_leap(s: u64, r: u64, claimed: u64) -> u64 {
 // Still pending: claim it by pointer and run it here; its queue entry, usually the newest in this
 // worker's deque, is taken out (an entry that is not it goes back). Claimed by someone else: on a
 // worker with room, leapfrog; otherwise, and when there is nothing to leapfrog, wait.
-fn rt_job_await(r: u64) -> u64 {
+fn rt_job_await(r: u64, t: u64) -> u64 {
     s := raw_atomic_load(raw_state() + 72);
     mut idle = 0;
     while true {
@@ -6963,14 +6964,14 @@ fn rt_job_await(r: u64) -> u64 {
         }
         w := rt_job_block();
         if st == 1 {
-            if raw_atomic_cas(r + 32, 1, rt_job_claim_word()) == 1 {
+            if raw_atomic_cas(r + 32, 1, rt_job_claim_on(w)) == 1 {
                 if w != 0 {
                     k := rt_deque_pop(rt_job_deque(w, raw_load(r + 112)));
                     if (k != 0) & (k != r) {
                         rt_deque_push(rt_job_deque(w, raw_load(r + 112)), k);
                     }
                 }
-                rt_job_exec_by(r, 1);
+                rt_job_exec_by(r, 1, t);
                 return 0;
             }
         } else {
@@ -6980,7 +6981,7 @@ fn rt_job_await(r: u64) -> u64 {
             }
             if k != 0 {
                 idle = 0;
-                claim := rt_job_claim_word();
+                claim := rt_job_claim_on(w);
                 if raw_atomic_cas(k + 32, 1, claim) == 1 {
                     if rt_job_descends(k, r) != 0 {
                         rt_job_help(w, k);
@@ -7046,9 +7047,8 @@ fn rt_job_park(r: u64) -> u64 {
     return 0;
 }
 // Join a listed fork: it is the newest entry of this stack's list, and leaves it here.
-fn rt_job_join(r: u64) -> u64 {
-    rt_job_await(r);
-    t := rt_job_stack();
+fn rt_job_join(r: u64, t: u64) -> u64 {
+    rt_job_await(r, t);
     if t != 0 {
         rt_list_set(t, raw_load(r + 64));
     }
@@ -7512,14 +7512,15 @@ fn f_host_background_wait_us() -> u64 {
 // the class from it. A plain thread keeps the class in its thread record for the duration.
 fn rt_parallel_class(class: u64, f: u64, env: u64) -> u64 {
     rt_jobs_sched();
-    if rt_job_stack() != 0 {
-        r := rt_job_make_class(rt_job_call0, f, env, 0, 1, class);
-        return rt_job_join(r);
+    t := rt_job_stack();
+    if t != 0 {
+        r := rt_job_make(t, f, env, 0, 0, class * 2 + 1);
+        return rt_job_join(r, t);
     }
     tp := raw_tp_get();
     old := raw_load(tp + 112);
     raw_store(tp + 112, class + 1);
-    res := rt_job_call0(f, env, 0);
+    res := raw_call2(f, env, 0);
     raw_store(tp + 112, old);
     return res;
 }

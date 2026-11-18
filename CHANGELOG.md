@@ -1,5 +1,12 @@
 ## Unreleased
 
+- Performance: a fork/join (`pool::join`, `parallel_map`'s splits, `pool::with_class`) costs fewer
+  instructions and two fewer full barriers. A job record's pending and free states are now written
+  with release stores (each was an `xchg` on x86-64); the stack a fork goes on is looked up once per
+  join instead of three times; the trampoline that called a join's first branch is gone (the record
+  calls the callback directly). The record maker also stays within six arguments, so the release
+  build keeps it on the optimised path. Measured with one worker on fib(32) with nested joins: 1434 ->
+  1318 user instructions per join in the development build, 561 -> 503 in release.
 - Fixed: a closure type written outside a parameter list (a struct field, a local's type) can take a
   reference parameter: `struct S { body: Fn<Owned>(&T) -> u64 }` was "elided output reference needs one
   input lifetime". Its elided lifetime is a fresh input of each call, as inside a function's parameter
