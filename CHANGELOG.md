@@ -1,5 +1,12 @@
 ## Unreleased
 
+- **The parity references follow the reference checkout's moves**: `tools/abundance-test.mjs`
+  gives every Abundance-tree reference the `engine/` include (`base/*.hpp` moved there) and builds the
+  RHI reference against this repository's `graphics/` (the foundation left the checkout); `job.cpp`
+  follows `job_scheduler.hpp` to `base/`. The world/cache fixtures are regenerated against the
+  checkout at `83d90ed95e` (generator version 122): the world and synthetic hashes and the cache
+  containers change with it, the landscape authority snapshot does not. All 13 programs and 6 probes
+  still match.
 - `tools/abundance-test.mjs`: the references map had two identical `checkpoint` entries; the first
   was shadowed and dead, and is deleted. No behavior change.
 
