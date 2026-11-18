@@ -63,6 +63,13 @@
   `call_dest` and passes it in the third argument register, as every other call site does. Corpus
   case `mutex-lock-result-enum-with-record-payload`.
 (compiler: lock_with passes the hidden result destination its callback needs)
+- **`math::asin` and `math::fmod` join the standard library.** asin is fdlibm's
+  `__ieee754_asin` - the algorithm glibc's double asin evaluates - so its results are bit-identical
+  to the system libm (expected bits in the new corpus case come from the libc itself); fmod is the
+  exact IEEE remainder, built only from power-of-two doublings and Sterbenz-exact subtractions, so
+  it agrees with C's fmod by construction rather than by measurement. Both are `@no_block`. The
+  Abundance sky port needed both (the day/night model uses std::asin for the sun and moon and
+  std::fmod for every clock wrap).
 - **Every performance chart is re-measured with the machine idle** (load average under 3; release
   compiler with PGO on main bcf78e5a). Every compile row now beats the fastest rival: the cold
   check of the 104,000-line program is 0.93x Zig's instructions (3.05 against 3.28 billion). Channels
