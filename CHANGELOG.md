@@ -1,5 +1,15 @@
 ## Unreleased
 
+- **f32 element loads and stores and f32 constants in development builds take no detours.** An f32
+  element now loads and stores with one `movss` (it went through `%eax`), and an f32 constant hoisted
+  into an SSE register is rounded to binary32 once, so `v * damping - gravity * dt` is `mulss` and
+  `subss` with no widening to f64. AArch64 and RV64 lower the new forms to `ldr`/`str s` and
+  `flw`/`fsw`, and `grail asm` encodes `movss` and AArch64 `movi d,#0`. Development builds, callgrind,
+  outputs unchanged: ecs 20.8G to 16.7G instructions (1.09 s to 0.80 s), matmul 11.9G to 9.9G,
+  xform_f32 7.0G to 6.4G, ecs_par 19.8G to 18.4G, dot_f32 5.1G to 3.9G.
+- **Fixed: a zeroed f32 local in an AArch64 development build failed to assemble** (`movi` was
+  missing from `grail asm`), and RV64/AArch64 had no register for `%xmm15`.
+
 - **`grail check` is about 9% faster on a large program: the root module writes no interface.** A
   check wrote every module's interface, including the program's root, which no other module reads.
   The root's run now skips it, and with it the effect recording that only fed that interface. A

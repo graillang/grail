@@ -335,7 +335,8 @@ pub fn is_desc_op(op: u64) -> bool {
     return (88 < op) && (op < 98);
 }
 pub fn is_float_op(op: u64) -> bool {
-    return (59 < op) && (op < 78);
+    // 78 is `movss` (optimize.grl `xmm_loads`/`xmm_stores`): never parsed, only made.
+    return (59 < op) && (op < 79);
 }
 
 pub fn opcode_key(k: u64) -> u64 {
@@ -1272,6 +1273,10 @@ pub fn reads<a>(o: (&a Body), i: u64) -> u64 {
     if op == 100 || op == 101 || op == 29 || op == 32 || op == 120 || is_jump(op) {
         return 0;
     }
+    // optimize.grl `xmm_narrow`: `movq %R,%xmmK; cvtsd2ss %xmmK,%xmmK` reads R.
+    if op == 121 {
+        return src;
+    }
     if movelike(op) {
         return src | dst_address(&o, i);
     }
@@ -1413,9 +1418,13 @@ pub fn writes<a>(o: (&a Body), i: u64) -> u64 {
     if (op == 98) || (op == 99) {
         return dst_writes(&o, i);
     }
-    // optimize.grl `xmm_narrow`: a binary32 register widened into a general one (through %xmm15).
+    // optimize.grl `xmm_narrow`: a binary32 register widened into a general one (through %xmm15);
+    // a general register's f32-exact double narrowed into an SSE one (121) writes none.
     if op == 120 {
         return dst_writes(&o, i);
+    }
+    if op == 121 {
+        return 0;
     }
     if is_float_op(op) {
         if (op == 69) || (op == 70) {
