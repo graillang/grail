@@ -104,6 +104,11 @@ cvttss2si %xmm0,%rax
 cvtsi2ssq %rax,%xmm0
 movsd (%rax),%xmm0
 movsd %xmm12,8(%r12)
+movss (%rax),%xmm0
+movss 4(%rbx,%rsi,4),%xmm8
+movss %xmm9,(%rcx)
+movss %xmm12,8(%r12)
+movss %xmm1,%xmm8
 movzbl %al,%eax
 movzwl %cx,%eax
 pause

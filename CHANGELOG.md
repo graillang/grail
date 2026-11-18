@@ -6,11 +6,40 @@
   straight from it and do two-address arithmetic in place, wherever the scratch is dead after.
   Development builds, outputs identical: ecs_par 18.3G to 15.2G instructions (-17%), dot_f32 -10%,
   xform_f32 -9%, ecs -8%, matmul -7%; f64 code unchanged.
+- **Release builds lift the `dyn` adapter thunks.** A thunk (`.C<hash>_N`) adjusts the receiver and
+  tail-calls the method with `jmp *%r11`; the lifter refused it, so every `dyn` call went through a
+  native thunk and a second jump. It is now a call and a return in IR, which LLVM inlines the method
+  into: bench/dyncall release 503.8 M -> 443.8 M instructions, output identical.
+
+- **A payload-less variant of a boxed enum allocates nothing.** `Tree::Leaf` is now one static
+  `{tag, 0}` object with a static object's header, which every free path already skips, instead of a
+  16-byte allocation per value. bench/bintrees release: 3.78 G -> 3.59 G instructions, 0.28 s ->
+  0.24 s; output identical.
+
+- **The performance chapter explains the `fib(32)` scheduler rows.** They mostly measure g++'s
+  recursive inlining in oneTBB's twin (46 to 50 million instructions for serial `fib(32)`, against
+  67 million for clang's C and 75 million for Grail's release build, which is clang's loop plus one
+  register move), not Grail's join, which costs about the same as oneTBB's per join. The chapter's
+  earlier explanation (hidden registers in Grail's calling convention) was wrong and is removed.
+- **Release builds lift the drop glue too.** The content-addressed helpers (`.D…` drop glue, `.P…`)
+  are frameless, so the lifter's function split ran each one on into the next helper's `.weak`
+  directive and refused it; they stayed native calls LLVM could not inline. A symbol directive that
+  introduces the next function now ends the open one. bench/bintrees in release: 3.85 G -> 3.78 G
+  instructions and 0.29 s -> 0.25 s; dyncall -3%, strings -1%; outputs identical.
+
+- The FFI test shim builds for Windows without a C library's headers again: `immintrin.h` pulled in
+  `<stdlib.h>` through `mm_malloc.h`, which a Linux host has no MSVC copy of, so the Windows check
+  (and with it every post-landing run) failed before any case ran.
 
 - **The performance charts are measured again** on main bd532104 (kernels, engine programs, parallel
   ECS; compile on 66e3b3b6 with PGO). `tools/bench-rivals.mjs` now takes the best of 7 runs by default
   (it was 3) and `just bench-results` the best of 9 for the parallel chart (it was 5), so the next
   refresh on a shared machine is less at the mercy of one quiet round.
+- **A task's finish no longer makes a system call nobody waits for.** Every finished task woke its
+  "finished" word with a futex call, waited on or not: a burst of 100k spawns made 100k futex wakes
+  (and about 40% of the burst's system time). A thread that waits on that word now registers in the
+  task's joiner word, and only then is the wake made: 100,049 -> about 300-500 futex wakes per 100k
+  spawns, system CPU 0.057 -> 0.035 s for the burst.
 
 - `bench/results/compile.json` re-measured with the release compiler of main 66e3b3b6 (with its
   profile): a cold check of the 104 000-line program is now 1.29x Zig's instructions (from 1.51x),

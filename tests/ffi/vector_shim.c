@@ -2,6 +2,10 @@
  * __m128/__m128d/__m128i and __m256 on x86-64 (SysV: xmm/ymm registers), float32x4_t, float64x2_t and
  * int32x4_t on AArch64 (AAPCS64: q registers), counted with the float arguments. */
 #if defined(__x86_64__)
+/* The shim is freestanding: immintrin.h's _mm_malloc wrapper (mm_malloc.h) includes <stdlib.h>,
+ * which a cross target without its C library headers - Windows MSVC on a Linux host - does not have.
+ * Nothing here allocates, so that header is skipped by its include guard. */
+#define __MM_MALLOC_H
 #include <immintrin.h>
 typedef __m128 vf4;
 typedef __m128d vd2;

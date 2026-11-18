@@ -35147,6 +35147,8 @@ fn variant<a, b>(c: (&a mut C), d: u64, name: &b [u8], explicit: u64) -> Val {
     mut n = 0;
     if framed(&mut c, ty) {
         n = enum_frame(&mut c, tag, payload, ty, pty);
+    } else if (has == 0) && (c.raw == 0) {
+        n = static_unit_variant(&mut c, k);
     } else {
         n = invoke(&mut c, view("rt_enum"), two(tag, payload));
     }
@@ -35154,6 +35156,26 @@ fn variant<a, b>(c: (&a mut C), d: u64, name: &b [u8], explicit: u64) -> Val {
     root := place_of(&mut c, n);
     transfer_bonds(&mut c, source, root);
     return val(n, ty);
+}
+// A payload-less variant of a boxed enum (`Tree::Leaf`): one static {tag, 0} object instead of an
+// allocation. It carries the header of a static object ({0, 2}, as a string literal's does), so
+// dropping it frees nothing; every reader loads the tag at +0 exactly as from an allocated box, and
+// nothing writes into an enum's box in place (a retag allocates a new one).
+fn static_unit_variant<a>(c: (&a mut C), k: u64) -> u64 {
+    at := label(&mut c);
+    if c.plat == 1 {
+        o(&mut c, view(".pushsection __DATA,__const\n"));
+    } else {
+        o(&mut c, view(".pushsection .rodata\n"));
+    }
+    o(&mut c, view(".p2align 4\n.quad 0\n.quad 2\n"));
+    mark(&mut c, at);
+    o(&mut c, view(".quad "));
+    on(&mut c, k);
+    o(&mut c, view("\n.quad 0\n.popsection\nleaq "));
+    lname(&mut c, at);
+    o(&mut c, view("(%rip),%rax\n"));
+    return save(&mut c);
 }
 // Canonical specialization keys erase opaque body aliases and lift captured lifetimes
 // into fresh signature slots, disjoint from explicitly named function lifetimes.
@@ -50556,6 +50578,30 @@ fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
             first = primary(&mut c, expected);
         }
     }
+    // Most operands are followed by no operator: then the loop below would leave on its first
+    // turn, and its frame (thousands of bytes, cleared on entry) is not needed at all.
+    k0 := kind(&mut c);
+    if (k0 != 40) && (k0 != 91) && (k0 != 63) && (k0 != 33) && ((k0 != 46) || (next_kind(&mut c) == 46)) {
+        mut kp = k0;
+        if (k0 == 60) || (k0 == 62) {
+            here := c.pos;
+            if (kind_at(&mut c, here + 1) == k0) && (c.toks[here].end == c.toks[here + 1].start) {
+                kp = 271;
+                if k0 == 62 {
+                    kp = 272;
+                }
+            }
+        }
+        p0 := prec(kp);
+        if (k0 == 46) || (p0 == 0) || (p0 < min) {
+            return first;
+        }
+    }
+    return expr_rest(&mut c, min, expected, lstart, first);
+}
+// The operators after an expression's first operand (expr_expected): postfix calls, indexing,
+// fields, `?`/`!`, and binary operators by precedence.
+fn expr_rest<a>(c: (&a mut C), min: u64, expected: u64, lstart: u64, first: Val) -> Val {
     mut lend = c.pos;
     mut left_lit = (c.lit_start == lstart) & (c.lit_end == lend);
     mut lvalue = c.lit_value;

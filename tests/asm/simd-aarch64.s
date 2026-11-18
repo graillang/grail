@@ -48,3 +48,5 @@ fmla v2.4s,v0.4s,v1.4s
 fmla v2.2d,v0.2d,v1.2d
 fmla v18.4s,v16.4s,v17.4s
 ret
+movi d0,#0
+movi d24,#0

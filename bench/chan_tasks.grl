@@ -1,0 +1,93 @@
+// bench/chan.grl with Grail tasks instead of OS threads: the same four cases, the same sums, so the
+// output is C's (tools/bench-rivals.mjs checks it). Tasks are the goroutine analogue - a task that
+// waits on a channel parks and gives its worker to another task, no OS thread sleeps for it - so
+// this is the like-for-like row against Go's chan. bench/chan.grl stays the OS-thread row, against
+// crossbeam and the pthread ring.
+//   1:1   one producer, one consumer, 400000 values
+//   N:1   four producers of 100000 values, one consumer
+//   N:M   four producers of 100000 values, four consumers
+//   ping  two channels of one slot, 100000 round trips (latency)
+// CHAN_CASE=1..4 runs one case alone.
+use chan;
+use host;
+
+struct Spread { c: chan::Channel<u64>, producers: u64, consumers: u64, each: u64 }
+fn produce(p: u64, s: (&Spread)) -> u64 {
+    for i in s.each {
+        s.c.send(p * 1000000 + i + 1);
+    }
+    return 0;
+}
+fn consume(q: u64, s: (&Spread)) -> u64 {
+    mut sum = 0;
+    while let Some(v) = s.c.recv() {
+        sum += v;
+    }
+    return sum;
+}
+fn spread_body<sc>(scope: (&sc Scope<(&Spread)>), s: (&Spread)) -> u64 {
+    mut senders = Task<u64>[];
+    for p in s.producers {
+        senders.push(spawn(scope, p, produce));
+    }
+    mut receivers = Task<u64>[];
+    for q in s.consumers {
+        receivers.push(spawn(scope, q, consume));
+    }
+    while let Some(t) = senders.pop() {
+        join(t);
+    }
+    s.c.close();
+    mut total = 0;
+    while let Some(t) = receivers.pop() {
+        total += join(t);
+    }
+    return total;
+}
+fn spread(producers: u64, consumers: u64, each: u64) -> u64 {
+    s := Spread { c: chan::bounded<u64>(64), producers: producers, consumers: consumers, each: each };
+    return task_scope(&s, spread_body);
+}
+
+struct Ping { there: chan::Channel<u64>, back: chan::Channel<u64>, rounds: u64 }
+fn echo(n: u64, p: (&Ping)) -> u64 {
+    while let Some(v) = p.there.recv() {
+        p.back.send(v + 1);
+    }
+    return 0;
+}
+fn ping_body<sc>(scope: (&sc Scope<(&Ping)>), p: (&Ping)) -> u64 {
+    t := spawn(scope, 0, echo);
+    mut v = 0;
+    for i in p.rounds {
+        p.there.send(v);
+        v = p.back.recv()!;
+    }
+    p.there.close();
+    join(t);
+    return v;
+}
+fn ping(rounds: u64) -> u64 {
+    p := Ping { there: chan::bounded<u64>(1), back: chan::bounded<u64>(1), rounds: rounds };
+    return task_scope(&p, ping_body);
+}
+
+fn main() {
+    which := host::env(view("CHAN_CASE"));
+    mut only = 0;
+    if which.len() != 0 {
+        only = u64(which[0]) - 48;
+    }
+    if (only == 0) || (only == 1) {
+        println("1:1 {}", spread(1, 1, 400000));
+    }
+    if (only == 0) || (only == 2) {
+        println("N:1 {}", spread(4, 1, 100000));
+    }
+    if (only == 0) || (only == 3) {
+        println("N:M {}", spread(4, 4, 100000));
+    }
+    if (only == 0) || (only == 4) {
+        println("ping {}", ping(100000));
+    }
+}
