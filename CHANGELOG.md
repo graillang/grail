@@ -78,6 +78,19 @@
   `frame_continuity_tests.cpp`). `abundance/src/render_float.grl` adds correctly rounded
   exp2/exp/ln/log2, because lib/math's 1-ulp fdlibm ones disagree with glibc on roughly 10 % of
   EV100 inputs.
+- **Abundance's virtual-texture streaming model runs in Grail, identical to the engine's.**
+  `abundance/src/virtual_textures.grl` ports the CPU side of `engine/materials/runtime/virtual_textures.cpp`: pool
+  sizing, the page-table shelf packer and atlas owner map, 80-byte descriptors, init-time and streamed registration
+  (12 textures or 8 MiB a frame), feedback with ancestor propagation and the HD-pack fallback, the priority-ordered
+  read queue with its stale and cap trimming, the clock-sweep and farthest-victim slot allocator (libstdc++'s
+  `partial_sort` reproduced for its ties), parking and drops, and deduplicated page-table writes with their staging
+  offsets. `abundance/tests/vt_test.grl` matches 684 lines from `abundance/tests/parity/vt.cpp`, which compiles the
+  engine's own file and drives it over host-memory stand-ins for the allocator and IO service: registrations, polls,
+  70 scripted frames under pool pressure (reads, copies, table writes, staging bytes, counters and every page's
+  residency state), the priority key across every band edge, and the refusals (no pool, unreadable file, cannot open,
+  page table full after 3632 strips, too many textures at 16384). Three engine findings are recorded in
+  abundance/README.md.
+
 - **Abundance's item_icons_check is ported, byte-identical to the built reference.**
   `abundance/src/item_icons.grl` reads `ui/icons/index.json`, applies the UI's stem rule and reports
   every catalogue item without a picture; the catalogue (the gameplay economy, stage 6) is an input
