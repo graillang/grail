@@ -26,6 +26,15 @@
   every cell of the fixture world through the samplers — against Abundance's own sources built at
   `-ffp-contract=off`. Every one matches.
 
+- **The session command surface is gated against the engine's own `abe::gameplay::Session`.**
+  `abundance/src/app_session.grl` gains the refusal ladder `engine/gameplay/session.cpp` states
+  itself — `player_ready`, `submit`/`action` refusing `no_world` then `player_boundary_pending`,
+  an aimed action's `player_support_pending`, `submit_hud`'s `malformed_hud_intent` and
+  `wrong_actor` — plus Session's `reset`. The `scarab` program's new `session` section is compared
+  with a reference that compiles `engine/gameplay/session.cpp` unmodified and drives the real
+  class over a canonical voxel fixture (the one the engine's own tests build), so the wording and
+  the command each call reports are the engine's; calls that get past the ladder print only that
+  they reached the host. 37 new lines, 1187 in total, and the recorded trace is unchanged.
 - **The shader pipeline's layout grammar reads the geometry tree's shapes.** `abundance/tools/shader-lib.mjs`
   now skips a `template<...> struct` wrapper whole (`ABReadOnly<T>`, the `AB_LOAD_RO` NonWritable load
   helper) and drops leading `[[...]]` attribute runs before a field's type, so
