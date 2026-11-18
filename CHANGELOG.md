@@ -1,5 +1,16 @@
 ## Unreleased
 
+- **The power domain's generation assessment is ported, bit for bit against the engine.**
+  `abundance/src/power_generation.grl` carries `power_generation.hpp/.cpp` of
+  `cmake/tx/power.cmake`: the seven limits, the canonical acceptance rules (finite, signbit-free,
+  at most the limit, so -0.0 is a distinct input from +0.0), the three config validators
+  (station service strictly below the rated gross output, cut-in strictly below cut-out), the
+  wind curve (resource `0.5 rho A v^3` with the world-event multiplier applied to speed before
+  the cube, cut-in/cut-out boundaries, rated cap, availability scaling), the solar irradiance
+  product, and geothermal station service consumed before the net offer.
+  `abundance/tests/power_generation_test.grl` prints 122 lines that match a reference linked
+  from the engine's own `power_generation.cpp` through `libabundance_gameplay_core.a`. The grid
+  half (PowerGrid, dispatch, the offer_* adapters) is a later increment.
 - Abundance port: `abundance/src/abcmesh.grl` is the `.abcmesh` character-mesh codec - the version-5
   container (render vertices with their topology split at UV seams, rigid joints, twelve influences
   per vertex with unorm16 weights, centres of rotation, rest positions, tangent rings and sparse
