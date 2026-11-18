@@ -1,5 +1,11 @@
 ## Unreleased
 
+- **Fixed (RISC-V): an `f32` accumulator kept in a register and started at `0.0` read as NaN.** The
+  optimiser keeps such a value in an SSE register in single precision and clears it with `xorps`,
+  which the RISC-V translation wrote as a double zero (`fmv.d.x`); RISC-V reads a single from a
+  floating-point register as NaN unless its upper half is all ones, so `total(&v[1: 4])` printed
+  `NaN`. A register the function reads only in single precision is now cleared with `fmv.w.x`, the
+  NaN-boxed binary32 zero (typed-slices, riscv64).
 - **Fixed: the internal x86-64 assembler encoded `movq` between an SSE register and memory as a
   general-register move.** `movq %xmmN, mem` was assembled as `mov %rN, mem` (and the load the same
   way), so a C-callback entry that saves its float argument registers around `rt_adopt_record`
