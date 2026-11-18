@@ -1,5 +1,16 @@
 ## Unreleased
 
+- **The frame loop is wired headless: session, job scheduler and render graph's plan in one
+  frame boundary.** `abundance/src/frame_loop.grl` runs a frame as `engine/core/engine.cpp` does —
+  the session's boundary commits the authority step, the frame's payload goes to one scheduler job
+  that is joined before the frame ends, and the graph declares its passes, compiles (a hit from the
+  second frame on) and executes with the plan's cache. `abundance/tests/frame_loop_test.grl` prints
+  each frame's session digest and the value the worker computed; the reference
+  (`parity/frame_loop.cpp`) drives the engine's own `ab::host::HostCore` and the real
+  `ab::terrain_jobs()` with the same 16 frames, and all 83 lines match. The plan's segment/barrier
+  counts are asserted in-process rather than compared: the engine's graph needs the mock device that
+  `parity/render_graph.cpp` owns, so a byte comparison of the planned counts still needs that mock
+  factored into a shared header with the rgraph lane.
 - **The dedicated server's datagram reliability layer is ported** (`abundance/src/net_datagram.grl`):
   `ab::server::DatagramConnection` - which the engine's own header documents as pure logic with no
   sockets - with packet sequence numbers and the wrap-safe newer-than compare plus a 32-bit ack
