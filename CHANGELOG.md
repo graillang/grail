@@ -1,5 +1,12 @@
 ## Unreleased
 
+- **ab::CoherentField2D, the standard basis every coherent terrain field samples through, is
+  ported.** The u64 world-seed fold into the noise seed, the generator's exact construction
+  sequence over the FastNoiseLite port (noise type, frequency, fractal state; the warp object's
+  type/amplitude/progressive octaves), warp-then-sample, and the C++ constructor's and sample()'s
+  refusals as typed verdicts. 136 values matched against the real facade linked from the worldgen
+  library.
+
 - **The island's world features are ported: sites, cave entrances, strategic regions and transport
   corridors, with the seeded fields and portable math they are placed by.** `abundance/src/
   worldgen_pm.grl` ports ab::pm exactly (sin/cos over the header's Cody-Waite reduction - not
