@@ -146,6 +146,17 @@
   `docs/design/abundance-ecs.md` is the contract gameplay lanes code against, including the
   worker borrow rule (workers lease an owned `Frame`; the owner keeps the mutable `World`, and the
   borrow checker enforces it) and the seams for the mover, frame sections, store and transactions.
+- **Abundance's XXH3-128 state digest and its SHA-256 usage are ported and gated.** `lib/xxhash.grl`
+  gains streaming XXH3-128 (`xxh3_new`/`reset`/`update`/`digest`, seeded and unseeded, plus
+  `canonical128`), byte-exact against the vendored xxHash 0.8.4 over 0..300-byte inputs, the
+  0/1/16/64/240/241/1024/64 KiB/1 MiB fixtures, three streaming chains and two seeds
+  (abundance/tests/xxhash3_test.grl: 58 lines against the header itself, and a `lib-xxhash3`
+  corpus case that pins it without the Abundance checkout). The one picosha2 caller
+  (`Private/config_value.cpp`'s `content_digest`) is gated end to end: 35 lines against the
+  vendored picosha2 in abundance/tests/sha256_test.grl, over SHA-256's padding boundaries,
+  `Digest::hex()` and seven canonical preimages the reference wrote. libsodium's UDP crypto is
+  recorded as out of scope in abundance/README.md. Checked arithmetic rewrites the reference's
+  `0 - x` complements as `wrapping_sub(0, x)`.
 
 - **Every performance chart is re-measured with the machine idle** (load average under 3; release
   compiler with PGO on main bcf78e5a). Every compile row now beats the fastest rival: the cold

@@ -89,3 +89,521 @@ pub fn hash64<a>(data: &a [u8], seed: u64) -> u64 {
     h = wrapping_mul(h ^ (h >> 29), P3);
     return h ^ (h >> 32);
 }
+
+// ---------------------------------------------------------------------------
+// XXH3-128 (xxHash 0.8.x, scalar paths): Abundance's streaming state digest.
+//
+// Identity hashing in the port is FNV-1a (abundance_hash); xxHash is used by the engine in
+// exactly two TUs — Private/world_state.cpp:161-184 (Hasher, a 128-bit state comparison) and
+// Private/current_production_line_source.cpp:136-142 (StampDigest, the binding stamp digest)
+// — both as streaming XXH3_128bits_reset/update/digest over the vendored header
+// (Source/AbundanceGameplayCore/Private/ThirdParty/xxhash/xxhash.h, 0.8.4, XXH_INLINE_ALL).
+// This is a byte-exact port of those scalar paths: one-shot and streaming give the same
+// values as the vendored code for any seed and any chunking, and the streaming state keeps
+// the same 256-byte window invariant so a digest can be taken without stopping ingestion.
+
+const PRIME32_1: u64 = 0x9E3779B1;
+const PRIME32_2: u64 = 0x85EBCA77;
+const PRIME32_3: u64 = 0xC2B2AE3D;
+const PRIME32_5: u64 = 0x165667B1;
+const PRIME_MX1: u64 = 0x165667919E3779F9;
+const PRIME_MX2: u64 = 0x9FB21C651E98DF25;
+const MASK32: u64 = 4294967295;
+const MASK64: u64 = 18446744073709551615;
+
+const SECRET_SIZE: u64 = 192;
+const STRIPE: u64 = 64;
+const CONSUME_RATE: u64 = 8;
+const SECRET_LIMIT: u64 = 128;
+const STRIPES_PER_BLOCK: u64 = 16;
+const BUFFER_SIZE: u64 = 256;
+const MIDSIZE_MAX: u64 = 240;
+const MERGEACCS_START: u64 = 11;
+const LASTACC_START: u64 = 7;
+const MIDSIZE_STARTOFFSET: u64 = 3;
+const MIDSIZE_LASTOFFSET: u64 = 17;
+const SECRET_SIZE_MIN: u64 = 136;
+
+// XXH3_kSecret (xxhash.h: XXH_SECRET_DEFAULT_SIZE 192 bytes), byte for byte.
+fn default_secret() -> u8[] {
+    return u8[
+        0xb8, 0xfe, 0x6c, 0x39, 0x23, 0xa4, 0x4b, 0xbe, 0x7c, 0x01, 0x81, 0x2c, 0xf7, 0x21, 0xad, 0x1c,
+        0xde, 0xd4, 0x6d, 0xe9, 0x83, 0x90, 0x97, 0xdb, 0x72, 0x40, 0xa4, 0xa4, 0xb7, 0xb3, 0x67, 0x1f,
+        0xcb, 0x79, 0xe6, 0x4e, 0xcc, 0xc0, 0xe5, 0x78, 0x82, 0x5a, 0xd0, 0x7d, 0xcc, 0xff, 0x72, 0x21,
+        0xb8, 0x08, 0x46, 0x74, 0xf7, 0x43, 0x24, 0x8e, 0xe0, 0x35, 0x90, 0xe6, 0x81, 0x3a, 0x26, 0x4c,
+        0x3c, 0x28, 0x52, 0xbb, 0x91, 0xc3, 0x00, 0xcb, 0x88, 0xd0, 0x65, 0x8b, 0x1b, 0x53, 0x2e, 0xa3,
+        0x71, 0x64, 0x48, 0x97, 0xa2, 0x0d, 0xf9, 0x4e, 0x38, 0x19, 0xef, 0x46, 0xa9, 0xde, 0xac, 0xd8,
+        0xa8, 0xfa, 0x76, 0x3f, 0xe3, 0x9c, 0x34, 0x3f, 0xf9, 0xdc, 0xbb, 0xc7, 0xc7, 0x0b, 0x4f, 0x1d,
+        0x8a, 0x51, 0xe0, 0x4b, 0xcd, 0xb4, 0x59, 0x31, 0xc8, 0x9f, 0x7e, 0xc9, 0xd9, 0x78, 0x73, 0x64,
+        0xea, 0xc5, 0xac, 0x83, 0x34, 0xd3, 0xeb, 0xc3, 0xc5, 0x81, 0xa0, 0xff, 0xfa, 0x13, 0x63, 0xeb,
+        0x17, 0x0d, 0xdd, 0x51, 0xb7, 0xf0, 0xda, 0x49, 0xd3, 0x16, 0x55, 0x26, 0x29, 0xd4, 0x68, 0x9e,
+        0x2b, 0x16, 0xbe, 0x58, 0x7d, 0x47, 0xa1, 0xfc, 0x8f, 0xf8, 0xb8, 0xd1, 0x7a, 0xd0, 0x31, 0xce,
+        0x45, 0xcb, 0x3a, 0x8f, 0x95, 0x16, 0x04, 0x28, 0xaf, 0xd7, 0xfb, 0xca, 0xbb, 0x4b, 0x40, 0x7e
+    ];
+}
+
+// XXH3_INIT_ACC.
+fn init_acc() -> u64[] {
+    return u64[PRIME32_3, P1, P2, P3, P4, PRIME32_2, P5, PRIME32_1];
+}
+
+// XXH3_initCustomSecret: each 16-byte secret round gains the seed on its low word
+// and loses it on its high word.
+fn custom_secret(seed: u64) -> u8[] {
+    base := default_secret();
+    mut out = u8[];
+    for i in 12 {
+        lo := wrapping_add(read64(&base, 16 * i), seed);
+        hi := wrapping_sub(read64(&base, 16 * i + 8), seed);
+        for b in 8 {
+            out.push((lo >> (b * 8)) & 255);
+        }
+        for b in 8 {
+            out.push((hi >> (b * 8)) & 255);
+        }
+    }
+    return out;
+}
+
+// The 128-bit digest: XXH128_hash_t { low64, high64 }.
+pub struct Hash128 {
+    low: u64,
+    high: u64
+}
+
+// The streaming state: XXH3_state_t's fields for the default-secret engine use,
+// with the 192-byte secret resolved (kSecret, or the seed-adjusted custom secret).
+pub struct Xxh3 {
+    acc: u64[],
+    secret: u8[],
+    buffer: u8[],
+    buffered: u64,
+    stripes_so_far: u64,
+    total: u64,
+    seed: u64,
+    use_seed: u64
+}
+
+fn xorshift64(x: u64, shift: u64) -> u64 {
+    return x ^ (x >> shift);
+}
+// XXH64_avalanche.
+fn avalanche64(h: u64) -> u64 {
+    mut x = h ^ (h >> 33);
+    x = wrapping_mul(x, P2);
+    x = x ^ (x >> 29);
+    x = wrapping_mul(x, P3);
+    return x ^ (x >> 32);
+}
+// XXH3_avalanche.
+fn avalanche3(h: u64) -> u64 {
+    mut x = xorshift64(h, 37);
+    x = wrapping_mul(x, PRIME_MX1);
+    return xorshift64(x, 32);
+}
+// XXH3_rrmxmx.
+fn rrmxmx(h: u64, n: u64) -> u64 {
+    mut x = h ^ (rotl(h, 49) ^ rotl(h, 24));
+    x = wrapping_mul(x, PRIME_MX2);
+    x = x ^ wrapping_add(x >> 35, n);
+    x = wrapping_mul(x, PRIME_MX2);
+    return xorshift64(x, 28);
+}
+fn rotl32v(x: u64, r: u64) -> u64 {
+    return ((x << r) | (x >> (32 - r))) & MASK32;
+}
+fn swap32v(x: u64) -> u64 {
+    return ((x & 255) << 24) | ((x & 65280) << 8) | ((x >> 8) & 65280) | ((x >> 24) & 255);
+}
+fn swap64v(x: u64) -> u64 {
+    mut v = x;
+    v = ((v & 0x00FF00FF00FF00FF) << 8) | ((v >> 8) & 0x00FF00FF00FF00FF);
+    v = ((v & 0x0000FFFF0000FFFF) << 16) | ((v >> 16) & 0x0000FFFF0000FFFF);
+    return (v << 32) | (v >> 32);
+}
+// XXH_mult64to128.
+fn mult64to128(lhs: u64, rhs: u64) -> Hash128 {
+    ll := wrapping_mul(lhs & MASK32, rhs & MASK32);
+    lh := wrapping_mul(lhs & MASK32, rhs >> 32);
+    hl := wrapping_mul(lhs >> 32, rhs & MASK32);
+    hh := wrapping_mul(lhs >> 32, rhs >> 32);
+    mid := (ll >> 32) + (lh & MASK32) + (hl & MASK32);
+    return Hash128 {
+        low: (mid << 32) | (ll & MASK32),
+        high: wrapping_add(wrapping_add(wrapping_add(hh, lh >> 32), hl >> 32), mid >> 32)
+    };
+}
+// XXH3_mul128_fold64.
+fn fold64(a: u64, b: u64) -> u64 {
+    p := mult64to128(a, b);
+    return p.low ^ p.high;
+}
+fn read64<a>(data: &a [u8], at: u64) -> u64 {
+    return bytes::load_u64(data, at);
+}
+// XXH3_mix16B.
+fn mix16b<a, c>(input: &a [u8], at: u64, secret: &c [u8], sec: u64, seed: u64) -> u64 {
+    lo := read64(input, at);
+    hi := read64(input, at + 8);
+    return fold64(lo ^ wrapping_add(read64(secret, sec), seed),
+                  hi ^ wrapping_sub(read64(secret, sec + 8), seed));
+}
+
+// XXH3_len_1to3_128b.
+fn len_1to3_128b<a, c>(data: &a [u8], n: u64, secret: &c [u8], seed: u64) -> Hash128 {
+    c1 := data[0];
+    c2 := data[n >> 1];
+    c3 := data[n - 1];
+    combinedl := (c1 << 16) | (c2 << 24) | c3 | (n << 8);
+    combinedh := rotl32v(swap32v(combinedl), 13);
+    bitflipl := wrapping_add(read32(secret, 0) ^ read32(secret, 4), seed);
+    bitfliph := wrapping_sub(read32(secret, 8) ^ read32(secret, 12), seed);
+    return Hash128 { low: avalanche64(combinedl ^ bitflipl), high: avalanche64(combinedh ^ bitfliph) };
+}
+// XXH3_len_4to8_128b.
+fn len_4to8_128b<a, c>(data: &a [u8], n: u64, secret: &c [u8], seed: u64) -> Hash128 {
+    mut s = seed ^ (swap32v(seed & MASK32) << 32);
+    lo := read32(data, 0);
+    hi := read32(data, n - 4);
+    input_64 := wrapping_add(lo, hi << 32);
+    bitflip := wrapping_add(read64(secret, 16) ^ read64(secret, 24), s);
+    keyed := input_64 ^ bitflip;
+    m := mult64to128(keyed, wrapping_add(P1, n << 2));
+    mut high = wrapping_add(m.high, m.low << 1);
+    mut low = m.low ^ (high >> 3);
+    low = xorshift64(low, 35);
+    low = wrapping_mul(low, PRIME_MX2);
+    low = xorshift64(low, 28);
+    high = avalanche3(high);
+    return Hash128 { low: low, high: high };
+}
+// XXH3_len_9to16_128b (the 64-bit codegen branch).
+fn len_9to16_128b<a, c>(data: &a [u8], n: u64, secret: &c [u8], seed: u64) -> Hash128 {
+    bitflipl := wrapping_sub(read64(secret, 32) ^ read64(secret, 40), seed);
+    bitfliph := wrapping_add(read64(secret, 48) ^ read64(secret, 56), seed);
+    input_lo := read64(data, 0);
+    mut input_hi = read64(data, n - 8);
+    m := mult64to128(input_lo ^ input_hi ^ bitflipl, P1);
+    mut low = wrapping_add(m.low, (n - 1) << 54);
+    input_hi = input_hi ^ bitfliph;
+    mut high = wrapping_add(wrapping_add(m.high, input_hi), wrapping_mul(input_hi & MASK32, PRIME32_2 - 1));
+    low = low ^ swap64v(high);
+    h := mult64to128(low, P2);
+    mut hhigh = wrapping_add(h.high, wrapping_mul(high, P2));
+    return Hash128 { low: avalanche3(h.low), high: avalanche3(hhigh) };
+}
+// XXH3_len_0to16_128b.
+fn len_0to16_128b<a, c>(data: &a [u8], n: u64, secret: &c [u8], seed: u64) -> Hash128 {
+    if n > 8 {
+        return len_9to16_128b(data, n, secret, seed);
+    }
+    if n >= 4 {
+        return len_4to8_128b(data, n, secret, seed);
+    }
+    if n > 0 {
+        return len_1to3_128b(data, n, secret, seed);
+    }
+    bitflipl := read64(secret, 64) ^ read64(secret, 72);
+    bitfliph := read64(secret, 80) ^ read64(secret, 88);
+    return Hash128 { low: avalanche64(seed ^ bitflipl), high: avalanche64(seed ^ bitfliph) };
+}
+// XXH128_mix32B.
+fn mix32b<a, c>(acc: Hash128, input: &a [u8], at1: u64, at2: u64, secret: &c [u8], sec: u64, seed: u64) -> Hash128 {
+    mut low = wrapping_add(acc.low, mix16b(input, at1, secret, sec, seed));
+    low = low ^ wrapping_add(read64(input, at2), read64(input, at2 + 8));
+    mut high = wrapping_add(acc.high, mix16b(input, at2, secret, sec + 16, seed));
+    high = high ^ wrapping_add(read64(input, at1), read64(input, at1 + 8));
+    return Hash128 { low: low, high: high };
+}
+// The common 128-bit tail of the two midsize paths.
+fn midsize_tail(acc: Hash128, n: u64, seed: u64) -> Hash128 {
+    low := avalanche3(wrapping_add(acc.low, acc.high));
+    mut high = wrapping_add(wrapping_mul(acc.low, P1), wrapping_mul(acc.high, P4));
+    high = wrapping_add(high, wrapping_mul(wrapping_sub(n, seed), P2));
+    return Hash128 { low: low, high: wrapping_sub(0, avalanche3(high)) };
+}
+// XXH3_len_17to128_128b.
+fn len_17to128_128b<a, c>(data: &a [u8], n: u64, secret: &c [u8], seed: u64) -> Hash128 {
+    mut acc = Hash128 { low: wrapping_mul(n, P1), high: 0 };
+    if n > 32 {
+        if n > 64 {
+            if n > 96 {
+                acc = mix32b(acc, data, 48, n - 64, secret, 96, seed);
+            }
+            acc = mix32b(acc, data, 32, n - 48, secret, 64, seed);
+        }
+        acc = mix32b(acc, data, 16, n - 32, secret, 32, seed);
+    }
+    acc = mix32b(acc, data, 0, n - 16, secret, 0, seed);
+    return midsize_tail(acc, n, seed);
+}
+// XXH3_len_129to240_128b.
+fn len_129to240_128b<a, c>(data: &a [u8], n: u64, secret: &c [u8], seed: u64) -> Hash128 {
+    mut acc = Hash128 { low: wrapping_mul(n, P1), high: 0 };
+    mut i: u64 = 32;
+    while i < 160 {
+        acc = mix32b(acc, data, i - 32, i - 16, secret, i - 32, seed);
+        i += 32;
+    }
+    acc.low = avalanche3(acc.low);
+    acc.high = avalanche3(acc.high);
+    // `i <= n` deliberately duplicates the last 32 bytes when n % 32 == 0, exactly as the
+    // frozen xxHash output requires.
+    mut j: u64 = 160;
+    while j <= n {
+        acc = mix32b(acc, data, j - 32, j - 16, secret, MIDSIZE_STARTOFFSET + j - 160, seed);
+        j += 32;
+    }
+    acc = mix32b(acc, data, n - 16, n - 32, secret, SECRET_SIZE_MIN - MIDSIZE_LASTOFFSET - 16, wrapping_sub(0, seed));
+    return midsize_tail(acc, n, seed);
+}
+
+// XXH3_accumulate_512_scalar: one stripe into the 8 lanes.
+fn accumulate_512<a, b, c>(acc: (&a mut u64[]), input: &b [u8], at: u64, secret: &c [u8], sec: u64) {
+    for lane in 8 {
+        data_val := read64(input, at + lane * 8);
+        data_key := data_val ^ read64(secret, sec + lane * 8);
+        acc[lane ^ 1] = wrapping_add(acc[lane ^ 1], data_val);
+        acc[lane] = wrapping_add(wrapping_mul(data_key & MASK32, (data_key >> 32) & MASK32), acc[lane]);
+    }
+}
+// XXH3_scrambleAcc over secret[SECRET_LIMIT .. SECRET_LIMIT + 64].
+fn scramble_acc<a, c>(acc: (&a mut u64[]), secret: &c [u8]) {
+    for lane in 8 {
+        mut x = acc[lane];
+        x = xorshift64(x, 47);
+        x = x ^ read64(secret, SECRET_LIMIT + lane * 8);
+        x = wrapping_mul(x, PRIME32_1);
+        acc[lane] = x;
+    }
+}
+// XXH3_accumulate: `stripes` stripes from input offset `at`, consuming the secret from `sec`.
+fn accumulate<a, b, c>(acc: (&a mut u64[]), input: &b [u8], at: u64, stripes: u64, secret: &c [u8], sec: u64) {
+    for n in stripes {
+        accumulate_512(acc, input, at + n * STRIPE, secret, sec + n * CONSUME_RATE);
+    }
+}
+// XXH3_consumeStripes: exactly the reference block/secret pacing; returns the updated
+// number of stripes consumed inside the current block.
+fn consume_stripes<a, b, c>(acc: (&a mut u64[]), input: &b [u8], at: u64, stripes: u64, so_far: u64, secret: &c [u8]) -> u64 {
+    mut sec = so_far * CONSUME_RATE;
+    mut nb = stripes;
+    mut consumed = at;
+    mut in_block = so_far;
+    if nb >= STRIPES_PER_BLOCK - in_block {
+        mut this = STRIPES_PER_BLOCK - in_block;
+        mut running = true;
+        while running {
+            accumulate(acc, input, consumed, this, secret, sec);
+            scramble_acc(acc, secret);
+            consumed += this * STRIPE;
+            nb -= this;
+            this = STRIPES_PER_BLOCK;
+            sec = 0;
+            running = nb >= STRIPES_PER_BLOCK;
+        }
+        in_block = 0;
+    }
+    if nb > 0 {
+        accumulate(acc, input, consumed, nb, secret, sec);
+        in_block += nb;
+    }
+    return in_block;
+}
+// XXH3_mergeAccs: four folded lane pairs from secret offset `sec`, avalanched.
+fn merge_accs<a, c>(acc: &a [u64], secret: &c [u8], sec: u64, start: u64) -> u64 {
+    mut result = start;
+    for i in 4 {
+        result = wrapping_add(result, fold64(acc[2 * i] ^ read64(secret, sec + 16 * i),
+                                             acc[2 * i + 1] ^ read64(secret, sec + 16 * i + 8)));
+    }
+    return avalanche3(result);
+}
+// XXH3_hashLong_128b_internal over a 192-byte secret.
+fn hash_long_128<a, c>(data: &a [u8], secret: &c [u8]) -> Hash128 {
+    n := data.len();
+    mut acc = init_acc();
+    block_len := STRIPE * STRIPES_PER_BLOCK;
+    nb_blocks := (n - 1) / block_len;
+    for b in nb_blocks {
+        accumulate(&mut acc, data, b * block_len, STRIPES_PER_BLOCK, secret, 0);
+        scramble_acc(&mut acc, secret);
+    }
+    nb_stripes := ((n - 1) - block_len * nb_blocks) / STRIPE;
+    accumulate(&mut acc, data, nb_blocks * block_len, nb_stripes, secret, 0);
+    accumulate_512(&mut acc, data, n - STRIPE, secret, SECRET_LIMIT - LASTACC_START);
+    low := merge_accs(&acc, secret, MERGEACCS_START, wrapping_mul(n, P1));
+    high := merge_accs(&acc, secret, SECRET_SIZE - STRIPE - MERGEACCS_START, wrapping_mul(n, P2) ^ MASK64);
+    return Hash128 { low: low, high: high };
+}
+
+// XXH3_128bits_withSeed: the one-shot digest for any length and seed.
+pub fn xxh3_128<a>(data: &a [u8], seed: u64) -> Hash128 {
+    n := data.len();
+    ksecret := default_secret();
+    if n > MIDSIZE_MAX {
+        if seed == 0 {
+            return hash_long_128(data, &ksecret);
+        }
+        csecret := custom_secret(seed);
+        return hash_long_128(data, &csecret);
+    }
+    if n > 128 {
+        return len_129to240_128b(data, n, &ksecret, seed);
+    }
+    if n > 16 {
+        return len_17to128_128b(data, n, &ksecret, seed);
+    }
+    return len_0to16_128b(data, n, &ksecret, seed);
+}
+
+// XXH128_canonicalFromHash: the 16 big-endian bytes StampDigest::finish() returns
+// (high64 first, then low64, each byte-swapped).
+pub fn canonical128(h: Hash128) -> u8[] {
+    mut out = u8[];
+    for i in 8 {
+        out.push((h.high >> (56 - i * 8)) & 255);
+    }
+    for i in 8 {
+        out.push((h.low >> (56 - i * 8)) & 255);
+    }
+    return out;
+}
+
+// A fresh streaming state (XXH3_128bits_reset for seed 0, XXH3_128bits_reset_withSeed
+// otherwise; a non-zero seed switches the state to the seed-adjusted custom secret).
+pub fn xxh3_new(seed: u64) -> Xxh3 {
+    mut secret = default_secret();
+    mut use_seed: u64 = 0;
+    if seed != 0 {
+        secret = custom_secret(seed);
+        use_seed = 1;
+    }
+    mut buffer = u8[];
+    for i in BUFFER_SIZE {
+        buffer.push(0);
+    }
+    return Xxh3 {
+        acc: init_acc(),
+        secret: secret,
+        buffer: buffer,
+        buffered: 0,
+        stripes_so_far: 0,
+        total: 0,
+        seed: seed,
+        use_seed: use_seed
+    };
+}
+
+impl Xxh3 {
+    // XXH3_128bits_reset / _withSeed.
+    pub fn reset(self: (&a mut Xxh3), seed: u64) {
+        fresh := xxh3_new(seed);
+        self.acc = fresh.acc;
+        self.secret = fresh.secret;
+        self.buffer = fresh.buffer;
+        self.buffered = 0;
+        self.stripes_so_far = 0;
+        self.total = 0;
+        self.seed = seed;
+        self.use_seed = fresh.use_seed;
+    }
+    // XXH3_128bits_update: buffers, then consumes stripes block by block. Any split of
+    // the input gives the same digest as the one-shot over the concatenation.
+    pub fn update<a, b>(self: (&a mut Xxh3), data: &b [u8]) {
+        len := data.len();
+        self.total = wrapping_add(self.total, len);
+        if len <= BUFFER_SIZE - self.buffered {
+            for i in len {
+                self.buffer[self.buffered + i] = data[i];
+            }
+            self.buffered = wrapping_add(self.buffered, len);
+            return;
+        }
+        // Large path: run the lanes on local copies, so the stripe helpers below only ever
+        // see plain arrays and views (the state fields are read back at the end).
+        mut acc = u64[];
+        for i in 8 {
+            acc.push(self.acc[i]);
+        }
+        mut secret = u8[];
+        for i in SECRET_SIZE {
+            secret.push(self.secret[i]);
+        }
+        mut at: u64 = 0;
+        if self.buffered != 0 {
+            // Complete the 256-byte window, then consume it.
+            load := BUFFER_SIZE - self.buffered;
+            for i in load {
+                self.buffer[self.buffered + i] = data[i];
+            }
+            at = load;
+            mut window = u8[];
+            for i in BUFFER_SIZE {
+                window.push(self.buffer[i]);
+            }
+            self.stripes_so_far = consume_stripes(&mut acc, &window, 0, BUFFER_SIZE / STRIPE, self.stripes_so_far, &secret);
+            self.buffered = 0;
+        }
+        if len - at > BUFFER_SIZE {
+            nb := (len - 1 - at) / STRIPE;
+            self.stripes_so_far = consume_stripes(&mut acc, data, at, nb, self.stripes_so_far, &secret);
+            at += nb * STRIPE;
+            // Keep the last consumed stripe in the window's tail for the digest's catchup.
+            for i in STRIPE {
+                self.buffer[BUFFER_SIZE - STRIPE + i] = data[at - STRIPE + i];
+            }
+        }
+        rest := len - at;
+        for i in rest {
+            self.buffer[i] = data[at + i];
+        }
+        self.buffered = rest;
+        for i in 8 {
+            self.acc[i] = acc[i];
+        }
+    }
+    // XXH3_128bits_digest: on a copy of the state, so ingestion can continue afterwards.
+    pub fn digest(self: Xxh3) -> Hash128 {
+        mut state = self;
+        if state.total > MIDSIZE_MAX {
+            mut acc = u64[];
+            for i in 8 {
+                acc.push(state.acc[i]);
+            }
+            mut secret = u8[];
+            for i in SECRET_SIZE {
+                secret.push(state.secret[i]);
+            }
+            mut window = u8[];
+            for i in BUFFER_SIZE {
+                window.push(state.buffer[i]);
+            }
+            mut last = u8[];
+            if state.buffered >= STRIPE {
+                // Consume the complete stripes still in the window, then the last stripe.
+                nb := (state.buffered - 1) / STRIPE;
+                consume_stripes(&mut acc, &window, 0, nb, state.stripes_so_far, &secret);
+                for i in STRIPE {
+                    last.push(window[state.buffered - STRIPE + i]);
+                }
+            } else {
+                // The window's tail holds the last consumed stripe: catch it up with what
+                // is buffered now (XXH3_digest_long's lastStripe path).
+                catchup := STRIPE - state.buffered;
+                for i in catchup {
+                    last.push(window[BUFFER_SIZE - catchup + i]);
+                }
+                for i in state.buffered {
+                    last.push(window[i]);
+                }
+            }
+            accumulate_512(&mut acc, &last, 0, &secret, SECRET_LIMIT - LASTACC_START);
+            low := merge_accs(&acc, &secret, MERGEACCS_START, wrapping_mul(state.total, P1));
+            high := merge_accs(&acc, &secret, SECRET_SIZE - STRIPE - MERGEACCS_START, wrapping_mul(state.total, P2) ^ MASK64);
+            return Hash128 { low: low, high: high };
+        }
+        // total <= 240: the engine digests exactly what is buffered, seeded or not.
+        return xxh3_128(state.buffer[0: state.total], state.seed);
+    }
+}
