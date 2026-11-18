@@ -1,5 +1,13 @@
 ## Unreleased
 
+- **The procedural rock kit's pebble and rock-node meshes are ported, bit for bit.**
+  `abundance/src/procgen_rock_kit.grl` carries `build_pebble_mesh` and `build_rock_node_mesh` with
+  `procgen_math.hpp`'s Rng and vector maths and the shared Soup pipeline (position-welded smooth
+  normals, UV-derived tangents, winding on request). `procgen_test.grl` matches `parity/procgen.txt`:
+  360 values over every variant. `build_shingle_mesh` stays unported and named: its radial shaping
+  needs `powf` and its UVs `asinf`, and the Grail float library has neither. The fixture loader's
+  comment now records why the topsoil raster is carried as an input (the palette classifier needs
+  inputs ABFE does not hold).
 - **The shader pipeline takes `geometry/`, the largest area.** 30 of its 46 entries (4.5 MB of SPIR-V)
   are built with the engine's pinned DXC at pin `ca1f1bc05b`: the cull, motion, HZB, software and
   hardware raster, assembly, VSM argument/cluster/SAT/settle and vegetation passes, plus the two mesh
