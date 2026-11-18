@@ -1,5 +1,10 @@
 ## Unreleased
 
+- **A payload-less variant of a boxed enum allocates nothing.** `Tree::Leaf` is now one static
+  `{tag, 0}` object with a static object's header, which every free path already skips, instead of a
+  16-byte allocation per value. bench/bintrees release: 3.78 G -> 3.59 G instructions, 0.28 s ->
+  0.24 s; output identical.
+
 - **The performance chapter explains the `fib(32)` scheduler rows.** They mostly measure g++'s
   recursive inlining in oneTBB's twin (46 to 50 million instructions for serial `fib(32)`, against
   67 million for clang's C and 75 million for Grail's release build, which is clang's loop plus one
