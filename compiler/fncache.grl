@@ -149,6 +149,14 @@ fn hex64<a>(out: (&a mut u8[]), n: u64) -> unit {
 
 pub fn encode<a>(u: (&a Unit)) -> u8[] {
     mut out = u8[];
+    mut scratch = u8[];
+    encode_into(&mut out, &mut scratch, u);
+    return out;
+}
+
+// `encode`, appended to `out`: a run filing thousands of units writes them all into its pack buffer,
+// and `scratch` (the bytes the checksum covers) is reused from one unit to the next.
+pub fn encode_into<a, b, d>(out: (&a mut u8[]), scratch: (&b mut u8[]), u: (&d Unit)) -> unit {
     out.push(71);
     out.push(70);
     out.push(78);
@@ -157,8 +165,12 @@ pub fn encode<a>(u: (&a Unit)) -> u8[] {
     ws(&mut out, view(u.text));
     ws(&mut out, view(u.facts));
     ws(&mut out, view(u.regs));
-    ws(&mut out, view(sum(u)));
-    return out;
+    scratch.truncate(0);
+    scratch.append(view(u.key));
+    scratch.append(view(u.facts));
+    scratch.append(view(u.regs));
+    ws(&mut out, view(hash(view(scratch))));
+    return ();
 }
 
 // A unit as a body worker sends it through its pipe: the same framing, and in a check run (whose
