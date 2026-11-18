@@ -1,5 +1,15 @@
 ## Unreleased
 
+- **Abundance: a world cache load's semantic checks are ported and gated on the engine's verdicts.**
+  `valid_world_landscape` decodes the landscape world's embedded ABWLA001 (a new reader, the
+  writer's inverse), rebuilds the authority, replays its reference operation and re-derives every
+  published raster cell (elevation, filled elevation, slope, lake depth, the hydraulic graph's
+  discharge, geology) to compare with the file. `valid_public_drainage_graph` checks the whole
+  receiver raster and the public drainage DAG; `valid_biome_authority` checks the biome rasters.
+  49 verdicts against Abundance's own validators on both committed caches and one-field corruptions
+  of them (`validate`). Porting the check found a heap bug in the routing priority flood's sift-down
+  (it promoted the later child); the filled-elevation raster now matches in every cell.
+
 - **Abundance: the landscape authority serialiser is ported and byte-identical.** A Grail program now
   builds the landscape world's terrain authority the way the engine's own fixture builder does,
   advances it through the reference-weather epoch, and writes the ABWLA001 stream that
