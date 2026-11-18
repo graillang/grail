@@ -19,6 +19,15 @@
   (`ocean.cpp`'s `make_sea_state`/`make_fetch_amplitudes`/`make_cascades`, riding
   `abundance/ocean_sea_state.hpp`) is a substantial portable spectrum and the water area's next
   increment, not a line item here.
+- **The render graph's plan is now a complete RHI input, gated by a mock device.** `ExecPlan` carries
+  the per-resource binding records an executor needs — each transient's heap, offset and create
+  description, each import's handle, the heaps themselves, and whether this frame realised new
+  objects (`placed`) — beside the segments, waits, barriers and dispatch groups it already had.
+  `device_check()` consumes the plan exactly as an RHI would and refuses aliasing that violates a
+  lifetime or a barrier naming an undeclared resource; the parity reference computes the same counts
+  from its own captured plan, so the device-facing surface is gated, not just described. 2827 lines
+  match.
+
 - **The Abundance tools lane records the last five tools' boundaries.** `abundance/README.md` now
   states exactly what each remaining tool needs: ui_snapshot's engine frame-stream format and
   rasteriser arithmetic, soundscape_render's audio/sky cores and ffmpeg rain loops,
