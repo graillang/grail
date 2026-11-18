@@ -1,5 +1,14 @@
 ## Unreleased
 
+- **Abundance's megaplants_import is ported as a plan, byte-identical to the reference's
+  invocations.** `abundance/src/megaplants_import.grl` discovers the extracted variants, names the
+  canopy family, picks the bark set and tile size, applies the leaf-atlas rule (with its flat-colour
+  warning) and the one-source-archive rule, and prints each `ab-import` argv where the reference runs
+  it. The suite runs the reference with a stub producer that prints the same JSON argv: four runs, 30
+  lines, including the failure verdict and exit 1. Executing the importer, megaplants_batch.py and
+  usd_assembly.py are recorded as the USD/private-input boundary. `abundance_pyjson` gains `dumps`
+  (Python's default separators).
+
 - **`lib/clipper2.grl`: the Clipper2 boolean engine, ported from the vendored 2.0.1.** The
   water-geometry callers clip buffered river banks, lake raster cells and tiles with Clipper2's
   Vatti sweep (`BooleanOp` into paths or a PolyTree, `ClipperD` at a decimal precision,
