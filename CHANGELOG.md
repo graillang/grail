@@ -33,6 +33,16 @@
   inputs, all six pinned by `lib-f32-libm-glibc`). `logf_split` factors the argument split both logarithms share.
 - `abundance/tools/vendor-shaders.mjs`: refuses to vendor a working tree under a pin's name (`ABUNDANCE_COMMIT`
   set while `ABUNDANCE_SRC` has a `.git`), so a vendored file's recorded commit cannot be a lie.
+- **The replay's session is saved through the ported ABCP2 container, and the C++ run's
+  checkpoint hash matches.** After replaying the trace, `scarab` builds a `GameplayCheckpoint` in
+  `abundance/src/app_session.grl` — the session's publication tick as the generation, its committed
+  time, one declared `scarab.session.replay` section carrying the run digest, and the run's own
+  identities in the five context slots the container requires nonzero — encodes it with
+  `abundance_checkpoint` and prints the section table, byte count, outer checksum and the decoder's
+  round trip. The reference builds the same save and encodes it with the engine's own
+  `ab::encode_checkpoint`, so the bytes and the checkpoint hash are the engine's: 141 bytes,
+  checksum 2747288393927024733, 1204 lines in total. The host's own sections (tx snapshot, world
+  edits, pawn records) are the payload lane's remaining hook.
 - **The shader pipeline takes `geometry/`, the largest area.** 30 of its 46 entries (4.5 MB of SPIR-V)
   are built with the engine's pinned DXC at pin `ca1f1bc05b`: the cull, motion, HZB, software and
   hardware raster, assembly, VSM argument/cluster/SAT/settle and vegetation passes, plus the two mesh
