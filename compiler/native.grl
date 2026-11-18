@@ -37289,6 +37289,24 @@ fn closure_body_symbol<a>(c: (&a mut C), ty: u64) -> u8[] {
     }
     return u8[];
 }
+// A closure called directly (closure_body_symbol) whose expression captures nothing: its body never
+// reads the environment it is handed.
+fn closure_captures_nothing<a>(c: (&a mut C), ty: u64) -> bool {
+    if ty_kind(&mut c, ty) != 20 {
+        return false;
+    }
+    env := ty_env(&mut c, ty);
+    if env == 0 {
+        return false;
+    }
+    d := ty_arg(&mut c, env);
+    for i in c.closures.len() {
+        if (c.closures[i].decl == d) && (c.closures[i].symbol.len() != 0) {
+            return c.closures[i].captures.len() == 0;
+        }
+    }
+    return false;
+}
 fn indirect_call<a>(c: (&a mut C), value: Val, opened: u64) -> Val {
     input := value.t;
     inty := value.ty;
@@ -37318,7 +37336,12 @@ fn indirect_call<a>(c: (&a mut C), value: Val, opened: u64) -> Val {
     if kind == 20 {
         o(&mut c, view("movq (%rax),%rax\n"));
         shift = 1;
-        if (ty_kind(&mut c, inty) == 7) && !direct(&mut c, ty) {
+        if (c.raw == 0) && (closure_body_symbol(&mut c, ty).len() != 0) && closure_captures_nothing(&mut c, ty) {
+            // Called directly, and its body reads no environment: none is made, so no slot of the
+            // caller's has its address taken for it (which keeps the caller a leaf the optimiser
+            // can copy into its own callers).
+            o(&mut c, view("xorl %eax,%eax\n"));
+        } else if (ty_kind(&mut c, inty) == 7) && !direct(&mut c, ty) {
             get(&mut c, input, view("%rax"));
         } else {
             o(&mut c, view("leaq "));

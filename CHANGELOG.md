@@ -1,5 +1,9 @@
 ## Unreleased
 
+- **A direct call to a closure that captures nothing passes no environment.** It was handed the
+  address of a stack copy of the closure value, which nothing reads and which kept the calling
+  function from being inlined. bench/iterchain (native): 1320M to 1310M instructions. The plan for
+  the rest of the native chain is in docs/design/dyn-and-callable-bounds.md, section 7.
 - **bintrees runs 21% fewer instructions in release and 18% fewer in dev.** Freeing a static object
   (a payload-less variant such as a tree's `Leaf`, or a literal's) is answered in the free fast path;
   it went through two slow-path calls, a third of the frees in bintrees. And with release builds the
