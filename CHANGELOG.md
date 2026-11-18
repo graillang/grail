@@ -1,5 +1,11 @@
 ## Unreleased
 
+- **The damage domain's placed-object entry points are ported.** `abundance/src/damage_actions.grl`
+  carries `actions/damage/placed_damage` (cmake/tx/damage): the book rows, `strike_placed`'s skips,
+  refusal wording ("damage.placed_energy") and wreck threshold, `first_placed_hit`'s box slab test and
+  the damage fraction. 135 values match a reference that drives the engine's own functions through a
+  real `Engine::submit` with a bound `PlacedDamageBook` and `MvpSpatialSnapshot` (the pinned build at
+  `~/abundance-pin`); the port takes the book as rows because the kernel binds no domain tables yet.
 - **The frame loop is wired headless: session, job scheduler and render graph's plan in one
   frame boundary.** `abundance/src/frame_loop.grl` runs a frame as `engine/core/engine.cpp` does —
   the session's boundary commits the authority step, the frame's payload goes to one scheduler job
