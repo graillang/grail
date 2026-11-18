@@ -23,6 +23,15 @@
   headers and the compiled `libabundance_gameplay_core.a` (`-ffp-contract=off`): 235 reference
   lines, all matched by `abundance/tests/tx_test.grl`.
 
+- **`Mutex::lock_with` passes the hidden result destination its callback needs.** A framed result
+  of more than two words — an `Option<record>`, or any enum whose payload is a record — is written
+  to a destination the caller passes after the declared arguments (docs/design/unboxed-values.md
+  3c). The builtin call site never passed one, so the callback wrote its result through whatever
+  `%rdx` already held: returning `Some(Pod{a,b})` from a `lock_with` callback segfaulted while
+  `u64`, `u64?` and bare records were unaffected. `mutex_method` now allocates the destination with
+  `call_dest` and passes it in the third argument register, as every other call site does. Corpus
+  case `mutex-lock-result-enum-with-record-payload`.
+(compiler: lock_with passes the hidden result destination its callback needs)
 - **Every performance chart is re-measured with the machine idle** (load average under 3; release
   compiler with PGO on main bcf78e5a). Every compile row now beats the fastest rival: the cold
   check of the 104,000-line program is 0.93x Zig's instructions (3.05 against 3.28 billion). Channels

@@ -44559,6 +44559,16 @@ fn mutex_method<a, b>(c: (&a mut C), value: Val, name: &b [u8]) -> Val {
     pointer := word_reference(&mut c, held_at, payload);
     get(&mut c, pointer, view("%rdi"));
     get(&mut c, heldslot, view("%rsi"));
+    // A framed result of more than two words is written to a destination passed after the declared
+    // arguments (call_dest, docs/design/unboxed-values.md 3c). The callback's two declared words are
+    // payload and context, so the destination rides in the third argument register. Without it the
+    // callback wrote its result through whatever %rdx already held (an Option<record> result
+    // segfaulted; the u64? and bare-record shapes hid it). Set before the callee, whose load goes
+    // through %rax.
+    dest := call_dest(&mut c, result);
+    if dest != 0 {
+        get(&mut c, dest, view("%rdx"));
+    }
     get(&mut c, target, view("%rax"));
     call_slot_out(&mut c, view("call *%rax\n"), view("a call through a value the compiler did not name"));
     // The callback's result as any call's is: a framed one in registers or its box (save_result).
