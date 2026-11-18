@@ -1,5 +1,16 @@
 ## Unreleased
 
+- **Faster `sort`, `xform_f64` and `nbody` in development builds (native backend): `sort` runs 11.21 G
+  instructions instead of 18.00 G, `xform_f64` 2.88 G instead of 3.48 G, `nbody` 4.13 G instead of
+  4.25 G.** (1) `a && b` and `a || b` write their result only as a constant on each edge into the
+  merge, and the optimiser threads a test of that result through to where each edge goes, so a
+  condition `a && b` is two compare-and-branches instead of materialising a boolean; jumps to jumps
+  are threaded and code after a `jmp` that no label reaches is dropped. (2) `exchange` on a vector
+  element is written inline (a load and a store) and the load goes when the old value is unused.
+  (3) A fixed array's or a register-held slice's element address, or a `leaq` of one, is folded into
+  the load or store that uses it, also through a register copy. (4) SSE stores through any register,
+  not only `%rax`, store straight from the SSE register.
+
 - **Faster float loops in development builds (native backend): `ecs` runs 3.69 G instructions instead of
   7.31 G (Go: 3.02 G), `ecs_par` 4.96 G instead of 10.66 G (Go: 4.32 G).** The optimiser now (1) keeps
   the data of vectors and slices that are stable across a loop in r8..r11/rdx when the loop makes no

@@ -18307,6 +18307,26 @@ fn emit_slot_fact<a>(c: (&a mut C), ty: u64, slot: u64) -> unit {
     llvm::fact_slot(&mut c.facts, name, slot, f32);
     return ();
 }
+// The jump that cuts `&&` (k 273) or `||` short on the operand just tested in %rax.
+fn short_jump<a>(c: (&a mut C), k: u64, to: u64) -> unit {
+    if k == 273 {
+        jump(&mut c, view("jz"), to);
+    } else {
+        jump(&mut c, view("jnz"), to);
+    }
+    return ();
+}
+// `movq $0|$1,SLOT`.
+fn bool_store<a>(c: (&a mut C), slot: u64, value: bool) -> unit {
+    if value {
+        o(&mut c, view("movq $1,"));
+    } else {
+        o(&mut c, view("movq $0,"));
+    }
+    stack_slot(&mut c, slot);
+    o(&mut c, view("\n"));
+    return ();
+}
 // One IEEE binary64 operation on the words in %rax (left) and %rcx (right), result in %rax: 123 add,
 // 124 sub, 125 mul, 126 div, 127 less-than, 128 equal, 129 sqrt, 130 from a signed integer, 131 to a
 // signed integer (truncating). SSE text on x86; elsewhere the `fop` line machine.grl expands.
@@ -39687,6 +39707,13 @@ fn exchange_into<a>(c: (&a mut C), a: Val, b: Val) -> Val {
         swap_records(&mut c, a.t, b.t, ty);
         get(&mut c, b.t, view("%rax"));
         slot = save(&mut c);
+    } else if (c.backend == 0) && (c.emit_ir == 0) {
+        // The native backend writes the exchange out, so the optimiser sees a load and a store
+        // (and drops the load when the old value is not wanted). The LLVM lifter keys on the call.
+        get(&mut c, a.t, view("%rdi"));
+        get(&mut c, b.t, view("%rsi"));
+        o(&mut c, view("movq (%rdi),%rax\nmovq %rsi,(%rdi)\n"));
+        slot = save(&mut c);
     } else {
         slot = apply(&mut c, view("rt_xchg"), two(a.t, b.t));
     }
@@ -51032,16 +51059,34 @@ fn expr_rest<a>(c: (&a mut C), min: u64, expected: u64, lstart: u64, first: Val)
                                         );
                                     }
                                 }
-                                result := imm(&mut c, k == 274);
-                                zero := imm(&mut c, 0);
-                                done := label(&mut c);
-                                get(&mut c, zero, view("%rcx"));
-                                get(&mut c, t, view("%rax"));
-                                o(&mut c, view("cmpq %rcx,%rax\n"));
-                                if k == 273 {
-                                    jump(&mut c, view("je"), done);
+                                // The native backend writes the result only as a constant just before
+                                // the merge, so each edge into it carries a known value, which the
+                                // optimiser threads through a test of the result (optimize.grl
+                                // `bool_threads`): a condition `a && b` becomes two branches.
+                                branchy := (c.backend == 0) && (c.emit_ir == 0);
+                                mut result = 0;
+                                mut zero = 0;
+                                mut short = 0;
+                                if branchy {
+                                    result = fresh(&mut c);
+                                    short = label(&mut c);
                                 } else {
-                                    jump(&mut c, view("jne"), done);
+                                    result = imm(&mut c, k == 274);
+                                    zero = imm(&mut c, 0);
+                                }
+                                done := label(&mut c);
+                                get(&mut c, t, view("%rax"));
+                                if branchy {
+                                    o(&mut c, view("testq %rax,%rax\n"));
+                                    short_jump(&mut c, k, short);
+                                } else {
+                                    get(&mut c, zero, view("%rcx"));
+                                    o(&mut c, view("cmpq %rcx,%rax\n"));
+                                    if k == 273 {
+                                        jump(&mut c, view("je"), done);
+                                    } else {
+                                        jump(&mut c, view("jne"), done);
+                                    }
                                 }
                                 right := expr(&mut c, p + 1);
                                 rt := right.ty;
@@ -51053,14 +51098,26 @@ fn expr_rest<a>(c: (&a mut C), min: u64, expected: u64, lstart: u64, first: Val)
                                         );
                                     }
                                 }
-                                get(&mut c, zero, view("%rcx"));
-                                get(&mut c, right.t, view("%rax"));
-                                o(
-                                    &mut c,
-                                    view("cmpq %rcx,%rax\nsetne %al\nmovzbq %al,%rax\nmovq %rax,")
-                                );
-                                stack_slot(&mut c, result);
-                                c.out.push(10);
+                                if branchy {
+                                    get(&mut c, right.t, view("%rax"));
+                                    o(&mut c, view("testq %rax,%rax\n"));
+                                    short_jump(&mut c, k, short);
+                                    // Both operands ran: true for `&&`, false for `||`; cut short, the
+                                    // other.
+                                    bool_store(&mut c, result, k == 273);
+                                    jump(&mut c, view("jmp"), done);
+                                    mark(&mut c, short);
+                                    bool_store(&mut c, result, k == 274);
+                                } else {
+                                    get(&mut c, zero, view("%rcx"));
+                                    get(&mut c, right.t, view("%rax"));
+                                    o(
+                                        &mut c,
+                                        view("cmpq %rcx,%rax\nsetne %al\nmovzbq %al,%rax\nmovq %rax,")
+                                    );
+                                    stack_slot(&mut c, result);
+                                    c.out.push(10);
+                                }
                                 mark(&mut c, done);
                                 t = result;
                                 ty = bool_type(&mut c);
