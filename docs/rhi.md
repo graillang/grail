@@ -730,3 +730,34 @@ What is worth building next, in the order the RHI would feel it:
    point at *arrays of structs built by Grail* rather than at one struct - which is a record of
    embedded records, i.e. the shape this increment already uses for `ShaderStages` and
    `VertexAttributes`. No new FFI feature is expected.
+
+### The engine's shader areas
+
+The fixture above is the one shader whose bytes are embedded in Grail source. The engine's own
+shaders, which `docs/design/abundance-port.md` §7 inventories (162 entries), go through the same
+discipline at scale. The bytes are committed beside their HLSL instead of being embedded:
+
+| File | Role |
+| --- | --- |
+| `abundance/shaders/<area>/**` | the vendored HLSL (`abundance/tools/vendor-shaders.mjs --area <area>`), the entries and their include closure; `upstream.json` records the source commit and per-file SHA-256 |
+| `abundance/shaders/<area>/<name>.<stage>.spv` | built by the engine's pinned DXC (`engine/tools/fetch.sh`, 1.9.2609) with `engine/CMakeLists.txt`'s flags, profile `<stage>_6_6`, entry `main` |
+| `abundance/shaders/<area>/shaders.json` | the manifest: compiler release, flags, and per entry the source hash, size, fnv1a64, entry points, bound blocks, vertex layout |
+| `abundance/src/shader_<area>.grl` | generated: the entries' descriptors as Grail constants |
+| `abundance/shaders/layout.json`, `abundance/src/shader_layout.grl` | the CPU<->shader layout pin |
+
+**The layout pin** is the `engine/tools/layout_hash.cmake` equivalent (design R9), kept per field
+rather than per header. Every struct a stage binds as a uniform or push-constant block is laid out
+twice: once by HLSL's rules under `-fvk-use-scalar-layout -Zpr`, where vectors align to their
+component and row-major matrices take 16-byte rows, and once from the module's
+`OpMemberDecorate Offset`. The two must agree field by field, and the agreed table is stamped with
+fnv1a64. A struct is identified by where it is declared, because every pass declares its own `Push`.
+`build-shaders.mjs --check` recomputes the table from the vendored headers and the committed SPIR-V
+with no compiler, so moving a field in a header without regenerating fails the gate with a message
+like `` `inv_view_proj_unjittered` is at offset 704 by the HLSL's rules but 752 in the compiled
+block``.
+
+An entry whose closure reaches the engine's mirrored kernel/terrain trees (`AbundanceTerrain/`,
+`AbundanceKernel/`) is refused by the vendoring tool until a mirror step exists. Today that is
+`sky/rain_splash.cs`. `post/dof_gather.cs` reaches `abundance/render/dof_sampling.ush` through the
+GameplayCore include root, which the tool does vendor.
+

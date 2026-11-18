@@ -17,6 +17,23 @@
   cells with a local correctly rounded double-double `pow`: `lib/math.grl`'s `pow` is one ulp off
   glibc on about 40 % of irrational exponents. One known limit is recorded: glibc's FMA `pow` itself
   misrounds within a few thousandths of an ulp of a midpoint (0.5^sqrt 6).
+- **The offline shader pipeline scales from one triangle to the engine's shader areas, with a
+  CPU<->shader layout pin.** `abundance/tools/vendor-shaders.mjs` copies an area of Abundance's
+  `engine/shaders/` plus its include closure into `abundance/shaders/` (refusing the CMake-mirrored
+  kernel/terrain trees rather than guessing them). `abundance/tools/build-shaders.mjs` compiles every
+  entry with the engine's pinned DXC 1.9.2609 and its exact flag set, and commits each `.spv` beside its
+  HLSL with a per-area `shaders.json` recording the compiler release, the flags, entry points, sizes,
+  fnv1a64 hashes, bound blocks and vertex layouts. It also generates `abundance/src/shader_<area>.grl`
+  (the descriptors) and `abundance/src/shader_layout.grl` + `abundance/shaders/layout.json`, which pin
+  every uniform and push-constant struct field by field. This is the `layout_hash.cmake` equivalent
+  (design R9): every offset is computed from the HLSL under scalar layout, cross-checked against the
+  SPIR-V's `OpMemberDecorate Offset`, and stamped. `--check` re-derives all of it from the committed
+  artifacts with no compiler, so a moved field fails the gate and names the field. When the recorded
+  compilers are present, it also recompiles and demands byte-identical output. The new
+  `shader_inventory` probe reads the generated modules from Grail, and the suite compares its hashes
+  and stamp with the manifests. First area: `core/` (11 entries, 162 100 bytes, 11 structs,
+  `FrameConstants` 816 bytes).
+
 - **Abundance's megaplants_import is ported as a plan, byte-identical to the reference's
   invocations.** `abundance/src/megaplants_import.grl` discovers the extracted variants, names the
   canopy family, picks the bark set and tile size, applies the leaf-atlas rule (with its flat-colour
