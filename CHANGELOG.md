@@ -1,5 +1,11 @@
 ## Unreleased
 
+- **A task's finish no longer makes a system call nobody waits for.** Every finished task woke its
+  "finished" word with a futex call, waited on or not: a burst of 100k spawns made 100k futex wakes
+  (and about 40% of the burst's system time). A thread that waits on that word now registers in the
+  task's joiner word, and only then is the wake made: 100,049 -> about 300-500 futex wakes per 100k
+  spawns, system CPU 0.057 -> 0.035 s for the burst.
+
 - `bench/results/compile.json` re-measured with the release compiler of main 66e3b3b6 (with its
   profile): a cold check of the 104 000-line program is now 1.29x Zig's instructions (from 1.51x),
   and every other row is at or below the fastest rival.
