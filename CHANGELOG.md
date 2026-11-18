@@ -119,6 +119,22 @@
   it agrees with C's fmod by construction rather than by measurement. Both are `@no_block`. The
   Abundance sky port needed both (the day/night model uses std::asin for the sun and moon and
   std::fmod for every clock wrap).
+- **The Abundance world model's storage, frame boundary and replay harness are ported.** There is
+  no ECS in the C++ to translate, so stage 3 is a design: `abundance/src/world_model.grl`
+  implements the epoch-stamped frame boundary the engine keeps in `FrameContext`/`Session` (the
+  epoch and its `create`/`reset` bumps, the pending player boundary and its exact-target retry,
+  publish refusing to mix a new body with old rules), an id-ordered entity registry with pawn
+  component columns beside it (the `ab::tx::EntityRows` insert/erase/mutate/encode semantics
+  `entity_table.grl` gates), `MoverServerSim`'s recorded-input admission (wrap-safe seq watermark,
+  duplicates and not-newer samples refused, queue bounded at 90) and tick rules (consume, repeat
+  for three starved ticks, then a zero input keeping the last seq and yaw), and the session
+  refusal texts verbatim. `abundance/tests/world_model_test.grl` replays 48 recorded 30 Hz inputs
+  in the engine's own 14-byte wire through it, gated line for line (1 176 lines) against a
+  reference built from `kinematic_mover.cpp`'s wire functions and the real registry;
+  `docs/design/abundance-ecs.md` is the contract gameplay lanes code against, including the
+  worker borrow rule (workers lease an owned `Frame`; the owner keeps the mutable `World`, and the
+  borrow checker enforces it) and the seams for the mover, frame sections, store and transactions.
+
 - **Every performance chart is re-measured with the machine idle** (load average under 3; release
   compiler with PGO on main bcf78e5a). Every compile row now beats the fastest rival: the cold
   check of the 104,000-line program is 0.93x Zig's instructions (3.05 against 3.28 billion). Channels
