@@ -57,6 +57,10 @@ fn punctuation(c: u64) -> bool {
         || (c == 64);
 }
 fn pair_kind(c: u64, d: u64) -> u64 {
+    // Every pair below ends in one of `= > : * & |`: any other second byte is no pair.
+    if (d != 61) && (d != 62) && (d != 58) && (d != 42) && (d != 38) && (d != 124) {
+        return 0;
+    }
     if (c == 45) & (d == 62) {
         return 256;
     }
@@ -125,7 +129,9 @@ pub fn tokenize<a>(source: &a [u8]) -> Token[] {
     mut col = 1;
     while i < size {
         c := source[i];
-        if whitespace(c) {
+        // whitespace(c), written out for the loop every byte passes through: space, tab, newline,
+        // form feed and carriage return are bits 32, 9, 10, 12 and 13 of the mask.
+        if (c < 33) && (((4294981120 >> c) & 1) != 0) {
             i = i + 1;
             continue;
         }
@@ -280,12 +286,14 @@ pub fn tokenize<a>(source: &a [u8]) -> Token[] {
                     i = size;
                 }
             } else {
-                if letter(c) {
+                // letter(c) and digit(b) written out: a letter's byte with bit 5 set is `a`..`z`; the
+                // subtraction wraps, so anything below `a` lands far above.
+                if (wrapping_sub(c | 32, 97) < 26) || (c == 95) {
                     kind = 1;
                     i = i + 1;
                     while i < size {
                         b := source[i];
-                        if !letter(b) && !digit(b) {
+                        if !((wrapping_sub(b | 32, 97) < 26) || (b == 95) || (wrapping_sub(b, 48) < 10)) {
                             break;
                         }
                         i = i + 1;
