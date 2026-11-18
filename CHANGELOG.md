@@ -1,5 +1,22 @@
 ## Unreleased
 
+- **BC7 block decode is ported, gated on the engine's own decoder.** `lib/bc7_decode.grl` carries
+  `bc7decomp::unpack_bc7` (bc7enc_rdo b9438627 — the `bc7decomp.cpp` that
+  `engine/materials/CMakeLists.txt` builds as `abe_bc7_decode` and `material_registry.cpp` calls for
+  the terrain palette's per-cell means and its per-block scan): the four integer-only unpack paths
+  (three-subset modes 0/2, two-subset modes 1/3/7, dual-plane modes 4/5 with component rotation and
+  mode 4's index mode, and mode 6's bit field), the anchor indices' implicit most-significant bits,
+  and the engine's interpolation. The decode tables are the engine's, not transcribed:
+  `abundance/tools/dump_bc7_tables.py` writes them from `bc7decomp.cpp` as packed hex into the
+  module, and `abundance/tests/parity/bc7decode.cpp` compiles that file unmodified to produce the
+  corpus. The 457-block corpus in `tests/lib/bc7decode` is the committed bc7e payloads of the
+  encoder fixtures (the modes bc7e chooses on them: 0, 1, 2, 4, 5 and 6) plus hand-built blocks
+  sweeping every subset partition of modes 0/1/2/3/7, every component rotation of modes 4/5, mode
+  4's index mode, mode 6's selectors and an invalid mode tag, alpha modes included. The port
+  reproduces all 64 RGBA8 bytes of every block; `bc7decode.txt` and the `lib-bc7decode` native case
+  pin it, and the engine's SSE2 and scalar paths agree byte for byte on the whole corpus. BC7 and
+  BC6H *encode* remain unported (bc7e's and texcomp's ISPC mode search).
+
 - **The Jolt surface closes with the overlap query.** `gr_jolt_overlap_capsule` is one `CollideShape`
   of the same capsule the cast sweeps, stopped at the first hit: `abundance/src/jolt.grl` now answers
   the core's `overlap` contract (a boolean, with `invalid_request` for a capsule shorter than its own

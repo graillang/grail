@@ -1,0 +1,506 @@
+// BC7 block decode: the unpacker Abundance's material_registry.cpp calls as
+// bc7decomp::unpack_bc7 (bc7enc_rdo b9438627, engine/materials/runtime consumers), returning the
+// block's sixteen RGBA8 texels. Unlike the encoder this is integer-only and has no search: a mode
+// tag, three partition tables, the anchor tables that name which indices the block stores with one
+// bit fewer, and the interpolation weights.
+//
+// The bit layout is the engine's, field for field: modes 0 and 2 share the three-subset unpack,
+// modes 1, 3 and 7 the two-subset one (7 is the only one carrying alpha), 4 and 5 the dual-plane
+// mode with its component rotation and, for 4, its swapped index stream, and 6 its own 4x4 bit
+// field. Interpolation is the engine's (l * (64 - w) + h * w + 32) >> 6, endpoints are dequantized
+// by bit replication. A first byte naming no mode (the engine's mode 8) is None, where unpack_bc7
+// returns false and leaves its buffer zeroed.
+//
+// The decode tables below are the engine's, not this port's: abundance/tools/dump_bc7_tables.py
+// rewrites them from bc7decomp.cpp as packed hex (the established form for large constant tables,
+// see lib/math.grl), so no entry is transcribed by hand. abundance/tests/parity/bc7decode.cpp
+// decodes the committed corpus with the engine's own bc7decomp.cpp and the parity test compares
+// the 64 RGBA8 bytes of every block.
+module bc7_decode;
+
+// g_bc7_weights2, g_bc7_weights3, g_bc7_weights4: the index weights, 0..64.
+static WEIGHTS2: string = "00152b40";
+static WEIGHTS3: string = "0009121b252e3740";
+static WEIGHTS4: string = "0004090d11151a1e22262b2f33373c40";
+// g_bc7_partition2[64 * 16], g_bc7_partition3[64 * 16]: the subset of each of a block's sixteen
+// texels for every partition.
+static PARTITION2: string = "00000101000001010000010100000101000000010000000100000001000000010001010100010101000101010001010100000001000001010000010100010101000000000000000100000001000001010000010100010101000101010101010100000001000001010001010101010101000000000000000100000101000101010000000000000000000000010000010100000101000101010101010101010101000000000000000100010101010101010000000000000000000000010001010100000001000101010101010101010101000000000000000001010101010101010000000001010101010101010101010100000000000000000000000001010101000000000100000001010100010101010001010100000001000000000000000000000000000000000100000001010100000101010000010100000001000000000000010100000001000000000000000000000000010000000101000001010100000000000000000001000000010100000001010100000101000001010000000100000101000000010000000100000000000000000100000001000000010100000001010000010100000101000001010000000101000101000001010001010000000000010001010101010100010000000000000001010101010101010000000000010101000000010100000001010100000001010100000101000001010100000001000100010001000100010001000100000000010101010000000001010101000100010100010000010001010001000000010100000101010100000101000000000101010100000000010101010000000100010001000101000100010001000001010001000001000101000100000100010001010001000100010000010001000101010000010101010000010101000000000100000101010100000100000000000101000001000001000001010000000001010100010101010001010100000001010001000001010000010001010000000101010100000101000000000101000101000001010001000001010000010000000000010100000101000000000000010000010101000001000000000000000001000001010100000100000000000000000000000100000101010000010000000000000100000101010000010000000101000101000001000001000001010000010100010100010100000100000100010100000001010100000101010000000001010100000101010000000101000001010001010000010100000100000100010100000001010000010101000001000101010101010001000000000000010000000101000000010101000001010100000000010101010000010100000101000001010000010101010101000000000000010000000100010101000101010000010000000100000001010100010101";
+static PARTITION3: string = "00000101000001010002020102020202000000010000010102020101020202010000000002000001020201010202010100020202000002020000010100010101000000000000000001010202010102020000010100000101000002020000020200000202000002020101010101010101000001010000010102020101020201010000000000000000010101010202020200000000010101010101010102020202000000000101010102020202020202020000010200000102000001020000010200010102000101020001010200010102000102020001020200010202000102020000010100010102010102020102020200000101020000010202000002020200000000010000010100010102010102020001010100000101020000010202000000000000010102020101020201010202000002020000020200000202010101010001010100010101000202020002020200000001000000010202020102020201000000000000010100010202000102020000000001010000020201000202010000010202000102020000010100000000000001020000010201010202020202020001010001020201010202010001010000000000000101000102020101020201000002020101000201010002000002020001010000010100020000020202020200000101000102020001020200000101000000000200000002020101020202010000000000000002010102020102020200020202000002020000010200000101000001010000010200000202000202020001020000010200000102000001020000000000010101010202020200000000000102000102000102000102000102000001020002000102010200010001020000000101020200000101020200000101000001010101020202020000000001010001000100010001020202020202020200000000000000000201020102010201000002020101020200000202010102020000020200000101000002020000010100020200010202010002020001020201000100010202020202020202000100010000000002010201020102010201020100010001000100010001000102020202000202020001010100020202000101010000000201010102000000020101010200000000020101020201010202010102000202020001010100010101000202020000000201010102010101020000000200010100000101000001010002020202000000000000000002010102020101020001010000010100020202020202020200000202000001010000010100000202000002020101020201010202000002020000000000000000000000000201010200000002000000010000000200000001000202020102020200020202010202020001000102020202020202020202020200010101020001010202000102020200";
+// g_bc7_table_anchor_index_second_subset, ..._third_subset_1/2: the texel whose index loses a bit.
+static ANCHOR2: string = "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0208020208080f02080202080802020f0f060802080f0f02080202020f0f06060206080f0f02020f0f0f0f0f02020f";
+static ANCHOR3_1: string = "03030f0f08030f0f08080606060503030303080f0303060a0508080608050f0f080f0305060a080f0f030f050f0f0f0f030f05050508050a050a080d0f0c0303";
+static ANCHOR3_2: string = "0f0808030f0f03080f0f0f0f0f0f0f080f080f030f080f08030f060a0f0f0a080f030f0a0a08090a060f080f030606080f030f0f0f0f0f0f0f0f0f0f030f0f08";
+// g_bc7_first_byte_to_mode[256]: a block's mode is the position of its lowest set bit.
+static FIRST_BYTE_MODE: string = "08000100020001000300010002000100040001000200010003000100020001000500010002000100030001000200010004000100020001000300010002000100060001000200010003000100020001000400010002000100030001000200010005000100020001000300010002000100040001000200010003000100020001000700010002000100030001000200010004000100020001000300010002000100050001000200010003000100020001000400010002000100030001000200010006000100020001000300010002000100040001000200010003000100020001000500010002000100030001000200010004000100020001000300010002000100";
+
+fn nibble(d: u8) -> u64 {
+    if d >= 97 {
+        return u64(d - 87);
+    }
+    return u64(d - 48);
+}
+
+// The packed tables are indexed in place: passing a static to a helper would view it, which
+// allocates (lib/math.grl's rule for its glibc tables).
+fn weight2(i: u64) -> u64 {
+    at := 2 * i;
+    return (nibble(WEIGHTS2[at]) << 4) | nibble(WEIGHTS2[at + 1]);
+}
+
+fn weight3(i: u64) -> u64 {
+    at := 2 * i;
+    return (nibble(WEIGHTS3[at]) << 4) | nibble(WEIGHTS3[at + 1]);
+}
+
+fn weight4(i: u64) -> u64 {
+    at := 2 * i;
+    return (nibble(WEIGHTS4[at]) << 4) | nibble(WEIGHTS4[at + 1]);
+}
+
+fn partition2(i: u64) -> u64 {
+    at := 2 * i;
+    return (nibble(PARTITION2[at]) << 4) | nibble(PARTITION2[at + 1]);
+}
+
+fn partition3(i: u64) -> u64 {
+    at := 2 * i;
+    return (nibble(PARTITION3[at]) << 4) | nibble(PARTITION3[at + 1]);
+}
+
+fn anchor2(i: u64) -> u64 {
+    at := 2 * i;
+    return (nibble(ANCHOR2[at]) << 4) | nibble(ANCHOR2[at + 1]);
+}
+
+fn anchor3_1(i: u64) -> u64 {
+    at := 2 * i;
+    return (nibble(ANCHOR3_1[at]) << 4) | nibble(ANCHOR3_1[at + 1]);
+}
+
+fn anchor3_2(i: u64) -> u64 {
+    at := 2 * i;
+    return (nibble(ANCHOR3_2[at]) << 4) | nibble(ANCHOR3_2[at + 1]);
+}
+
+fn mode_of(first_byte: u64) -> u64 {
+    at := 2 * first_byte;
+    return (nibble(FIRST_BYTE_MODE[at]) << 4) | nibble(FIRST_BYTE_MODE[at + 1]);
+}
+
+// The two 64-bit chunks the block is read as, little-endian.
+struct Chunks {
+    low: u64,
+    high: u64
+}
+
+fn read_chunks(block: &[u8]) -> Chunks {
+    mut low: u64 = 0;
+    mut high: u64 = 0;
+    for i in 8 {
+        low = low | (u64(block[i]) << (8 * i));
+        high = high | (u64(block[8 + i]) << (8 * i));
+    }
+    return Chunks { low: low, high: high };
+}
+
+// The engine's bc7_dequant: the stored endpoint bits plus a parity bit, expanded to eight bits by
+// repeating the high bits.
+fn dequant_p(val: u64, pbit: u64, bits: u64) -> u64 {
+    mut v = (val << 1) | pbit;
+    v = v << (8 - (bits + 1));
+    return v | (v >> (bits + 1));
+}
+
+fn dequant(val: u64, bits: u64) -> u64 {
+    mut v = val << (8 - bits);
+    return v | (v >> bits);
+}
+
+// The engine's insert_weight_zero: insert an implicit zero index bit at pixel `offset`, shifting
+// the rest of the packed stream up one bit.
+fn insert_zero(index_bits: u64, bits: u64, offset: u64) -> u64 {
+    shift := bits * (offset + 1) - 1;
+    low_mask := (u64(1) << shift) - 1;
+    low := index_bits & low_mask;
+    high := index_bits - low;
+    return (high << 1) | low;
+}
+
+fn interp(l: u64, h: u64, w: u64, bits: u64) -> u64 {
+    mut weight: u64 = 0;
+    if bits == 2 {
+        weight = weight2(w);
+    } else if bits == 3 {
+        weight = weight3(w);
+    } else {
+        weight = weight4(w);
+    }
+    return (l * (64 - weight) + h * weight + 32) >> 6;
+}
+
+// unpack_bc7_mode0_2: three subsets, endpoints 4 bits plus one parity bit each (mode 0) or 5 bits
+// (mode 2), indices 3 bits (mode 0) or 2 bits (mode 2). Mode 0's six parity bits end its endpoint
+// run at bit 83, where its indices start; mode 2's run ends at bit 99.
+fn unpack_mode0_2(mode: u64, low: u64, high: u64) -> u8[] {
+    wbits := if mode == 0 { u64(3) } else { u64(2) };
+    wmask := (u64(1) << wbits) - 1;
+    ebits := if mode == 0 { u64(4) } else { u64(5) };
+    emask := (u64(1) << ebits) - 1;
+    parity := mode == 0;
+    wvals := u64(1) << wbits;
+    part_mask := if mode == 0 { u64(15) } else { u64(63) };
+
+    part := (low >> (mode + 1)) & part_mask;
+
+    mut channel = u64[0, 0, 0];
+    if mode == 0 {
+        channel[0] = low >> 5;
+        channel[1] = low >> 29;
+        channel[2] = (low >> 53) | (high << 11);
+    } else {
+        channel[0] = low >> 9;
+        channel[1] = (low >> 39) | (high << 25);
+        channel[2] = high >> 5;
+    }
+
+    mut endpoints = u8[0; 24];
+    for c in 3 {
+        mut read = channel[c];
+        for e in 6 {
+            endpoints[e * 4 + c] = u8(read & emask);
+            read = read >> ebits;
+        }
+    }
+
+    mut pbits = u64[0; 6];
+    if parity {
+        chunk := (high >> 13) & 255;
+        for p in 6 {
+            pbits[p] = (chunk >> p) & 1;
+        }
+    }
+
+    mut weights_read = high >> (67 - 16 * wbits);
+    weights_read = insert_zero(weights_read, wbits, 0);
+    first := anchor3_1(part);
+    second := anchor3_2(part);
+    if first <= second {
+        weights_read = insert_zero(weights_read, wbits, first);
+        weights_read = insert_zero(weights_read, wbits, second);
+    } else {
+        weights_read = insert_zero(weights_read, wbits, second);
+        weights_read = insert_zero(weights_read, wbits, first);
+    }
+
+    mut weights = u64[0; 16];
+    for i in 16 {
+        weights[i] = weights_read & wmask;
+        weights_read = weights_read >> wbits;
+    }
+
+    for e in 6 {
+        for c in 3 {
+            v := u64(endpoints[e * 4 + c]);
+            if parity {
+                endpoints[e * 4 + c] = u8(dequant_p(v, pbits[e], ebits));
+            } else {
+                endpoints[e * 4 + c] = u8(dequant(v, ebits));
+            }
+        }
+        endpoints[e * 4 + 3] = 255;
+    }
+
+    mut colors = u8[0; 3 * 8 * 4];
+    for s in 3 {
+        for i in wvals {
+            for c in 3 {
+                colors[(s * wvals + i) * 4 + c] =
+                    u8(interp(u64(endpoints[s * 8 + c]), u64(endpoints[s * 8 + 4 + c]), i, wbits));
+            }
+            colors[(s * wvals + i) * 4 + 3] = 255;
+        }
+    }
+
+    mut out = u8[0; 64];
+    for i in 16 {
+        s := partition3(part * 16 + i);
+        at := (s * wvals + weights[i]) * 4;
+        out[i * 4] = colors[at];
+        out[i * 4 + 1] = colors[at + 1];
+        out[i * 4 + 2] = colors[at + 2];
+        out[i * 4 + 3] = 255;
+    }
+    return out;
+}
+
+// unpack_bc7_mode1_3_7: two subsets, four endpoints per component. Mode 1 shares one parity bit
+// per subset over 6-bit endpoints; modes 3 and 7 carry four parity bits over 7 and 5 bits; mode 7
+// has a fourth (alpha) component and is the only two-subset mode that does.
+fn unpack_mode1_3_7(mode: u64, low: u64, high: u64) -> u8[] {
+    comps := if mode == 7 { u64(4) } else { u64(3) };
+    wbits := if mode == 1 { u64(3) } else { u64(2) };
+    wmask := (u64(1) << wbits) - 1;
+    ebits := if mode == 7 { u64(5) } else if mode == 1 { u64(6) } else { u64(7) };
+    emask := (u64(1) << ebits) - 1;
+    parity := if mode == 1 { u64(2) } else { u64(4) };
+    shared := mode == 1;
+    wvals := u64(1) << wbits;
+
+    part := (low >> (mode + 1)) & 63;
+
+    mut channel = u64[0, 0, 0, 0];
+    channel[0] = low >> (mode + 7);
+    mut p_read: u64 = 0;
+    mut weights_read: u64 = 0;
+    if mode == 1 {
+        channel[1] = low >> 32;
+        channel[2] = (low >> 56) | (high << 8);
+        p_read = high >> 16;
+        weights_read = high >> 18;
+    } else if mode == 3 {
+        channel[1] = (low >> 38) | (high << 26);
+        channel[2] = high >> 2;
+        p_read = high >> 30;
+        weights_read = high >> 34;
+    } else {
+        channel[1] = low >> 34;
+        channel[2] = (low >> 54) | (high << 10);
+        channel[3] = high >> 10;
+        p_read = high >> 30;
+        weights_read = high >> 34;
+    }
+
+    mut endpoints = u8[0; 16];
+    for c in comps {
+        mut read = channel[c];
+        for e in 4 {
+            endpoints[e * 4 + c] = u8(read & emask);
+            read = read >> ebits;
+        }
+    }
+
+    mut pbits = u64[0; 4];
+    for p in parity {
+        pbits[p] = (p_read >> p) & 1;
+    }
+
+    weights_read = insert_zero(weights_read, wbits, 0);
+    weights_read = insert_zero(weights_read, wbits, anchor2(part));
+
+    mut weights = u64[0; 16];
+    for i in 16 {
+        weights[i] = weights_read & wmask;
+        weights_read = weights_read >> wbits;
+    }
+
+    for e in 4 {
+        for c in 4 {
+            if (mode != 7) && (c == 3) {
+                endpoints[e * 4 + 3] = 255;
+            } else {
+                pb := if shared { pbits[e >> 1] } else { pbits[e] };
+                endpoints[e * 4 + c] = u8(dequant_p(u64(endpoints[e * 4 + c]), pb, ebits));
+            }
+        }
+    }
+
+    mut colors = u8[0; 2 * 8 * 4];
+    for s in 2 {
+        for i in wvals {
+            for c in comps {
+                colors[(s * wvals + i) * 4 + c] =
+                    u8(interp(u64(endpoints[s * 8 + c]), u64(endpoints[s * 8 + 4 + c]), i, wbits));
+            }
+            if comps == 3 {
+                colors[(s * wvals + i) * 4 + 3] = 255;
+            }
+        }
+    }
+
+    mut out = u8[0; 64];
+    for i in 16 {
+        s := partition2(part * 16 + i);
+        at := (s * wvals + weights[i]) * 4;
+        out[i * 4] = colors[at];
+        out[i * 4 + 1] = colors[at + 1];
+        out[i * 4 + 2] = colors[at + 2];
+        out[i * 4 + 3] = colors[at + 3];
+    }
+    return out;
+}
+
+// unpack_bc7_mode4_5: dual plane. Two endpoints, colour indices 2 bits and alpha indices 3 bits
+// (mode 4) or 2 bits (mode 5); mode 4's index mode swaps which stream is which, and both modes
+// rotate a colour component with alpha afterwards.
+fn unpack_mode4_5(mode: u64, low: u64, high: u64) -> u8[] {
+    wbits := u64(2);
+    wmask := u64(3);
+    a_wbits := if mode == 4 { u64(3) } else { u64(2) };
+    a_wmask := (u64(1) << a_wbits) - 1;
+    ebits := if mode == 4 { u64(5) } else { u64(7) };
+    emask := (u64(1) << ebits) - 1;
+    a_ebits := if mode == 4 { u64(6) } else { u64(8) };
+    a_emask := (u64(1) << a_ebits) - 1;
+
+    rot := (low >> (mode + 1)) & 3;
+    index_mode := if mode == 4 { (low >> 7) & 1 } else { u64(0) };
+
+    mut read = low >> 8;
+    mut endpoints = u8[0; 8];
+    for c in 3 {
+        for e in 2 {
+            endpoints[e * 4 + c] = u8(read & emask);
+            read = read >> ebits;
+        }
+    }
+
+    mut rgb_weights: u64 = 0;
+    mut a_weights: u64 = 0;
+    if mode == 4 {
+        endpoints[3] = u8(read & a_emask);
+        endpoints[7] = u8((read >> a_ebits) & a_emask);
+        rgb_weights = (low >> 50) | (high << 14);
+        a_weights = high >> 17;
+    } else {
+        endpoints[3] = u8(read & a_emask);
+        endpoints[7] = u8(((low >> 58) | (high << 6)) & a_emask);
+        rgb_weights = high >> 2;
+        a_weights = high >> 33;
+    }
+
+    rgb_weights = insert_zero(rgb_weights, wbits, 0);
+    a_weights = insert_zero(a_weights, a_wbits, 0);
+
+    first_bits := if index_mode != 0 { a_wbits } else { wbits };
+    first_mask := if index_mode != 0 { a_wmask } else { wmask };
+    second_bits := if index_mode != 0 { wbits } else { a_wbits };
+    second_mask := if index_mode != 0 { wmask } else { a_wmask };
+
+    if index_mode != 0 {
+        swap := rgb_weights;
+        rgb_weights = a_weights;
+        a_weights = swap;
+    }
+
+    mut weights = u64[0; 16];
+    for i in 16 {
+        weights[i] = rgb_weights & first_mask;
+        rgb_weights = rgb_weights >> first_bits;
+    }
+    mut alpha_weights = u64[0; 16];
+    for i in 16 {
+        alpha_weights[i] = a_weights & second_mask;
+        a_weights = a_weights >> second_bits;
+    }
+
+    for e in 2 {
+        for c in 3 {
+            endpoints[e * 4 + c] = u8(dequant(u64(endpoints[e * 4 + c]), ebits));
+        }
+        endpoints[e * 4 + 3] = u8(dequant(u64(endpoints[e * 4 + 3]), a_ebits));
+    }
+
+    mut colors = u8[0; 8 * 4];
+    for i in (u64(1) << first_bits) {
+        for c in 3 {
+            colors[i * 4 + c] = u8(interp(u64(endpoints[c]), u64(endpoints[4 + c]), i, first_bits));
+        }
+    }
+    for i in (u64(1) << second_bits) {
+        colors[i * 4 + 3] = u8(interp(u64(endpoints[3]), u64(endpoints[7]), i, second_bits));
+    }
+
+    mut out = u8[0; 64];
+    for i in 16 {
+        at := weights[i] * 4;
+        out[i * 4] = colors[at];
+        out[i * 4 + 1] = colors[at + 1];
+        out[i * 4 + 2] = colors[at + 2];
+        out[i * 4 + 3] = colors[alpha_weights[i] * 4 + 3];
+        if rot >= 1 {
+            swap := out[i * 4 + 3];
+            out[i * 4 + 3] = out[i * 4 + (rot - 1)];
+            out[i * 4 + (rot - 1)] = swap;
+        }
+    }
+    return out;
+}
+
+// unpack_bc7_mode6: one subset, four 7-bit endpoints plus a shared parity bit each, and sixteen
+// 4-bit indices. The engine reads it as a 16-byte bit field; the fields are laid out here by the
+// same bit positions.
+fn unpack_mode6(low: u64, high: u64) -> u8[] {
+    p0 := (low >> 63) & 1;
+    p1 := high & 1;
+    r0 := (((low >> 7) & 127) << 1) | p0;
+    r1 := (((low >> 14) & 127) << 1) | p1;
+    g0 := (((low >> 21) & 127) << 1) | p0;
+    g1 := (((low >> 28) & 127) << 1) | p1;
+    b0 := (((low >> 35) & 127) << 1) | p0;
+    b1 := (((low >> 42) & 127) << 1) | p1;
+    a0 := (((low >> 49) & 127) << 1) | p0;
+    a1 := (((low >> 56) & 127) << 1) | p1;
+
+    mut values = u8[0; 64];
+    for i in 16 {
+        w := weight4(i);
+        iw := 64 - w;
+        values[i * 4] = u8((r0 * iw + r1 * w + 32) >> 6);
+        values[i * 4 + 1] = u8((g0 * iw + g1 * w + 32) >> 6);
+        values[i * 4 + 2] = u8((b0 * iw + b1 * w + 32) >> 6);
+        values[i * 4 + 3] = u8((a0 * iw + a1 * w + 32) >> 6);
+    }
+
+    // The selectors are stored column-major: pixel 4 * column + row.
+    mut selectors = u64[0; 16];
+    selectors[0] = (high >> 1) & 7;
+    selectors[1] = (high >> 4) & 15;
+    selectors[2] = (high >> 8) & 15;
+    selectors[3] = (high >> 12) & 15;
+    selectors[4] = (high >> 16) & 15;
+    selectors[5] = (high >> 20) & 15;
+    selectors[6] = (high >> 24) & 15;
+    selectors[7] = (high >> 28) & 15;
+    selectors[8] = (high >> 32) & 15;
+    selectors[9] = (high >> 36) & 15;
+    selectors[10] = (high >> 40) & 15;
+    selectors[11] = (high >> 44) & 15;
+    selectors[12] = (high >> 48) & 15;
+    selectors[13] = (high >> 52) & 15;
+    selectors[14] = (high >> 56) & 15;
+    selectors[15] = (high >> 60) & 15;
+
+    mut out = u8[0; 64];
+    for i in 16 {
+        s := selectors[i];
+        out[i * 4] = values[s * 4];
+        out[i * 4 + 1] = values[s * 4 + 1];
+        out[i * 4 + 2] = values[s * 4 + 2];
+        out[i * 4 + 3] = values[s * 4 + 3];
+    }
+    return out;
+}
+
+// One 16-byte BC7 block to its sixteen RGBA8 texels, r,g,b,a; None for a slice shorter than a block
+// or a first byte that names no mode (the engine's unpack_bc7 returns false there and zeroes its
+// buffer).
+pub fn unpack_bc7(block: &[u8]) -> u8[]? {
+    if block.len() < 16 {
+        return None;
+    }
+    mode := mode_of(u64(block[0]));
+    if mode == 8 {
+        return None;
+    }
+    chunks := read_chunks(block);
+    if (mode == 0) || (mode == 2) {
+        return Some(unpack_mode0_2(mode, chunks.low, chunks.high));
+    }
+    if (mode == 1) || (mode == 3) || (mode == 7) {
+        return Some(unpack_mode1_3_7(mode, chunks.low, chunks.high));
+    }
+    if (mode == 4) || (mode == 5) {
+        return Some(unpack_mode4_5(mode, chunks.low, chunks.high));
+    }
+    return Some(unpack_mode6(chunks.low, chunks.high));
+}

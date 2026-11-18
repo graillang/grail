@@ -1,0 +1,110 @@
+// BC7 block decode parity.
+//
+// Every fixture in tests/lib/bc7decode is a pair: `<label>.bc7`, 16-byte BC7 blocks, and
+// `<label>.rgba8`, the 64 RGBA8 bytes the engine's own decoder produces for each block in order.
+// The corpus is written by abundance/tests/parity/bc7decode.cpp, which compiles the engine's
+// bc7decomp.cpp unmodified (the file engine/materials/CMakeLists.txt builds as abe_bc7_decode for
+// material_registry.cpp's unpack_bc7) and decodes the committed bc7e block payloads plus
+// hand-built blocks covering every mode, every subset partition, mode 4's index mode, every
+// component rotation, mode 6's selector field and an invalid mode tag.
+//
+// This test decodes each block with lib/bc7_decode.grl and compares all 64 bytes, so a single
+// texel that differs from the engine fails. The invalid-mode fixture has no texels (the engine
+// returns false and zeroes its buffer): the port must return None there.
+//
+// argv: the corpus directory. Prints the block count and the failure count, and returns it.
+use bc7_decode;
+
+use fs;
+
+fn read_file(path: u8[]) -> u8[] {
+    match fs::read(&path) {
+        d: u8[] => {
+            return d;
+        },
+        e: fs::Error => {
+            println("cannot read {}", path.text());
+            return u8[];
+        }
+    }
+}
+
+fn ends_with_bc7(name: &[u8]) -> bool {
+    n := name.len();
+    if n < 5 {
+        return false;
+    }
+    return (name[n - 4] == 46) && (name[n - 3] == 98) && (name[n - 2] == 99) && (name[n - 1] == 55);
+}
+
+fn path_of(dir: &[u8], name: &[u8], suffix: &[u8]) -> u8[] {
+    mut out = dir.copy();
+    out.push(47);
+    for i in name.len() {
+        out.push(name[i]);
+    }
+    for i in suffix.len() {
+        out.push(suffix[i]);
+    }
+    return out;
+}
+
+pub fn main(dir: &[u8]) -> u64 {
+    names := fs::list_dir(dir)!;
+    mut blocks: u64 = 0;
+    mut failures: u64 = 0;
+    for n in names.len() {
+        name := view(names[n]);
+        if !ends_with_bc7(name) {
+            continue;
+        }
+        label := name[0: name.len() - 4].copy();
+        block_bytes := read_file(path_of(dir, name, &""));
+        want := read_file(path_of(dir, &label, &".rgba8"));
+        count := block_bytes.len() / 16;
+        if (block_bytes.len() % 16) != 0 {
+            println("FAIL {} (block bytes {} not a multiple of 16)", label.text(), block_bytes.len());
+            failures += 1;
+            continue;
+        }
+        if want.len() != count * 64 {
+            println("FAIL {} ({} texels for {} blocks)", label.text(), want.len() / 64, count);
+            failures += 1;
+            continue;
+        }
+        for b in count {
+            at := b * 16;
+            expected := want[b * 64: b * 64 + 64];
+            match bc7_decode::unpack_bc7(block_bytes[at: at + 16]) {
+                Some(pixels) => {
+                    mut k: u64 = 0;
+                    while k < 64 {
+                        if pixels[k] != expected[k] {
+                            println("FAIL {} block {} texel {}: got {}, want {}", label.text(), b,
+                                k / 4, pixels[k], expected[k]);
+                            failures += 1;
+                            break;
+                        }
+                        k += 1;
+                    }
+                },
+                None => {
+                    // The engine's failure path leaves the buffer zeroed.
+                    mut k: u64 = 0;
+                    while k < 64 {
+                        if expected[k] != 0 {
+                            println("FAIL {} block {}: the port refused a block the engine decoded",
+                                label.text(), b);
+                            failures += 1;
+                            break;
+                        }
+                        k += 1;
+                    }
+                }
+            }
+            blocks += 1;
+        }
+    }
+    println("{} blocks, {} failures", blocks, failures);
+    return failures;
+}
