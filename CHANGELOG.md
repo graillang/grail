@@ -21,9 +21,11 @@
   top-53-bit uniform, the weighted pick and the unit range), the `Fill` merge rules (stacking by
   resource and compartment, the refill leanings, the distance-lifted quality and rare chances),
   the manifest selector and the rarity-weighted vehicle-part pool. Every table and id is generated
-  from the engine's own source. `abundance/tests/world_loot_roll_test.grl` prints 10 472 lines
-  (640 fills) that match a reference calling the engine's own `roll_world_loot` exactly; the Van
-  (kind 16) is excluded because one cargo-manifest merge diverges, and the module records it.
+  from the engine's own source. `abundance/tests/world_loot_roll_test.grl` prints 11 722 lines
+  (680 fills, all seventeen kinds) that match a reference calling the engine's own
+  `roll_world_loot` exactly. The one place the port first disagreed — the Van's cargo branch —
+  was C++ argument evaluation order: `f.picks(table, f.count(..), ..)` draws the count before the
+  manifest pick (right-to-left), and the port now keeps that order explicitly.
 - **The frame loop is wired headless: session, job scheduler and render graph's plan in one
   frame boundary.** `abundance/src/frame_loop.grl` runs a frame as `engine/core/engine.cpp` does —
   the session's boundary commits the authority step, the frame's payload goes to one scheduler job
