@@ -1,5 +1,13 @@
 ## Unreleased
 
+- **Abundance's build_piece_meshes writer is ported: glTF, .bin and pieces.json byte-identical.**
+  `abundance/src/piece_meshes.grl` reproduces the Y-up re-centred glTF text (per-surface material,
+  tint, roughness, the glass transmission extensions, texture set and relative URIs), the .bin layout
+  and pieces.json, including C++'s ostream %g float spelling and its sign-of-zero in the mesh arrays.
+  The mesher and the entry catalogue are the stage-6 construction core: the suite compiles the tool's
+  own source into a reference dumper (the shipped binary predates the current mesher) that writes the
+  raw meshes, the glTF/.bin and pieces.json, and diffs six pieces across all six building surfaces.
+
 - **The shader pipeline's layout grammar reads the geometry tree's shapes.** `abundance/tools/shader-lib.mjs`
   now skips a `template<...> struct` wrapper whole (`ABReadOnly<T>`, the `AB_LOAD_RO` NonWritable load
   helper) and drops leading `[[...]]` attribute runs before a field's type, so
