@@ -1,5 +1,17 @@
 ## Unreleased
 
+- **Abundance's file/OS services land on Grail, matching `content_paths.hpp` 35/35 lines.**
+  `abundance/src/platform_os.grl` carries the engine core's content paths (`packaged`, `root` including
+  the `$HOME/.cache` and `/tmp` fallbacks, `shader_root`, `resolve`) as rules over the environment
+  values a caller passes, with thin `env`-reading wrappers, plus `engine.cpp`'s save root
+  (`SDL_GetPrefPath` then `saves`) and the monotonic clock. Nothing needed binding: Grail's `env`,
+  `fs`, `io` and `time` already carry the services, so the increment is semantics - and the parity
+  proves it against the engine's own header, compiled unmodified, over five environment cases
+  (`abundance/tests/parity/platform_os.cpp`; `tests/platform_os_test.grl` matches it byte for byte,
+  including the save root and the steady-clock invariants). The one shim addition is
+  `gr_sdl_pref_path`: SDL allocates the pref path with SDL_malloc and Grail has no CPtr-to-CStr cast,
+  so the shim copies the text out and frees the buffer.
+
 - **The damage domain's placed-object entry points are ported.** `abundance/src/damage_actions.grl`
   carries `actions/damage/placed_damage` (cmake/tx/damage): the book rows, `strike_placed`'s skips,
   refusal wording ("damage.placed_energy") and wreck threshold, `first_placed_hit`'s box slab test and
