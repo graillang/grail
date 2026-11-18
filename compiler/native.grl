@@ -14148,12 +14148,30 @@ fn interface_of_method<a>(c: (&a mut C), index: u64) -> u64 {
 }
 // A dyn object's methods in vtable order: the interface's own, then each super's (all_supers order).
 fn dyn_methods<a>(c: (&a mut C), id: u64) -> u64[] {
-    mut out = copy_numbers(&c.interfaces[id - 1].methods);
+    mut all = copy_numbers(&c.interfaces[id - 1].methods);
     supers := all_supers(&mut c, id);
     for i in supers.len() {
         more := copy_numbers(&c.interfaces[supers[i] - 1].methods);
         for j in more.len() {
-            out.push(more[j]);
+            all.push(more[j]);
+        }
+    }
+    // As in Rust, a method with type parameters of its own (`fn fold<A, G: FnMut(..)>`) has no single
+    // vtable entry, and one that takes `self` by value cannot be called through a reference to the
+    // object: it is not part of the dyn object, and calls it on the concrete type and through bounds
+    // only. An interface whose every other method fits is still usable as dyn.
+    mut out = u64[];
+    for i in all.len() {
+        generic := c.funcs[all[i]].types > 1;
+        count := c.funcs[all[i]].count;
+        first := c.funcs[all[i]].first;
+        mut by_value = count != 0;
+        if by_value {
+            receiver := c.params[first];
+            by_value = ty_kind(&mut c, receiver) != 7;
+        }
+        if !(generic && by_value) {
+            out.push(all[i]);
         }
     }
     return out;
