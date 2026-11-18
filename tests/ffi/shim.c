@@ -286,6 +286,7 @@ const struct ca_pt *c_ca_pts(void) { return ca_pts; }
 
 /* A foreign call that holds its thread: sleeps `us` microseconds with the raw nanosleep system
    call (no libc), for foreign_handoff - the scheduler's monitor must hand the worker on. */
+#if !defined(_WIN32)
 struct nap_ts { long s, ns; };
 long c_nap(long us) {
     struct nap_ts t = { us / 1000000, (us % 1000000) * 1000 };
@@ -309,3 +310,4 @@ long c_nap(long us) {
     return rax;
 #endif
 }
+#endif

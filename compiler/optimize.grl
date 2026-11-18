@@ -1569,6 +1569,10 @@ fn reg_read_later<a, b>(s: &a [u8], from: u64, reg: &b [u8], low: &b [u8]) -> bo
                 return true;
             }
             if ir::at(view(line), 0, view("ret")) {
+                // %xmm0 is the C convention's float result (an `extern "C"` function's return).
+                if ir::same_range(view(reg), 0, reg.len(), view("%xmm0")) {
+                    return true;
+                }
                 going = false;
                 continue;
             }
@@ -1653,9 +1657,144 @@ pub fn has_f32_const_ops<a>(s: &a [u8]) -> bool {
         if (s[a] == 99) && ir::at(view(s), a, view("cvtss2sd")) {
             return true;
         }
+        if (s[a] == 109) && ir::at(view(s), a, view("movaps %xmm")) && scratch_op_at(view(s), a) {
+            return true;
+        }
         a = bytes::find_byte(view(s), a, 10) + 1;
     }
     return false;
+}
+// `OPxs` (add, sub, mul, div; s or d) at line start `a`, with `%xmm0` as destination: the scratch
+// form the front end and f32_const_ops leave. Answers the line's end, or 0.
+fn scratch_op_end<a>(s: &a [u8], a: u64) -> u64 {
+    if a >= s.len() {
+        return 0;
+    }
+    e := line_at(view(s), a);
+    if (e - a < 12) || !ir::at(view(s), e - 6, view(",%xmm0")) || (s[a + 5] != 32) {
+        return 0;
+    }
+    if !(ir::at(view(s), a, view("add")) || ir::at(view(s), a, view("sub")) || ir::at(view(s), a, view("mul")) || ir::at(view(s), a, view("div"))) {
+        return 0;
+    }
+    if !((s[a + 3] == 115) && ((s[a + 4] == 115) || (s[a + 4] == 100))) {
+        return 0;
+    }
+    return e;
+}
+// Whether line `a` (a `movaps %xmmA,%xmm0` or `movaps %xmmB,%xmm1`) starts a scratch shape.
+fn scratch_op_at<a>(s: &a [u8], a: u64) -> bool {
+    e := line_at(view(s), a);
+    l2 := e + 1;
+    if l2 >= s.len() {
+        return false;
+    }
+    if scratch_op_end(view(s), l2) != 0 {
+        return true;
+    }
+    e2 := line_at(view(s), l2);
+    return (e2 + 1 < s.len()) && (scratch_op_end(view(s), e2 + 1) != 0);
+}
+// The register number of `%xmmN` text (a..e), or 99.
+fn xmm_text_no<a>(s: &a [u8], a: u64, e: u64) -> u64 {
+    if !is_xmm_text(view(s), a, e) {
+        return 99;
+    }
+    if e - a == 5 {
+        return s[a + 4] - 48;
+    }
+    return 10 + s[a + 5] - 48;
+}
+// The scratch arithmetic done in place (text, after the optimiser, like the rewrite below):
+//   movaps %xmmA,%xmm0; [movaps %xmmB,%xmm1;] OPxs SRC,%xmm0; movaps %xmm0,%xmmD
+// with the scratch read nowhere after is `OPxs SRC',%xmmD`, after `movaps %xmmA,%xmmD` when D is
+// not A (SRC' is %xmmB for the second form). Appends the rewrite to `out` and answers the end of the
+// shape's last line, or 0 when line `a` does not start one.
+fn scratch_fold<a>(s: &a [u8], a: u64, out: (&mut u8[])) -> u64 {
+    e1 := line_at(view(s), a);
+    if !((e1 - a >= 18) && (e1 - a <= 19) && ir::at(view(s), a, view("movaps %xmm")) && ir::at(view(s), e1 - 6, view(",%xmm0"))) {
+        return 0;
+    }
+    xa := xmm_text_no(view(s), a + 7, e1 - 6);
+    if (xa == 99) || (xa < 2) {
+        return 0;
+    }
+    mut l = e1 + 1;
+    mut el = line_at(view(s), l);
+    mut xb = 99;
+    mut src_a = 0;
+    mut src_e = 0;
+    if (l < s.len()) && (el - l >= 18) && (el - l <= 19) && ir::at(view(s), l, view("movaps %xmm")) && ir::at(view(s), el - 6, view(",%xmm1")) {
+        xb = xmm_text_no(view(s), l + 7, el - 6);
+        if (xb == 99) || (xb < 2) {
+            return 0;
+        }
+        src_a = l + 7;
+        src_e = el - 6;
+        l = el + 1;
+        el = line_at(view(s), l);
+    }
+    eo := scratch_op_end(view(s), l);
+    if eo == 0 {
+        return 0;
+    }
+    // The operation's source: %xmm1 (from the copy) in the four-line form, else any SSE register but
+    // the scratch, or memory.
+    sa := l + 6;
+    se := eo - 6;
+    if xb != 99 {
+        if !ir::same_range(view(s), sa, se, view("%xmm1")) {
+            return 0;
+        }
+    } else {
+        if ir::same_range(view(s), sa, se, view("%xmm0")) || ir::same_range(view(s), sa, se, view("%xmm1")) {
+            return 0;
+        }
+        src_a = sa;
+        src_e = se;
+    }
+    l4 := eo + 1;
+    e4 := line_at(view(s), l4);
+    if !((l4 < s.len()) && (e4 - l4 >= 18) && (e4 - l4 <= 19) && ir::at(view(s), l4, view("movaps %xmm0,%xmm"))) {
+        return 0;
+    }
+    xd := xmm_text_no(view(s), l4 + 13, e4);
+    if (xd == 99) || (xd < 2) {
+        return 0;
+    }
+    if reg_read_later(view(s), e4 + 1, view("%xmm0"), view("")) {
+        return 0;
+    }
+    if (xb != 99) && reg_read_later(view(s), e4 + 1, view("%xmm1"), view("")) {
+        return 0;
+    }
+    commutes := ir::at(view(s), l, view("add")) || ir::at(view(s), l, view("mul"));
+    // D is the source register: only a commuting operation can swap its operands.
+    src_is_d := xmm_text_no(view(s), src_a, src_e) == xd;
+    if src_is_d && (xd != xa) && !commutes {
+        return 0;
+    }
+    opname := s[l: l + 6].copy();
+    if src_is_d && (xd != xa) {
+        out.append(view(opname));
+        out.append(view(s[a + 7: e1 - 6]));
+    } else {
+        if xd != xa {
+            out.append(view("movaps "));
+            out.append(view(s[a + 7: e1 - 6]));
+            out.push(44);
+            out.append(view(s[l4 + 13: e4]));
+            out.push(10);
+        }
+        out.append(view(opname));
+        out.append(view(s[src_a: src_e]));
+    }
+    out.push(44);
+    out.append(view(s[l4 + 13: e4]));
+    if e4 < s.len() {
+        out.push(10);
+    }
+    return e4 + 1;
 }
 pub fn f32_const_ops<a>(s: &a [u8]) -> u8[] {
     if !has_f32_const_ops(view(s)) {
@@ -1696,19 +1835,54 @@ pub fn f32_const_ops<a>(s: &a [u8]) -> u8[] {
                     put_num(&mut out, f - 1);
                     out.append(view(",%ecx\nmovd %ecx,%xmm1\n"));
                     src := s[l2 + 9: e2 - 6].copy();
-                    if !ir::same_range(view(src), 0, src.len(), view("%xmm0")) {
-                        out.append(view("movaps "));
-                        out.append(view(src));
-                        out.append(view(",%xmm0\n"));
+                    // The result usually goes straight on to its register (`movaps %xmm0,%xmmD`): with
+                    // the scratch not read after, the operation is done in D itself.
+                    l6 := e5 + 1;
+                    e6 := line_at(view(s), l6);
+                    mut dst = u8[];
+                    if (l6 < s.len()) && (e6 - l6 >= 18) && (e6 - l6 <= 19) && ir::at(view(s), l6, view("movaps %xmm0,%xmm")) {
+                        d := s[l6 + 13: e6].copy();
+                        if !ir::same_range(view(d), 0, d.len(), view("%xmm1")) && !reg_read_later(view(s), e6 + 1, view("%xmm0"), view("")) {
+                            dst = d;
+                        }
                     }
-                    out.append(view(op));
-                    out.append(view("ss %xmm1,%xmm0"));
-                    if e5 < s.len() {
-                        out.push(10);
+                    if dst.len() != 0 {
+                        if !ir::same_range(view(src), 0, src.len(), view(dst)) {
+                            out.append(view("movaps "));
+                            out.append(view(src));
+                            out.push(44);
+                            out.append(view(dst));
+                            out.push(10);
+                        }
+                        out.append(view(op));
+                        out.append(view("ss %xmm1,"));
+                        out.append(view(dst));
+                        if e6 < s.len() {
+                            out.push(10);
+                        }
+                        a = e6 + 1;
+                    } else {
+                        if !ir::same_range(view(src), 0, src.len(), view("%xmm0")) {
+                            out.append(view("movaps "));
+                            out.append(view(src));
+                            out.append(view(",%xmm0\n"));
+                        }
+                        out.append(view(op));
+                        out.append(view("ss %xmm1,%xmm0"));
+                        if e5 < s.len() {
+                            out.push(10);
+                        }
+                        a = e5 + 1;
                     }
-                    a = e5 + 1;
                     done = true;
                 }
+            }
+        }
+        if !done && (s[a] == 109) {
+            next := scratch_fold(view(s), a, &mut out);
+            if next != 0 {
+                a = next;
+                done = true;
             }
         }
         if !done {
@@ -2698,6 +2872,7 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
     xmm_stores(&mut o, view(s), last);
     xmm_fold(&mut o, view(s), last);
     xmm_memops(&mut o, view(s), last);
+    xmm_copies(&mut o, view(s), last);
     index_cse(&mut o, view(s), last);
     dead_defs(&mut o, view(s), first, last);
     // Slots read only by text emitted outside the lines: a stable sequence's slot (item 6).
@@ -4716,6 +4891,172 @@ fn xmm_fold<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
             kill(&mut o, l2);
             kill(&mut o, l4);
         }
+    }
+}
+// Copies through the scratch pair, for any SSE registers (xmm_fold's are promoted slots only).
+// The front end computes in %xmm0/%xmm1 and copies in and out, also around the registers its own f32
+// sequences name (%xmm8, %xmm9). Three shapes, each with the scratch dead after:
+//   load then copy    `movss M,%T; movaps %T,%X`            is `movss M,%X`
+//   copy then read    `movaps %A,%T; ..; OP %T,D`           is `OP %A,D`  (stores and copies too)
+//   two-address       `movaps %X,%T; OPs %S,%T; movaps %T,%X` is `OPs %S,%X`
+// Lines in a shape are consecutive (up to two unrelated lines before the read), with no label.
+fn xmm_copies<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
+    for round in 2 {
+        xmm_load_copies(&mut o, view(s), last);
+        xmm_copy_reads(&mut o, view(s), last);
+        xmm_two_address(&mut o, view(s), last);
+    }
+}
+// xmm_dead_after for dropping a copy: a return ends the path with the register dead. Grail's own
+// functions return floats in %rax, and an exported callback that returns one in %xmm0 writes it
+// on the line before its `leave; ret` (native.grl, export_fret), a whole write met first. Kept apart
+// from xmm_dead_after, which other passes use to drop writes.
+fn xmm_dead_to_exit<a, b>(o: (&a ir::Body), s: &b [u8], i: u64, r: u64, depth: u64) -> bool {
+    last := o.op.len();
+    if (depth == 0) || (r == 99) {
+        return false;
+    }
+    mut j = i;
+    for step in 40 {
+        j = next_live(&o, j, last);
+        if j >= last {
+            return false;
+        }
+        op := o.op[j];
+        if (op == 15) && never_returns(&o, view(s), j) {
+            return true;
+        }
+        if (op == 16 || ((16 < op) && (op < 25))) && (o.k0[j] == 4) {
+            t := jump_target(&o, j);
+            if (t >= last) || !xmm_dead_to_exit(&o, view(s), t, r, depth - 1) {
+                return false;
+            }
+            if op == 16 {
+                return true;
+            }
+            continue;
+        }
+        if (op == 100) || (op == 29) {
+            continue;
+        }
+        if op == 30 {
+            return true;
+        }
+        if (op == 0) || (op == 15) || ir::is_jump(op) {
+            return false;
+        }
+        if xmm_no(&o, view(s), j, 0) == r {
+            return false;
+        }
+        if xmm_no(&o, view(s), j, 1) == r {
+            return (op == 1) || (op == 68) || (op == 70) || (op == 71) || (op == 65) || (op == 66) || (op == 77) || (op == 78);
+        }
+    }
+    return false;
+}
+fn xmm_arith(op: u64) -> bool {
+    return ((59 < op) && (op < 64)) || ((71 < op) && (op < 76));
+}
+fn plain_line<a>(o: (&a ir::Body), i: u64) -> bool {
+    op := o.op[i];
+    return !((op == 100) || (op == 0) || (op == 15) || (op == 29) || (op == 30) || ir::is_jump(op));
+}
+fn copy_operand<a>(o: (&a mut ir::Body), i: u64, j: u64, from: u64, fj: u64) {
+    if fj == 0 {
+        set_operand(&mut o, i, j, o.k0[from], o.v0[from]);
+        set_range(&mut o, i, j, o.s0[from], o.e0[from]);
+    } else {
+        set_operand(&mut o, i, j, o.k1[from], o.v1[from]);
+        set_range(&mut o, i, j, o.s1[from], o.e1[from]);
+    }
+    ir::put(&mut o.chg, i, 1);
+    bump(&mut o);
+}
+fn xmm_load_copies<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
+    for i in last {
+        if (o.del[i] != 0) || !((o.op[i] == 78) || (o.op[i] == 77) || (o.op[i] == 70)) {
+            continue;
+        }
+        t := xmm_no(&o, view(s), i, 1);
+        if (t == 99) || (xmm_no(&o, view(s), i, 0) != 99) {
+            continue;
+        }
+        n := next_live(&o, i, last);
+        if (n >= last) || (o.op[n] != 68) || (xmm_no(&o, view(s), n, 0) != t) {
+            continue;
+        }
+        x := xmm_no(&o, view(s), n, 1);
+        if (x == 99) || (x == t) || !xmm_dead_to_exit(&o, view(s), n, t, 6) {
+            continue;
+        }
+        copy_operand(&mut o, i, 1, n, 1);
+        kill(&mut o, n);
+    }
+}
+fn xmm_copy_reads<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
+    for i in last {
+        if (o.del[i] != 0) || (o.op[i] != 68) {
+            continue;
+        }
+        a := xmm_no(&o, view(s), i, 0);
+        t := xmm_no(&o, view(s), i, 1);
+        if (a == 99) || (t == 99) || (a == t) {
+            continue;
+        }
+        mut u = next_live(&o, i, last);
+        mut gap = 0;
+        mut found = false;
+        while (u < last) && (gap < 3) && plain_line(&o, u) {
+            if xmm_no(&o, view(s), u, 0) == t {
+                found = true;
+                break;
+            }
+            if (xmm_no(&o, view(s), u, 1) == t) || (xmm_no(&o, view(s), u, 0) == a) || (xmm_no(&o, view(s), u, 1) == a) {
+                break;
+            }
+            u = next_live(&o, u, last);
+            gap += 1;
+        }
+        if !found {
+            continue;
+        }
+        op := o.op[u];
+        // The read: an operation's source (its destination another register), a store, a copy or a
+        // conversion out of T.
+        d := xmm_no(&o, view(s), u, 1);
+        reads := (xmm_arith(op) && (d != t) && (d != 99)) || (((op == 78) || (op == 77)) && (d == 99))
+            || ((op == 68) && (d != t) && (d != 99)) || (((op == 65) || (op == 66)) && (d != t)) || ((op == 70) && (d == 99));
+        if !reads || !xmm_dead_to_exit(&o, view(s), u, t, 6) {
+            continue;
+        }
+        copy_operand(&mut o, u, 0, i, 0);
+        kill(&mut o, i);
+    }
+}
+fn xmm_two_address<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
+    for i in last {
+        if (o.del[i] != 0) || (o.op[i] != 68) {
+            continue;
+        }
+        x := xmm_no(&o, view(s), i, 0);
+        t := xmm_no(&o, view(s), i, 1);
+        if (x == 99) || (t == 99) || (x == t) {
+            continue;
+        }
+        u := next_live(&o, i, last);
+        if (u >= last) || !xmm_arith(o.op[u]) || (xmm_no(&o, view(s), u, 1) != t) || (xmm_no(&o, view(s), u, 0) == t) {
+            continue;
+        }
+        w := next_live(&o, u, last);
+        if (w >= last) || (o.op[w] != 68) || (xmm_no(&o, view(s), w, 0) != t) || (xmm_no(&o, view(s), w, 1) != x) {
+            continue;
+        }
+        if !xmm_dead_to_exit(&o, view(s), w, t, 6) {
+            continue;
+        }
+        copy_operand(&mut o, u, 1, i, 0);
+        kill(&mut o, i);
+        kill(&mut o, w);
     }
 }
 fn prev_live<a>(o: (&a ir::Body), i: u64) -> u64 {

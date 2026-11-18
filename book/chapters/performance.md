@@ -72,7 +72,9 @@ code is:
   pointer loaded again beside it;
 - loops test at the top and jump back unconditionally, and values move between registers on every
   step, where Go's loops are laid out tight;
-- `f32` arithmetic goes through `f64` and back on every operation (`xform_f32`, `dot_f32`, `matmul`).
+- `f32` arithmetic still widens to `f64` where a value comes from a field or crosses a call
+  (`xform_f32`, `ecs`). Locals, elements and constants now stay in single precision in registers,
+  which took `dot_f32` from 0.67 to 0.17 seconds and `matmul` from 1.11 to 0.35.
 
 {{perf:bench-rivals#instructions|cpu}}
 
@@ -106,10 +108,12 @@ and Zig, written the way each language is usually written:
 executes the same number of instructions as C and Rust: strings are one block, enums keep their
 payloads inline, and a value written before it is read is not zeroed first. What remains:
 
-- **`chan`: threads hand off through the operating system.** Grail's channel is a mutex and two
-  conditions around a ring, as C's and Zig's twins are, and lands with them. crossbeam spins
-  before it sleeps, so a hand-off rarely parks a thread; Go runs both ends as goroutines on one
-  scheduler and never reaches the kernel at all.
+- **`chan`: a loaded machine.** Grail's channel is crossbeam-channel's design (a ring of stamped
+  slots, a compare-exchange per hand-off, spin, then yield, then park) and executes fewer
+  instructions than C's, Rust's or Go's twin, second only to Zig's. Its CPU time depends on the
+  machine: a spinning thread whose partner has been descheduled burns time, and on the shared
+  machine charted crossbeam's own figure rose to four times its quiet one beside Grail's. Go runs
+  both ends as goroutines on one scheduler and never spins on another thread, so its figure holds.
 - **`bintrees`: the allocator.** Allocating and freeing the nodes are about three fifths of the
   run; Zig's release allocator executes the fewest instructions.
 - **`hashmap`: insertion order costs one memory touch.** Grail's map keeps its entries in insertion
@@ -137,10 +141,7 @@ pieces of at least 16,384), Go one goroutine per core, and Zig one `std.Thread` 
 others fuse the six columns into one loop, the usual way to write it in each; Grail's library has a
 zip of at most four columns, hence one call per axis. Each entity's arithmetic is independent and
 the final sum is serial, so every program prints the serial checksum at any worker count, and the
-tool checks that it does: a build that prints another answer is not charted. Grail's release build
-of this program is absent for that reason on the commit charted. With the three updates written as
-closure literals at the call, it prints a wrong checksum (the y axis's positions are lost), a
-miscompile in the LLVM backend that is being fixed; the development build prints the right one.
+tool checks that it does: a build that prints another answer is not charted.
 
 A parallel loop is about time, so this chart is wall time, best of several runs, with every runtime
 told the same number of threads. It needs a machine doing nothing else, and the figures charted
@@ -247,8 +248,14 @@ that is a finding in its own right. Everything else is behind under either load:
   allocates nothing.
 - **The main thread is not a worker.** Joining from `main` posts the work and waits to be woken,
   as rayon does; oneTBB's main thread is a slot of its arena and joins directly.
-- **The calls themselves are slower.** Serial `fib(32)`, with no scheduler involved, is 3x
-  oneTBB's: Grail's calling convention carries three hidden registers through every call.
+- **The `fib(32)` rows measure GCC's recursive inlining more than the scheduler.** oneTBB's twin is
+  C++ built with g++, which inlines `fib` into itself: serial `fib(32)` takes 46 to 50 million
+  instructions there. LLVM never inlines a recursive call into itself, so clang's C (67 million)
+  and rayon's Rust don't get this either, and neither does Grail's release build (75 million, the
+  same loop as clang's with one more register move). Per join, Grail's work-stealing join costs
+  about 1,050 instructions against oneTBB's 920, and its main thread runs fewer instructions than
+  oneTBB's. What remains of the gap in the join rows is that serial difference plus the noise of
+  wall time on a loaded machine.
 - **The importer gets fewer rounds by design.** At most a quarter of the workers run Background
   work, where oneTBB lets its low-priority arena take every idle thread.
 

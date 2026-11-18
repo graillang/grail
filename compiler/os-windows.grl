@@ -2332,7 +2332,14 @@ fn rt_os_workers() -> u64 {
 fn rt_os_marker_cached() -> u64 {
     return 0;
 }
+// The monitor's barrier for taking a worker back from a foreign call (rt_sysmon): the call's marker
+// is a plain increment and a plain load, so the monitor issues FlushProcessWriteBuffers - every
+// running thread of the process passes a full barrier, Windows' membarrier
+// (docs/design/concurrency-model.md, 2.4.1). It exists on every supported Windows: `setup` 1 says yes.
 fn rt_os_retake_barrier(setup: u64) -> u64 {
+    if setup == 0 {
+        raw_win32(FlushProcessWriteBuffers);
+    }
     return 1;
 }
 fn rt_os_sched_prepare() -> u64 {

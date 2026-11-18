@@ -3953,7 +3953,7 @@ fn ffi_marker_enter<a>(c: (&a mut C), slot: u64) -> unit {
 // After the call, with its result in memory: count the marker out and look at the pair's `retaken`
 // word (8 bytes on). x86-64 Linux does both with plain instructions - the monitor pays for the
 // ordering with membarrier (docs/design/concurrency-model.md, 2.4.1), and so do AArch64 and RV64
-// Linux; Windows x64 keeps a locked increment until its barrier is wired in. A non-zero `retaken` goes to rt_foreign_return, which settles the retake with one
+// Linux; Windows x64 the same, with FlushProcessWriteBuffers. A non-zero `retaken` goes to rt_foreign_return, which settles the retake with one
 // compare-and-swap. A `blocking` call has its own leave hook.
 fn ffi_hooks_leave<a, b>(c: (&a mut C), slot: u64, block_here: bool, symbol: &b [u8]) -> unit {
     if block_here {
@@ -3968,11 +3968,7 @@ fn ffi_hooks_leave<a, b>(c: (&a mut C), slot: u64, block_here: bool, symbol: &b 
         stack_slot(&mut c, slot);
         o(&mut c, view(",%r11\ntestq %r11,%r11\n"));
         jump(&mut c, view("je"), done);
-        if c.target == 0 {
-            o(&mut c, view("incq (%r11)\n"));
-        } else {
-            o(&mut c, view("lock incq (%r11)\n"));
-        }
+        o(&mut c, view("incq (%r11)\n"));
         o(&mut c, view("cmpq $0,8(%r11)\n"));
         jump(&mut c, view("je"), done);
         o(&mut c, view("movq %r11,%rsi\n"));
@@ -4500,6 +4496,9 @@ fn win32_arity<a>(name: (&a [u8])) -> u64 {
         return 1;
     }
     if same(view(name), view("SwitchToThread")) {
+        return 0;
+    }
+    if same(view(name), view("FlushProcessWriteBuffers")) {
         return 0;
     }
     if same(view(name), view("DeleteFileW")) {
@@ -35151,6 +35150,8 @@ fn variant<a, b>(c: (&a mut C), d: u64, name: &b [u8], explicit: u64) -> Val {
     mut n = 0;
     if framed(&mut c, ty) {
         n = enum_frame(&mut c, tag, payload, ty, pty);
+    } else if (has == 0) && (c.raw == 0) {
+        n = static_unit_variant(&mut c, k);
     } else {
         n = invoke(&mut c, view("rt_enum"), two(tag, payload));
     }
@@ -35158,6 +35159,26 @@ fn variant<a, b>(c: (&a mut C), d: u64, name: &b [u8], explicit: u64) -> Val {
     root := place_of(&mut c, n);
     transfer_bonds(&mut c, source, root);
     return val(n, ty);
+}
+// A payload-less variant of a boxed enum (`Tree::Leaf`): one static {tag, 0} object instead of an
+// allocation. It carries the header of a static object ({0, 2}, as a string literal's does), so
+// dropping it frees nothing; every reader loads the tag at +0 exactly as from an allocated box, and
+// nothing writes into an enum's box in place (a retag allocates a new one).
+fn static_unit_variant<a>(c: (&a mut C), k: u64) -> u64 {
+    at := label(&mut c);
+    if c.plat == 1 {
+        o(&mut c, view(".pushsection __DATA,__const\n"));
+    } else {
+        o(&mut c, view(".pushsection .rodata\n"));
+    }
+    o(&mut c, view(".p2align 4\n.quad 0\n.quad 2\n"));
+    mark(&mut c, at);
+    o(&mut c, view(".quad "));
+    on(&mut c, k);
+    o(&mut c, view("\n.quad 0\n.popsection\nleaq "));
+    lname(&mut c, at);
+    o(&mut c, view("(%rip),%rax\n"));
+    return save(&mut c);
 }
 // Canonical specialization keys erase opaque body aliases and lift captured lifetimes
 // into fresh signature slots, disjoint from explicitly named function lifetimes.
@@ -37175,8 +37196,12 @@ fn emit_fn_thunk<a>(c: (&a mut C)) -> unit {
         return ();
     }
     part(&mut c, view("runtime"));
+    // Every per-module object that coerces a function emits the adapter, so it is a weak definition
+    // like the other shared adapters (zip, result, vtables): the linker keeps one.
     if own_object(&c) {
         o(&mut c, view(".globl grail_fn_thunk\n"));
+        weak_def(&mut c);
+        o(&mut c, view("grail_fn_thunk\n"));
     }
     o(&mut c, view("grail_fn_thunk:\npushq %rbp\nmovq %rsp,%rbp\nmovq (%rdi),%rax\nmovq 16(%rax),%rax\n"));
     o(&mut c, view("movq %rsi,%rdi\nmovq %rdx,%rsi\nmovq %rcx,%rdx\nmovq %r8,%rcx\nmovq %r9,%r8\ncall *%rax\nleave\nret\n"));
@@ -50556,6 +50581,30 @@ fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
             first = primary(&mut c, expected);
         }
     }
+    // Most operands are followed by no operator: then the loop below would leave on its first
+    // turn, and its frame (thousands of bytes, cleared on entry) is not needed at all.
+    k0 := kind(&mut c);
+    if (k0 != 40) && (k0 != 91) && (k0 != 63) && (k0 != 33) && ((k0 != 46) || (next_kind(&mut c) == 46)) {
+        mut kp = k0;
+        if (k0 == 60) || (k0 == 62) {
+            here := c.pos;
+            if (kind_at(&mut c, here + 1) == k0) && (c.toks[here].end == c.toks[here + 1].start) {
+                kp = 271;
+                if k0 == 62 {
+                    kp = 272;
+                }
+            }
+        }
+        p0 := prec(kp);
+        if (k0 == 46) || (p0 == 0) || (p0 < min) {
+            return first;
+        }
+    }
+    return expr_rest(&mut c, min, expected, lstart, first);
+}
+// The operators after an expression's first operand (expr_expected): postfix calls, indexing,
+// fields, `?`/`!`, and binary operators by precedence.
+fn expr_rest<a>(c: (&a mut C), min: u64, expected: u64, lstart: u64, first: Val) -> Val {
     mut lend = c.pos;
     mut left_lit = (c.lit_start == lstart) & (c.lit_end == lend);
     mut lvalue = c.lit_value;

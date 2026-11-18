@@ -56,6 +56,7 @@ export const imports = {
     'SetConsoleOutputCP',
     'Sleep',
     'SwitchToThread',
+    'FlushProcessWriteBuffers',
     'TerminateProcess',
     'VirtualAlloc',
     'VirtualFree',
