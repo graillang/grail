@@ -1,5 +1,13 @@
 ## Unreleased
 
+- **Native backend: iterator chains run 18% fewer instructions** (bench/iterchain: 1100M -> 897M
+  user-space instructions in the development build). A direct call to a capture-free closure now
+  zeroes its environment register with `xorq %rax,%rax`, which the optimiser reads as a write that
+  reads nothing, so the loads that computed the closure value die (`xorl` was an unknown instruction
+  to it: every register live, nothing before it removed). And the copy of a small leaf that the
+  optimiser pastes over each call to it is forwarded and cleared of dead definitions once its frame
+  slots are registers - a value stored and loaded back is the register it came from - and a slot's
+  register is zeroed at the copy's start only when the copy still names it. Output is unchanged.
 - Fixed: a closure type written outside a parameter list (a struct field, a local's type) can take a
   reference parameter: `struct S { body: Fn<Owned>(&T) -> u64 }` was "elided output reference needs one
   input lifetime". Its elided lifetime is a fresh input of each call, as inside a function's parameter
