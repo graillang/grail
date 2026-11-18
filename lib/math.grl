@@ -309,7 +309,8 @@ pub fn hypot(x:f64,y:f64)->f64{
 }
 
 // ---------------------------------------------------------------------------------------------
-// Single precision, bit for bit what glibc computes: sinf, cosf, expf, exp2f, logf, log2f.
+// Single precision, bit for bit what glibc computes: sinf, cosf, expf, exp2f, logf, log2f,
+// powf, asinf.
 //
 // glibc's float routines (sysdeps/ieee754/flt-32, from ARM's optimized-routines) evaluate in double
 // over small tables, and the x86-64 libm runs its FMA build, so each `a * b + c` there rounds once.
@@ -657,4 +658,310 @@ pub fn sinf(x: f32) -> f32 {
 @no_block
 pub fn cosf(x: f32) -> f32 {
     return sincosf_eval(x, true);
+}
+
+// Single precision powf and asinf, bit for bit what glibc computes.
+//
+// powf is sysdeps/ieee754/flt-32/e_powf.c: log2_inline over __powf_log2_data, then exp2_inline
+// over __exp2f_data. x86-64 libm resolves powf through an ifunc and this host has FMA/AVX2, so
+// the FMA build is the one that runs: every `a * b + c` the C source writes as a single
+// expression is a fused multiply-add here. asinf is e_asinf.c, CORE-MATH's correctly rounded
+// arc-sine (Sibidanov), over its b[], C0 and C1 tables; it is correctly rounded in either build.
+// A C prototype of these steps matched the host libm on all 2^32 asinf inputs and on millions of
+// random (x, y) pairs for powf, special values included.
+//
+// Both tables are packed hex text, 16 digits a word: POWF_LOG2_DATA is __powf_log2_data's 16
+// (invc, logc) pairs and then its 5 poly coefficients; ASINF_DATA is asinf's b[16], then C0[12]
+// and C1[12].
+static POWF_LOG2_DATA: string = "3ff661ec79f8f3bebfdefec65b9630193ff571ed4aaf883dbfdb0b6832d4fca43ff49539f0f010b0bfd7418b0a1fb77b3ff3c995b0b80385bfd39de91a6dcf7b3ff30d190c8864a5bfd01d9bf3f2b6313ff25e227b0b8ea0bfc97c1d1b3b7af03ff1bb4a4a1a343fbfc2f9e393af3c9f3ff12358f08ae5babfb960cbbf788d5c3ff0953f419900a7bfaa6f9db6475fce3ff000000000000000000000000000003fee608cfd9a47ac3fb338ca9f24f53d3feca4b31f026aa03fc476a9543891ba3feb2036576afce63fce840b4ac4e4d23fe9c2d163a1aa2d3fd40645f0c6651c3fe886e6037841ed3fd88e9c2c1b9ff83fe767dcf55348623fdce0a44eb17bcc3fd27616c9496e0bbfd71969a075c67a3fdec70a6ca7baddbfe7154748bef6c83ff71547652ab82b";
+static ASINF_DATA: string = "3ff00000000000053fc55557aeca105d3fb3314ec3db7d123fa775738a5a6f923f75d5f7ce1c85383fd605c6d58740f0c005728b732d73c6402f152170f151ebc04f962ea3ca992e40671971e17375a0c07860512b4ba23040826a3b8d4bdb14c0836f2ea5698b51407b3d722aebfa2ec066cf89703b12894041518af6a65e2d3fc555555555529c3fb333333337e0dd3fa6db6db3b4465e3f9f1c72e13ac3063f96e89cebe06bc43f91c6dcf52890943f8c6dbbcc7c63153f88f8dc2615e9963f7a5833b7bf15e83f943f44ace1665cbf90fb17df881c733fa07520c026b2d63ff6a09e667f3bcb3fbe2b7dddff2db93f9b27247ab42dbc3f802995cc4e07443f65ffb0276ec8ea3f5033885a928dec3f3911f2be23f8c73f24c3c55d2437fd3f0af477e1d7b4613f0abd6bdff67dcbbef1717e86d0fa283ef6ff526de46023";
+
+fn powf_log2_data(i: u64) -> u64 {
+    // Indexed in place: passing the static to a helper would view it, which allocates.
+    at := 16 * i;
+    mut word = 0;
+    for j in 16 {
+        d := POWF_LOG2_DATA[at + j];
+        mut v = d - 48;
+        if d >= 97 {
+            v = d - 87;
+        }
+        word = (word << 4) | v;
+    }
+    return word;
+}
+fn asinf_data(i: u64) -> u64 {
+    // Indexed in place: passing the static to a helper would view it, which allocates.
+    at := 16 * i;
+    mut word = 0;
+    for j in 16 {
+        d := ASINF_DATA[at + j];
+        mut v = d - 48;
+        if d >= 97 {
+            v = d - 87;
+        }
+        word = (word << 4) | v;
+    }
+    return word;
+}
+// Two times a 32-bit word: powf's special cases classify x and y by 2*ix, as uint32 wraps.
+fn dbl32(v: u64) -> u64 {
+    return (2 * v) & 4294967295;
+}
+// True for a signaling NaN: a NaN whose quiet bit is clear.
+fn f32_signaling(x: f32) -> bool {
+    b := f32_bits(x);
+    return ((b & 2147483647) > 2139095040) && ((b & 4194304) == 0);
+}
+// checkint: 0 when y is not an integer, 1 when it is odd, 2 when it is even (a finite non-zero
+// float's bits).
+fn powf_checkint(iy: u64) -> u64 {
+    e := (iy >> 23) & 255;
+    if e < 127 {
+        return 0;
+    }
+    if e > 150 {
+        return 2;
+    }
+    if (iy & ((1 << (150 - e)) - 1)) != 0 {
+        return 0;
+    }
+    if (iy & (1 << (150 - e))) != 0 {
+        return 1;
+    }
+    return 2;
+}
+// True for +-0, +-inf and NaN.
+fn powf_zeroinfnan(ix: u64) -> bool {
+    return (wrapping_sub(dbl32(ix), 1) & 4294967295) >= 4278190079;
+}
+// log2_inline: x = 2^k z with z in [OFF, 2*OFF], then
+// log2(x) = log1p(z/c-1)/ln2 + log2(c) + k, the polynomial pipelined.
+fn powf_log2(ix: u64) -> f64 {
+    tmp := wrapping_sub(ix, 1060306944) & 4294967295;
+    i := (tmp >> 19) % 16;
+    top := tmp & 4286578688;
+    iz := wrapping_sub(ix, top) & 4294967295;
+    k := sext32(top) >> 23;
+    invc := f64_from_bits(powf_log2_data(2 * i));
+    logc := f64_from_bits(powf_log2_data(2 * i + 1));
+    z := f64(f32_from_bits(iz));
+    r := fma_rn(z, invc, -1.0);
+    y0 := logc + f64(k);
+    r2 := r * r;
+    mut y = fma_rn(f64_from_bits(powf_log2_data(32)), r, f64_from_bits(powf_log2_data(33)));
+    p := fma_rn(f64_from_bits(powf_log2_data(34)), r, f64_from_bits(powf_log2_data(35)));
+    r4 := r2 * r2;
+    mut q = fma_rn(f64_from_bits(powf_log2_data(36)), r, y0);
+    q = fma_rn(p, r2, q);
+    y = fma_rn(y, r4, q);
+    return y;
+}
+// exp2_inline, the unscaled (no-toint) path: 2^(k/32) from __exp2f_data.tab times a cubic in r.
+// sign_bias folds a negative sign into the result by adding 2^63 to the exponent word.
+fn powf_exp2(xd: f64, sign_bias: u64) -> f64 {
+    shift := f64_from_bits(4821103401100115968);
+    mut kd = xd + shift;
+    ki := bits(kd);
+    kd = kd - shift;
+    r := xd - kd;
+    s := f64_from_bits(wrapping_add(exp2f_tab(ki % 32), wrapping_add(ki, sign_bias) << 47));
+    z := fma_rn(f64_from_bits(4588159735035929492), r, f64_from_bits(4597823162434634995));
+    r2 := r * r;
+    mut y = fma_rn(f64_from_bits(4604418534314627798), r, 1.0);
+    y = fma_rn(z, r2, y);
+    return y * s;
+}
+
+@no_block
+pub fn powf(x: f32, y: f32) -> f32 {
+    mut sign_bias = u64(0);
+    mut ix = f32_bits(x);
+    iy := f32_bits(y);
+    if (wrapping_sub(ix, 8388608) >= 2130706432) || powf_zeroinfnan(iy) {
+        // Either x < 2^-126 (so 0, subnormal, inf or nan) or y is 0, inf or nan.
+        if powf_zeroinfnan(iy) {
+            if dbl32(iy) == 0 {
+                // y is zero: 1 for every x, except that a signaling x is quieted by x + y.
+                if f32_signaling(x) {
+                    return x + y;
+                }
+                return 1.0;
+            }
+            if ix == 1065353216 {
+                if f32_signaling(y) {
+                    return x + y;
+                }
+                return 1.0;
+            }
+            if (dbl32(ix) > 4278190080) || (dbl32(iy) > 4278190080) {
+                return x + y;
+            }
+            if dbl32(ix) == 2130706432 {
+                return 1.0;
+            }
+            if (dbl32(ix) < 2130706432) == ((iy & 2147483648) == 0) {
+                // |x| < 1 with y == inf, or |x| > 1 with y == -inf.
+                return 0.0;
+            }
+            return y * y;
+        }
+        if powf_zeroinfnan(ix) {
+            mut x2 = x * x;
+            if ((ix & 2147483648) != 0) && (powf_checkint(iy) == 1) {
+                x2 = -x2;
+                sign_bias = 1;
+            }
+            if (dbl32(ix) == 0) && ((iy & 2147483648) != 0) {
+                // pow(+-0, negative): a signed infinity from glibc's __math_divzerof.
+                if sign_bias != 0 {
+                    return f32_from_bits(4286578688);
+                }
+                return f32_from_bits(2139095040);
+            }
+            if (iy & 2147483648) != 0 {
+                return 1.0 / x2;
+            }
+            return x2;
+        }
+        // x and y are finite and non-zero.
+        if (ix & 2147483648) != 0 {
+            yi := powf_checkint(iy);
+            if yi == 0 {
+                // A negative x to a non-integer power: glibc's __math_invalidf.
+                return f32_from_bits(2143289344);
+            }
+            if yi == 1 {
+                sign_bias = 65536;
+            }
+            ix = ix & 2147483647;
+        }
+        if ix < 8388608 {
+            // Normalize a subnormal x so its exponent becomes negative.
+            ix = f32_bits(x * f32_from_bits(1258291200)) & 2147483647;
+            ix = wrapping_sub(ix, 192937984);
+        }
+    }
+    ylogx := f64(y) * powf_log2(ix);
+    // |y*log2(x)| >= 126: the result cannot be computed by exp2 without a range check.
+    if ((bits(ylogx) >> 47) & 65535) >= 32959 {
+        if ylogx <= -150.0 {
+            // glibc's __math_uflowf: a signed zero.
+            if sign_bias != 0 {
+                return f32_from_bits(2147483648);
+            }
+            return 0.0;
+        }
+        if ylogx < -149.0 {
+            // glibc's __math_may_uflowf: (0x1.4p-75)^2 is the smallest float, signed.
+            z := f32_from_bits(438304768) * f32_from_bits(438304768);
+            if sign_bias != 0 {
+                return -z;
+            }
+            return z;
+        }
+        if ylogx > f64_from_bits(4638707616188585329) {
+            // |x^y| > 0x1.fffffffd1d571p+6: glibc's __math_oflowf, a signed infinity.
+            if sign_bias != 0 {
+                return f32_from_bits(4286578688);
+            }
+            return f32_from_bits(2139095040);
+        }
+        if ylogx > f64_from_bits(4638707616185559778) {
+            // 0x1.fffffffa3aae2p+6 and above: glibc asks whether rounding 1.0f + 0x1p-25f would
+            // move it away from 1 (in round-to-nearest it does not), and saturates otherwise.
+            if sign_bias != 0 {
+                return f32_from_bits(4286578687);
+            }
+            return f32_from_bits(2139095039);
+        }
+    }
+    return f32(powf_exp2(ylogx, sign_bias));
+}
+
+// The coefficient `i` of asinf's table whose base word is `tab` (0 b[], 16 C0, 28 C1).
+fn asinf_coef(tab: u64, i: u64) -> f64 {
+    return f64_from_bits(asinf_data(tab + i));
+}
+// CORE-MATH's poly12 over C0 (the middle range) or C1 (near +-1).
+fn asinf_poly12(z: f64, tab: u64) -> f64 {
+    z2 := z * z;
+    z4 := z2 * z2;
+    mut c0 = asinf_coef(tab, 0) + z * asinf_coef(tab, 1);
+    c2 := asinf_coef(tab, 2) + z * asinf_coef(tab, 3);
+    mut c4 = asinf_coef(tab, 4) + z * asinf_coef(tab, 5);
+    c6 := asinf_coef(tab, 6) + z * asinf_coef(tab, 7);
+    mut c8 = asinf_coef(tab, 8) + z * asinf_coef(tab, 9);
+    c10 := asinf_coef(tab, 10) + z * asinf_coef(tab, 11);
+    c0 += c2 * z2;
+    c4 += c6 * z2;
+    c8 += z2 * c10;
+    c0 += z4 * (c4 + z4 * c8);
+    return c0;
+}
+
+@no_block
+pub fn asinf(x: f32) -> f32 {
+    ax := dbl32(f32_bits(x));
+    if ax > 2130706432 {
+        // |x| > 1: NaN (a NaN passes through as x + x).
+        if ax > 4278190080 {
+            return x + x;
+        }
+        return f32_from_bits(2143289344);
+    }
+    xs := f64(x);
+    if ax < 2124484608 {
+        if ax < 1929379840 {
+            // |x| < 115 << 24: fmaf(x, 0x1p-25, x). x * (1 + 2^-25) is exact in double (24
+            // significant bits plus 25 more, and no underflow), so rounding that product to f32
+            // once is the same fused rounding - two-step float arithmetic is not.
+            return f32(xs * 1.0000000298023223876953125);
+        }
+        // |x| below 0x1.cp-3: the 16-term b[] polynomial, taken only when both ends of a
+        // one-ulp-in-double bound round to the same float.
+        z := xs;
+        z2 := z * z;
+        z4 := z2 * z2;
+        z8 := z4 * z4;
+        z16 := z8 * z8;
+        p0 := (asinf_coef(0, 0) + z2 * asinf_coef(0, 1)) + z4 * (asinf_coef(0, 2) + z2 * asinf_coef(0, 3));
+        p1 := (asinf_coef(0, 4) + z2 * asinf_coef(0, 5)) + z4 * (asinf_coef(0, 6) + z2 * asinf_coef(0, 7));
+        p2 := (asinf_coef(0, 8) + z2 * asinf_coef(0, 9)) + z4 * (asinf_coef(0, 10) + z2 * asinf_coef(0, 11));
+        p3 := (asinf_coef(0, 12) + z2 * asinf_coef(0, 13)) + z4 * (asinf_coef(0, 14) + z2 * asinf_coef(0, 15));
+        r := z * ((p0 + z8 * p1) + z16 * (p2 + z8 * p3));
+        ub := f32(r);
+        lb := f32(r - z * f64_from_bits(4471786970770571264));
+        if ub == lb {
+            return ub;
+        }
+    }
+    if ax < 2113929216 {
+        // |x| below 0x7e<<24: asin(x) = x + x^3 P(x^2).
+        z := xs;
+        z2 := z * z;
+        return f32(z + (z * z2) * asinf_poly12(z2, 16));
+    }
+    if ax == 2119526538 {
+        // copysignf(0x1.75b8a2p-1, x) + copysignf(0x1p-26, x): the one input in this range whose
+        // correctly rounded result the C1 route below does not produce.
+        if xs < 0.0 {
+            return -f32_from_bits(1060822097) - f32_from_bits(847249408);
+        }
+        return f32_from_bits(1060822097) + f32_from_bits(847249408);
+    }
+    if ax == 2115007540 {
+        if xs < 0.0 {
+            return -f32_from_bits(1057990066) - f32_from_bits(847249408);
+        }
+        return f32_from_bits(1057990066) + f32_from_bits(847249408);
+    }
+    // Near +-1: asin(x) = pi/2 - sqrt(1-|x|) P(1-|x|), the sign restored afterwards.
+    z := 1.0 - xs.abs();
+    s := z.sqrt();
+    mut r = f64_from_bits(4609753056924675352) - s * asinf_poly12(z, 28);
+    if xs < 0.0 {
+        r = -r;
+    }
+    return f32(r);
 }

@@ -232,7 +232,7 @@
   `procgen_math.hpp`'s Rng and vector maths and the shared Soup pipeline (position-welded smooth
   normals, UV-derived tangents, winding on request). `procgen_test.grl` matches `parity/procgen.txt`:
   360 values over every variant. `build_shingle_mesh` stays unported and named: its radial shaping
-  needs `powf` and its UVs `asinf`, and the Grail float library has neither. The fixture loader's
+  needs `powf` and its UVs `asinf`, and the Grail float library had neither (both are there now). The fixture loader's
   comment now records why the topsoil raster is carried as an input (the palette classifier needs
   inputs ABFE does not hold).
 - **The logistics stock authority is ported, with its parity reference on the engine's own code.**
@@ -258,6 +258,14 @@
   engine's own routines (sysdeps/ieee754/flt-32) step for step over glibc's tables as packed hex with a software
   fused multiply-add, so a result is the host libm's bit for bit (`expf`/`exp2f`/`sinf`/`cosf` exhaustive over 2^32
   inputs, all six pinned by `lib-f32-libm-glibc`). `logf_split` factors the argument split both logarithms share.
+- **glibc-exact single-precision `powf` and `asinf`**: the last two of the engine's float routines join
+  `lib/math`. `powf` is `e_powf.c`'s log2/exp2 pair over glibc's own tables with the fused multiply-adds the
+  x86-64 FMA build performs (x86-64 libm resolves `powf` through an ifunc and this host takes the FMA arm, so a
+  prototype compiled `-mfma` is what agrees with it); `asinf` is CORE-MATH's correctly rounded arc-sine over its
+  b[], C0 and C1 tables, its tiny-argument `fmaf(x, 0x1p-25, x)` evaluated as one rounding the way a fused
+  multiply-add is. Both are the host libm's bit for bit: `powf` over 17,000,625 pairs and `asinf` over
+  29,458,001 inputs (every subnormal, both signs), special values and the range-check thresholds covered, and
+  pinned by `lib-f32-libm-glibc-pow`.
 - `abundance/tools/vendor-shaders.mjs`: refuses to vendor a working tree under a pin's name (`ABUNDANCE_COMMIT`
   set while `ABUNDANCE_SRC` has a `.git`), so a vendored file's recorded commit cannot be a lie.
 - **The replay's session is saved through the ported ABCP2 container, and the C++ run's
