@@ -6139,6 +6139,16 @@ fn frame_split<a>(instrs: (&a u8[][]), deepest: (&a mut u64)) -> u64 {
                     b -= 1;
                 }
                 d := parse_int(view(sub(line, b, i - 1)));
+                // A load of a stack-passed argument word, `movq 16+8k(%rbp),%reg` (native.grl
+                // stack_params): read as the parameter %a(6+k) in either mode (stack_param), it
+                // touches no slot. Such a function - seven or more argument words, intern_env's
+                // shape - was lowered as one frame object whose whole cleared range was memset at
+                // every entry; split, the slots' zeroing is what LLVM can see through.
+                if (d.ok != 0) && (d.v >= 16) && (d.v % 8 == 0) && starts(line, view("movq ")) && (b == 5)
+                    && (i + 5 < line.len()) && (line[i + 5] == 44) && (line[i + 6] == 37) {
+                    i += 4;
+                    continue;
+                }
                 if (d.ok == 0) || (d.v >= 0) {
                     return 0;
                 }
