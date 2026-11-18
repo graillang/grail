@@ -1,5 +1,17 @@
 ## Unreleased
 
+- **Faster float loops in development builds (native backend): `ecs` runs 3.69 G instructions instead of
+  7.31 G (Go: 3.02 G), `ecs_par` 4.96 G instead of 10.66 G (Go: 4.32 G).** The optimiser now (1) keeps
+  the data of vectors and slices that are stable across a loop in r8..r11/rdx when the loop makes no
+  call that returns and never names them, so every column of a structure-of-arrays loop has a register
+  where the five callee-saved ones ran out after three; a vector stable across several loops is hoisted
+  for each; (2) folds a slice element's address into the load or store that uses it
+  (`movss (%rB,%rI,4)` instead of `leaq` and copies through `%rax`/`%rcx`), reading the index from the
+  register it was copied from; (3) loads float constants once before an innermost call-free loop into
+  a free `%xmm8..15` (`DAMPING`, `DT` in `ecs_par`'s closures), with binary32-exact constants narrowed
+  as `f32_const_ops` does; and (4) re-runs the SSE copy folding after those, with whole-body SSE
+  liveness for the scratch registers a loop's last statement leaves. Cases
+  `opt-loop-registers-float-consts`, `opt-loop-registers-float-consts-asm`.
 - **Release builds: a function of more than six words in an `unsafe module` is optimised.** Such a
   body reads its seventh and later arguments from the caller's stack, which the LLVM lifter names
   through the body's signature fact - but an `unsafe module` recorded none, so the body and every

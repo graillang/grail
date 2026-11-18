@@ -1374,12 +1374,17 @@ pub fn reads<a>(o: (&a Body), i: u64) -> u64 {
         return 64 | src | dst;
     }
     if is_desc_op(op) {
-        // The index in rsi and the hoisted data and len registers the operands name; the byte store
-        // also its value in rdx.
-        if op == 89 {
-            return 68 | src | dst;
+        // The index (rsi, or the register optimize.grl `desc_regs` put in the low byte of m1, +1)
+        // and the hoisted data and len registers the operands name; the byte store also its value
+        // in rdx.
+        mut x = 64;
+        if (o.m1[i] & 255) != 0 {
+            x = bit((o.m1[i] & 255) - 1);
         }
-        return 64 | src | dst;
+        if op == 89 {
+            return 4 | x | src | dst;
+        }
+        return x | src | dst;
     }
     if is_float_op(op) {
         // movd, cvttsd2si, cvtsi2sdq, cvtsi2ssq: the destination is written, not read.
@@ -1421,6 +1426,10 @@ pub fn writes<a>(o: (&a Body), i: u64) -> u64 {
         return 1;
     }
     if is_desc_op(op) {
+        // The address in %rax, unless desc_regs folded it into the access after it (m1 bit 8).
+        if ((o.m1[i] >> 8) & 1) != 0 {
+            return 0;
+        }
         return 1;
     }
     if (op == 86) || (op == 87) {
