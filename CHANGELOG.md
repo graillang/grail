@@ -1,5 +1,21 @@
 ## Unreleased
 
+- **Jolt physics is bound to Grail, and a 373-value parity program gates it.** `abundance/src/jolt.grl`
+  calls Jolt 5.3.0 (the commit `engine/physics/jolt.cmake` pins) through a C shim
+  (`abundance/tools/jolt_shim.h/.cpp`) built the way the engine's physics builds it:
+  `DOUBLE_PRECISION`, `CROSS_PLATFORM_DETERMINISTIC`, the JPH defines that are part of Jolt's binary
+  interface, and one `libJolt.a` shared by the shim and the reference. It exposes the surface
+  `engine/physics/world.cpp` uses - the engine's world configuration, box/sphere/capsule/mesh bodies,
+  add/remove, the 1/30 s step, the character mirror of `World::step`, ray and capsule casts carrying
+  the core's refusals, and bounded contact events. The parity program
+  (`abundance/tests/jolt_test.grl` against `abundance/tests/parity/jolt.cpp`, which drives Jolt
+  directly with the engine's physics header) prints a deterministic box-stack scene as exact bit
+  patterns - transforms, sleep state, every step's contact counts, six queries and 120 character
+  ticks - and matches all 373 values. `abundance/tests/jolt_layout_probe.grl` checks every record's
+  layout in both directions and the world lifecycle; docs/jolt.md records the binding and two
+  findings: Jolt's `sRotation` capsule quaternion cannot be spelled as a decimal literal (one ulp
+  off, caught by the parity at tick 0), and `world.cpp` is the specification rather than a link
+  because its collision path's closure is the canonical voxel snapshot.
 - **The island's world features are ported: sites, cave entrances, strategic regions and transport
   corridors, with the seeded fields and portable math they are placed by.** `abundance/src/
   worldgen_pm.grl` ports ab::pm exactly (sin/cos over the header's Cody-Waite reduction - not
