@@ -19681,6 +19681,18 @@
     "note": "a module-level float constant folds + - * /, negation and other float constants (`const THIRD: f64 = 1.0 / 3.0;` was a parse error at the `/`); an f32 constant folds at f32 precision"
   },
   {
+    "name": "loop-after-partial-move-of-local",
+    "source": "struct Inner { values: u64[] }\nstruct Outer { inner: Inner, tag: u64 }\nfn make() -> Outer { return Outer{inner: Inner{values: u64[1, 2, 3]}, tag: 7}; }\nfn main() {\n    r := make();\n    f := r.inner;\n    mut total = u64(0);\n    for i in 3 {\n        total += f.values[i] + r.tag;\n    }\n    println(total);\n}\n",
+    "stdout": "27\n",
+    "note": "a struct partly moved before a loop (`f := r.inner;`) does not make the loop's backedge refuse it: only what the body consumes counts (it was \"loop backedge consumes entry storage: `r` is moved out of it\")"
+  },
+  {
+    "name": "loop-moves-remaining-field-rejected",
+    "source": "struct Inner { values: u64[] }\nstruct Outer { inner: Inner, other: Inner }\nfn make() -> Outer { return Outer{inner: Inner{values: u64[1]}, other: Inner{values: u64[2]}}; }\nfn eat(x: Inner) -> u64 { return x.values.len(); }\nfn main() {\n    r := make();\n    f := r.inner;\n    mut total = u64(0);\n    for i in 3 {\n        total += eat(r.other);\n    }\n    println(total + f.values.len());\n}\n",
+    "reject": true,
+    "diagnostic": "loop backedge consumes entry storage"
+  },
+  {
     "name": "closure-type-field-reference-param",
     "source": "struct T { x: u64 }\nstruct S { body: Fn<Owned>(&T) -> u64 }\nfn twice(t: &T) -> u64 { return t.x * 2; }\nfn main() {\n    s := S{body: twice};\n    t := T{x: 21};\n    println((s.body)(&t));\n    s2 := S{body: |t: &T| -> u64 { return t.x + 1; }};\n    println((s2.body)(&t));\n}\n",
     "stdout": "42\n22\n",

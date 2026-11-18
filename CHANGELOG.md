@@ -1,5 +1,10 @@
 ## Unreleased
 
+- Fixed: a struct partly moved before a loop (`f := r.inner;`) no longer makes the loop refuse with "loop
+  backedge consumes entry storage: `r` is moved out of it" when the body only reads it. The backedge check
+  now counts what the body consumes: a place that dies in the body, one that was whole at entry and is
+  not now, or a field of a partly-moved place that the body moves (still refused). Cases
+  `loop-after-partial-move-of-local`, `loop-moves-remaining-field-rejected`.
 - Fixed: a closure type written outside a parameter list (a struct field, a local's type) can take a
   reference parameter: `struct S { body: Fn<Owned>(&T) -> u64 }` was "elided output reference needs one
   input lifetime". Its elided lifetime is a fresh input of each call, as inside a function's parameter

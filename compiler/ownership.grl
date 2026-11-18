@@ -697,14 +697,42 @@ pub fn merge<a, b>(s: (&a mut State), saved: (&b State)) -> unit {
     exchange(&mut s.live_ok, 0);
     return ();
 }
+// Whether place `id` is `root` or lies inside it (follows the parent chain; parents precede children).
+fn place_within<a>(s: (&a State), id: u64, root: u64) -> bool {
+    mut k = id;
+    mut steps = 0;
+    while (k != 0) && (steps < 4096) {
+        if k == root {
+            return true;
+        }
+        k = s.places[k - 1].parent;
+        steps += 1;
+    }
+    return false;
+}
 // The entry place a repeating backedge consumed: the first one `backedge` refuses for, or 0. It is
 // what lets the diagnostic name the value the second iteration would use twice (native.grl).
 pub fn consumed_entry<a, b>(s: (&a State), entry: (&b State)) -> u64 {
     for i in entry.places.len() {
         mut p = &entry.places[i];
         if p.status == 1 {
-            if complete(&s, i + 1) != 0 {
+            // Consumed in the body: the place itself died, or it was whole at entry and is not
+            // now. A place already partly moved before the loop (`f := r.inner;`) is not; each of
+            // its fields is a place of its own, checked here, so a field moved in the body is.
+            if (s.places[i].status != 1) || ((complete(&s, i + 1) != 0) && (complete(&entry, i + 1) == 0)) {
                 return i + 1;
+            }
+            // Fields are tracked from their first move, so a field of a partly-moved place that
+            // the body moves (`eat(r.other)` after `f := r.inner;`) is a place made in the loop:
+            // dead now and inside this place, it was consumed here.
+            if complete(&entry, i + 1) != 0 {
+                mut j = entry.places.len();
+                while j < s.places.len() {
+                    if (s.places[j].status != 1) && place_within(&s, j + 1, i + 1) {
+                        return i + 1;
+                    }
+                    j += 1;
+                }
             }
         }
     }
