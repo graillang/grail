@@ -19,6 +19,14 @@
 - **Fixed: a yield on AArch64 and RV64 Linux did nothing.** The runtime's `sched_yield` had no
   entry in their system-call table, so the scheduler's own yields there returned "not
   implemented"; it is system call 124 on both.
+- **f32 locals in development builds stay in SSE registers, in binary32.** The native optimiser
+  kept no float local in a register in any function that multiplied two f32 values (that sequence
+  names %xmm8/%xmm9, and the allocator gave up on a function naming either), and a local set to
+  `0.0` (a `movq $0` store) never qualified. Now the registers a body names are skipped rather than
+  disqualifying it, a zero store becomes `xorps`, and `xmm_narrow` keeps such a local in binary32
+  when it is returned or added to a product: `s = s + x[i] * y[i]` is one `addss` on the register.
+  bench/dot_f32 (dev): 0.690 s to 0.330 s, 5.14 G to 4.14 G instructions; matmul 11.88 G to 10.54 G;
+  outputs unchanged.
 
 - **Default `extern "C"` calls on AArch64 and RV64 Linux lost their atomic instruction too.** The
   foreign-call marker counts out with a plain load, add and store (the `ldaxr`/`stlxr` loop and
