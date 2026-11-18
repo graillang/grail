@@ -1,5 +1,22 @@
 ## Unreleased
 
+- **Abundance port: the engine RHI, with the stage-7 exit gate passing.** Four new modules port
+  engine/core's device, memory, bindless and pipelines files: `rhi_engine_device` (instance with the
+  Khronos layer and synchronisation validation enabled from inside the program, the engine's
+  1.1/1.2/1.3 feature set, four queues each with a timeline semaphore, vkQueueSubmit2 receipts),
+  `rhi_engine_memory` (pools per memory class and type with VMA's block sizing, dedicated allocations
+  at 64 MiB, the named 18-category ledger, VK_EXT_memory_budget), `rhi_engine_bindless` (set 0 with the
+  engine's capacities 65536/16384/256/65536/64, set 1 frame constants, one pipeline layout with 128
+  bytes of push constants, the 13 samplers) and `rhi_engine_pipelines` (declare-then-build_all PSOs
+  through one cache persisted per device UUID, dynamic rendering, vertex pulling). The arithmetic is in
+  `rhi_engine_policy` and matches a C++ reference built from the engine's own headers on 58 values
+  (`abundance/tests/parity/rhi_engine.*`; the suite now compares 371). `rhi_engine_probe` creates the
+  device, a pool, one PSO and one draw, reads the image back and is clean under the validation layer
+  with synchronisation validation on. The vertex-pulling shader is compiled with the engine's DXC and
+  flags (`abundance/tools/build-pull-shader.mjs`); `abundance-test` finds Abundance's
+  pinned validation layer and skips every device probe while the human's game is running.
+
+
 - **msdfgen, the UI's font SDF generator, is bound to Grail and gated at 143 values.**
   `abundance/src/msdfgen.grl` calls msdfgen v1.12 - the release `engine/third_party/msdfgen` vendors
   byte for byte - through a C shim (`abundance/tools/msdfgen_shim.h/.cpp`) whose entry points are
