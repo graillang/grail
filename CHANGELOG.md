@@ -6,6 +6,14 @@
   (mix/unit salts, 256 irrational-angle gradients, rotated fBm); `worldgen_pm.grl` gains ab::pm's
   `atan`/`atan2`. 3170 values matched against the worldgen library over eight plans.
 
+- **A value hiding a borrow can no longer be moved into a parameter that may keep it.** A record
+  whose closure field captured a reference, or holds a call-scoped `Fn(..)` parameter, was refused
+  when stored but not when passed by value to another function (`keep(v, Spec { body: f })`) or as
+  `Mutex::lock_with`'s context: the callee stored it, and the closure's environment - in the frame
+  of the call it was lent for, even for a closure that captures nothing - dangled (segfault or
+  stack overflow at the stored call). The caller now refuses it, as a `dyn` box already did; the
+  spelling that keeps such a closure is `Fn<Owned, ..>`. Pinned by `closure-hidden-loan-*` and two
+  running cases, `closure-owned-through-lock-with-runs` among them.
 - **`lib/clipper2.grl` gains the offset engine (`ClipperOffset`, `InflatePaths`), and `lib/math.grl`
   gains `acos`.** The water-geometry callers buffer river centrelines with
   `InflatePaths(..., JoinType::Round, EndType::Round, 2.0, 3, arcTol)`; the port carries all of

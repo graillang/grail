@@ -19681,5 +19681,50 @@
     "source": "const X: f64 = 5.0 % 2.0;fn main(){}",
     "reject": true,
     "diagnostic": "this compile-time operator does not apply to floats"
+  },
+  {
+    "name": "closure-hidden-loan-record-into-lock-with-refused",
+    "source": "use sync;\nstruct Spec { body: Fn<Share>(u64) -> u64 }\nstruct Box { jobs: Spec[] }\nfn keep(b: (&mut Box), s: Spec) -> u64 { b.jobs.push(s); return 0; }\nfn run0(b: (&mut Box), x: u64) -> u64 { return (b.jobs[0].body)(x); }\nfn add(m: (&Mutex<Box>), f: Fn<Share>(u64) -> u64) { r := m.lock_with(Spec{body: f}, keep); }\nfn submit(m: (&Mutex<Box>), p: (&u64)) {\n    add(m, |x: u64| -> u64 { return x + *p; });\n}\nfn main() {\n    k := 5;\n    m := Mutex::new(Box{jobs: Spec[]});\n    println(11);\n    submit(&m, &k);\n    println(22);\n    println(m.lock_with(1, run0));\n    println(99);\n}\n",
+    "modules": [
+      "lib/sync.grl"
+    ],
+    "reject": true,
+    "diagnostic": "this value holds a borrow its type cannot show",
+    "note": "a call-scoped `Fn<Share>` parameter wrapped in a record and moved into `lock_with`'s context: the callback keeps it in the guarded payload, which outlives the call whose frame holds the closure's environment. It used to compile and segfault at the stored call (env[1] == 0)"
+  },
+  {
+    "name": "closure-hidden-loan-noncapturing-into-lock-with-refused",
+    "source": "use sync;\nstruct Spec { body: Fn<Share>(u64) -> u64 }\nstruct Box { jobs: Spec[] }\nfn keep(b: (&mut Box), s: Spec) -> u64 { b.jobs.push(s); return 0; }\nfn run0(b: (&mut Box), x: u64) -> u64 { return (b.jobs[0].body)(x); }\nfn add(m: (&Mutex<Box>), f: Fn<Share>(u64) -> u64) { r := m.lock_with(Spec{body: f}, keep); }\nfn submit(m: (&Mutex<Box>), p: (&u64)) {\n    add(m, |x: u64| -> u64 { return x + 1; });\n}\nfn main() {\n    k := 5;\n    m := Mutex::new(Box{jobs: Spec[]});\n    println(11);\n    submit(&m, &k);\n    println(22);\n    println(m.lock_with(1, run0));\n    println(99);\n}\n",
+    "modules": [
+      "lib/sync.grl"
+    ],
+    "reject": true,
+    "diagnostic": "this value holds a borrow its type cannot show",
+    "note": "the same shape with a closure that captures nothing is refused too: a literal passed to a call-scoped parameter gets a frame environment (call-abi.md S6 B), so storing it dangles whatever it captures (it used to abort with a stack overflow at the stored call)"
+  },
+  {
+    "name": "closure-hidden-loan-record-into-owned-param-refused",
+    "source": "struct Spec { body: Fn<Share>(u64) -> u64 }\nfn keep(b: (&mut Spec[]), s: Spec) -> u64 { b.push(s); return 0; }\nfn add(v: (&mut Spec[]), f: Fn<Share>(u64) -> u64) { r := keep(v, Spec{body: f}); }\nfn submit(v: (&mut Spec[]), p: (&u64)) {\n    add(v, |x: u64| -> u64 { return x + *p; });\n}\nfn main() {\n    k := 5;\n    mut v = Spec[];\n    submit(&mut v, &k);\n    println((v[0].body)(1));\n}\n",
+    "reject": true,
+    "diagnostic": "this value holds a borrow its type cannot show",
+    "note": "a record whose closure field captured a borrowed parameter, moved into a callee's owned parameter that pushes it into a vector: the callee cannot see the loan, so the caller refuses, as `dyn_box` refuses erasing one"
+  },
+  {
+    "name": "closure-owned-through-lock-with-runs",
+    "source": "use sync;\nstruct Spec { body: Fn<Owned, Share>(u64) -> u64 }\nstruct Box { jobs: Spec[] }\nfn keep(b: (&mut Box), s: Spec) -> u64 { b.jobs.push(s); return 0; }\nfn run(b: (&mut Box), i: u64) -> u64 { return (b.jobs[i].body)(10); }\nfn add(m: (&Mutex<Box>), f: Fn<Owned, Share>(u64) -> u64) { r := m.lock_with(Spec{body: f}, keep); }\nfn submit(m: (&Mutex<Box>), p: (&u64)) {\n    add(m, |x: u64| -> u64 { return x + 1; });\n    q := *p;\n    add(m, |x: u64| -> u64 { return x + q; });\n}\nfn main() {\n    k := 5;\n    m := Mutex::new(Box{jobs: Spec[]});\n    submit(&m, &k);\n    println(m.lock_with(0, run));\n    println(m.lock_with(1, run));\n}\n",
+    "modules": [
+      "lib/sync.grl"
+    ],
+    "stdout": "11\n15\n",
+    "note": "the spelling that keeps a closure passed through an intermediate function: `Fn<Owned, Share>` on the parameter and the field. A non-capturing literal and one capturing a local copy are stored through `lock_with` and called later"
+  },
+  {
+    "name": "closure-record-built-at-literal-through-lock-with-runs",
+    "source": "use sync;\nstruct Spec { body: Fn<Share>(u64) -> u64 }\nstruct Box { jobs: Spec[] }\nfn keep(b: (&mut Box), s: Spec) -> u64 { b.jobs.push(s); return 0; }\nfn run0(b: (&mut Box), x: u64) -> u64 { return (b.jobs[0].body)(x); }\nfn submit(m: (&Mutex<Box>), p: (&u64)) {\n    q := *p;\n    r := m.lock_with(Spec{body: |x: u64| -> u64 { return x + q; }}, keep);\n}\nfn main() {\n    k := 5;\n    m := Mutex::new(Box{jobs: Spec[]});\n    submit(&m, &k);\n    println(m.lock_with(1, run0));\n}\n",
+    "modules": [
+      "lib/sync.grl"
+    ],
+    "stdout": "6\n",
+    "note": "a record built where its closure is written, capturing a local copy, moved into `lock_with` and called after the submitting function returned"
   }
 ]
