@@ -20,6 +20,13 @@
   shapes, all four clip types under all four fill rules, paths and PolyTrees, and the double
   wrapper's precision and range refusals, every vertex compared exactly (doubles as 64-bit
   patterns).
+- **ab-worldgen's command line is ported: every refusal, the usage text and the exit codes are
+  byte-identical to the reference binary.** `abundance/src/worldgen_cli.grl` carries the defaults,
+  the option set with its validation and messages, and the `--no-export`/`--publish-shared` rules;
+  the suite compiles Abundance's own `src/main.cpp` and diffs 22 command lines (message, usage text,
+  exit status) — all refusing before generation, so the gate is hermetic. Generation, cache loading
+  and the reports are the world generator and world model (stage 6) and are recorded as the
+  boundary, not faked.
 - **The logistics route model is ported.** `abundance/src/logistics_network.grl` carries
   `logistics_network.hpp/.cpp` of `cmake/tx/logistics.cmake`: the rover and cargo-drone specs,
   the dispatcher (what busy carriers took and bring counts against both sides; an idle carrier
