@@ -1,5 +1,22 @@
 ## Unreleased
 
+- **Inventory: the stock authority, the slot authority and the never-blocks overflow rule are
+  ported.** `abundance/src/logistics_registry.grl` carries the catalog (sorted, five refusals, its
+  FNV content hash, `extends`), the container/lot/crop-genome records with their acceptance rules
+  (capacity and handling bounds, form masks, dedicated resources, the `player_work_ids` reserved
+  band, the 48-byte UTF-8 name rule), gross usage in the engine's canonical order with its
+  1e-9 kg / 1e-12 m3 margins, and every instant stock edit, each on a candidate so a refusal
+  leaves the registry byte-identical. `abundance/src/inventory_hotbar.grl` adds the slot
+  authority over it: rules and the FRIH1 hash, the intent/slot guards, bind at an exact lot
+  revision, quick swap, selection, batched reference refresh, death and the next life, and the
+  lot/container revision hashes. `abundance/src/inventory_overflow.grl` is the gameplay rule the
+  economy depends on: `deliver_or_drop`/`grant_or_drop` put what fits into the pack (bulk splits
+  in whole tenths of a kilogram at the 0.1 kg minimum; packaged items move whole or not at all)
+  and drop the rest as one visible pile (custodian 10 770, 100 t, 1 000 m3), so a full inventory
+  never refuses a delivery and nothing vanishes. References: 123 lines against the engine's own
+  `logistics.cpp` (compiled from source), 81 against `inventory_hotbar.cpp`, and 36 driving the
+  engine's real `deliver_or_drop` through a tx World with its own overflow fixture.
+
 - **Abundance: the palette classifier is gated cell-for-cell on a generated world.** The palette
   test generates the feature pass's own world (seed 1, 64 cells of 250 m, exactly as
   `tests/parity/features.cpp` does), dumps every input the classifier reads
