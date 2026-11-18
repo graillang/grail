@@ -1,5 +1,14 @@
 ## Unreleased
 
+- Faster: `chan` hand-offs between threads. A sender or receiver spinning on a full or empty ring
+  now watches only the stamp of the slot it wants, looking after every CPU wait hint, instead of
+  re-reading the other side's counter behind a fence between ever longer runs of hints: it sees the
+  hand-off as soon as it lands and no longer pulls the counter line away from the side about to
+  compare-exchange it. A side waiting for a peer that claimed a slot and has not finished with it
+  yields after the spin phase instead of spinning on (a preempted peer cost it a time slice). On
+  bench/chan.grl (release, CPU time, interleaved, loaded host) the ping case went from 0.045 to
+  0.011-0.017 s median (Go 0.022-0.029 s) and the whole program from 0.16-0.28 s to 0.086-0.144 s
+  median, 0.10-0.20 s to 0.055-0.088 s best (Go 0.083-0.098 s median).
 - Fixed: a closure type written outside a parameter list (a struct field, a local's type) can take a
   reference parameter: `struct S { body: Fn<Owned>(&T) -> u64 }` was "elided output reference needs one
   input lifetime". Its elided lifetime is a fresh input of each call, as inside a function's parameter
