@@ -1,5 +1,16 @@
 ## Unreleased
 
+- **World loot's per-fill rules are ported.** `abundance/src/world_loot_rules.grl` carries
+  `world_loot_sealed_mask` (each compartment sealed when mix64(site ^ cycle<<32 ^ 0x5EA1<<8 ^
+  compartment) as a double in [0,1) falls below the kind's seal chance), `world_loot_work_seconds`
+  (opening by hand, or the pry seconds with the power tool's 0.6 multiplier), and
+  `world_loot_respawn_seconds` plus the `world_loot_fluid` set, over the ported world_loot type
+  table. `abundance/tests/world_loot_rules_test.grl` prints 482 lines that match a reference
+  compiling the engine's own `world_loot_tables.cpp`: the sealed masks for every kind over four
+  sites and three cycles, every compartment's three opening times, every respawn period and the
+  fluid verdicts. The weighted roll tables (`roll_world_loot`) and the placement pass are the next
+  increment.
+
 - **The construction catalogue is computed and ported, with the shape monument placement
   reads.** `abundance/src/construction_catalog.grl` carries the ConstructionModule record (id,
   kind, dimensions, sorted occupied cells), the material tiers and build modules, and the
