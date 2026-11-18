@@ -1,5 +1,18 @@
 ## Unreleased
 
+- Abundance port: `abundance/src/tx_tables.grl` starts the per-table payloads inside the 'ABTW'
+  checkpoint envelope with the survival record tables - `survival.life` (u64 character id, u64
+  respawn container), `survival.join` (string digest, u64 account, u64 character) and
+  `survival.wetness` (u64 character id, u32 life sequence, two f64s) - each a `RecordTable<T>`
+  payload: a u32 record count, then the records' fields in AB_TX_FIELDS order. Decoding is the field
+  codec's: an object count at most 2^22 and at most one per remaining byte, a string a u32 length at
+  most 65536 and at most what remains, exact consumption, and no key-order check (only put() sorts).
+  The reference builds the three tables through their own put(), saves them with the engine's
+  World::encode_tables, prints every record field with floats as bits, and replays twelve mutated
+  payloads through the engine's decode_tables, whose "payload does not load (table N name)" wording
+  the port reproduces verbatim; `abundance/tests/tx_tables_test.grl` matches all 26 lines and
+  re-encodes each blob byte for byte.
+
 - **World loot's per-fill rules are ported.** `abundance/src/world_loot_rules.grl` carries
   `world_loot_sealed_mask` (each compartment sealed when mix64(site ^ cycle<<32 ^ 0x5EA1<<8 ^
   compartment) as a double in [0,1) falls below the kind's seal chance), `world_loot_work_seconds`
