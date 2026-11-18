@@ -1,5 +1,17 @@
 ## Unreleased
 
+- **LLVM backend: no more reads through dead vector headers** (fixes the `--verify-facts` aborts
+  in pkg-toml-document, pkg-requirement, pkg-resolve-conflict, pkg-manifest-overflow,
+  json-suite-floats-errors-and-round-trips, lib-jpeg, lib-zstd and stdmap-dns-*). After every call
+  the lifter re-read `data`/`len` of each header slot the call had made stale. It did this on every
+  path to that point, including paths where the binding was never written (a zeroed slot), and
+  after calls that had consumed the header (a move). The type facts were right. The re-read was
+  a load through null on those paths: undefined behaviour in the release build (dead there, so no
+  observed miscompile), and an abort of the `cap >= len` tripwire under `--verify-facts`. Stale
+  fields are now re-established only by the next write to the slot. Release-build instruction
+  counts are unchanged on every benchmark (within 0.01%). Also under `--range-facts` and
+  `--verify-facts`, an index past the end through an accessor call the lifter keeps now names its
+  statement (` --> file:line:col`) as the other builds do (runtime-error-index-after-proved-divide).
 - **Faster `sort`, `xform_f64` and `nbody` in development builds (native backend): `sort` runs 11.21 G
   instructions instead of 18.00 G, `xform_f64` 2.88 G instead of 3.48 G, `nbody` 4.13 G instead of
   4.25 G.** (1) `a && b` and `a || b` write their result only as a constant on each edge into the

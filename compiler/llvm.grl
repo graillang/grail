@@ -420,10 +420,13 @@ struct L {
     hslots: u64[],
     hwhat: u64[],
     hwidth: u64[],
-    // The established `data`/`len` of each accepted header slot: `eon[k]` is 0 when the header has
-    // been rewritten since it was read (any call that receives it and is not a read-only accessor),
-    // else the two SSA words loaded where the fact was established -- the hoist
-    // docs/design/typed-ir.md asks for, executed once on the path that establishes it.
+    // The established `data`/`len` of each accepted header slot: `eon[k]` is 1 while the two SSA
+    // words loaded where the fact was established are current -- the hoist docs/design/typed-ir.md
+    // asks for, executed once on the path that establishes it -- 2 once a call that receives the
+    // header (and is not a read-only accessor) may have rewritten it, and 0 before the slot is
+    // first written. Stale fields are not re-read after the call: the call may have consumed the
+    // header (a move), and on another path to the same text the slot may never have been written,
+    // so only the next write to the slot establishes them again.
     eon: u64[],
     edata: u8[][],
     elen: u8[][],
@@ -2502,9 +2505,9 @@ fn establish(l: (&mut L), k: u64, w: (&[u8])) -> unit {
     return ();
 }
 // The header of slot k may have been rewritten: `data` dies on any growth and on any untyped
-// write to the slot, `len` on every push/pop/remove/insert/truncate/fill/clear. The slot still
-// holds a live header, so its fields are re-read where the next site needs them; the values
-// already emitted stay correct for every use before this point.
+// write to the slot, `len` on every push/pop/remove/insert/truncate/fill/clear. The values already
+// emitted stay correct for every use before this point; later uses keep the word lowering until a
+// write to the slot establishes the fields again.
 fn stale(l: (&mut L), k: u64) -> unit {
     while l.eon.len() <= k {
         l.eon.push(0);
@@ -2523,30 +2526,8 @@ fn stale(l: (&mut L), k: u64) -> unit {
     }
     return ();
 }
-// The slot no longer holds a header it was known to hold (a constant or untyped word was written
-// to it), so there is nothing to re-read.
-fn unestablish(l: (&mut L), k: u64) -> unit {
-    while l.eon.len() <= k {
-        l.eon.push(0);
-        l.edata.push(u8[]);
-        l.elen.push(u8[]);
-        l.edptr.push(u8[]);
-    }
-    l.eon[k] = 0;
-    return ();
-}
-// Re-reads `data`/`len` of a slot whose header may have moved (a growth, or an address that
-// escaped), so the next region reads the two fields once instead of on every access.
-fn reestablish(l: (&mut L), k: u64) -> unit {
-    if !established(&l, k) {
-        return ();
-    }
-    w := def(&mut l, view("load i64, ptr {}, align 8"), &u8[][slot_name(k)]);
-    establish(&mut l, k, view(w));
-    return ();
-}
-// 1 when slot k's `data`/`len` are established and current, 2 when it holds a live header whose
-// fields have to be re-read, 0 when it does not hold a header at all.
+// 1 when slot k's `data`/`len` are established and current, 2 when a call may have changed them,
+// 0 when they were never read.
 fn established(l: (&L), k: u64) -> u64 {
     if k >= l.eon.len() {
         return 0;
@@ -2631,7 +2612,7 @@ fn header_readonly(name: (&[u8])) -> bool {
 }
 // The header slots a call reaches through its argument words. A call that is not one of the
 // read-only accessors may grow, fill, truncate, pop, insert or clear the sequence it is given, so
-// the fields hoisted for that slot are stale from here; they are re-read once the call returns.
+// the fields hoisted for that slot are stale from here.
 // The runtime calls that cannot change any vector header: the read-only accessors, the float and
 // integer helpers (pure functions of their words), and the failures that never return.
 fn header_neutral(name: (&[u8])) -> bool {
@@ -2694,15 +2675,6 @@ fn clear_args(l: (&mut L)) -> unit {
     for i in 6 {
         r := reg_index(view(arg_reg(i)));
         set_chain(&mut l, r + 1, 0, 0, 0);
-    }
-    return ();
-}
-// Re-reads every field set a call made stale, so the region after it keeps the hoist.
-fn refresh(l: (&mut L)) -> unit {
-    for k in l.eon.len() {
-        if l.eon[k] == 2 {
-            reestablish(&mut l, k);
-        }
     }
     return ();
 }
@@ -3090,8 +3062,34 @@ fn generic_element(l: (&mut L), target: (&[u8])) -> bool {
         checked = true;
         value = 32;
     }
-    // Under --verify-facts and --range-facts the accessor calls are what those modes check and count.
-    if (width == 0) || (l.verify != 0) || (l.proof.len() != 0) {
+    if width == 0 {
+        return false;
+    }
+    // Under --verify-facts and --range-facts the accessor calls are what those modes check and count,
+    // so the call stays. Its own bounds failure cannot name the statement - lifted code has no
+    // site-table entries for the runtime's return-address walk - so a checked one is preceded by
+    // the same compare with a sited failure, and an index past the end reports where it is.
+    if (l.verify != 0) || (l.proof.len() != 0) {
+        if checked {
+            s := get_reg(&mut l, view("rdi"));
+            i := get_reg(&mut l, view("rsi"));
+            h := def(&mut l, view("inttoptr i64 {} to ptr"), &u8[][s]);
+            len := header_load(&mut l, view(h), 8);
+            ok := def(&mut l, view("icmp ult i64 {}, {}"), &u8[][copy(view(i)), copy(view(len))]);
+            good := fresh_block(&mut l);
+            wrong := fresh_block(&mut l);
+            emit(&mut l, view("br i1 {}, label %{}, label %{}"), &u8[][ok, copy(view(good)), copy(view(wrong))]);
+            begin_block(&mut l, view(wrong));
+            l.calls.push(copy(view("rt_fail")));
+            site_hint(&mut l);
+            emit(
+                &mut l,
+                view("call {i64, i64} @\"rt_fail\"(i64 1, i64 {}, i64 {}, i64 0, i64 0, i64 0)"),
+                &u8[][i, len]
+            );
+            emit(&mut l, view("unreachable"), &u8[][]);
+            begin_block(&mut l, view(good));
+        }
         return false;
     }
     s := get_reg(&mut l, view("rdi"));
@@ -3463,7 +3461,7 @@ fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> uni
     // F1 call fact carries, counted in emission order on both sides of the table.
     ord := callee_ordinal(&mut l, view(target));
     // A call that may grow, fill or truncate the sequence it is given makes the `data`/`len`
-    // hoisted for that slot stale; the fields are re-read once it returns.
+    // hoisted for that slot stale; they are read again where the slot is next written.
     invalidate_args(&mut l, view(target));
     l.calls.push(copy(target));
     // A range fact proves the index this accessor is handed is below the sequence's length, so the
@@ -3526,7 +3524,6 @@ fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> uni
             set_chain(&mut l, reg_index(view("rax")) + 1, 0, 0, 0);
             set_chain(&mut l, reg_index(view("rdx")) + 1, 0, 0, 0);
             clear_args(&mut l);
-            refresh(&mut l);
             return ();
         }
     }
@@ -3586,7 +3583,6 @@ fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> uni
         set_chain(&mut l, reg_index(view("rax")) + 1, 0, 0, 0);
         set_chain(&mut l, reg_index(view("rdx")) + 1, 0, 0, 0);
         clear_args(&mut l);
-        refresh(&mut l);
         l.rdxdead = 1;
         exchange(&mut l.rdxcallee, copy(target));
         return ();
@@ -3598,7 +3594,6 @@ fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> uni
     set_chain(&mut l, reg_index(view("rax")) + 1, 0, 0, 0);
     set_chain(&mut l, reg_index(view("rdx")) + 1, 0, 0, 0);
     clear_args(&mut l);
-    refresh(&mut l);
     return ();
 }
 
@@ -3655,7 +3650,6 @@ fn lower_indirect_call<a, b, d>(l: (&a mut L), reg: &b [u8], facts: (&d Facts), 
     set_chain(&mut l, reg_index(view("rax")) + 1, 0, 0, 0);
     set_chain(&mut l, reg_index(view("rdx")) + 1, 0, 0, 0);
     clear_args(&mut l);
-    refresh(&mut l);
     return ();
 }
 // The body of a bounds-checked accessor with the check removed. A range fact proves the index the
@@ -3701,7 +3695,6 @@ fn unchecked_access(l: (&mut L), which: u64) -> unit {
     set_chain(&mut l, reg_index(view("rax")) + 1, 0, 0, 0);
     set_chain(&mut l, reg_index(view("rdx")) + 1, 0, 0, 0);
     clear_args(&mut l);
-    refresh(&mut l);
     return ();
 }
 fn wide<a, b>(l: (&a mut L), v: &b [u8]) -> u8[] {
@@ -5568,7 +5561,6 @@ fn lower_ffi_call<a, b>(l: (&a mut L), target: &b [u8], code: u64, mem: u64) -> 
     l.xstale = 0;
     set_chain(&mut l, reg_index(view("rax")) + 1, 0, 0, 0);
     clear_args(&mut l);
-    refresh(&mut l);
     return ();
 }
 // `{i64, i64}` for a two-word result, `i64` for one.
