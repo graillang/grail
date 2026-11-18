@@ -1,5 +1,10 @@
 ## Unreleased
 
+- **The performance charts are measured again** on main bd532104 (kernels, engine programs, parallel
+  ECS; compile on 66e3b3b6 with PGO). `tools/bench-rivals.mjs` now takes the best of 7 runs by default
+  (it was 3) and `just bench-results` the best of 9 for the parallel chart (it was 5), so the next
+  refresh on a shared machine is less at the mercy of one quiet round.
+
 - **f32 element loads and stores and f32 constants in development builds take no detours.** An f32
   element now loads and stores with one `movss` (it went through `%eax`), and an f32 constant hoisted
   into an SSE register is rounded to binary32 once, so `v * damping - gravity * dt` is `mulss` and
