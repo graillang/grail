@@ -14,6 +14,12 @@
   on the struct and counts a shared receiver as a read; `&mut self`, by-value `self` and names the
   struct does not define stay writes. Cases `closure-shared-method-on-capture-is-fn`,
   `closure-mut-method-on-capture-is-fnmut`.
+- **The parity references can be built against a pinned Abundance tree**: `tools/abundance-test.mjs`
+  takes `ABUNDANCE_BUILD` for the native libraries and generated headers (`build/...` includes), so a
+  tree exported from a pinned commit (with no `build-engine` beside it) gates every reference
+  instead of whatever the checkout last built; `abundance/tools/vendor-shaders.mjs` resolves an
+  include beside the including file first, as DXC does (the split far-pixel kernels need it), and
+  records `ABUNDANCE_COMMIT` when the tree is an export with no `.git`.
 - Fixed: module-level integer constants fold `<<` and `>>` (`pub const A: u32 = 1 << 3;` was "expected a
   compile-time constant expression"). The lexer emits a shift as two touching `<`/`>` tokens, which body
   expressions already joined; the compile-time folder now joins them the same way. Cases
