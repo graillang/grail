@@ -1452,9 +1452,7 @@ fn o<a, b>(c: (&a mut C), s: &b [u8]) -> unit {
     if c.quiet != 0 {
         return ();
     }
-    for i in s.len() {
-        c.out.push(s[i]);
-    }
+    c.out.append(s);
     return ();
 }
 fn on<a>(c: (&a mut C), n: u64) -> unit {
@@ -1676,7 +1674,7 @@ fn write_parts<a, b, d>(c: (&a mut C), path: &b [u8], text: &d [u8]) -> u64 {
             mut wrote = 0;
             // A part's frames are its own functions', so it is probed on its own (see write_image).
             mut piece = text[start: end].copy();
-            if c.backend == 0 {
+            if (c.backend == 0) && optimize::has_f32_const_ops(view(piece)) {
                 piece = optimize::f32_const_ops(view(piece));
             }
             if (c.probes != 0) & (c.backend == 0) {
@@ -43568,9 +43566,7 @@ fn whole_slice<a>(c: (&a mut C), x: Val, write: bool) -> Val {
 }
 fn copy_bytes<a>(x: &a [u8]) -> u8[] {
     mut o = u8[];
-    for i in x.len() {
-        o.push(x[i]);
-    }
+    o.append(x);
     return o;
 }
 // The field type inside the body. A capture the body does not write is read-only there, even when
@@ -62517,7 +62513,7 @@ pub fn main() -> u64 {
     // probes go into each part as it is written (write_parts) rather than here, where the lines they
     // add would move every later part's start.
     // An f32 operation with an f32 constant is the binary32 operation (optimize::f32_const_ops).
-    if (c.backend == 0) & (c.split == 0) {
+    if (c.backend == 0) & (c.split == 0) && optimize::has_f32_const_ops(view(out)) {
         out = optimize::f32_const_ops(view(out));
     }
     if (c.probes != 0) & (c.backend == 0) & (c.split == 0) {
