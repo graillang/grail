@@ -6169,11 +6169,7 @@ fn rt_worker_run(s: u64, w: u64, t: u64) -> u64 {
         // Now off the task's stack: release it, then publish completion (the joiner may free t).
         rt_os_ctx_release(t);
         raw_atomic_store(t + 96, 1);
-        rt_syscall_low(202, t + 96, 129, 2147483647);
-        joiner := raw_atomic_swap(t + 88, 1);
-        if 1 < joiner {
-            rt_wake(joiner);
-        }
+        rt_task_published(t);
         if runner {
             if raw_load(w + 224) == t {
                 raw_store(w + 224, 0); // this worker's own runner, ended by a contained failure
@@ -6217,11 +6213,7 @@ fn rt_worker_run_detached(t: u64) -> u64 {
         runner := raw_load(t + 104) == 3;
         rt_os_ctx_release(t);
         raw_atomic_store(t + 96, 1);
-        rt_syscall_low(202, t + 96, 129, 2147483647);
-        joiner := raw_atomic_swap(t + 88, 1);
-        if 1 < joiner {
-            rt_wake(joiner);
-        }
+        rt_task_published(t);
         if runner {
             rt_runner_free(t);
         }
@@ -7651,6 +7643,19 @@ fn rt_task_spawn(s: u64, f: u64, item: u64, arity: u64, dropper: u64) -> u64 {
     rt_enqueue(t);
     return t;
 }
+// A finished task's joiner (word 88): 0 nobody yet, a task record when a task joins it (rt_wake),
+// 2 when a thread that runs no task waits on word 96 with the futex - only then is the system call
+// paid. It was made for every task, waited on or not: a burst of 100k spawns made 100k futex wakes
+// that nobody slept in. 1 marks the word taken: whoever comes after the publish finds the task done.
+fn rt_task_published(t: u64) -> u64 {
+    joiner := raw_atomic_swap(t + 88, 1);
+    if joiner == 2 {
+        rt_syscall_low(202, t + 96, 129, 2147483647);
+    } else if 1 < joiner {
+        rt_wake(joiner);
+    }
+    return 0;
+}
 fn rt_task_wait(t: u64) -> u64 {
     if raw_atomic_load(t + 96) {
         return 0;
@@ -7674,8 +7679,20 @@ fn rt_task_wait(t: u64) -> u64 {
         }
         return 0;
     }
+    // A thread that runs no task: register as the futex waiter (rt_task_published), then sleep on
+    // word 96. The publisher swaps word 88 after it stores 96, so either it sees the 2 and wakes, or
+    // this compare-and-swap sees its 1 and the task is done.
+    seen := raw_atomic_cas(t + 88, 0, 2);
+    if (seen == 0) || (seen == 2) {
+        while raw_atomic_load(t + 96) == 0 {
+            rt_syscall_low(202, t + 96, 128, 0);
+        }
+        return 0;
+    }
+    // A task joins it too (one handle, so only a scope's exit can meet a join here): that joiner gets
+    // the wake, and this thread looks without sleeping.
     while raw_atomic_load(t + 96) == 0 {
-        rt_syscall_low(202, t + 96, 128, 0);
+        rt_syscall_low(24, 0, 0, 0);
     }
     return 0;
 }
