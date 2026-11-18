@@ -43,6 +43,14 @@
   release instructions; the scheduler): Grail's ratio to the fastest rival, the geometric mean of the
   category's rows, with its best and worst rows marked. A table under it names them. It reads the
   same committed results as the other charts (`{{perf:summary}}`).
+- **The release compiler is built with profile-guided optimisation.** `tools/native.mjs release`
+  compiles the compiler's LLVM code with `-fprofile-use` and the profile in
+  `tools/pgo/grail.profdata.xz`: a training run of the instrumented compiler (a cold check and build
+  of a 26 000-line program and the compiler's own check), regenerated with `bun tools/native.mjs
+  pgo-train`. The compiler's output is unchanged (byte-identical text and objects); it runs 7-9% fewer
+  instructions per compile: check of a 104 000-line program 5.06 G -> 4.60 G, its build 26.5 G ->
+  24.7 G. `GRAIL_PGO=0` builds without the profile.
+
 - **Generic code over a type that owns nothing has no drop bookkeeping.** In a specialisation, a
   type parameter bound to a plain type (`A = u64`) answered "needs drop" like an unknown type, so
   every value of it carried a drop flag, a drop-helper call guarded by it, and a callee-saved register
