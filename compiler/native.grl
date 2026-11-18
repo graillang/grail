@@ -43238,9 +43238,36 @@ fn capture_written_at<a>(c: (&a mut C), i: u64, end: u64, ty: u64) -> bool {
                 return false;
             }
         }
+        if ty_kind(&mut c, ty) == 8 {
+            // A struct's own method reads its receiver when it takes `self: &T`; one taking
+            // `&mut` (or the receiver by value, or a name the struct does not define) stays a write.
+            m := tok_text(&mut c, i + 2);
+            if struct_method_reads(&mut c, view(m), ty) {
+                return false;
+            }
+        }
         return true;
     }
     return false;
+}
+// Whether `name` is a method of struct type `recv` (written in its `impl`) whose receiver is a
+// shared reference, so calling it on a captured value reads the capture.
+fn struct_method_reads<a, b>(c: (&a mut C), name: &b [u8], recv: u64) -> bool {
+    mut found = false;
+    owner_id := ty_arg(&mut c, recv);
+    for i in c.funcs.len() {
+        f := &c.funcs[i];
+        if (f.owner != 0) & !inherent_is_type_key(f.owner) & (f.owner < generic_impl_key(0)) & (f.count != 0) & same(view(f.name), view(name)) {
+            if owner_id == f.owner - 1 {
+                pty := c.params[f.first];
+                if (ty_kind(&mut c, pty) != 7) || (ty_mode(&mut c, pty) != 0) {
+                    return false;
+                }
+                found = true;
+            }
+        }
+    }
+    return found;
 }
 // Index + 1 of `name` in `names`, or 0.
 fn capture_index<a, b>(names: (&a u8[][]), name: &b [u8]) -> u64 {

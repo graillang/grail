@@ -1,5 +1,10 @@
 ## Unreleased
 
+- Fixed: a closure that calls a `self: &T` method of a captured struct is `Fn`, not `FnMut` (it was refused
+  with "a closure that mutates a captured value is FnMut"): the capture scan now looks the method up
+  on the struct and counts a shared receiver as a read; `&mut self`, by-value `self` and names the
+  struct does not define stay writes. Cases `closure-shared-method-on-capture-is-fn`,
+  `closure-mut-method-on-capture-is-fnmut`.
 - Fixed: module-level integer constants fold `<<` and `>>` (`pub const A: u32 = 1 << 3;` was "expected a
   compile-time constant expression"). The lexer emits a shift as two touching `<`/`>` tokens, which body
   expressions already joined; the compile-time folder now joins them the same way. Cases

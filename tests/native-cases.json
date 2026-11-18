@@ -19681,10 +19681,22 @@
     "note": "a module-level float constant folds + - * /, negation and other float constants (`const THIRD: f64 = 1.0 / 3.0;` was a parse error at the `/`); an f32 constant folds at f32 precision"
   },
   {
+    "name": "closure-shared-method-on-capture-is-fn",
+    "source": "struct P { v: u64 }\nimpl P { pub fn get(self: &P) -> u64 { return self.v; } }\nfn call_shared(f: Fn<Share>() -> u64) -> u64 { return f(); }\nfn main() { p := P{v: 3}; println(call_shared(|| -> u64 { return p.get(); })); }\n",
+    "stdout": "3\n",
+    "note": "a closure calling a `self: &T` method of a captured struct only reads the capture, so it is `Fn` (it was refused as \"a closure that mutates a captured value is FnMut\")"
+  },
+  {
+    "name": "closure-mut-method-on-capture-is-fnmut",
+    "source": "struct P { v: u64 }\nimpl P { pub fn bump(self: &mut P) -> u64 { self.v += 1; return self.v; } }\nfn call_shared(f: Fn<Share>() -> u64) -> u64 { return f(); }\nfn main() { mut p = P{v: 3}; println(call_shared(|| -> u64 { return p.bump(); })); }\n",
+    "reject": true,
+    "diagnostic": "a closure that mutates a captured value is FnMut, not Fn"
+  },
+  {
     "name": "const-int-shift-fold",
     "source": "pub const A: u32 = 1 << 3;\npub const B: u64 = (1 << 40) >> 8;\npub const C: u64 = 1 << 3 | 1;\npub const D: bool = (16 >> 2) > 3;\nfn main() { println(u64(A)); println(B); println(C); println(D); }",
     "stdout": "8\n4294967296\n9\ntrue\n",
-    "note": "a module-level integer constant folds << and >> (the lexer emits them as two touching < or > tokens; `const A: u32 = 1 << 3;` was \"expected a compile-time constant expression\"); a spaced `> >` stays two comparisons"
+    "note": "a module-level integer constant folds << and >> (the lexer emits them as two touching < or > tokens; `const A: u32 = 1 << 3;` was \"expected a compile-time constant expression\")"
   },
   {
     "name": "const-int-shift-overflow",
