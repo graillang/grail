@@ -101,6 +101,18 @@
   stage on a machine carrying a 25-way swarm took longer than 15 minutes and the land gate read the SIGTERM
   as a failed self-host, blocking a branch whose own tests were byte-identical. A slow compile is not a
   wrong one; the budget only bounds a hang.
+- **The geometry runtime's wind deformation is ported.** `abundance/src/render_policy_wind.grl`
+  carries `engine/geometry/runtime/wind_deformation.hpp` (a mesh's pivot table condensed into wind
+  members, the member extent and axis, the member weights, the displacement bound `max_wind_m`, the
+  frond-articulation gate and its bound, and the composed transform a part's skeleton applies -
+  `walk_part`, `walk_chain` and `part_rotation`) together with the two kernel functions it calls
+  from `abundance/flora/foliage_wind_kernel.ush` (`ab_fwk_pivot_angles`, `ab_fwk_pivot_bend`) and
+  the helpers beneath them. 497 reference lines. `render_float.grl` gains `pow_f32`: the correctly
+  rounded binary32 `pow` (powf), because a double `pow` narrowed to float double-rounds and
+  disagreed with the members' wood-branch compliance at 3.9 m and 13 m. Two ordering traps found by
+  the parity test and now documented in the port: float literals in a mixed expression are
+  evaluated in binary64 unless they are `f32(...)`, and `compliance *= a * b` multiplies by the
+  whole right-hand side, not left to right.
 - **Abundance's megaplants_batch extraction cache is ported.** `abundance/src/megaplants_batch.grl`
   reproduces `_file_sig` (a provenance-recorded sha256, else `size:mtime`), `_variant_sig` (archive,
   atlas and traced templates, extractor bytes), the `<species>_<tag>-<sig>` entry name and `_prune`'s
