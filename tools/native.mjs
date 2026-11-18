@@ -135,7 +135,7 @@ export function targetName(target) {
 export function command(argv, options = {}) {
   // GRAIL_COMMAND_TIMEOUT (seconds) raises the limit for a step known to be long on a loaded host,
   // such as clang -O2 over the whole compiler's LLVM module in `release`.
-  const result = spawnSync(argv[0], argv.slice(1), { cwd: root, maxBuffer: 16 * 1024 * 1024, timeout: Number(process.env.GRAIL_COMMAND_TIMEOUT ?? 900) * 1000, ...options });
+  const result = spawnSync(argv[0], argv.slice(1), { cwd: root, maxBuffer: 16 * 1024 * 1024, timeout: Number(process.env.GRAIL_COMMAND_TIMEOUT ?? 2400) * 1000, ...options });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`${argv.join(' ')} failed (${result.signal ?? result.status})\n${result.stdout ?? ''}${result.stderr ?? ''}`);
   return result;
@@ -171,7 +171,10 @@ export function crossSysroot(target) {
   return value && existsSync(value) ? value : null;
 }
 export function dynamicLinkFlags(target, linkArgs) {
-  if (!linkArgs.some(input => input.startsWith('-l'))) return [];
+  // A shared library named by path (`lib "../third_party/x/liby.so"`) makes the image dynamic exactly
+  // as a `-lNAME` does: without the interpreter and libc the call would land on an unrelocated PLT
+  // slot. platform/audio found this: its shim is a path, and the program crashed on the first call.
+  if (!linkArgs.some(input => input.startsWith('-l') || input.endsWith('.so'))) return [];
   const sysroot = crossSysroot(target);
   if (sysroot) {
     const loader = (dynamicLoaders[target] ?? []).find(candidate => existsSync(join(sysroot, candidate)));
@@ -652,6 +655,33 @@ export function compileProgram(compiler, inputs, directory, { target = hostTarge
   // `interfaces` compiles against the interface directory a previous emit produced instead of the
   // modules' sources (B1 stage 2). It changes what the checker sees, not what it is given.
   const interfaceFlags = interfaces ? ['--interface', interfaces] : [];
+  // A content stamp over everything that can change the binary: the compiler image, the inputs,
+  // the flags. A program whose stamp still matches is not recompiled — the parity suite builds over
+  // sixty programs and a lane's gate should not rebuild the ones a change did not touch.
+  const stampFile = join(directory, `${name}.stamp`);
+  const stampParts = [compiler, backend, target, overflow, name, verifyFacts ? '1' : '0', rangeFacts ? '1' : '0',
+    interfaces ?? '', ...extra, ...files];
+  for (const file of [compiler, ...files]) {
+    let st;
+    try {
+      st = statSync(file);
+    } catch {
+      st = null;
+    }
+    stampParts.push(st ? `${file}:${st.size}:${st.mtimeMs}` : `${file}:missing`);
+  }
+  const stamp = createHash('sha256').update(stampParts.join('\0')).digest('hex');
+  const executable = join(directory, name);
+  if (process.env.GRAIL_NO_BUILD_CACHE !== '1') {
+    try {
+      if (readFileSync(stampFile, 'utf8') === stamp && statSync(executable).size > 0) {
+        if (output) output.push('');
+        return executable;
+      }
+    } catch {
+      // no stamp, or a half-written artifact: build it
+    }
+  }
   const compiled = command([compiler, ...interfaceFlags, ...(llvm ? ['--backend=llvm'] : []), ...(verifyFacts ? ['--verify-facts'] : []), ...(rangeFacts ? ['--range-facts'] : []), ...extra, '--target', target, `--overflow=${overflow}`, assembly, ...files]);
   // `output`, when a caller passes an array, receives what the compiler printed.
   if (output) output.push(`${compiled.stdout ?? ''}${compiled.stderr ?? ''}`);
@@ -662,7 +692,13 @@ export function compileProgram(compiler, inputs, directory, { target = hostTarge
     linkArgs.unshift(object);
   }
   const framework = machoTargets.includes(target) ? frameworkArguments(frameworks, { directory, sdk }) : { args: [] };
-  return assemble(assembly, join(directory, name), target, linkArgs, { frameworkArgs: framework.args, sign, sdk });
+  const built = assemble(assembly, join(directory, name), target, linkArgs, { frameworkArgs: framework.args, sign, sdk });
+  try {
+    writeFileSync(stampFile, stamp);
+  } catch {
+    // a cache that cannot be recorded is no reason to fail the build
+  }
+  return built;
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const mode = process.argv[2] ?? 'build';
