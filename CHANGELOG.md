@@ -1,5 +1,18 @@
 ## Unreleased
 
+- **msdfgen, the UI's font SDF generator, is bound to Grail and gated at 143 values.**
+  `abundance/src/msdfgen.grl` calls msdfgen v1.12 - the release `engine/third_party/msdfgen` vendors
+  byte for byte - through a C shim (`abundance/tools/msdfgen_shim.h/.cpp`) whose entry points are
+  exactly the calls of the engine's one call site, `rasterise_glyph` in `engine/ui/canvas_builder.cpp`:
+  FreeType init and font load, loadGlyph (em-normalised) with the empty-contour check, normalize,
+  edgeColoringSimple, bounds, and generateMSDF into a float RGB bitmap with the error-correction
+  configuration crossing explicitly. `abundance/tools/build-msdfgen.mjs` fetches the pinned archive and
+  compiles the engine's 24 msdfgen units with its own flags into one archive the shim and the reference
+  both link. `msdfgen_test.grl` against `parity/msdfgen.cpp` rasterises five glyphs of the committed
+  Titillium Web Regular at the engine's tiers and matches all 143 lines (bounds, sizes, texel digests, a
+  whole field as f32 bits, a seed variant and the refusals); `msdfgen_layout_probe.grl` checks every
+  record in both directions and the font/glyph/bitmap lifecycle. docs/msdfgen.md has the details.
+
 - **The island's macro coastline plan is ported bit for bit.** `abundance/src/
   worldgen_macro_coast.grl` carries `terrain_shape.cpp`'s planner (lobes, bays, islets, valley axes
   and tributaries), `macro_land_field` and `protected_blend_weight`, with the file's own noise
