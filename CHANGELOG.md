@@ -1,5 +1,13 @@
 ## Unreleased
 
+- Performance: a burst of spawns from a main thread's task scope costs the spawning thread about 30%
+  less CPU (24 workers: main-thread user time over 6M spawns and joins 0.84 s -> 0.57 s; user cycles
+  of five 100k bursts 300M -> 225M, median of 7). A spawn touches fewer contended lines: a
+  task deque's head, which every steal writes, moved off the line of the tail the owner writes (and
+  the owner reads it only when its last-read head says full); the parked and searching worker counts
+  that every push reads are one word on a line of their own instead of two words on two hot lines;
+  and a new task record clears its first 296 bytes, not all 496 - the waiter block's held slots are
+  set up the first time the task waits.
 - **Performance: a task woken by a timer or a ready descriptor runs at the next scheduling step.**
   Every worker step now looks at the task injection ring (the reactor's wakes, spawns from other
   threads) before taking jobs; it looked only every 61st step, so while frame jobs kept the workers

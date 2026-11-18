@@ -22,6 +22,10 @@ worker has the task. Chains of tasks are therefore LIFO for the worker that spaw
 what makes a fork-join recursion run its children depth-first, and FIFO for thieves, which is what
 spreads a burst.
 
+The head lives a line away from the tail, the buffer and the mask (`rt_deque_head`, deque + 1024),
+and the owner keeps the head it read last beside it: a push reads the shared head only when that
+bound says full. On one line, every steal's CAS cost a burst's pusher a miss per push.
+
 The buffer is fixed at 131072 entries. That is deliberate: a growing Chase-Lev needs memory
 reclamation for the old buffer (a thief may still be reading it), and a fixed buffer needs none.
 A push that does not fit spills to the shared **injection ring**, which is also where a spawn or a
@@ -152,8 +156,9 @@ on a worker issue 15 wakes, where every one of them used to.
 between, on both sides (Dekker):
 
 - the pusher: publish the work (the deque's tail store or the ring's), full barrier
-  (`rt_full_fence`: a locked CAS on a frame word, no shared write), load `parked` (scheduler word 96)
-  and `searching` (jobs word 416);
+  (`rt_full_fence`: a locked CAS on a frame word, no shared write), load the idle word
+  (`rt_idle_word`, scheduler word 256: `parked` in the high half, `searching` in the low half - one
+  load on a line of its own, where two counters on two busy lines cost a burst's pusher two misses);
 - a parking worker: `searching -= 1` (a locked RMW, a full barrier), load the sequence, `parked += 1`
   (a locked RMW, a full barrier), look at every queue once more, and only then wait on the sequence
   with the value it loaded.
