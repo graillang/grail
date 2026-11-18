@@ -19231,6 +19231,39 @@
     "note": "optimize.grl: an f32 local set from $0 is promoted to an SSE register (xorps), kept in binary32 by xmm_narrow, and `s + x[i]*y[i]` is one addss on it, the product read where cvtss2sd had widened it; the returned value widens through %xmm15. Same output as the generic sequence."
   },
   {
+    "name": "f32-columns-movss-and-binary32-constants",
+    "source": "// f32 columns updated in place with f32 constants: elements load and store with movss, and the\n// constants stay binary32 in registers, so the arithmetic is mulss/subss/addss.\nfn main() {\n    n: u64 := 1000;\n    mut px = f32[];\n    mut vy = f32[];\n    for i in n {\n        px.push(f32(i64(i % 97)) * 0.5);\n        vy.push(f32(i64(i % 13)) * 0.25);\n    }\n    dt: f32 := 0.016;\n    damping: f32 := 0.999;\n    gravity: f32 := 0.0981;\n    for frame in 50 {\n        for i in n {\n            vy[i] = vy[i] * damping - gravity * dt;\n            px[i] = px[i] + vy[i] * dt;\n        }\n    }\n    mut sum: f64 = 0.0;\n    for i in n {\n        sum = sum + f64(px[i]) + f64(vy[i]);\n    }\n    println(\"{}\", sum);\n}\n",
+    "stdout": "25983.516222726554\n",
+    "targets": [
+      "x86_64"
+    ],
+    "asm": [
+      {
+        "in": "f_main_main",
+        "text": "movss ("
+      },
+      {
+        "in": "f_main_main",
+        "text": "mulss"
+      },
+      {
+        "in": "f_main_main",
+        "text": "subss"
+      }
+    ],
+    "note": "optimize.grl: an f32 element loads and stores with movss (xmm_loads/xmm_stores, op 78), and f32 constants hoisted into SSE registers are rounded to binary32 once (op 121), so `v * damping - gravity * dt` is mulss/subss with no widening. The asm pins are x86-64 spellings; aarch64 and riscv64 check the output (machine.grl lowers movss to ldr/str s and flw/fsw, xorps to movi d,#0)."
+  },
+  {
+    "name": "f32-columns-binary32-other-targets",
+    "source": "// f32 columns updated in place with f32 constants: elements load and store with movss, and the\n// constants stay binary32 in registers, so the arithmetic is mulss/subss/addss.\nfn main() {\n    n: u64 := 1000;\n    mut px = f32[];\n    mut vy = f32[];\n    for i in n {\n        px.push(f32(i64(i % 97)) * 0.5);\n        vy.push(f32(i64(i % 13)) * 0.25);\n    }\n    dt: f32 := 0.016;\n    damping: f32 := 0.999;\n    gravity: f32 := 0.0981;\n    for frame in 50 {\n        for i in n {\n            vy[i] = vy[i] * damping - gravity * dt;\n            px[i] = px[i] + vy[i] * dt;\n        }\n    }\n    mut sum: f64 = 0.0;\n    for i in n {\n        sum = sum + f64(px[i]) + f64(vy[i]);\n    }\n    println(\"{}\", sum);\n}\n",
+    "stdout": "25983.516222726554\n",
+    "targets": [
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "The same program as f32-columns-movss-and-binary32-constants on AArch64 and RV64: machine.grl lowers the optimiser's movss to ldr/str s and flw/fsw, op 121's cvtsd2ss in place, and xorps to movi d,#0 / fmv.d.x zero; the output must match."
+  },
+  {
     "name": "closure-shared-ref-captured-twice",
     "note": "a shared reference binding captured by two closures: it is copied, as Rust's `&T` is, and both closures hold the shared loan (the first used to move it: `r` was moved)",
     "source": "struct Holder { n: u64 }\nfn main() { holder := Holder { n: 4 }; r := &holder; a := || -> u64 r.n; b := || -> u64 r.n + 1; println(a() + b()); }\n",

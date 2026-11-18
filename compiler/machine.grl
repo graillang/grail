@@ -3615,7 +3615,8 @@ fn freg<a>(target: u64, s: &a [u8], single: bool) -> u8[] {
     if (s.len() == 5) && starts(view(s), view("%xmm")) && (s[4] > 55) && (s[4] < 58) {
         n = s[4] - 48;
     }
-    if (s.len() == 6) && starts(view(s), view("%xmm1")) && (s[5] > 47) && (s[5] < 53) {
+    // %xmm15 too: optimize.grl's binary32-to-general widening (op 120) uses it as scratch.
+    if (s.len() == 6) && starts(view(s), view("%xmm1")) && (s[5] > 47) && (s[5] < 54) {
         n = 10 + s[5] - 48;
     }
     mut out = u8[];
@@ -3713,6 +3714,39 @@ fn float_sse<a, b, c, d>(o: (&a mut Out), op: &b [u8], src: &c [u8], dst: &d [u8
             put(&mut o, view(",[x13]\n"));
         } else {
             put(&mut o, view("fld "));
+            put(&mut o, view(fd));
+            put(&mut o, view(",0(t3)\n"));
+        }
+        return true;
+    }
+    if eq(view(op), view("movss")) {
+        // An f32 element loaded straight into, or stored from, a floating-point register in its
+        // single-precision view (optimize.grl `xmm_loads`/`xmm_stores`).
+        fd := freg(target, view(dst), true);
+        fs := freg(target, view(src), true);
+        if (fs.len() != 0) && (dst.len() != 0) && (dst[0] != 37) {
+            address(&mut o, view(dst));
+            if arm {
+                put(&mut o, view("str "));
+                put(&mut o, view(fs));
+                put(&mut o, view(",[x13]\n"));
+            } else {
+                put(&mut o, view("fsw "));
+                put(&mut o, view(fs));
+                put(&mut o, view(",0(t3)\n"));
+            }
+            return true;
+        }
+        if (fd.len() == 0) || (src.len() == 0) || (src[0] == 37) {
+            return false;
+        }
+        address(&mut o, view(src));
+        if arm {
+            put(&mut o, view("ldr "));
+            put(&mut o, view(fd));
+            put(&mut o, view(",[x13]\n"));
+        } else {
+            put(&mut o, view("flw "));
             put(&mut o, view(fd));
             put(&mut o, view(",0(t3)\n"));
         }

@@ -1163,6 +1163,16 @@ struct C {
     // Empty for a hand-run compiler; the option vector then carries the executable's own path, size
     // and modification time instead.
     fn_id: u8[],
+    // The module's unit pack (fncache "Packs"): its name in the store when the driver named one
+    // (`--fn-pack`), the pack this run read, and the units this run will file in its place.
+    fn_pack: u8[],
+    fn_pk: fncache::Pack,
+    fn_pk_read: u64,
+    fn_wnames: u8[][],
+    fn_woffs: u64[],
+    fn_wlens: u64[],
+    fn_wdata: u8[],
+    fn_wslots: u64[],
     // `--fn-cache-quiet`: use the store, print no report line.
     fn_quiet: u64,
     // `--object PATH`: assemble in this process (compiler/asm_x86.grl) and write the object to PATH;
@@ -8145,12 +8155,38 @@ fn advance<a>(c: (&a mut C)) -> unit {
     // cursor may step onto the end-of-file token, but stepping past it is a truncated program, not
     // a token to skip. Without this the scan spun forever on an unfinished declaration.
     if c.toks.len() <= c.pos {
-        if c.toks.len() != 0 {
-            exchange(&mut c.pos, c.toks.len() - 1);
-        }
-        fail(&mut c, view("unexpected end of file"));
+        past_end(&mut c);
     }
     exchange(&mut c.pos, c.pos + 1);
+    return ();
+}
+// The parser's refusals, out of line: a refusal's message is an owned value, and one in a hot
+// function made every call of it save, clear and drop-test registers for it (advance, ident and
+// expect run for every token).
+fn past_end<a>(c: (&a mut C)) -> unit {
+    if c.toks.len() != 0 {
+        exchange(&mut c.pos, c.toks.len() - 1);
+    }
+    fail(&mut c, view("unexpected end of file"));
+    return ();
+}
+fn not_a_name<a>(c: (&a mut C)) -> unit {
+    mut msg = copy_bytes(view("expected a name here"));
+    push_bytes(&mut msg, view(found_msg(&mut c)));
+    fail(&mut c, view(msg));
+    return ();
+}
+fn truth_not_a_name<a>(c: (&a mut C)) -> unit {
+    fail(&mut c, view("truth keyword is not an identifier"));
+    return ();
+}
+fn expected_token<a, b>(c: (&a mut C), s: &b [u8]) -> unit {
+    want := s.copy();
+    mut msg = copy_bytes(view("expected `"));
+    push_bytes(&mut msg, view(want));
+    msg.push(96);
+    push_bytes(&mut msg, view(found_msg(&mut c)));
+    fail(&mut c, view(msg));
     return ();
 }
 // The cursor's token text. Past the last token is the end of the file, which has no text.
@@ -8814,12 +8850,7 @@ fn eat<a, b>(c: (&a mut C), s: &b [u8]) -> bool {
 }
 fn expect<a, b>(c: (&a mut C), s: &b [u8]) -> unit {
     if !eat(&mut c, s) {
-        want := s.copy();
-        mut msg = copy_bytes(view("expected `"));
-        push_bytes(&mut msg, view(want));
-        msg.push(96);
-        push_bytes(&mut msg, view(found_msg(&mut c)));
-        fail(&mut c, view(msg));
+        expected_token(&mut c, s);
     }
     return ();
 }
@@ -12409,13 +12440,11 @@ fn pv_strict_fail_why<a, b, d>(c: (&a mut C), pred: Pred, pos: u64, need: &b [u8
 }
 fn ident<a>(c: (&a mut C)) -> u8[] {
     if kind(&mut c) != 1 {
-        mut msg = copy_bytes(view("expected a name here"));
-        push_bytes(&mut msg, view(found_msg(&mut c)));
-        fail(&mut c, view(msg));
+        not_a_name(&mut c);
     }
     t := tok_text(&mut c, c.pos);
     if same(view(t), view("true")) || same(view(t), view("false")) {
-        fail(&mut c, view("truth keyword is not an identifier"));
+        truth_not_a_name(&mut c);
     }
     advance(&mut c);
     return t;
@@ -21181,7 +21210,7 @@ fn dr_load<a>(c: (&a mut C), files: u64) -> unit {
     exchange(&mut c.dr_key, key.copy());
     mut name = copy_bytes(view("dr-"));
     push_bytes(&mut name, view(fncache::hash(view(key))));
-    u := fncache::load_checked(view(c.fn_dir), view(name));
+    u := fn_load_unit(&mut c, view(name), true);
     if (u.key.len() == 0) || !same(view(u.key), view(key)) {
         return ();
     }
@@ -21281,8 +21310,125 @@ fn dr_save<a>(c: (&a mut C)) -> unit {
     mut name = copy_bytes(view("dr-"));
     push_bytes(&mut name, view(fncache::hash(view(c.dr_key))));
     u := fncache::Unit { key: c.dr_key.copy(), text: text, facts: u8[], regs: u8[] };
-    fncache::save(view(c.fn_dir), view(name), &u);
+    fn_save_unit(&mut c, view(name), &u);
     c.fn_used.push(name);
+    return ();
+}
+// ---- The store's units: through the module's pack when the driver named one -------------------
+fn fn_packed<a>(c: &a C) -> bool {
+    return (c.fn_pack.len() != 0) & (c.fn_dir.len() != 0);
+}
+// The pack's file: the driver's name for the module, and the run's mode - a check and a build (or a
+// debug build) of one module file different units, and each must keep its own pack rather than
+// overwrite the other's.
+fn fn_pack_file<a>(c: &a C) -> u8[] {
+    mut name = copy_bytes(view(c.fn_pack));
+    if c.check_only != 0 {
+        push_bytes(&mut name, view("-check"));
+    }
+    if c.debug != 0 {
+        push_bytes(&mut name, view("-debug"));
+    }
+    return name;
+}
+// Reads the module's pack, once, before any body (and before body workers fork, so they share it).
+fn fn_pack_open<a>(c: (&a mut C)) -> unit {
+    if !fn_packed(&c) || (c.fn_pk_read != 0) {
+        return ();
+    }
+    exchange(&mut c.fn_pk_read, 1);
+    file := fn_pack_file(&c);
+    pk := fncache::pack_read(view(c.fn_dir), view(file));
+    exchange(&mut c.fn_pk, pk);
+    return ();
+}
+// The bytes of the unit filed under `name`: the pack's, else a one-file entry (a store written before
+// packs, or by a run that named none).
+fn fn_unit_bytes<a, b>(c: (&a mut C), name: &b [u8]) -> u8[] {
+    if fn_packed(&c) {
+        fn_pack_open(&mut c);
+        got := fncache::pack_get(&c.fn_pk, name);
+        if got.len() != 0 {
+            return got;
+        }
+    }
+    mut file = copy_bytes(view(c.fn_dir));
+    file.push(47);
+    push_bytes(&mut file, name);
+    if host::exists(view(file)) == 0 {
+        return u8[];
+    }
+    return host::read_file(view(file));
+}
+fn fn_load_unit<a, b>(c: (&a mut C), name: &b [u8], checked: bool) -> fncache::Unit {
+    bytes := fn_unit_bytes(&mut c, name);
+    if bytes.len() == 0 {
+        return fncache::none();
+    }
+    if checked {
+        return fncache::decode_piped(bytes);
+    }
+    return fncache::decode(bytes);
+}
+// A unit this run applied, kept for the pack the run will file: its encoding appended to one buffer.
+fn fn_pack_keep<a, b, d>(c: (&a mut C), name: &b [u8], u: (&d fncache::Unit)) -> unit {
+    if !fn_packed(&c) || (c.par_me != 0) {
+        return ();
+    }
+    if fncache::index_find(&c.fn_wslots, &c.fn_wnames, name) != 0 {
+        return ();
+    }
+    bytes := fncache::encode(u);
+    c.fn_woffs.push(c.fn_wdata.len());
+    c.fn_wlens.push(bytes.len());
+    c.fn_wdata.append(view(bytes));
+    c.fn_wnames.push(copy_bytes(name));
+    i := c.fn_wnames.len() - 1;
+    fncache::index_put(&mut c.fn_wslots, &c.fn_wnames, i);
+    return ();
+}
+// A unit replayed straight from the store, kept for the run's pack as the bytes it was filed as.
+fn fn_pack_keep_raw<a, b>(c: (&a mut C), name: &b [u8]) -> unit {
+    if !fn_packed(&c) || (c.par_me != 0) {
+        return ();
+    }
+    if fncache::index_find(&c.fn_wslots, &c.fn_wnames, name) != 0 {
+        return ();
+    }
+    bytes := fn_unit_bytes(&mut c, name);
+    if bytes.len() == 0 {
+        return ();
+    }
+    c.fn_woffs.push(c.fn_wdata.len());
+    c.fn_wlens.push(bytes.len());
+    c.fn_wdata.append(view(bytes));
+    c.fn_wnames.push(copy_bytes(name));
+    i := c.fn_wnames.len() - 1;
+    fncache::index_put(&mut c.fn_wslots, &c.fn_wnames, i);
+    return ();
+}
+// Files a unit: into the pack when the run has one, else as a file of its own.
+fn fn_save_unit<a, b, d>(c: (&a mut C), name: &b [u8], u: (&d fncache::Unit)) -> unit {
+    if fn_packed(&c) {
+        fn_pack_keep(&mut c, name, u);
+        return ();
+    }
+    fncache::save(view(c.fn_dir), name, u);
+    return ();
+}
+// The module's pack, written once at the end of the run, over the previous one.
+fn fn_pack_flush<a>(c: (&a mut C)) -> unit {
+    if !fn_packed(&c) || (c.par_me != 0) || (c.fn_wnames.len() == 0) {
+        return ();
+    }
+    names := exchange(&mut c.fn_wnames, u8[][]);
+    offs := exchange(&mut c.fn_woffs, u64[]);
+    lens := exchange(&mut c.fn_wlens, u64[]);
+    data := exchange(&mut c.fn_wdata, u8[]);
+    file := fn_pack_file(&c);
+    fncache::pack_write(view(c.fn_dir), view(file), &names, &offs, &lens, view(data));
+    c.fn_used.push(file);
+    fn_note_used(&mut c);
     return ();
 }
 // The entries this run used, written once (fncache::note_used): at the end of the bodies pass, and
@@ -21347,7 +21493,8 @@ fn dr_fast<a>(c: (&a mut C), position: u64, claim_alloc: u64, claim_panic: u64, 
     mut u = fncache::Unit { key: c.dr_name[k].copy(), text: u8[], facts: u8[], regs: rbytes.copy() };
     if c.check_only == 0 {
         // A build needs the text: the unit itself, as filed (a check unit has none and is a miss).
-        u = fncache::load(view(c.fn_dir), view(c.dr_name[k]));
+        dname := c.dr_name[k].copy();
+        u = fn_load_unit(&mut c, view(dname), false);
         if u.key.len() == 0 {
             return false;
         }
@@ -21365,6 +21512,8 @@ fn dr_fast<a>(c: (&a mut C), position: u64, claim_alloc: u64, claim_panic: u64, 
     c.dr_hits = c.dr_hits + 1;
     name := c.dr_name[k].copy();
     c.fn_used.push(name.copy());
+    // A body replayed through the body record is still one of this run's units: its pack keeps it.
+    fn_pack_keep_raw(&mut c, view(name));
     dr_note(&mut c, position, last, ord, view(unit), view(name), view(rbytes));
     exchange(&mut c.pos, last + 1);
     return true;
@@ -21911,11 +22060,8 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             from_worker := par_unit.key.len() != 0;
             mut hit = par_unit;
             if (hit.key.len() == 0) & (c.fn_dir.len() != 0) {
-                if c.check_only != 0 {
-                    hit = fncache::load_checked(view(c.fn_dir), view(fncache::hash(view(key))));
-                } else {
-                    hit = fncache::load(view(c.fn_dir), view(fncache::hash(view(key))));
-                }
+                hname := fncache::hash(view(key));
+                hit = fn_load_unit(&mut c, view(hname), c.check_only != 0);
                 par_outcome = 2;
             }
             if hit.key.len() != 0 {
@@ -21938,6 +22084,9 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                         fn_apply(&mut c, &hit, &regs, fn_line, position, claimed_alloc, claimed_panic, claimed_block);
                         hit_name := fncache::hash(view(key));
                         c.fn_used.push(hit_name.copy());
+                        // Every unit the run applied - a store hit or a body worker's - goes into
+                        // the pack the run files.
+                        fn_pack_keep(&mut c, view(hit_name), &hit);
                         hit_regs := hit.regs.copy();
                         dr_note(&mut c, position, end, hit_ord, view(unit), view(hit_name), view(hit_regs));
                         if par_outcome == 1 {
@@ -22386,7 +22535,11 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             // so two keys that collide make a miss and never a wrong hit.
             if c.fn_dir.len() != 0 {
                 filed_name := fncache::hash(view(produced.key));
-                fncache::save(view(c.fn_dir), view(filed_name), &produced);
+                // A body worker files nothing when the run packs its units: it hands the unit to
+                // the parent, which keeps it.
+                if !(fn_packed(&c) & (c.par_me != 0)) {
+                    fn_save_unit(&mut c, view(filed_name), &produced);
+                }
                 c.fn_used.push(filed_name);
                 c.fn_filed = c.fn_filed + 1;
             }
@@ -61683,6 +61836,14 @@ pub fn main() -> u64 {
         fx_body_calls: u64[],
         fn_dir: u8[],
         fn_id: u8[],
+        fn_pack: u8[],
+        fn_pk: fncache::pack_none(),
+        fn_pk_read: 0,
+        fn_wnames: u8[][],
+        fn_woffs: u64[],
+        fn_wlens: u64[],
+        fn_wdata: u8[],
+        fn_wslots: u64[],
         object: u8[],
         fn_quiet: 0,
         fn_flags: u8[],
@@ -62019,6 +62180,14 @@ pub fn main() -> u64 {
             // says nothing about it: no per-module report line.
             exchange(&mut c.fn_quiet, 1);
             offset += 1;
+        } else if same(view(option), view("--fn-pack")) {
+            // The name of this module's unit pack in the store: one file for the run's units
+            // instead of one per function (fncache "Packs"). Without it units are one file each.
+            if argc < offset + 3 {
+                fail_option(&mut c, view("--fn-pack needs a name"));
+            }
+            exchange(&mut c.fn_pack, host::arg(offset + 2));
+            offset += 2;
         } else if same(view(option), view("--fn-cache-id")) {
             // The compiler's own digest, as the driver computed it (`cache_build_id`). A unit is
             // code this compiler emitted, so a new compiler is a new key for every function.
@@ -62432,6 +62601,7 @@ pub fn main() -> u64 {
             exchange(&mut c.fn_flags, fn_flags_now(&mut c));
             exchange(&mut c.fn_surface, fn_surface_now(&mut c));
             fncache::ensure(view(c.fn_dir));
+            fn_pack_open(&mut c);
         }
     }
     // Every definition has been emitted by now, so an --export name that never matched is a typo.
@@ -62766,6 +62936,7 @@ pub fn main() -> u64 {
         line.push(10);
         host::print(view(line));
     }
+    fn_pack_flush(&mut c);
     jobs::phase(view("front-end-done"));
     if c.check_only != 0 {
         return 0;
