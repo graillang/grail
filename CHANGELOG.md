@@ -1,5 +1,18 @@
 ## Unreleased
 
+- Abundance port: `abundance/src/abcmesh.grl` is the `.abcmesh` character-mesh codec - the version-5
+  container (render vertices with their topology split at UV seams, rigid joints, twelve influences
+  per vertex with unorm16 weights, centres of rotation, rest positions, tangent rings and sparse
+  fp16 blendshape deltas as CSR arrays, packed masked/two-sided submesh words, channel names,
+  Multi-PIE landmarks, two eyes) with every reader admission bound, exact consumption, and
+  `validate`'s exact diagnostic strings. `abundance/tests/abcmesh_test.grl` matches the C++ codec
+  byte for byte on fixtures written by the engine's own encoder (a skinned body, a rigid head, a
+  morph face, the engine's one-triangle mesh and the empty mesh), sixteen mutated files the decoder
+  refuses, the full validate rule matrix (28 cases) and the packed channel-id bound - 206 reference
+  lines, floats as 32-bit patterns. Compiling the engine's own `mesh_decode_tests.cpp` shows a
+  stale expectation there (a submesh word of 256 now means masked Skin and decodes; the test still
+  asserts a refusal from before the version-5 flag bits), so the suite pins the decoder's behaviour.
+
 - `tools/abundance-test.mjs`: the references map had two identical `checkpoint` entries; the first
   was shadowed and dead, and is deleted. No behavior change.
 
@@ -22,6 +35,7 @@
   changesets both implementations reject. Gated by `tests/parity/tx.cpp` against the engine's own
   headers and the compiled `libabundance_gameplay_core.a` (`-ffp-contract=off`): 235 reference
   lines, all matched by `abundance/tests/tx_test.grl`.
+ (Abundance: .abcmesh codec, identical to the C++ on fixtures the engine's own encoder writes (206 lines))
 
 - **Every performance chart is re-measured with the machine idle** (load average under 3; release
   compiler with PGO on main bcf78e5a). Every compile row now beats the fastest rival: the cold
