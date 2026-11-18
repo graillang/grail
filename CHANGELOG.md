@@ -1,5 +1,9 @@
 ## Unreleased
 
+- `bench/results/compile.json` re-measured with the release compiler of main 66e3b3b6 (with its
+  profile): a cold check of the 104 000-line program is now 1.29x Zig's instructions (from 1.51x),
+  and every other row is at or below the fastest rival.
+
 - **f32 element loads and stores and f32 constants in development builds take no detours.** An f32
   element now loads and stores with one `movss` (it went through `%eax`), and an f32 constant hoisted
   into an SSE register is rounded to binary32 once, so `v * damping - gravity * dt` is `mulss` and
