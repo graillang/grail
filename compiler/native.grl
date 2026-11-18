@@ -980,6 +980,9 @@ struct C {
     // there and nowhere else (docs/design/task-failure-containment.md).
     ignored_failure: u64,
     parsing_input: u64,
+    // Parsing a closure type's parameter list: an elided reference there is an input of each call
+    // and belongs to no enclosing item, so it gets no lifetime parameter of the struct that holds it.
+    closure_input: u64,
     output_region: u64,
     receiver_region: u64,
     input_regions: u64[],
@@ -17109,6 +17112,9 @@ fn parse_reference<a>(c: (&a mut C)) -> u64 {
     if r == 0 {
         if c.parsing_input != 0 {
             r = fresh_lifetime(&mut c);
+        } else if c.closure_input != 0 {
+            // A closure type's parameter: its lifetime is per call, so it names no region the type
+            // carries (a struct holding the closure would otherwise take it as a lifetime parameter).
         } else if c.output_region != 0 {
             r = c.output_region;
         } else if dyn_type_ahead(&mut c) {
@@ -17377,8 +17383,8 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
         // parameter list is being read (a struct field, a local's type), its elided lifetime is
         // a fresh one, as it is inside a function's parameter list.
         mut entered = false;
-        if (c.parsing_input == 0) & (c.output_region == 0) {
-            exchange(&mut c.parsing_input, 1);
+        if (c.parsing_input == 0) & (c.output_region == 0) & (c.closure_input == 0) {
+            exchange(&mut c.closure_input, 1);
             entered = true;
         }
         if !eat(&mut c, view(")")) {
@@ -17392,7 +17398,7 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
             }
         }
         if entered {
-            exchange(&mut c.parsing_input, 0);
+            exchange(&mut c.closure_input, 0);
         }
         if 5 < params.len() {
             fail(&mut c, view("closure type exceeds five parameters"));
@@ -62081,6 +62087,7 @@ pub fn main() -> u64 {
         no_union: 0,
         ignored_failure: 0,
         parsing_input: 0,
+        closure_input: 0,
         output_region: 0,
         receiver_region: 0,
         input_regions: u64[],

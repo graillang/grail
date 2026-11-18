@@ -1,5 +1,18 @@
 ## Unreleased
 
+- Fixed: a closure type in a struct field can still be a vector element (`struct S { body: Fn<Share, Owned>((&T), u64) -> u64 }`
+  and then `S[]`): the fresh lifetime a closure parameter takes is now its own (a new `closure_input` parser state)
+  instead of an input region of the enclosing item, so the struct takes no lifetime parameter from it.
+- **glibc-exact single-precision maths**: `lib/math` gains `sinf`, `cosf`, `expf`, `exp2f`, `logf` and `log2f`, the
+  engine's own routines (sysdeps/ieee754/flt-32) step for step over glibc's tables as packed hex with a software
+  fused multiply-add, so a result is the host libm's bit for bit. `expf` and `exp2f` were checked against the system
+  libm on all 2^32 inputs, `sinf` and `cosf` likewise, `logf`/`log2f` by the corpus case `lib-f32-libm-glibc` and
+  exhaustive sweeps. `logf_split` factors the argument split both logarithms share.
+- `abundance/tools/vendor-shaders.mjs`: refuses to vendor a working tree under a pin's name (`ABUNDANCE_COMMIT`
+  set while `ABUNDANCE_SRC` has a `.git`), resolves an include beside the including file first, and records the
+  commit of an exported tree.
+- Core, post and sky shaders re-vendored at the pin (sky's `cloud_trace`/`sky_composite` split into near and far
+  kernels; `SkyPush` 112 to 120 bytes), with the regenerated `shader_*.grl` and layout pin.
 - Fixed: a struct partly moved before a loop (`f := r.inner;`) no longer makes the loop refuse with "loop
   backedge consumes entry storage: `r` is moved out of it" when the body only reads it. The backedge check
   now counts what the body consumes: a place that dies in the body, one that was whole at entry and is
