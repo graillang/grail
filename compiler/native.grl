@@ -33378,6 +33378,13 @@ fn static_literal_view<a>(c: (&a mut C)) -> Val {
     o(&mut c, view("(%rip),%rax\n"));
     source := save(&mut c);
     own(&mut c, source, 3);
+    // The string is a read-only static object: it is still a checked place the view is bonded to,
+    // but it carries no drop flag, so releasing it below ends the place and emits no drop call (on a
+    // static block that call did nothing, and every `view("...")` made one: millions in a check).
+    k := resource(&mut c, source);
+    if k != 0 {
+        exchange(&mut c.resources[k - 1].flag, 0);
+    }
     o(&mut c, view("leaq "));
     lname(&mut c, desc);
     o(&mut c, view("(%rip),%rax\n"));
