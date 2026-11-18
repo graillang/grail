@@ -34,6 +34,13 @@
   under an id that is not fnv1a64 of its name), and the checkpoint's sections re-encode under the
   existing ABCP2 port. The reference links the pinned gameplay-core build whole so every table's
   static registrar is present.
+- **Texture decode: enumerated, and the Basis/KTX2 premise does not hold.** The engine has no
+  Basis Universal / KTX2 transcoder, no `.ktx2`/`.basis` asset and no call site; the file that
+  suggested one (`engine/characters/tests/basis_decode_tests.cpp`) is the character shape-basis
+  codec. The runtime decodes `abtex` containers (already ported) and block-compressed payloads:
+  `bc7decomp::unpack_bc7` in `material_registry.cpp` for the terrain palette's means, and rgbcx's
+  BC4/BC5 unpack. BC7 decode (679 integer-only lines, no search) is recorded in
+  abundance/README.md as the real decode gap; nothing was shimmed or ported on a guess.
 
 - **The procedural rock kit's pebble and rock-node meshes are ported, bit for bit.**
   `abundance/src/procgen_rock_kit.grl` carries `build_pebble_mesh` and `build_rock_node_mesh` with
