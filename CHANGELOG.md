@@ -1,5 +1,17 @@
 ## Unreleased
 
+- **A cooked `.abtex` can be written without C++.** `abundance/src/texture_build.grl` ports the writer side of
+  `engine/materials/src/texture_build.cpp`: `format_for`, the RGBA8 quantization, BC4/BC5 blocks through
+  `lib/bc_encode.grl` (byte-exact against the engine's rgbcx path), the IEEE binary16 conversion for RGBA16F, the
+  8-texel page border with wrap/clamp addressing, the 144 x 144 page slices, the descriptor's address/alpha/ORM
+  flags and mip-0 average, and the container. `abundance/tests/texbuild_test.grl` matches 77 lines from
+  `abundance/tests/parity/texbuild.cpp`, which links the engine's own `build_mips`/`build_texture` and writes its
+  mip chains to `tests/parity/texbuild/` for the port to encode: tiled BC4 under repeat and clamp, an untiled BC5
+  normal, an untiled RGBA16F LUT, a cut-out mask and a random BC4 chain, every payload byte for byte. The README's
+  table records which formats the Grail writer can produce (BC4 tiled and untiled, BC5 untiled, RGBA16F, RGBA8) and
+  which still need the C++ importer (BC7 and BC6H: ISPC encoders; tiled BC5: its RDO pass), and that the mip filter
+  itself stays in C++ while `lib/math`'s `sin`/`pow` are a unit in the last place off glibc's.
+
 - **The shader pipeline takes `geometry/`, the largest area.** 30 of its 46 entries (4.5 MB of SPIR-V)
   are built with the engine's pinned DXC at pin `ca1f1bc05b`: the cull, motion, HZB, software and
   hardware raster, assembly, VSM argument/cluster/SAT/settle and vegetation passes, plus the two mesh
