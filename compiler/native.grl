@@ -36285,6 +36285,7 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
                 exchange(&mut sources[argi], v.t);
                 exchange(&mut args[argi], v.t);
             } else {
+                refuse_hidden_loan_argument(&mut c, v.t, v.ty, c.params[template_first + index]);
                 held := move_value(&mut c, v);
                 exchange(&mut sources[argi], held.t);
                 exchange(&mut args[argi], held.t);
@@ -43043,6 +43044,27 @@ fn capture_borrow<a>(c: (&a mut C), ty: u64) -> bool {
     }
     return false;
 }
+// A value moved into a parameter whose type names no lifetime is the callee's to keep: it may store
+// it anywhere (`b.jobs.push(s)`), so a value holding a borrow its type cannot show - a record with
+// a closure field whose closure captured a reference, or that is a call-scoped `Fn(..)` parameter -
+// would leave that storage holding a dangling environment. The callee cannot see the loan, so the
+// caller refuses, as `dyn_box` refuses erasing it into a `dyn`. A closure-typed parameter is exempt:
+// without `Owned` it is itself call-scoped, and with it the closure's own bounds are checked.
+fn refuse_hidden_loan_argument<a>(c: (&a mut C), slot: u64, ty: u64, formal: u64) -> unit {
+    if c.raw != 0 {
+        return ();
+    }
+    if (ty_kind(&mut c, formal) == 20) || contains_borrow(&mut c, formal, 0) || (type_regions(&mut c, formal).len() != 0) {
+        return ();
+    }
+    if !concrete_type(&mut c, formal) {
+        return ();
+    }
+    if may_hide_borrow(&mut c, ty) && holds_live_loan(&mut c, place_of(&mut c, slot)) {
+        fail(&mut c, view("this value holds a borrow its type cannot show (a closure field that captured a reference, or a call-scoped `Fn(..)` parameter), so it cannot be moved into a parameter that may keep it: pass it by reference, or make the field `Fn<Owned>(..)` and capture owned values"));
+    }
+    return ();
+}
 // A capture whose type cannot show a borrow but whose value holds one - a call-scoped closure
 // parameter, a record with a closure field: its loans are the closure's too.
 fn capture_hides_loan<a>(c: (&a mut C), slot: u64, ty: u64) -> bool {
@@ -44623,6 +44645,9 @@ fn mutex_method<a, b>(c: (&a mut C), value: Val, name: &b [u8]) -> Val {
         place := target_of(&mut c, context.t);
         capture_authority(&mut c, place);
     }
+    // The callback owns the context and may store it in the guarded payload, which outlives this
+    // call: a context hiding a loan is refused as any argument to such a parameter is.
+    refuse_hidden_loan_argument(&mut c, context.t, context.ty, expected);
     held := move_value(&mut c, context);
     heldslot := held.t;
     move_out(&mut c, held);
