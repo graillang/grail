@@ -5730,26 +5730,69 @@ fn return_bonds<a>(c: (&a mut C), src: u64, dst: u64, aggregate: u64) -> unit {
     if !bond_under(&mut c, src) {
         return ();
     }
+    // The bonds held by `src` or a place inside it, found through the storage tree and the per-holder
+    // chains instead of a pass over every bond the function has made (that pass was a tenth of a
+    // check), then visited in the order of the bond list as before. A place outside the tree
+    // (bond_unranged) falls back to the full pass.
+    bonds_sync(&mut c);
     n := c.bonds.len();
-    for i in n {
-        mut b = &c.bonds[i];
-        holder := b.holder;
-        loan := b.loan;
-        guard := b.guard;
-        if loan_live(&mut c, loan) != 0 {
-            if ownership::ancestor(&c.check, src, holder) {
-                mut role = guard;
-                if aggregate != 0 {
-                    role = 1;
-                }
-                if guard == 3 {
-                    role = 3;
-                }
-                if aggregate == 3 {
-                    role = 3;
-                }
-                bond_kind(&mut c, dst, loan, role);
+    mut found = u64[];
+    if (c.bond_unranged != 0) || (c.check.places.len() < src) {
+        for i in n {
+            if ownership::ancestor(&c.check, src, c.bonds[i].holder) {
+                found.push(i);
             }
+        }
+    } else {
+        // Marked in a byte map and read back in index order: the bond list's order, as before.
+        mut hit = u8[0; n];
+        mut any = false;
+        mut stack = u64[];
+        stack.push(src);
+        while let Some(p) = stack.pop() {
+            mut j = 0;
+            if p < c.bond_hhead.len() {
+                j = c.bond_hhead[p];
+            }
+            while j != 0 {
+                if j - 1 < n {
+                    hit[j - 1] = 1;
+                    any = true;
+                }
+                j = c.bond_hnext[j - 1];
+            }
+            mut k = c.check.places[p - 1].child;
+            while k != 0 {
+                if (k < c.bond_under.len()) && (c.bond_under[k] != 0) {
+                    stack.push(k);
+                }
+                k = c.check.places[k - 1].next;
+            }
+        }
+        if any {
+            for i in n {
+                if hit[i] != 0 {
+                    found.push(i);
+                }
+            }
+        }
+    }
+    for f in found.len() {
+        i := found[f];
+        loan := c.bonds[i].loan;
+        guard := c.bonds[i].guard;
+        if loan_live(&mut c, loan) != 0 {
+            mut role = guard;
+            if aggregate != 0 {
+                role = 1;
+            }
+            if guard == 3 {
+                role = 3;
+            }
+            if aggregate == 3 {
+                role = 3;
+            }
+            bond_kind(&mut c, dst, loan, role);
         }
     }
     return ();
@@ -9780,28 +9823,47 @@ fn pv_literal<a>(t: &a [u8]) -> bool {
 }
 // A word the prover must not mistake for a variable.
 fn pv_keyword<a>(t: &a [u8]) -> bool {
-    // Every word below is two to eight bytes long.
-    if (t.len() < 2) || (8 < t.len()) {
+    // Every word below is two to eight bytes long; the first byte picks the one or two it can be,
+    // so a name is compared with at most three words, not eighteen.
+    n := t.len();
+    if (n < 2) || (8 < n) {
         return false;
     }
-    return same(view(t), view("true"))
-        || same(view(t), view("false"))
-        || same(view(t), view("if"))
-        || same(view(t), view("else"))
-        || same(view(t), view("while"))
-        || same(view(t), view("for"))
-        || same(view(t), view("in"))
-        || same(view(t), view("let"))
-        || same(view(t), view("mut"))
-        || same(view(t), view("return"))
-        || same(view(t), view("assert"))
-        || same(view(t), view("break"))
-        || same(view(t), view("continue"))
-        || same(view(t), view("loop"))
-        || same(view(t), view("match"))
-        || same(view(t), view("where"))
-        || same(view(t), view("ensures"))
-        || same(view(t), view("fn"));
+    k := t[0];
+    if k == 116 {
+        return same(view(t), view("true"));
+    }
+    if k == 102 {
+        return same(view(t), view("false")) || same(view(t), view("for")) || same(view(t), view("fn"));
+    }
+    if k == 105 {
+        return same(view(t), view("if")) || same(view(t), view("in"));
+    }
+    if k == 101 {
+        return same(view(t), view("else")) || same(view(t), view("ensures"));
+    }
+    if k == 119 {
+        return same(view(t), view("while")) || same(view(t), view("where"));
+    }
+    if k == 108 {
+        return same(view(t), view("let")) || same(view(t), view("loop"));
+    }
+    if k == 109 {
+        return same(view(t), view("mut")) || same(view(t), view("match"));
+    }
+    if k == 114 {
+        return same(view(t), view("return"));
+    }
+    if k == 97 {
+        return same(view(t), view("assert"));
+    }
+    if k == 98 {
+        return same(view(t), view("break"));
+    }
+    if k == 99 {
+        return same(view(t), view("continue"));
+    }
+    return false;
 }
 // The term at `at`, with the number of tokens it spans in `used`: a name, `name.len()` or a literal.
 // Empty text means the tokens there are not one this prover knows.

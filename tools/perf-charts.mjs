@@ -135,3 +135,69 @@ export function renderResults(data, prefix = data?.tool) {
   const html = data.tables.map(t => `${t.chart ? chart(t, data, prefix) : ''}${numbers(t)}`).join('') + provenance(data);
   return `<section class="perf-results" data-tool="${escape(data.tool)}">${html}</section>`.replace(/\n/g, ' ');
 }
+
+// The one-page summary: every result file's headline tables, each row reduced to Grail's ratio to the
+// fastest rival (rowRatio), grouped into categories. A category is one bar, its geometric mean on a
+// logarithmic axis centred on 1x (left: Grail ahead, right: behind), with its best and worst rows
+// marked and named. Nothing is measured here; it reads the same committed files as the charts.
+export const summaryCategories = [
+  { file: 'compile', table: 'compile', label: 'Compile: check, cold', match: n => /check cold$/.test(n) },
+  { file: 'compile', table: 'compile', label: 'Compile: check after an edit', match: n => /check edited$/.test(n) },
+  { file: 'compile', table: 'compile', label: 'Compile: build, cold', match: n => /build cold$/.test(n) },
+  { file: 'compile', table: 'compile', label: 'Compile: build after an edit', match: n => /build edited$/.test(n) },
+  { file: 'compile', table: 'compile', label: 'Compile: rebuild, nothing changed', match: n => /build no-op$/.test(n) },
+  { file: 'bench-rivals', table: 'release', label: 'Release run time: kernels' },
+  { file: 'engine', table: 'release', label: 'Release run time: engine programs' },
+  { file: 'parallel', table: 'release', label: 'Release run time: parallel ECS' },
+  { file: 'sched-rivals', table: 'scheduler', label: 'Scheduler (release build)' },
+  { file: 'bench-rivals', table: 'instructions', label: 'Release instructions: kernels' },
+  { file: 'engine', table: 'instructions', label: 'Release instructions: engine programs' },
+  { file: 'bench-rivals', table: 'dev', label: 'Development build run time: kernels' },
+  { file: 'engine', table: 'dev', label: 'Development build run time: engine programs' },
+  { file: 'parallel', table: 'dev', label: 'Development build run time: parallel ECS' },
+];
+
+export function summaryRows(files) {
+  return summaryCategories.map(cat => {
+    const data = files[cat.file];
+    const table = data?.tables?.find(t => t.id === cat.table);
+    if (!table) return { ...cat, rows: [] };
+    const rows = table.rows.filter(r => !cat.match || cat.match(r.name)).map(r => ({ name: r.name, ratio: rowRatio(table, r) })).filter(r => Number.isFinite(r.ratio) && r.ratio > 0);
+    const mean = rows.length ? Math.exp(rows.reduce((s, r) => s + Math.log(r.ratio), 0) / rows.length) : undefined;
+    const sorted = [...rows].sort((a, b) => a.ratio - b.ratio);
+    return { ...cat, rows, mean, best: sorted[0], worst: sorted[sorted.length - 1], behind: rows.filter(r => r.ratio > 1).length, commit: data.commit, date: String(data.date ?? '').slice(0, 10) };
+  });
+}
+
+export function summary(files) {
+  const cats = summaryRows(files).filter(c => c.rows.length);
+  const left = 300, width = 420, right = 380, rowH = 26, top = 58, bottom = 34;
+  const lo = Math.log(1 / 32), hi = Math.log(32);
+  const px = r => left + ((Math.min(Math.max(Math.log(r), lo), hi) - lo) / (hi - lo)) * width;
+  const one = px(1);
+  const height = top + cats.length * rowH + bottom;
+  const parts = [];
+  parts.push(`<text x="0" y="13" class="perf-axis perf-direction">Grail's time or instructions over the fastest rival's, per category: the geometric mean of its rows.</text>`);
+  parts.push(`<text x="0" y="27" class="perf-axis">Left of 1x Grail is ahead, right of it behind; logarithmic axis. ◆ the worst row, ○ the best.</text>`);
+  for (const t of [1 / 32, 1 / 8, 1 / 2, 1, 2, 8, 32]) {
+    const x = px(t);
+    parts.push(`<line x1="${x.toFixed(1)}" x2="${x.toFixed(1)}" y1="${top - 6}" y2="${height - bottom + 4}" class="perf-grid"${t === 1 ? ' stroke-width="2"' : ''}/><text x="${x.toFixed(1)}" y="${top - 10}" class="perf-tick" text-anchor="middle">${t < 1 ? `1/${Math.round(1 / t)}` : t}x</text>`);
+  }
+  cats.forEach((c, i) => {
+    const y = top + i * rowH;
+    const ahead = c.mean <= 1;
+    const x0 = Math.min(one, px(c.mean)), w = Math.max(2, Math.abs(px(c.mean) - one));
+    parts.push(`<text x="${left - 8}" y="${y + 15}" class="perf-label" text-anchor="end">${escape(c.label)}</text>`);
+    parts.push(`<rect x="${x0.toFixed(1)}" y="${y + 5}" width="${w.toFixed(1)}" height="14" fill="${ahead ? '#2b8a3e' : '#c92a2a'}" opacity="0.85"><title>${escape(`${c.label}: geometric mean ${c.mean.toFixed(2)}x over ${c.rows.length} rows`)}</title></rect>`);
+    if (c.best) parts.push(`<circle cx="${px(c.best.ratio).toFixed(1)}" cy="${y + 12}" r="4" fill="none" stroke="#212529"><title>${escape(`best: ${c.best.name} ${c.best.ratio.toFixed(2)}x`)}</title></circle>`);
+    if (c.worst) parts.push(`<path d="M ${px(c.worst.ratio).toFixed(1)} ${y + 7} l 5 5 l -5 5 l -5 -5 z" fill="#212529"><title>${escape(`worst: ${c.worst.name} ${c.worst.ratio.toFixed(2)}x`)}</title></path>`);
+    const note = `${c.mean.toFixed(2)}x · ${c.behind ? `${c.behind}/${c.rows.length} behind, worst ${c.worst.name} ${c.worst.ratio.toFixed(2)}x` : `all ${c.rows.length} ahead`}`;
+    parts.push(`<text x="${left + width + 8}" y="${y + 15}" class="${ahead ? 'perf-met' : 'perf-missed'}">${escape(note.length > 60 ? note.slice(0, 59) + '…' : note)}</text>`);
+  });
+  const sources = [...new Set(cats.map(c => `${c.file} ${String(c.commit).slice(0, 8)} ${c.date}`))].join('; ');
+  parts.push(`<text x="0" y="${height - 8}" class="perf-axis perf-source">${escape(`From bench/results: ${sources}.`)}</text>`);
+  const svg = `<figure class="perf-chart" id="chart-summary"><svg viewBox="0 0 ${left + width + right} ${height}" width="100%" role="img" aria-label="Summary: Grail against the fastest rival in every category" xmlns="http://www.w3.org/2000/svg">${parts.join('')}</svg><figcaption>Every benchmark on one page: per category, Grail's ratio to the fastest rival, the geometric mean of the category's rows (left of 1x is ahead). The charts further down have every row.</figcaption></figure>`;
+  const body = cats.map(c => `<tr><td>${escape(c.label)}</td><td class="${c.mean <= 1 ? 'perf-met' : 'perf-missed'}">${c.mean.toFixed(2)}x</td><td>${c.behind}/${c.rows.length}</td><td>${escape(c.best.name)} ${c.best.ratio.toFixed(2)}x</td><td>${escape(c.worst.name)} ${c.worst.ratio.toFixed(2)}x</td><td><code>${escape(String(c.commit).slice(0, 8))}</code> ${escape(c.date)}</td></tr>`).join('');
+  const table = `<div class="perf-table"><table><caption>Every category: Grail over the fastest rival (geometric mean), how many rows it is behind on, and its best and worst rows</caption><thead><tr><th>category</th><th>Grail / fastest rival</th><th>rows behind</th><th>best row</th><th>worst row</th><th>measured on</th></tr></thead><tbody>${body}</tbody></table></div>`;
+  return `<section class="perf-results perf-summary">${svg}${table}</section>`.replace(/\n/g, ' ');
+}

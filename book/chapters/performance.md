@@ -22,6 +22,15 @@ the user-space instructions executed (from `perf_event_open`, which load does no
 scheduler's figures are wall time by nature, the median of several rounds, with the load beside
 them.
 
+## Everything at a glance
+
+One bar per category: Grail's time (or instructions) over the fastest rival's in that category, the
+geometric mean of its rows, on a logarithmic axis centred on 1x. Left of the line Grail is ahead;
+right of it, behind. Each category's best and worst row are marked and named in the table under the
+chart, and the sections that follow chart every row.
+
+{{perf:summary}}
+
 ## Release builds
 
 The release build is Grail's LLVM backend: the compiler's own code lifted to LLVM IR and compiled
@@ -86,32 +95,30 @@ and Zig, written the way each language is usually written:
 - `dyncall`: a million shapes of three kinds behind an interface object, one indirect call each;
 - `iterchain`: ten million numbers through `map`, `filter` and a sum (Go and Zig have no iterator
   adapters in their standard libraries, so their twins are the loop; Go's uses range-over-func);
-- `ecs`: a million entities as structure-of-arrays `f32` columns, a hundred frames of integration.
+- `ecs`: a million entities as structure-of-arrays `f32` columns, a hundred frames of integration;
+- `chan`: bounded channels between threads, one to one, many to one, many to many and a ping-pong
+  of round trips (Rust's twin uses crossbeam-channel; C's and Zig's are a mutex-and-condition ring).
 
 {{perf:engine#release}}
 
-**Why Grail is behind**, read from the code of the commit charted. Most of the gap closed in the last
-round of work: views are two words passed in registers, so `strings` no longer allocates per call
-and is at parity; header and element accesses carry separate alias tags, so `ecs`'s update loop
-vectorises; and release builds inline across modules, so the map's helpers fold into their callers.
-What remains:
+**Why Grail is behind**, read from the code of the commit charted. `strings` is at parity and `json`
+executes the same number of instructions as C and Rust: strings are one block, enums keep their
+payloads inline, and a value written before it is read is not zeroed first. What remains:
 
-- **`iterchain`: a nested loop the vectoriser cannot see through.** The adapters are types with
-  callable bounds and the whole chain now inlines into one function, but `fold` still drives
-  `next()`, and `Filter::next` loops inside it. Rust overrides `fold` per adapter (internal
-  iteration); Grail needs interface methods generic over a callable to be callable through
-  `I: Iterator` before it can do the same.
-- **`json` and `dyncall`: a box per value.** Each parsed node and each `dyn` object is still a heap
-  allocation; enums whose payloads are stored inline and `dyn` values held in cells are the next
-  steps (`docs/design/unboxed-values.md`).
-- **`hashmap`: insertion order costs one memory touch.** One-word keys hash with a seeded
-  multiply mix (about eight instructions, as Go's and Zig's tables do) rather than SipHash-1-3,
-  which puts the map within about 1.1x of C in time. What remains is the layout: Grail's map keeps
-  its entries in insertion order in a dense vector beside the probe table, like Python's `dict`
-  and Zig's `ArrayHashMap`, so a lookup reads the slot and then the key. C's open-addressed table
-  keeps keys in the slots.
-- **`bintrees`** is where Grail does best against `malloc` and `Box`; Zig, with its release
-  allocator, executes the fewest instructions.
+- **`chan`: threads hand off through the operating system.** Grail's channel is a mutex and two
+  conditions around a ring, as C's and Zig's twins are, and lands with them. crossbeam spins
+  before it sleeps, so a hand-off rarely parks a thread; Go runs both ends as goroutines on one
+  scheduler and never reaches the kernel at all.
+- **`bintrees`: the allocator.** Allocating and freeing the nodes are about three fifths of the
+  run; Zig's release allocator executes the fewest instructions.
+- **`hashmap`: insertion order costs one memory touch.** Grail's map keeps its entries in insertion
+  order in a dense vector beside the probe table, like Python's `dict` and Zig's `ArrayHashMap`, so
+  a lookup reads the slot and then the key. C's open-addressed table keeps keys in the slots.
+- **`iterchain`: a scalar loop.** The chain folds internally (`Map` and `Filter` override `fold`, as
+  Rust's adapters do) over a slice iterator that counts an index, so it compiles to one loop with
+  no calls, but it is not yet vectorised the way C's and Rust's are.
+- **`dyncall` and `ecs`** are bound by the indirect call and by a reload after each store in the
+  update loop respectively.
 
 {{perf:engine#dev}}
 
@@ -162,11 +169,11 @@ compiler's columns, so a change is measured on the engine the same way.
 (the ImGui program is left out where its library is not built). The figures charted were taken with
 the release compiler of the commit named. After a one-statement edit to `main` a rebuild costs a
 twentieth or less of a cold build, because the store replays every unchanged module and function:
-`abgeo`, the largest, builds cold in 10.7 billion instructions and again after an edit in 0.25.
+`abgeo`, the largest, builds cold in 9.5 billion instructions and again after an edit in 0.22.
 
-The release runs are short: `abgeo` (the cluster builder and its reader) takes 0.49 billion
-instructions, and `job`, the slowest for its size, spends its time in the scheduler's stealing
-(`rt_job_steal`, `rt_worker_steal`) rather than in its own work, since its jobs are tiny.
+The release runs are short. `abgeo` (the cluster builder and its reader) takes 0.30 billion
+instructions, most of it the mesh simplifier's own work; constant tables that it once rebuilt on
+every call are now read-only data.
 
 {{perf:abundance#abundance-compile-cpu}}
 
@@ -198,15 +205,14 @@ A second chart shows wall time with four jobs each, this machine's cap.
 {{perf:compile#compile-wall}}
 
 **Where Grail is ahead, and where it is behind.** On the commit charted, counting instructions,
-Grail is the fastest on every row of hello world and the seven engine programs, on every check and
-build after an edit, and on the cold check and cold build of the 26,000-line program. It is level
-with Go on the cold build of the 104,000-line program. It is behind in two places:
-
-- **A cold check of a large program** (1.95x Zig at 104,000 lines, level at 26,000). The growth is
-  linear, so the cost is per line; profiles of the compiler (`docs/design/compile-speed.md`) put
-  about a third of it in allocation, then the interface's writing and its digests.
-- **A rebuild of the large program with nothing changed** (1.3x cargo): 0.09 billion instructions
-  against 0.07, both under a twentieth of a second.
+Grail is the fastest on every row but one: hello world, the seven engine programs, every check and
+build after an edit, every rebuild with nothing changed (a twentieth of the others' cost or less),
+and the cold check and cold build of both generated programs except one. The exception is the
+cold check of the 104,000-line program (1.7x Zig). Both programs call every function they
+declare, so Zig's lazy analysis skips nothing; Zig's cost per line is lower and it pays a fixed cost
+for its standard library once, which is why its total grows more slowly. The profiles of the
+compiler (`docs/design/compile-speed.md`) place Grail's per-line cost in parsing, the allocator and
+the per-function units written to the store.
 
 The chart is the release compiler of the commit named, built with ThinLTO. The wall times were
 taken with the machine loaded (the load average is recorded with the run), so they favour the
