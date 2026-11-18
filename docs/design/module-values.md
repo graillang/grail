@@ -55,7 +55,7 @@ changes until the decisions below are taken. Line numbers are for this branch's
   for a string's bytes or a table's elements. A call whose value is not known yet has
   `ty == CT_PENDING` (N:48) and its call's source text in `text` (N:18200-18209).
 - **Accepted values.** A literal, a constant-tier expression (`ct_expr`, N:17390; names other
-  constants through `ct_primary`, N:17369-17386, ints and bools only), a negative or float literal
+  constants through `ct_primary`, N:17369-17386, ints, bools and floats), a negative or float literal
   with its type (N:18249-18290), or — run tier — a call. The run tier's result must be "an integer,
   a bool, a string, bytes or a vector of integers"; a record or a `Mutex` is refused (probes 4, 5,
   same message). `ct_pending_type` (N:17731) and `ct_seq_elem` (N:17757) define that set.

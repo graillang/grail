@@ -120,6 +120,17 @@
   `abundance/tests/lake_topology_test.grl` matches all 72 lines - the 235 KB real sidecar
   round-trips byte for byte, and 24 malformed files reach their intended refusals.
 
+- **A method called on a struct's `f32` (or other narrow) field reads and writes the field, not the
+  eight bytes at its address.** `self.a.clone()` - which every `@derive(Clone)` on a record with an
+  `f32` field generates - borrowed the field untagged, so the callee loaded a whole word: `y.a` came
+  back with the next field's bits in it and `y.b` as 0. The receiver is now tagged exactly as `&s.a`
+  is, which also fixes a `&mut self` method on a narrow field (`t.a.bump(1.0)`). Pinned by
+  `derives-clone-f32-fields`.
+- **Module-level float constants fold expressions.** `const THIRD: f64 = 1.0 / 3.0;` was a parse
+  error at the `/`; the constant tier now folds float literals, other float constants, unary minus,
+  `+ - * /` and comparisons, and an `f32` constant folds at f32 precision (every step rounded to
+  binary32). Mixing a float with an integer operand, `f32` with `f64`, or `%`/bit operators on
+  floats is refused by name. Pinned by `const-float-fold-across-modules` and two rejection cases.
 - **The subsurface probe's ore and oil indicators are ported, with `ab::pm`'s exp, log and pow.**
   `worldgen_pm.grl` gains the portable-math exponentials the indicators ride: `exp` over the
   header's 128-entry 2^(j/128) table (embedded as the exact bit patterns it compiles to), `log`

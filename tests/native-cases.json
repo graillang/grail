@@ -19651,5 +19651,35 @@
       "lib/math.grl"
     ],
     "stdout": "asin 0 4602891378046628710\nasin 1 13826263414901404518\nasin 2 4591882244033050756\nasin 3 4608743911553287141\nasin 4 4609746687872471981\nasin 5 4609753056924675352\nasin 6 13833125093779451160\nasin 7 4599160474810251007\nasin 8 13831093849597911410\nasin 9 0\nasin 10 4481081629233643520\nasin 11 4607394977673999205\nasin 12 13833125030088931800\nasin_nan true\nasin_inf true\nfmod 0 4609434218613702656\nfmod 1 13832806255468478464\nfmod 2 4630664975387038080\nfmod 3 4652805554282954752\nfmod 4 4643638706798854144\nfmod 5 4609434218613702656\nfmod 6 0\nfmod 7 9223372036854775808\nfmod_zero_div true\nfmod_inf_y true\nfmod_inf_x true\nfmod_nan true\n"
+  },
+  {
+    "name": "derives-clone-f32-fields",
+    "source": "module derives_clone_f32_fields;\nuse clone;\n\n@derive(Clone)\nstruct Inner {\n    a: f32,\n    b: f32,\n}\n@derive(Clone)\nstruct S {\n    a: f32,\n    b: f32,\n    c: u64,\n    d: f64,\n    inner: Inner,\n}\n\ninterface Bump {\n    fn bump(self: &mut Self, d: Self);\n}\nimpl Bump for f32 {\n    fn bump(self: &mut f32, d: f32) {\n        *self = *self + d;\n    }\n}\nimpl Bump for u32 {\n    fn bump(self: &mut u32, d: u32) {\n        *self = *self + d;\n    }\n}\n\nfn ref_field(s: &S) -> f32 {\n    return s.a.clone();\n}\n\nfn main() -> u64 {\n    x := S { a: 1.5, b: -2.5, c: 7, d: 3.25, inner: Inner { a: 0.25, b: 4.0 } };\n    y := x.clone();\n    println(\"{} {} {} {} {} {}\", x.a, x.b, y.a, y.b, y.c, y.d);\n    println(\"{} {}\", y.inner.a, y.inner.b);\n    println(y.a == x.a);\n    println(ref_field(&x));\n    println(x.inner.b.clone());\n    mut z: f32 = 2.0;\n    mut w: u32 = 5;\n    z.bump(0.5);\n    w.bump(2);\n    mut t = S { a: z, b: -1.0, c: 60, d: 0.5, inner: Inner { a: 1.0, b: 2.0 } };\n    t.a.bump(1.0);\n    t.inner.b.bump(0.5);\n    println(\"{} {} {} {}\", t.a, t.b, t.inner.b, t.inner.a);\n    return 0;\n}\n",
+    "modules": [
+      "lib/clone.grl"
+    ],
+    "stdout": "1.5 -2.5 1.5 -2.5 7 3.25\n0.25 4\ntrue\n1.5\n4\n3.5 -1 2.5 1\n",
+    "note": "a method called on a struct's narrow field (`self.a.clone()`, `t.a.bump(1.0)`) borrows the field with a tagged reference, as `&t.a` does, so the callee reads and writes four bytes: untagged, the f32 clone read eight and picked up the next field (y.a's bits were wrong, y.b was 0)"
+  },
+  {
+    "name": "const-float-fold-across-modules",
+    "files": [
+      "compiler/tests/const_float_fold.grl",
+      "compiler/tests/const_float_values.grl"
+    ],
+    "stdout": "0.3333333333333333 8 -1.25 -0.3333333333333333 3.5\n0.33333334 1.5 -2.5 4 true\n1051372203\n",
+    "note": "a module-level float constant folds + - * /, negation and other float constants (`const THIRD: f64 = 1.0 / 3.0;` was a parse error at the `/`); an f32 constant folds at f32 precision"
+  },
+  {
+    "name": "const-float-reject-int-operand",
+    "source": "const X: f64 = 1.0 / 3;fn main(){}",
+    "reject": true,
+    "diagnostic": "a compile-time float expression cannot mix a float with an integer"
+  },
+  {
+    "name": "const-float-reject-remainder",
+    "source": "const X: f64 = 5.0 % 2.0;fn main(){}",
+    "reject": true,
+    "diagnostic": "this compile-time operator does not apply to floats"
   }
 ]

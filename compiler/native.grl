@@ -743,6 +743,9 @@ struct C {
     vis_off: u64,
     // Set when a compile-time expression read a value parameter that is not bound yet.
     ct_unbound: u64,
+    // The precision a compile-time float expression folds at (53, or 24 inside an `f32` constant):
+    // a float literal is rounded from its decimal text to it and every folded operation to it.
+    ct_fp: u64,
     // 1 once a function's frame is larger than a page: the output then gets stack probes
     // (optimize::probe_frames). The largest array in the frame being compiled, and where it is.
     probes: u64,
@@ -24060,10 +24063,41 @@ fn ct_bool<a>(c: (&a mut C), v: CVal, what: &a [u8]) -> u64 {
     return v.value;
 }
 fn ct_int<a>(c: (&a mut C), v: CVal) -> u64 {
-    if (v.ty == ct_tag_ty()) || ct_is_bool(&mut c, v.ty) {
+    if (v.ty == ct_tag_ty()) || ct_is_bool(&mut c, v.ty) || is_float(&mut c, v.ty) {
         fail(&mut c, view("this compile-time operator needs integers"));
     }
     return v.value;
+}
+// A folded float: its type is the float type and its `value` the binary64 word the language holds
+// every float in, an f32's being exact in it.
+fn ct_float_ty<a>(c: (&a mut C), ty: u64) -> bool {
+    if ty == ct_tag_ty() {
+        return false;
+    }
+    return is_float(&mut c, ty);
+}
+// Two folded floats as the binary64 words a folded operation takes. An integer operand or the other
+// precision is refused, as the same expression in a body is: there is no implicit numeric
+// conversion. `what` names the operation the refusal is about.
+fn ct_float_pair<a, b, d>(c: (&a mut C), l: &b CVal, r: &d CVal, what: &a [u8]) -> f64[] {
+    if !ct_float_ty(&mut c, l.ty) || !ct_float_ty(&mut c, r.ty) {
+        fail(&mut c, view(what));
+    }
+    if !same_type(&mut c, l.ty, r.ty) {
+        fail(&mut c, view("a compile-time expression cannot mix f32 and f64: give the other precision's value a name of its own"));
+    }
+    mut out = f64[];
+    out.push(f64_from_bits(l.value));
+    out.push(f64_from_bits(r.value));
+    return out;
+}
+// A folded float's bits, rounded to the precision it folds at (c.ct_fp): a constant declared `f32`
+// folds as f32 arithmetic, to nearest even after every step.
+fn ct_round_bits<a>(c: (&a mut C), x: f64) -> u64 {
+    if c.ct_fp == 24 {
+        return bits(f64(f32(x)));
+    }
+    return bits(x);
 }
 // size_of / align_of: defined where the size is a fact of the target - scalars, bool, handles and
 // C pointers, and extern "C" records (their C layout). A Grail record or vector is a managed
@@ -24100,6 +24134,17 @@ fn ct_primary<a>(c: (&a mut C)) -> CVal {
         advance(&mut c);
         return ct_val(v, 0);
     }
+    if k == 5 {
+        // A float literal is rounded from its decimal text at the precision being folded.
+        t := tok_text(&mut c, here);
+        bits := float_bits_p(&mut c, view(t), c.ct_fp);
+        advance(&mut c);
+        mut ty = float_type(&mut c);
+        if c.ct_fp == 24 {
+            ty = f32_type(&mut c);
+        }
+        return ct_val(bits, ty);
+    }
     if is(&mut c, view("true")) || is(&mut c, view("false")) {
         v := u64(is(&mut c, view("true")));
         advance(&mut c);
@@ -24114,6 +24159,15 @@ fn ct_primary<a>(c: (&a mut C)) -> CVal {
         v := ct_primary(&mut c);
         b := ct_bool(&mut c, v, view("! needs a bool"));
         return ct_val(1 - b, bt);
+    }
+    if eat(&mut c, view("-")) {
+        // Only floats negate here: an integer constant is unsigned, and a negative one is written
+        // with its own sign so its range is checked.
+        v := ct_primary(&mut c);
+        if !ct_float_ty(&mut c, v.ty) {
+            fail(&mut c, view("only a float value can be negated in a compile-time expression: integer constants are unsigned"));
+        }
+        return ct_val(v.value ^ 9223372036854775808, v.ty);
     }
     if eat(&mut c, view(".")) {
         name := ident(&mut c);
@@ -24213,9 +24267,12 @@ fn ct_primary<a>(c: (&a mut C)) -> CVal {
             if same(view(q.module), view(module)) & same(view(q.name), view(name)) {
                 ty := q.ty;
                 value := q.value;
-                if (ty == 3) || is_float(&mut c, ty) {
+                if ty == 3 {
                     exchange(&mut c.pos, here);
-                    fail(&mut c, view("only integer and bool constants can be used in a compile-time expression"));
+                    fail(&mut c, view("only integer, bool and float constants can be used in a compile-time expression"));
+                }
+                if is_float(&mut c, ty) {
+                    return ct_val(value, ty);
                 }
                 if ct_is_bool(&mut c, ty) {
                     return ct_val(value, bt);
@@ -24254,6 +24311,20 @@ fn ct_expr<a>(c: (&a mut C), min: u64) -> CVal {
             if (left.ty == ct_tag_ty()) != (right.ty == ct_tag_ty()) {
                 fail(&mut c, view("a target tag compares only with another tag"));
             }
+            if ct_float_ty(&mut c, left.ty) || ct_float_ty(&mut c, right.ty) {
+                pair := ct_float_pair(&mut c, &left, &right, view("a compile-time float comparison cannot mix a float with an integer: write the operand as a float (`1.0`, not `1`)"));
+                x := pair[0];
+                y := pair[1];
+                mut r = false;
+                if k == 258 { r = x == y; }
+                if k == 259 { r = x != y; }
+                if k == 60 { r = x < y; }
+                if k == 62 { r = x > y; }
+                if k == 269 { r = x <= y; }
+                if k == 270 { r = x >= y; }
+                left = ct_val(u64(r), bt);
+                continue;
+            }
             if ct_is_bool(&mut c, left.ty) != ct_is_bool(&mut c, right.ty) {
                 fail(&mut c, view("a compile-time comparison needs two values of the same kind"));
             }
@@ -24280,6 +24351,23 @@ fn ct_expr<a>(c: (&a mut C), min: u64) -> CVal {
             } else {
                 left = ct_val(a | b, bt);
             }
+            continue;
+        }
+        if ct_float_ty(&mut c, left.ty) || ct_float_ty(&mut c, right.ty) {
+            // Folded in the language's own binary64 arithmetic, rounded to the precision it folds
+            // at. Division by zero is the IEEE result, as it is in a body.
+            if (k != 43) & (k != 45) & (k != 42) & (k != 47) {
+                fail(&mut c, view("this compile-time operator does not apply to floats: + - * / and the comparisons do"));
+            }
+            pair := ct_float_pair(&mut c, &left, &right, view("a compile-time float expression cannot mix a float with an integer: write the operand as a float (`1.0`, not `1`)"));
+            x := pair[0];
+            y := pair[1];
+            mut f = 0.0;
+            if k == 43 { f = x + y; }
+            if k == 45 { f = x - y; }
+            if k == 42 { f = x * y; }
+            if k == 47 { f = x / y; }
+            left = ct_val(ct_round_bits(&mut c, f), left.ty);
             continue;
         }
         a := ct_int(&mut c, left);
@@ -26341,31 +26429,28 @@ fn constant_declaration<a>(c: (&a mut C), pass: u64) -> unit {
     k := kind(&mut c);
     mut value = 0;
     mut text = u8[];
-    if negative != 0 && k == 5 {
-        if !is_float(&mut c, ty) {
-            fail(&mut c, view("float constant needs type f64 or f32"));
+    if is_float(&mut c, ty) {
+        // A float constant folds like an integer one: float literals, other float constants and
+        // + - * / (see ct_expr). Every step rounds to the declared type's precision, so an f32
+        // constant is f32 arithmetic rather than a binary64 result narrowed once at the end.
+        if negative != 0 {
+            exchange(&mut c.pos, here - 1);
         }
-        t := tok_text(&mut c, here);
-        fp := float_precision(&mut c, ty);
-        bits := float_bits_p(&mut c, view(t), fp);
-        advance(&mut c);
-        expect(&mut c, view(";"));
-        item_public_10 := c.decl_public;
-        c
-            .constants
-            .push(
-                Constant {
-                    public: item_public_10,
-                    module: module,
-                    name: name, declared_at: declared, file: c.file, at: at_name, 
-                    ty: ty,
-                    value: bits ^ 9223372036854775808,
-                    text: text,
-                }
-            );
-        return ();
-    }
-    if (k == 2) & (negative != 0) {
+        old_fp := exchange(&mut c.ct_fp, float_precision(&mut c, ty));
+        v := ct_expr(&mut c, 0);
+        exchange(&mut c.ct_fp, old_fp);
+        if !ct_float_ty(&mut c, v.ty) {
+            exchange(&mut c.pos, here);
+            fail(&mut c, view("float constant needs a float value: write its operands as floats (`1.0`, not `1`)"));
+        }
+        if !same_type(&mut c, v.ty, ty) {
+            exchange(&mut c.pos, here);
+            fail(&mut c, view("the constant's type and its expression's differ: an `f32` constant folds at f32 precision, so its value cannot be an `f64` constant"));
+        }
+        value = v.value;
+    } else if k == 5 {
+        fail(&mut c, view("float constant needs type f64 or f32"));
+    } else if (k == 2) & (negative != 0) {
         t := tok_text(&mut c, here);
         value = literal_value(&mut c, view(t));
         advance(&mut c);
@@ -26376,7 +26461,7 @@ fn constant_declaration<a>(c: (&a mut C), pass: u64) -> unit {
             fail(&mut c, view(literal_range_msg_v(&mut c, ty, value, negative)));
         }
         value = wrapping_sub(0, value);
-    } else if (k != 5) & (k != 3) & (negative == 0) {
+    } else if (k != 3) & (negative == 0) {
         // A compile-time constant expression: literals, other constants, size_of, align_of,
         // target, arithmetic, comparisons.
         v := ct_expr(&mut c, 0);
@@ -26404,31 +26489,21 @@ fn constant_declaration<a>(c: (&a mut C), pass: u64) -> unit {
         if negative != 0 {
             fail(&mut c, view("only integer constants can be negative"));
         }
-        if k == 5 {
-            if !is_float(&mut c, ty) {
-                fail(&mut c, view("float constant needs type f64 or f32"));
+        if k == 3 {
+            if ty != 3 {
+                fail(&mut c, view("text constant needs type string"));
             }
-            t := tok_text(&mut c, here);
-            fp := float_precision(&mut c, ty);
-            value = float_bits_p(&mut c, view(t), fp);
+            text = decode_literal(&mut c, here);
             advance(&mut c);
         } else {
-            if k == 3 {
-                if ty != 3 {
-                    fail(&mut c, view("text constant needs type string"));
+            if is(&mut c, view("true")) || is(&mut c, view("false")) {
+                if !is_bool(&mut c, ty) {
+                    fail(&mut c, view("bool constant needs type bool"));
                 }
-                text = decode_literal(&mut c, here);
+                value = u64(is(&mut c, view("true")));
                 advance(&mut c);
             } else {
-                if is(&mut c, view("true")) || is(&mut c, view("false")) {
-                    if !is_bool(&mut c, ty) {
-                        fail(&mut c, view("bool constant needs type bool"));
-                    }
-                    value = u64(is(&mut c, view("true")));
-                    advance(&mut c);
-                } else {
-                    fail(&mut c, view("constants must be integer, float, bool or text literals"));
-                }
+                fail(&mut c, view("constants must be integer, float, bool or text literals"));
             }
         }
     }
@@ -45552,6 +45627,10 @@ fn method_receiver<a>(c: (&a mut C), input: u64, inty: u64, xty: u64, formal: u6
                 }
                 holder := held_record(&mut c, b);
                 n := field_reference(&mut c, b, holder, field);
+                // A narrow field's reference is tagged exactly as `&a.b` is, so the callee reads
+                // and writes it at the field's width (see ref_load): untagged, `self.a.clone()`
+                // on a struct's f32 field loaded eight bytes and picked up the field after it.
+                tag_narrow_borrow(&mut c, n);
                 root := place_of(&mut c, b);
                 target := member_place(&mut c, root, field, xty);
                 authority := authority_of(&mut c, b);
@@ -61787,6 +61866,7 @@ pub fn main() -> u64 {
         decl_public: 1,
         vis_off: 0,
         ct_unbound: 0,
+        ct_fp: 53,
         probes: 0,
         array_big: 0,
         array_big_at: 0,
