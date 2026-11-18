@@ -1,5 +1,10 @@
 ## Unreleased
 
+- **The performance charts are measured again** on main bd532104 (kernels, engine programs, parallel
+  ECS; compile on 66e3b3b6 with PGO). `tools/bench-rivals.mjs` now takes the best of 7 runs by default
+  (it was 3) and `just bench-results` the best of 9 for the parallel chart (it was 5), so the next
+  refresh on a shared machine is less at the mercy of one quiet round.
+
 - `bench/results/compile.json` re-measured with the release compiler of main 66e3b3b6 (with its
   profile): a cold check of the 104 000-line program is now 1.29x Zig's instructions (from 1.51x),
   and every other row is at or below the fastest rival.

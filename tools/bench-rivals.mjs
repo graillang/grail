@@ -38,7 +38,8 @@ import { compilerOptions, grailCompiler, jsonOption, loadavg, measurer, ratio, r
 
 const argv = process.argv.slice(2);
 const option = (name, fallback) => { const at = argv.indexOf(name); if (at < 0) return fallback; const v = argv[at + 1]; argv.splice(at, 2); return v; };
-const runs = Number(option('--runs', 3));
+// Best of 7 by default: on a shared machine a best of 3 still let one quiet round decide a figure.
+const runs = Number(option('--runs', 7));
 const chosen = compilerOptions(argv);
 const jsonPath = jsonOption(argv);
 const metric = option('--metric', 'cpu'); // cpu | instructions | wall
