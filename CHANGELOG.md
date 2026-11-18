@@ -1,5 +1,27 @@
 ## Unreleased
 
+- **Abundance's audio playback path lands on Grail over a miniaudio shim, matching the engine's own
+  code 57/57 lines.** `abundance/src/platform_audio.grl` carries `engine/ui/audio.cpp`'s playback
+  path: the plan `world_sound`/`call`/`blast`/`ringing`/`pod_take` build (gains, pitches, distances,
+  the blast's ceiling clamp and attenuation model, the ringing key's endpoint route), `start()`'s
+  range culling and camera-relative position, its volume product and start/stop/fade frame
+  arithmetic, `place()` for a moved listener, `hearing()`'s 250 Hz-to-20 kHz cutoff curve and the 2%
+  reinit hysteresis, and `volumes()`'s clamps; `tools/platform_audio_shim.cpp` runs the miniaudio
+  calls those decisions drive, in audio.cpp's order, over the pinned miniaudio 0.11.21 the engine
+  vendors (fetched by `tools/build-audio.mjs`, byte-identical to
+  `engine/third_party/miniaudio/miniaudio.h`). The gate is the engine's own no-device capture mode:
+  `tests/parity/platform_audio.cpp` plays the same six-voice scene through audio.cpp's paths and
+  `tests/platform_audio_test.grl` through the port, both at 48 kHz stereo in capture mode, and the
+  six 1024-frame pulls match bit for bit - digests, hearing state, listener moves and voice states.
+  No sound card, no audio driver, no window.
+
+- **A Grail program that links a shared library by path now gets the dynamic loader.** `lib
+  "../third_party/x/liby.so"` produced a NEEDED entry but no PT_INTERP and no libc, because
+  `tools/native.mjs`'s `dynamicLinkFlags` only switched to a dynamic image for `-lNAME` inputs; the
+  first call into such a library landed on an unrelocated PLT slot and segfaulted. One line: a `.so`
+  link input now counts like `-l`. Found by the audio shim, which is the first binding linked only
+  by path.
+
 - **Abundance: the palette classifier is gated cell-for-cell on a generated world.** The palette
   test generates the feature pass's own world (seed 1, 64 cells of 250 m, exactly as
   `tests/parity/features.cpp` does), dumps every input the classifier reads

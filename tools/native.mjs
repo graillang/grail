@@ -171,7 +171,10 @@ export function crossSysroot(target) {
   return value && existsSync(value) ? value : null;
 }
 export function dynamicLinkFlags(target, linkArgs) {
-  if (!linkArgs.some(input => input.startsWith('-l'))) return [];
+  // A shared library named by path (`lib "../third_party/x/liby.so"`) makes the image dynamic exactly
+  // as a `-lNAME` does: without the interpreter and libc the call would land on an unrelocated PLT
+  // slot. platform/audio found this: its shim is a path, and the program crashed on the first call.
+  if (!linkArgs.some(input => input.startsWith('-l') || input.endsWith('.so'))) return [];
   const sysroot = crossSysroot(target);
   if (sysroot) {
     const loader = (dynamicLoaders[target] ?? []).find(candidate => existsSync(join(sysroot, candidate)));
