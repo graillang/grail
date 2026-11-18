@@ -10,6 +10,16 @@
   reference compiling the engine's own `crafting_menu.cpp`, probing every rule and 37 realistic
   products.
 
+- **Abundance's biomes tool is ported: validation and every generated output reach byte parity.**
+  `abundance/src/biomes.grl` reproduces `engine/tools/biomes.py`'s `--check` (every error and warning
+  in the reference's order) and `--generate` — terrain_palette.json, biome_canopy_mix.ush,
+  biome_fold.ush, biome_near_density.ush, near_field.json and the deterministic
+  Saved/BiomeCuration/biomes_status.json — on `abundance/src/pyjson.grl`, a shared module carrying
+  Python's json semantics (canonical, `dumps(indent=)`, `repr` float layout) that the content tool now
+  uses too. The suite drives both implementations on identical staged trees: 24 reference lines and
+  six generated files compared byte for byte, with the reference run from a staged copy because its
+  status report would otherwise write into the human's checkout (that one CURATION line is the copy's
+  only difference). Not ported, recorded: `write_to_download` reads the machine's free disk space.
 - **The island generator's gradient noise kernels are ported bit for bit.** `abundance/src/
   worldgen_noise.grl` carries `gradient_noise`, `gradient_fbm` and `ridged_multifractal` from the
   shared `engine/base/worldgen_noise_impl.hpp` (rotated mix64 lattice mixes, the eight-entry
