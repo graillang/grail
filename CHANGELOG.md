@@ -1,5 +1,14 @@
 ## Unreleased
 
+- **Combat core resolves against real collision geometry.** `abundance/src/combat_trace.grl` gains the
+  collision view's query half over resident chunk triangles - query_box, world_segment_hit (front and
+  back faces, so penetration measures thickness to the back face), gather_triangles, raycast and
+  sweep_capsule (Ericson closest points, conservative advancement, the shared-contact tie-break) - and
+  a data-driven surface-material source for trace_shot_with. 374 values match a reference that builds
+  three views with the engine's ChunkCollisionWorld and replays traces, ricochets, a grenade rolling
+  to rest, a rocket impact and blast occlusion. Found on the way: the built
+  libabundance_gameplay_core.a carries a collision_chunk object older than its source (it lacks the
+  shared-contact tie-break), so the reference compiles collision_chunk.cpp from the checkout.
 - **The island's macro coastline plan is ported bit for bit.** `abundance/src/
   worldgen_macro_coast.grl` carries `terrain_shape.cpp`'s planner (lobes, bays, islets, valley axes
   and tributaries), `macro_land_field` and `protected_blend_weight`, with the file's own noise
