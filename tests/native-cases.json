@@ -1,5 +1,36 @@
 [
   {
+    "name": "guard-return-fact-drops-check",
+    "source": "fn down(n: u64) -> u64 {\n    if n < 2 {\n        return 0;\n    }\n    return n - 2;\n}\nfn skip(v: u64) -> u64 {\n    mut s = 0;\n    for i in v {\n        if i < 1 {\n            continue;\n        }\n        s += i - 1;\n    }\n    return s;\n}\nfn fib(n: u64) -> u64 {\n    if n < 2 {\n        return n;\n    }\n    return fib(n - 1) + fib(n - 2);\n}\nfn main() {\n    println(down(1));\n    println(down(7));\n    println(skip(5));\n    println(fib(20));\n}\n",
+    "stdout": "0\n5\n6\n6765\n",
+    "asmAbsent": [
+      {
+        "in": "f_main_down",
+        "text": "rt_abort"
+      },
+      {
+        "in": "f_main_down",
+        "text": "rt_trap"
+      }
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "note": "after a guard with no `else` whose block never falls through, the failed condition is a fact for the rest of the block: `n - 2` after `if n < 2 { return 0; }` has no overflow check"
+  },
+  {
+    "name": "guard-with-else-keeps-check",
+    "source": "fn f(x: u64) -> u64 {\n    mut n = x;\n    if n < 2 {\n        return 0;\n    } else {\n        n = 0;\n    }\n    return n - 1;\n}\nfn main() {\n    println(f(5));\n}\n",
+    "signal": "SIGABRT",
+    "note": "a guard with an `else` leaves no fact after it: the `else` may write what the condition read, so `n - 1` keeps its check and traps"
+  },
+  {
+    "name": "guard-falling-through-keeps-check",
+    "source": "fn f(n: u64, k: u64) -> u64 {\n    if n < 2 {\n        if k == 1 {\n            return 0;\n        }\n    }\n    return n - 1;\n}\nfn main() {\n    println(f(0, 2));\n}\n",
+    "signal": "SIGABRT",
+    "note": "a guard whose block can fall through states nothing after it: `n - 1` keeps its check and traps for n = 0"
+  },
+  {
     "name": "const-promote-literal-tables",
     "source": "fn can_collapse(a: u64, b: u64) -> u64 {\n    table := u64[1, 1, 1, 1, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0];\n    return table[a * 6 + b];\n}\nfn narrow(i: u64) -> i64 {\n    t := i16[-32768, -1, 32767];\n    return i64(t[i]) + i64(t.len());\n}\nfn bytes(i: u64) -> u8 {\n    b := u8[65, 66, 255];\n    return b[i];\n}\n@no_alloc\nfn hot(a: u64, b: u64) -> u64 {\n    table := u64[3, 5, 7, 9];\n    if a < table.len() {\n        return table[a] + b;\n    }\n    return 0;\n}\nfn main() -> u64 {\n    mut s = 0;\n    for a in 6 {\n        for b in 6 {\n            s += can_collapse(a, b);\n        }\n    }\n    println(s);\n    println(narrow(0));\n    println(narrow(2));\n    println(bytes(2));\n    println(hot(3, 1));\n    return 0;\n}\n",
     "stdout": "15\n-32765\n32770\n255\n10\n",
@@ -17447,7 +17478,7 @@
     ],
     "asm": [
       "+16,%rsp\nmovq %rbx,-",
-      "(%rbp)\nmovq %rdi,%rbx\njmp "
+      "(%rbp)\nmovq %rdi,%rbx\n"
     ],
     "note": "call ABI S4: the callee-saved save area is part of the one frame adjustment, and a promoted register written before it is read is not cleared"
   },
