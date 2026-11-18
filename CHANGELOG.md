@@ -1,5 +1,17 @@
 ## Unreleased
 
+- **World loot's kind table is ported.** `abundance/src/world_loot_types.grl` carries
+  `world_loot/world_loot_types.hpp/.cpp` of `cmake/tx/world_loot.cmake`: the seventeen lootable
+  kinds with their footprints, steps, vehicle families, respawn hours and up to four
+  compartments (each with its seal/open/pry times, capacities and work point; every f32 is
+  narrowed then widened so the port stores the C++ float's exact bits, and fuel tanks divide
+  their volume in f32), plus `find`, `valid_lootable_kind`, `loot_context_name` and
+  `compartment_name`. `abundance/tests/world_loot_types_test.grl` prints 711 lines that match a
+  reference compiling the engine's own `world_loot_types.cpp`. One engine quirk is recorded, not
+  copied: `find()` scans five entries of a four-slot array (zeroed padding answers as Hold, and a
+  full vehicle row reads one past the array); the port scans its stored entries, which answers
+  every in-bounds question identically.
+
 - **Abundance's megaplants_import is ported as a plan, byte-identical to the reference's
   invocations.** `abundance/src/megaplants_import.grl` discovers the extracted variants, names the
   canopy family, picks the bark set and tile size, applies the leaf-atlas rule (with its flat-colour
