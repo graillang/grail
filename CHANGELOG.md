@@ -1,5 +1,11 @@
 ## Unreleased
 
+- **Performance charts re-measured on 4ab4767a**, machine idle: run time, engine, parallel ECS and
+  the scheduler (the compile and Abundance charts are unchanged). Parallel ECS in development builds
+  is 1.3x to 1.6x Go (it was 2.6x to 6.4x); in release it is level with C's OpenMP on four workers
+  (0.92x) and 1.43x on eight (1.7x). A burst of spawns is 3.0x oneTBB (6.5x) and a join from the main
+  thread half of oneTBB's. `just bench-results` and the gate measure `chan` in the engine chart
+  again: the command had lost it, so a refresh dropped the row the chapter discusses.
 - **Development builds convert a 64-bit integer to `f32` in one instruction.** `f32(x)` of an `i64`
   (or a `u64`, or any integer wider than 32 bits) called the runtime, which converted in software and
   then rounded bit by bit; on x86-64 it is now `cvtsi2ssq`, one rounding as the language requires,
@@ -9,14 +15,17 @@
   0.13 s on four - the set-up loop's six million conversions were a serial third of the run;
   bench/ecs (native) 0.73 to 0.49 s. Results agree bit for bit with the old code and the LLVM build
   over 8 million random signed and unsigned values.
-- **A burst of spawns from the main thread costs half as much with every worker started.** An idle
-  worker reserved a Background slot on every empty look before looking for Background work, then
-  gave it back and notified - which, on its last look before parking, woke another parked worker to
-  do the same. It now reserves only when Background work is queued. Steal scans read the worker
-  count and the block array from the worker's own block, and the task injection ring has cache lines
-  of its own: all three shared lines with what every spawn from a thread that is not a worker
-  writes or reads. bench/sched.grl on 24 workers (release): a burst of 100k spawns 850 to 490 ns a
-  spawn.
+- **Idle workers stop costing the threads that give them work.** An idle worker reserved a
+  Background slot on every empty look before looking for Background work, then gave it back and
+  notified - which, on its last look before parking, woke another parked worker to do the same - and
+  the slot count shares a cache line with the searching count every push reads. It now reserves only
+  when Background work is queued. Steal scans read the worker count and the block array from the
+  worker's own block, and the task injection ring has cache lines of its own. Against the
+  scheduler's rivals (release, main -> this change, the same tool one run after the other): a join
+  from the main thread 528 to 141 ns (oneTBB 288), spawn and wait 862 to 456 ns, a burst of 100k
+  spawns 1110 to 483 ns a spawn, fib(32) by nested join from main 1419 to 878 us; the sched run's CPU
+  time 6.3 to 1.8 s. The frame loop is unchanged (28 interleaved rounds) and the I/O task wakes
+  later by 0.58 ms at worst instead of 0.92.
 - **`T[0; n]` into a new vector writes nothing.** An allocation comes back cleared, so copies of a
   zero word are already there and the pages of a large buffer are first touched by the program's own
   writes. bench/ecs and bench/ecs_par now make their columns at full length (`f32[0.0; n]`) and fill
