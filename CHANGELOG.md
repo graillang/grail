@@ -1,5 +1,9 @@
 ## Unreleased
 
+- The FFI test shim builds for Windows without a C library's headers again: `immintrin.h` pulled in
+  `<stdlib.h>` through `mm_malloc.h`, which a Linux host has no MSVC copy of, so the Windows check
+  (and with it every post-landing run) failed before any case ran.
+
 - **The performance charts are measured again** on main bd532104 (kernels, engine programs, parallel
   ECS; compile on 66e3b3b6 with PGO). `tools/bench-rivals.mjs` now takes the best of 7 runs by default
   (it was 3) and `just bench-results` the best of 9 for the parallel chart (it was 5), so the next
