@@ -11,6 +11,18 @@
   counts are asserted in-process rather than compared: the engine's graph needs the mock device that
   `parity/render_graph.cpp` owns, so a byte comparison of the planned counts still needs that mock
   factored into a shared header with the rgraph lane.
+- **Abundance: the crags and broken facets pass is ported and bit-exact.** `src/coherent_crags.grl`
+  carries `apply_coherent_crags`: the steepest-descent receiver and 3x3-smoothed steepness gates,
+  the D8 drainage-area channel test beside the stored discharge, the keep set (channels, lakes, the
+  river / canyon / coast / karst / mesa / volcanic marks, authored sand and strata, chalk, the map
+  edge, and the guard around existing pits), the belt-rock and sea-cliff gates with their margin
+  easing, domain-warped ridged relief at 300/100/30 m, crest teeth, the descent cap and the
+  canyon-cursed step limit — so no pit and no flat is made and every original flow path still runs.
+  `tests/coherent_crags_test.grl` matches Abundance's own `coherent_crags.cpp` (`-ffp-contract=off`)
+  over a synthetic coastal alpine world at 12 m cells in five configurations: the engine's own
+  (596 raised, 72 teeth, 0 pits), a strong gain, the original without the step limit, a tight
+  descent cap (42 capped) and a small step limit (192 step-limited) — 60 of 60 lines.
+
 - **The dedicated server's datagram reliability layer is ported** (`abundance/src/net_datagram.grl`):
   `ab::server::DatagramConnection` - which the engine's own header documents as pure logic with no
   sockets - with packet sequence numbers and the wrap-safe newer-than compare plus a 32-bit ack
