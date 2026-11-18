@@ -1,5 +1,16 @@
 ## Unreleased
 
+- **Abundance: the mesa country planner is ported and bit-exact.** `src/coherent_mesa.grl` carries
+  `plan_mesa_regions` and `mesa_region_weight`: the ~128 m summary grid, the 128 m block means and
+  land share, the summary slope, the two-round chamfer distance fields (sea, mountain belt,
+  keep-outs), the province suitability, the warmth/dryness/elevation/ruggedness/coast/belt gates and
+  the seeded jitter that score every other cell, and the ranked, kept-apart selection that seeds
+  each region. `tests/coherent_mesa_test.grl` matches Abundance's own `coherent_mesa.cpp`
+  (`-ffp-contract=off`) over a synthetic 8 km sedimentary world in four configurations (natural,
+  forced, canyonlands, small footprint): 12 of 12 lines. The builder — the plateau cap, scarp
+  retreat from the washes, slot canyons, spires and the stepped-hills coupling — and the mark and
+  biome hooks are not ported yet.
+
 - **The damage domain's placed-object entry points are ported.** `abundance/src/damage_actions.grl`
   carries `actions/damage/placed_damage` (cmake/tx/damage): the book rows, `strike_placed`'s skips,
   refusal wording ("damage.placed_energy") and wreck threshold, `first_placed_hit`'s box slab test and
