@@ -652,6 +652,33 @@ export function compileProgram(compiler, inputs, directory, { target = hostTarge
   // `interfaces` compiles against the interface directory a previous emit produced instead of the
   // modules' sources (B1 stage 2). It changes what the checker sees, not what it is given.
   const interfaceFlags = interfaces ? ['--interface', interfaces] : [];
+  // A content stamp over everything that can change the binary: the compiler image, the inputs,
+  // the flags. A program whose stamp still matches is not recompiled — the parity suite builds over
+  // sixty programs and a lane's gate should not rebuild the ones a change did not touch.
+  const stampFile = join(directory, `${name}.stamp`);
+  const stampParts = [compiler, backend, target, overflow, name, verifyFacts ? '1' : '0', rangeFacts ? '1' : '0',
+    interfaces ?? '', ...extra, ...files];
+  for (const file of [compiler, ...files]) {
+    let st;
+    try {
+      st = statSync(file);
+    } catch {
+      st = null;
+    }
+    stampParts.push(st ? `${file}:${st.size}:${st.mtimeMs}` : `${file}:missing`);
+  }
+  const stamp = createHash('sha256').update(stampParts.join('\0')).digest('hex');
+  const executable = join(directory, name);
+  if (process.env.GRAIL_NO_BUILD_CACHE !== '1') {
+    try {
+      if (readFileSync(stampFile, 'utf8') === stamp && statSync(executable).size > 0) {
+        if (output) output.push('');
+        return executable;
+      }
+    } catch {
+      // no stamp, or a half-written artifact: build it
+    }
+  }
   const compiled = command([compiler, ...interfaceFlags, ...(llvm ? ['--backend=llvm'] : []), ...(verifyFacts ? ['--verify-facts'] : []), ...(rangeFacts ? ['--range-facts'] : []), ...extra, '--target', target, `--overflow=${overflow}`, assembly, ...files]);
   // `output`, when a caller passes an array, receives what the compiler printed.
   if (output) output.push(`${compiled.stdout ?? ''}${compiled.stderr ?? ''}`);
@@ -662,7 +689,13 @@ export function compileProgram(compiler, inputs, directory, { target = hostTarge
     linkArgs.unshift(object);
   }
   const framework = machoTargets.includes(target) ? frameworkArguments(frameworks, { directory, sdk }) : { args: [] };
-  return assemble(assembly, join(directory, name), target, linkArgs, { frameworkArgs: framework.args, sign, sdk });
+  const built = assemble(assembly, join(directory, name), target, linkArgs, { frameworkArgs: framework.args, sign, sdk });
+  try {
+    writeFileSync(stampFile, stamp);
+  } catch {
+    // a cache that cannot be recorded is no reason to fail the build
+  }
+  return built;
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const mode = process.argv[2] ?? 'build';
