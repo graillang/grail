@@ -111,7 +111,7 @@ than misread.
  // grail-interface 4
  module pair
  source "tests/interfaces/pair.grl"
- sha256 "ad1f2b3cf421decab61ea22f7dfc572fec79a74a3078b3ef330f4e49a94db2d0"
+ source-hash "ad1f2b3cf421decab61ea22f7dfc572fec79a74a3078b3ef330f4e49a94db2d0"
  mode typed_refs=1 default_u64=1 overflow=checked target=x86_64
  abi dyn pair size = 16 align = 8 word0 = data word1 = vtable drop = 0 ref record = address record plain = inline plain record = frame args = 6 registers then stack layout = c
  unsafe 0
@@ -226,9 +226,9 @@ build).
 All three are named, exit 1, and name the module and the file:
 
 1. **missing** - `--interface DIR` wants `DIR/util.iface` and it is not there;
-2. **stale** - the source on the command line no longer hashes to the `sha256` line:
+2. **stale** - the source on the command line no longer hashes to the `source-hash` line:
    `grail: DIR/util.iface: module `util` changed since this interface was written: the interface
-   records source-sha256 <a> for "src/util.grl", but src/util.grl is <b>`;
+   records source-hash <a> for "src/util.grl", but src/util.grl is <b>`;
 3. **disagreeing** - `--verify` (or a mismatched manifest) refuses with the first differing line:
    `grail: DIR/util.iface: module `util` does not match this interface: line 12: the interface says
    `type util::Stream handle params=0 lifetimes=0 transfer=0 share=0`, the sources give
@@ -604,7 +604,7 @@ fn util::keep <1> ((tparam 0 0 [])) -> (tparam 0 0 []) public=1 lifetimes=0
   |pub fn keep<T>(value: T) -> T {
   |    return value;
   |}
-sha256 "…"
+source-hash "…"
 digest "…"
 ```
 
@@ -666,7 +666,7 @@ half-installed: the prologue, the framing of every record, the trailer's digest 
 because they are different bugs: a file that does not match its own trailer digest is *tampered with*
 (`changed after it was written: the digest in its trailer does not match the file`), and a file whose
 recorded source digest does not match the source on the command line is *stale*
-(`module \`util\` changed since this interface was written: the interface records source-sha256 …,
+(`module \`util\` changed since this interface was written: the interface records source-hash …,
 but src/util.grl is …`). The trailer's framing is checked before either: a file cut short is reported
 as truncation, not as a digest mismatch.
 
@@ -1065,7 +1065,7 @@ RISC-V (the cross targets are run under qemu).
 
 With `--cache`, each module's run is keyed by its inputs alone: the build's flags, compiler and
 assembler, the target, the module's name and source digests, and the *surface* of every interface the
-run can read (each interface without its `sha256` and `digest` lines, which change with the module's
+run can read (each interface without its `source-hash` and `digest` lines, which change with the module's
 body). A hit restores the run's object, its link inputs and its interface and skips the compiler run
 and the assembler; a miss runs both and files the outputs. The image is filed under the program key,
 so a rebuild of unchanged sources prints `program up to date` and runs nothing. Because a module

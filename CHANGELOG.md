@@ -7,6 +7,22 @@
   `rt_drop_seq` use wrapping arithmetic. A cold `grail check` of the 26k-line syn1000 runs 4.247 G
   -> 4.040 G instructions (-4.9%), with identical output.
 
+- **A release build's runtime error says where it failed.** A failing check in a release (LLVM)
+  build printed its message without the ` --> file:line:col` line a development build prints, because
+  that line came from the native backend's site table. The front end now records statement positions
+  for the lifter too (`.gsite` lines), and the failure path of lifted code - only the failure path -
+  points the runtime at a record of its statement before it calls the failure entry, which the report
+  prints as the ` --> ` line. Measured: no instruction changes on bench/ecs, sort, sieve, xform_f32 or
+  nbody. Failures inside a runtime helper that is not lifted in place still report no location, and a
+  contained task failure keeps the location it had.
+- Interfaces record the source they describe by the build store's fast hash (`source-hash`) rather
+  than SHA-256 (interface format 14): digesting every source byte with SHA-256 was a twelfth of
+  checking a large module. Interfaces written by an older compiler are refused as a different format
+  and rebuilt.
+- **Fix: `dyn Iterator` works again.** `Iterator::fold` (a generic method taking `self` by value)
+  made the interface "cannot be used as dyn". As in Rust, such a method is now left out of the dyn
+  object - it is called on concrete types and through bounds - and the interface stays usable as
+  `dyn` for its other methods.
 - **A failed check inside a parallel job no longer aborts silently now and then.** The joiner that
   re-raises a job's failure took one from the contained-failure count with a checked subtraction,
   which trapped - inside the failure path, so without a report - when it ran before the failing stack

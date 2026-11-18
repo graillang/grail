@@ -661,7 +661,7 @@ struct C {
     fmod_ids: u64[][],
     fmod_n: u64,
     // The digest of each source file the interface writer has read this run, by path, and the
-    // file's length: one sha256 per source instead of one per question (iface_source_digest).
+    // file's length: one digest per source instead of one per question (iface_source_digest).
     srcdig_paths: u8[][],
     srcdig_vals: u8[][],
     srcdig_lens: u64[],
@@ -2791,6 +2791,105 @@ fn debug_sections<a, b>(c: &a C, entry: &b [u8]) -> u8[] {
 fn site_table_on<a>(c: (&a C)) -> bool {
     return (c.plat == 0) && (c.backend == 0) && (c.debug == 0) && (c.split == 0) && (c.no_sites == 0);
 }
+// A release (LLVM) build of a Linux target records statement positions too: no table is built from
+// them (the lifted code's addresses are clang's), but site_resolve turns them into `.gsite` lines the
+// lifter turns into the location a failure reports.
+fn release_sites<a>(c: (&a C)) -> bool {
+    return (c.plat == 0) && (c.backend != 0) && (c.debug == 0) && (c.split == 0) && (c.no_sites == 0) && (c.emit_ir == 0);
+}
+fn sites_on<a>(c: (&a C)) -> bool {
+    return site_table_on(&c) || release_sites(&c);
+}
+// For the LLVM lifter: `.gbase`/`.gpos`/`.gposa` resolved into `.gsite LINE COL PATH` lines, the
+// absolute line and the file relative to the working directory as the site table would name them;
+// a position in the unsafe runtime (or a function that has none) becomes a bare `.gsite`. A
+// function label starts with no position.
+fn site_resolve<a, b>(c: (&a C), text: &b [u8]) -> u8[] {
+    mut out = u8[];
+    mut w = u64[];
+    cwd := host::env(view("PWD"));
+    mut base_line: u64 = 0;
+    mut seen_own = false;
+    mut own_internal = false;
+    mut a: u64 = 0;
+    while a < text.len() {
+        mut e = a;
+        while (e < text.len()) && (text[e] != 10) {
+            e += 1;
+        }
+        next := e + 1;
+        line := text[a: e];
+        if site_at(text, a, e, view(".gbase ")) {
+            site_words_into(line, &mut w);
+            if w.len() == 1 {
+                base_line = w[0];
+            }
+            a = next;
+            continue;
+        }
+        absolute := site_at(text, a, e, view(".gposa "));
+        if absolute || site_at(text, a, e, view(".gpos ")) {
+            site_words_into(line, &mut w);
+            if w.len() == 4 {
+                internal := w[3] != 0;
+                if !seen_own {
+                    seen_own = true;
+                    own_internal = internal;
+                }
+                if internal {
+                    if own_internal {
+                        push_bytes(&mut out, view(".gsite\n"));
+                    }
+                } else {
+                    mut at = w[1];
+                    if !absolute {
+                        at = base_line + w[1];
+                    }
+                    push_bytes(&mut out, view(".gsite "));
+                    decimal(&mut out, at);
+                    out.push(32);
+                    decimal(&mut out, w[2]);
+                    out.push(32);
+                    push_bytes(&mut out, view(site_relative(view(site_path(&c, w[0])), view(cwd))));
+                    out.push(10);
+                }
+            }
+            a = next;
+            continue;
+        }
+        // A function's own label (not a local `.L` one) starts a body: whether it is the runtime's is
+        // what its first position says. (The lifter starts every function with no position.)
+        if (e > a) && (text[e - 1] == 58) && (text[a] != 46) && (text[a] != 32) && (text[a] != 9) {
+            seen_own = false;
+            own_internal = false;
+        }
+        push_bytes(&mut out, view(line));
+        if next <= text.len() {
+            out.push(10);
+        }
+        a = next;
+    }
+    return out;
+}
+// The native remainder of a lowered stream without the `.gsite` lines the lifter read.
+fn strip_gsite<a>(text: &a [u8]) -> u8[] {
+    mut out = u8[];
+    mut a: u64 = 0;
+    while a < text.len() {
+        mut e = a;
+        while (e < text.len()) && (text[e] != 10) {
+            e += 1;
+        }
+        if !((e - a >= 6) && (text[a] == 46) && (text[a + 1] == 103) && (text[a + 2] == 115) && (text[a + 3] == 105) && (text[a + 4] == 116) && (text[a + 5] == 101)) {
+            push_bytes(&mut out, view(text[a: e]));
+            if e < text.len() {
+                out.push(10);
+            }
+        }
+        a = e + 1;
+    }
+    return out;
+}
 // `.gbase LINE`: the line the `.gpos` markers after it count from. A function states its own first
 // line before its body, so the body's markers say how far down the function a statement is and not
 // how far down the file: a body's text is the same wherever in the file it stands.
@@ -3371,7 +3470,7 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
 // Source line/column of the current token. The assembler turns .loc into .debug_line.
 fn emit_loc<a>(c: (&a mut C)) -> unit {
     if c.debug == 0 {
-        if site_table_on(&c) && (c.validating == 0) {
+        if sites_on(&c) && (c.validating == 0) {
             site_pos(&mut c);
         }
         return ();
@@ -14148,12 +14247,30 @@ fn interface_of_method<a>(c: (&a mut C), index: u64) -> u64 {
 }
 // A dyn object's methods in vtable order: the interface's own, then each super's (all_supers order).
 fn dyn_methods<a>(c: (&a mut C), id: u64) -> u64[] {
-    mut out = copy_numbers(&c.interfaces[id - 1].methods);
+    mut all = copy_numbers(&c.interfaces[id - 1].methods);
     supers := all_supers(&mut c, id);
     for i in supers.len() {
         more := copy_numbers(&c.interfaces[supers[i] - 1].methods);
         for j in more.len() {
-            out.push(more[j]);
+            all.push(more[j]);
+        }
+    }
+    // As in Rust, a method with type parameters of its own (`fn fold<A, G: FnMut(..)>`) has no single
+    // vtable entry, and one that takes `self` by value cannot be called through a reference to the
+    // object: it is not part of the dyn object, and calls it on the concrete type and through bounds
+    // only. An interface whose every other method fits is still usable as dyn.
+    mut out = u64[];
+    for i in all.len() {
+        generic := c.funcs[all[i]].types > 1;
+        count := c.funcs[all[i]].count;
+        first := c.funcs[all[i]].first;
+        mut by_value = count != 0;
+        if by_value {
+            receiver := c.params[first];
+            by_value = ty_kind(&mut c, receiver) != 7;
+        }
+        if !(generic && by_value) {
+            out.push(all[i]);
         }
     }
     return out;
@@ -19985,7 +20102,7 @@ fn fn_apply<a, b, d>(c: (&a mut C), u: (&b fncache::Unit), regs: (&d FnReg[]), l
     if (c.validating == 0) & (k != 0) & (k <= c.fnext.len()) {
         c.fnext[k - 1] = c.fnext[k - 1] + 1;
     }
-    if site_table_on(&c) {
+    if sites_on(&c) {
         c.plan_at.push(c.out.len());
         site_base(&mut c, line);
     }
@@ -21772,7 +21889,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     // What a unit is taken back to: after the part's marker (the first body of a part writes it),
     // before the line that says where the function is.
     apply_mark := c.out.len();
-    if site_table_on(&c) && (c.validating == 0) && (position < c.toks.len()) {
+    if sites_on(&c) && (c.validating == 0) && (position < c.toks.len()) {
         c.plan_at.push(c.out.len());
         site_base(&mut c, fn_line);
     }
@@ -43702,7 +43819,7 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
         weak := c.closures[i].weak;
         part(&mut c, view(unit));
         scope_begin(&mut c);
-        if site_table_on(&c) && (start < c.toks.len()) {
+        if sites_on(&c) && (start < c.toks.len()) {
             base_line := c.toks[start].line;
             c.plan_at.push(c.out.len());
             site_base(&mut c, base_line);
@@ -55112,7 +55229,7 @@ fn emit_exit<a, b>(c: (&a mut C), argument: &b [u8]) -> unit {
 // SHA-256 (FIPS 180-4). The interface digests are what make "refuses to proceed when the sources it
 // was built from changed" checkable, so they are a real cryptographic hash and not a checksum.
 // The compiler is built without the standard library, so it carries its own; `lib/sha256.grl` is the
-// user-facing twin with an incremental API. `tools/interface-test.mjs` checks every `source-sha256`
+// user-facing twin with an incremental API. `tools/interface-test.mjs` checks every `source-hash`
 // line against the host's `sha256sum`, which is what keeps this copy honest.
 const S256MASK: u64 = 4294967295;
 fn s256_k() -> u64[] {
@@ -55473,6 +55590,14 @@ pub fn iface_digest<a>(data: &a [u8]) -> u8[] {
     d := sha256(data);
     return iface_hex(&d);
 }
+// The digest an interface records of the source it describes, as 64 lowercase hex characters: the
+// build store's fast_hash. It tells a changed source from an unchanged one, as the trailer's digest
+// tells a damaged interface from a whole one; neither stands against a writer who means harm, and
+// SHA-256 of every source byte was a twelfth of checking a large module.
+pub fn source_digest<a>(data: &a [u8]) -> u8[] {
+    d := fast_hash(data);
+    return iface_hex(&d);
+}
 
 // ---- the interface format (format 4) ----
 //
@@ -55496,7 +55621,7 @@ pub fn iface_digest<a>(data: &a [u8]) -> u8[] {
 // Format 7 added the effect summary rows of every listed function; format 8 gives an `Atomic<T>`
 // its element type; format 9 carries a `dyn` type's bounds; format 10 adds the SIMD vector types
 // (kind 36: the element, and the lane count in the mode).
-const IFACE_VERSION: u64 = 13;
+const IFACE_VERSION: u64 = 14;
 const IFACE_TAG_MODULE: u64 = 1;
 const IFACE_TAG_TRAILER: u64 = 2;
 const IFACE_TAG_LINK: u64 = 3;
@@ -57407,7 +57532,7 @@ fn iface_is_section(tag: u64) -> bool {
 }
 // The bytes of one module's interface. One writer, driven by the declaration store: the header, then
 // one length-counted record per declaration of the public surface, then the trailer that carries the
-// source digest and the digest of every byte before it. `digest` is the source's SHA-256, or empty to
+// source digest and the digest of every byte before it. `digest` is the source's source_digest, or empty to
 // read the source this module was built from; the round-trip command passes the digest the file
 // already records, so re-encoding a loaded module reproduces its bytes exactly.
 fn iface_module_bytes<a, b, d>(c: (&a mut C), m: &b [u8], path: &d [u8], in_std: u64, unsafe_flag: u64, host_opt: u64, digest: &a [u8]) -> u8[] {
@@ -59286,12 +59411,12 @@ fn iface_decode<a, b>(c: (&a mut C), path: &a [u8], bytes: &a [u8], source_path:
         // (the definition sweep) has no source to check: phase 1 has already done it, once.
         if (phase != 2) & (source_path.len() != 0) {
             source := host::read_file(view(source_path));
-            got := iface_digest(&source);
+            got := source_digest(&source);
             if !same(view(got), view(head.digest)) {
                 mut msg = u8[];
                 push_bytes(&mut msg, view("module `"));
                 push_bytes(&mut msg, view(module));
-                push_bytes(&mut msg, view("` changed since this interface was written: the interface records source-sha256 "));
+                push_bytes(&mut msg, view("` changed since this interface was written: the interface records source-hash "));
                 push_bytes(&mut msg, view(head.digest));
                 push_bytes(&mut msg, view(" for \""));
                 push_bytes(&mut msg, view(head.source));
@@ -59342,7 +59467,7 @@ fn iface_decode<a, b>(c: (&a mut C), path: &a [u8], bytes: &a [u8], source_path:
     if p.phase == 0 {
         iface_walk(&mut c, &mut p, view(module), 0, head.unsafe);
         iface_rt_indent(&mut p, view(""));
-        push_bytes(&mut p.rtext, view("sha256 \""));
+        push_bytes(&mut p.rtext, view("source-hash \""));
         push_bytes(&mut p.rtext, view(head.digest));
         push_bytes(&mut p.rtext, view("\""));
         iface_rt_indent(&mut p, view(""));
@@ -59558,12 +59683,12 @@ fn iface_verify_module<a>(c: (&a mut C), index: u64) -> unit {
     }
     // A changed source is staleness, said as such, before any declaration of the surface is compared.
     head := iface_r_head(view(file), view(want));
-    actual := iface_digest(&host::read_file(view(path)));
+    actual := source_digest(&host::read_file(view(path)));
     if !same(view(head.digest), view(actual)) {
         mut msg = u8[];
         push_bytes(&mut msg, view("module `"));
         push_bytes(&mut msg, view(m));
-        push_bytes(&mut msg, view("` changed since this interface was written: the interface records source-sha256 "));
+        push_bytes(&mut msg, view("` changed since this interface was written: the interface records source-hash "));
         push_bytes(&mut msg, view(head.digest));
         push_bytes(&mut msg, view(", but "));
         push_bytes(&mut msg, view(path));
@@ -60759,7 +60884,7 @@ fn iface_source_digest<a, b>(c: (&a mut C), path: &b [u8]) -> u8[] {
         }
     }
     source := host::read_file(view(path));
-    digest := iface_digest(&source);
+    digest := source_digest(&source);
     c.srcdig_paths.push(copy_bytes(view(path)));
     c.srcdig_vals.push(digest.copy());
     c.srcdig_lens.push(source.len());
@@ -62438,6 +62563,9 @@ pub fn main() -> u64 {
         }
         if c.backend != 0 {
             // LLVM IR for the lifted functions beside the native remainder: PATH.ll and PATH.
+            if release_sites(&c) {
+                out = site_resolve(&c, view(out));
+            }
             lowered := llvm::lower(view(out), view("x86_64-unknown-linux-gnu"), &c.facts, c.verify_facts, c.range_facts);
             if lowered.error.len() != 0 {
                 host::print(view(lowered.error));
@@ -62450,7 +62578,7 @@ pub fn main() -> u64 {
             if written != 0 {
                 return written;
             }
-            mut native = lowered.native;
+            mut native = strip_gsite(view(lowered.native));
             if c.probes != 0 {
                 native = optimize::probe_frames(view(native), 0);
             }
@@ -62466,6 +62594,9 @@ pub fn main() -> u64 {
     if c.backend != 0 {
         // LLVM IR (PATH.ll) for the lifted functions; the remainder goes through the usual
         // instruction selection, followed by the calling-convention thunks.
+        if release_sites(&c) {
+            out = site_resolve(&c, view(out));
+        }
         lowered := llvm::lower_for(view(out), target, &c.facts, c.verify_facts, c.range_facts);
         if lowered.error.len() != 0 {
             host::print(view(lowered.error));
@@ -62478,7 +62609,7 @@ pub fn main() -> u64 {
         if written != 0 {
             return written;
         }
-        mut rest = lowered.native;
+        mut rest = strip_gsite(view(lowered.native));
         if c.probes != 0 {
             rest = optimize::probe_frames(view(rest), u64(target == 4));
         }
