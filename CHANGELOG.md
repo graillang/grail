@@ -1,5 +1,16 @@
 ## Unreleased
 
+- Performance (development build): `xform_f32`'s loop is 13 instructions where it was 30, and the
+  program runs in 0.17 s where it took 0.44 (callgrind: 5.76G instructions to 2.75G). An `f32`
+  parameter stays binary32 in its SSE register (`x[i] * a` is `mulss`, not a widening, `mulsd` and a
+  rounding); the no-op drop flags of borrowed slices, tested and cleared only at the exit, no longer
+  hold callee-saved registers, and a register the live-range colouring leaves free goes to a slice's
+  `data` and `len`, so `y[i]`'s check no longer reloads the descriptor; f32 element loads and stores
+  through such a slice are one indexed `movss`. Fixed on the way: an inlined body could keep a value
+  in `%rdx` across a `mulq` that overwrites it (case `inline-mulq-slot-not-in-rdx`), and AArch64 and
+  RISC-V now lower a binary32 constant's `movd` into a float register. Cases
+  `f32-parameter-binary32-slices-in-registers`, `f32-parameter-binary32-other-targets`,
+  `f32-slice-in-registers-index-error`.
 - **Native backend: iterator chains run 18% fewer instructions** (bench/iterchain: 1100M -> 897M
   user-space instructions in the development build). A direct call to a capture-free closure now
   zeroes its environment register with `xorq %rax,%rax`, which the optimiser reads as a write that

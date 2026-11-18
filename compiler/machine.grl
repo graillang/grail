@@ -3772,6 +3772,28 @@ fn float_sse<a, b, c, d>(o: (&a mut Out), op: &b [u8], src: &c [u8], dst: &d [u8
         }
         return false;
     }
+    if eq(view(op), view("movd")) {
+        // A binary32 constant's bits from a general register into a floating-point one, read in its
+        // single-precision view (optimize.grl `f32_const_ops`: `movl $K,%ecx; movd %ecx,%xmm1`).
+        fd := freg(target, view(dst), true);
+        if (fd.len() == 0) || (src.len() < 2) || (src[0] != 37) || (src[1] != 101) {
+            return false;
+        }
+        r := reg(target, view(src));
+        if arm {
+            put(&mut o, view("fmov "));
+            put(&mut o, view(fd));
+            put(&mut o, view(",w"));
+            put(&mut o, view(r[1:]));
+        } else {
+            put(&mut o, view("fmv.w.x "));
+            put(&mut o, view(fd));
+            put(&mut o, view(","));
+            put(&mut o, view(r));
+        }
+        put(&mut o, view("\n"));
+        return true;
+    }
     if eq(view(op), view("movsd")) {
         // A float element loaded straight into a floating-point register.
         fd := freg(target, view(dst), false);
