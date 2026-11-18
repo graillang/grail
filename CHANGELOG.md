@@ -1,5 +1,14 @@
 ## Unreleased
 
+- **The Jolt surface closes with the overlap query.** `gr_jolt_overlap_capsule` is one `CollideShape`
+  of the same capsule the cast sweeps, stopped at the first hit: `abundance/src/jolt.grl` now answers
+  the core's `overlap` contract (a boolean, with `invalid_request` for a capsule shorter than its own
+  caps), and the Jolt parity program grew four overlap cases - the ground, an empty column of air, a
+  prop and an invalid capsule - all matching the direct-Jolt reference (381 values now). docs/jolt.md
+  records the closure: `engine/physics` holds only `world.cpp` and `physics_module.cpp`, a kinematic
+  capsule over terrain chunks, and **the engine has no ragdoll, articulation or vehicle physics** to
+  bind. Also: the abundance suite's `--only=NAME` accepts a probe name on its own
+  (`--only=jolt_layout`), where it used to fail looking for a test program to match it.
 - **Abundance's file/OS services land on Grail, matching `content_paths.hpp` 35/35 lines.**
   `abundance/src/platform_os.grl` carries the engine core's content paths (`packaged`, `root` including
   the `$HOME/.cache` and `/tmp` fallbacks, `shader_root`, `resolve`) as rules over the environment

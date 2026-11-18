@@ -110,10 +110,26 @@ axis is world +Z and whose half height is centre-to-top including the cap - the 
 `invalid_request`, and an invalid capsule (radius not positive, half height below the radius) is
 `invalid_request` too.
 
+`gr_jolt_overlap_capsule` is the core's `overlap`: one `CollideShape` of the same capsule, stopped at
+the first hit, answering the boolean the contract asks for - so the ground counts, an empty column of
+air does not, and a capsule shorter than its own caps is `invalid_request`. Nothing about the hit's
+identity crosses, because `ab::PhysicalWorld::overlap` returns a boolean, not a receipt.
+
 The contact listener records, per step, the body pair, whether the contact was added, persisted or
 removed, the world-space normal and the penetration depth - the fields a contact consumer reads. The
 buffer is bounded at 1024 events per drain and counts what it dropped, because an unbounded event
 queue is exactly what the engine's physics design forbids.
+
+## The surface is closed
+
+`engine/physics` is two translation units: `world.cpp` (the Jolt host) and `physics_module.cpp` (the
+module that drives it). Between them they contain a kinematic-capsule character over streamed terrain
+chunks - which the binding covers as `gr_jolt_character_step` and `gr_jolt_add_static_mesh` - rigid
+bodies, ray and capsule casts, contacts and the overlap query bound here. **The engine has no ragdoll,
+no articulation and no vehicle physics**: there is no joint, articulation or wheel code in the engine
+tree to bind, so none is invented behind the shim. With the overlap query every call the engine makes,
+and every query `ab::PhysicalWorld` states, has a shim entry; a future engine feature that needs one
+more Jolt call adds one entry point the same way.
 
 ## The headless proof
 
@@ -122,11 +138,12 @@ the Grail one through the shim and the FFI, the C++ one against Jolt directly wi
 physics header for the constants. The scene is a 40 x 40 m triangle-mesh ground, a stack of five
 1 m cubes, a sphere and a capsule; 120 fixed steps of 1/30 s; body ids, and every body's
 position/rotation/velocity and sleep state at ticks 0, 1, 30, 60 and 120; the contact counts of every
-step and the first six added events in full; six queries (hit, miss, zero-length, capsule hit,
-capsule miss, invalid capsule); and the character tick over 120 ticks in a second world.
+step and the first six added events in full; six casts (hit, miss, zero-length, capsule hit,
+capsule miss, invalid capsule); four overlap cases (the ground, an empty column of air, a prop, an
+invalid capsule); and the character tick over 120 ticks in a second world.
 
 Every number is an exact bit pattern (f64 as its u64 word, f32 widened to binary64 first), so the
-diff has no tolerance. All **373** values match.
+diff has no tolerance. All **381** values match.
 
 Two findings that shaped the binding:
 
@@ -155,9 +172,8 @@ Two findings that shaped the binding:
   origin, not as `ab::CollisionChunk`; the chunk lease, replacement and readiness policy stay in the
   core (`ChunkCollisionWorld`), which the physics module drives.
 - **No heightfields, no water source, no vehicles, no ragdoll, no debug wireframe.** They are later
-  slices in `engine/physics/DESIGN.md`; nothing here claims them.
-- **Overlap queries are not bound.** The core's `PhysicalWorld` contract has `overlap`; this
-  increment binds ray and shape casts, and the overlap is a later addition.
+  slices in `engine/physics/DESIGN.md`, and none of them exists in the engine yet; nothing here
+  claims them.
 - **The layout check covers the records, not Jolt's internal structs.** None of Jolt's structs
   cross (Jolt's `Vec3` is 16 bytes with SIMD padding; ours carry the values), so there is nothing to
   compare them against - what is checked is the C header against the Grail records, in both
