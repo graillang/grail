@@ -1,5 +1,16 @@
 ## Unreleased
 
+- **Abundance: the landscape authority serialiser is ported and byte-identical.** A Grail program now
+  builds the landscape world's terrain authority the way the engine's own fixture builder does,
+  advances it through the reference-weather epoch, and writes the ABWLA001 stream that
+  `terrain::write_landscape_world_snapshot` writes: all 721,840 bytes of
+  `abundance/tests/parity/world_landscape.abws` match. The epoch runs the same water balance (rain,
+  infiltration, groundwater drainage through an `expm1` that agrees with glibc's), the P1 depression
+  hierarchy, the facet routing, the FIFO fill/spill lake solve with its `std::midpoint` stage
+  bisection, the body identity inheritance and the engine's Richardson substep gate (four rejected
+  trials, sixteen accepted 1/16-day steps). The bytes are ABWLA001 around ABCATCH1 (with ABLAND01 and
+  the final ABLAKE01) and the initial ABLAKE01, every section checksummed. The reference is
+  compiled with `-ffp-contract=off` against Abundance's own library (`landscape_write`, 41 lines).
 - **Abundance port: the engine RHI, with the stage-7 exit gate passing.** Four new modules port
   engine/core's device, memory, bindless and pipelines files: `rhi_engine_device` (instance with the
   Khronos layer and synchronisation validation enabled from inside the program, the engine's
