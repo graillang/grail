@@ -2791,6 +2791,105 @@ fn debug_sections<a, b>(c: &a C, entry: &b [u8]) -> u8[] {
 fn site_table_on<a>(c: (&a C)) -> bool {
     return (c.plat == 0) && (c.backend == 0) && (c.debug == 0) && (c.split == 0) && (c.no_sites == 0);
 }
+// A release (LLVM) build of a Linux target records statement positions too: no table is built from
+// them (the lifted code's addresses are clang's), but site_resolve turns them into `.gsite` lines the
+// lifter turns into the location a failure reports.
+fn release_sites<a>(c: (&a C)) -> bool {
+    return (c.plat == 0) && (c.backend != 0) && (c.debug == 0) && (c.split == 0) && (c.no_sites == 0) && (c.emit_ir == 0);
+}
+fn sites_on<a>(c: (&a C)) -> bool {
+    return site_table_on(&c) || release_sites(&c);
+}
+// For the LLVM lifter: `.gbase`/`.gpos`/`.gposa` resolved into `.gsite LINE COL PATH` lines, the
+// absolute line and the file relative to the working directory as the site table would name them;
+// a position in the unsafe runtime (or a function that has none) becomes a bare `.gsite`. A
+// function label starts with no position.
+fn site_resolve<a, b>(c: (&a C), text: &b [u8]) -> u8[] {
+    mut out = u8[];
+    mut w = u64[];
+    cwd := host::env(view("PWD"));
+    mut base_line: u64 = 0;
+    mut seen_own = false;
+    mut own_internal = false;
+    mut a: u64 = 0;
+    while a < text.len() {
+        mut e = a;
+        while (e < text.len()) && (text[e] != 10) {
+            e += 1;
+        }
+        next := e + 1;
+        line := text[a: e];
+        if site_at(text, a, e, view(".gbase ")) {
+            site_words_into(line, &mut w);
+            if w.len() == 1 {
+                base_line = w[0];
+            }
+            a = next;
+            continue;
+        }
+        absolute := site_at(text, a, e, view(".gposa "));
+        if absolute || site_at(text, a, e, view(".gpos ")) {
+            site_words_into(line, &mut w);
+            if w.len() == 4 {
+                internal := w[3] != 0;
+                if !seen_own {
+                    seen_own = true;
+                    own_internal = internal;
+                }
+                if internal {
+                    if own_internal {
+                        push_bytes(&mut out, view(".gsite\n"));
+                    }
+                } else {
+                    mut at = w[1];
+                    if !absolute {
+                        at = base_line + w[1];
+                    }
+                    push_bytes(&mut out, view(".gsite "));
+                    decimal(&mut out, at);
+                    out.push(32);
+                    decimal(&mut out, w[2]);
+                    out.push(32);
+                    push_bytes(&mut out, view(site_relative(view(site_path(&c, w[0])), view(cwd))));
+                    out.push(10);
+                }
+            }
+            a = next;
+            continue;
+        }
+        // A function's own label (not a local `.L` one) starts a body: whether it is the runtime's is
+        // what its first position says. (The lifter starts every function with no position.)
+        if (e > a) && (text[e - 1] == 58) && (text[a] != 46) && (text[a] != 32) && (text[a] != 9) {
+            seen_own = false;
+            own_internal = false;
+        }
+        push_bytes(&mut out, view(line));
+        if next <= text.len() {
+            out.push(10);
+        }
+        a = next;
+    }
+    return out;
+}
+// The native remainder of a lowered stream without the `.gsite` lines the lifter read.
+fn strip_gsite<a>(text: &a [u8]) -> u8[] {
+    mut out = u8[];
+    mut a: u64 = 0;
+    while a < text.len() {
+        mut e = a;
+        while (e < text.len()) && (text[e] != 10) {
+            e += 1;
+        }
+        if !((e - a >= 6) && (text[a] == 46) && (text[a + 1] == 103) && (text[a + 2] == 115) && (text[a + 3] == 105) && (text[a + 4] == 116) && (text[a + 5] == 101)) {
+            push_bytes(&mut out, view(text[a: e]));
+            if e < text.len() {
+                out.push(10);
+            }
+        }
+        a = e + 1;
+    }
+    return out;
+}
 // `.gbase LINE`: the line the `.gpos` markers after it count from. A function states its own first
 // line before its body, so the body's markers say how far down the function a statement is and not
 // how far down the file: a body's text is the same wherever in the file it stands.
@@ -3371,7 +3470,7 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
 // Source line/column of the current token. The assembler turns .loc into .debug_line.
 fn emit_loc<a>(c: (&a mut C)) -> unit {
     if c.debug == 0 {
-        if site_table_on(&c) && (c.validating == 0) {
+        if sites_on(&c) && (c.validating == 0) {
             site_pos(&mut c);
         }
         return ();
@@ -14148,12 +14247,30 @@ fn interface_of_method<a>(c: (&a mut C), index: u64) -> u64 {
 }
 // A dyn object's methods in vtable order: the interface's own, then each super's (all_supers order).
 fn dyn_methods<a>(c: (&a mut C), id: u64) -> u64[] {
-    mut out = copy_numbers(&c.interfaces[id - 1].methods);
+    mut all = copy_numbers(&c.interfaces[id - 1].methods);
     supers := all_supers(&mut c, id);
     for i in supers.len() {
         more := copy_numbers(&c.interfaces[supers[i] - 1].methods);
         for j in more.len() {
-            out.push(more[j]);
+            all.push(more[j]);
+        }
+    }
+    // As in Rust, a method with type parameters of its own (`fn fold<A, G: FnMut(..)>`) has no single
+    // vtable entry, and one that takes `self` by value cannot be called through a reference to the
+    // object: it is not part of the dyn object, and calls it on the concrete type and through bounds
+    // only. An interface whose every other method fits is still usable as dyn.
+    mut out = u64[];
+    for i in all.len() {
+        generic := c.funcs[all[i]].types > 1;
+        count := c.funcs[all[i]].count;
+        first := c.funcs[all[i]].first;
+        mut by_value = count != 0;
+        if by_value {
+            receiver := c.params[first];
+            by_value = ty_kind(&mut c, receiver) != 7;
+        }
+        if !(generic && by_value) {
+            out.push(all[i]);
         }
     }
     return out;
@@ -19985,7 +20102,7 @@ fn fn_apply<a, b, d>(c: (&a mut C), u: (&b fncache::Unit), regs: (&d FnReg[]), l
     if (c.validating == 0) & (k != 0) & (k <= c.fnext.len()) {
         c.fnext[k - 1] = c.fnext[k - 1] + 1;
     }
-    if site_table_on(&c) {
+    if sites_on(&c) {
         c.plan_at.push(c.out.len());
         site_base(&mut c, line);
     }
@@ -21772,7 +21889,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     // What a unit is taken back to: after the part's marker (the first body of a part writes it),
     // before the line that says where the function is.
     apply_mark := c.out.len();
-    if site_table_on(&c) && (c.validating == 0) && (position < c.toks.len()) {
+    if sites_on(&c) && (c.validating == 0) && (position < c.toks.len()) {
         c.plan_at.push(c.out.len());
         site_base(&mut c, fn_line);
     }
@@ -43702,7 +43819,7 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
         weak := c.closures[i].weak;
         part(&mut c, view(unit));
         scope_begin(&mut c);
-        if site_table_on(&c) && (start < c.toks.len()) {
+        if sites_on(&c) && (start < c.toks.len()) {
             base_line := c.toks[start].line;
             c.plan_at.push(c.out.len());
             site_base(&mut c, base_line);
@@ -62446,6 +62563,9 @@ pub fn main() -> u64 {
         }
         if c.backend != 0 {
             // LLVM IR for the lifted functions beside the native remainder: PATH.ll and PATH.
+            if release_sites(&c) {
+                out = site_resolve(&c, view(out));
+            }
             lowered := llvm::lower(view(out), view("x86_64-unknown-linux-gnu"), &c.facts, c.verify_facts, c.range_facts);
             if lowered.error.len() != 0 {
                 host::print(view(lowered.error));
@@ -62458,7 +62578,7 @@ pub fn main() -> u64 {
             if written != 0 {
                 return written;
             }
-            mut native = lowered.native;
+            mut native = strip_gsite(view(lowered.native));
             if c.probes != 0 {
                 native = optimize::probe_frames(view(native), 0);
             }
@@ -62474,6 +62594,9 @@ pub fn main() -> u64 {
     if c.backend != 0 {
         // LLVM IR (PATH.ll) for the lifted functions; the remainder goes through the usual
         // instruction selection, followed by the calling-convention thunks.
+        if release_sites(&c) {
+            out = site_resolve(&c, view(out));
+        }
         lowered := llvm::lower_for(view(out), target, &c.facts, c.verify_facts, c.range_facts);
         if lowered.error.len() != 0 {
             host::print(view(lowered.error));
@@ -62486,7 +62609,7 @@ pub fn main() -> u64 {
         if written != 0 {
             return written;
         }
-        mut rest = lowered.native;
+        mut rest = strip_gsite(view(lowered.native));
         if c.probes != 0 {
             rest = optimize::probe_frames(view(rest), u64(target == 4));
         }
