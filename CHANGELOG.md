@@ -8,6 +8,10 @@
   marker counts out with a plain increment and one load; the scheduler's monitor orders it with
   `FlushProcessWriteBuffers` before it hands a stuck call's worker on (docs/design/concurrency-model.md,
   2.4.1). With this every target has the asymmetric-fence marker.
+- **Fix: a per-module build where two modules coerce a function links.** Each module's object carried
+  its own global `grail_fn_thunk` (the adapter that lets a named function act as an `Fn` value), so
+  the link failed with `duplicate symbol: grail_fn_thunk`. It is now a weak definition like the
+  other shared adapters, and the linker keeps one.
 - **f32 element loads and stores and f32 constants in development builds take no detours.** An f32
   element now loads and stores with one `movss` (it went through `%eax`), and an f32 constant hoisted
   into an SSE register is rounded to binary32 once, so `v * damping - gravity * dt` is `mulss` and
