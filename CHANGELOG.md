@@ -1,5 +1,8 @@
 ## Unreleased
 
+- `abundance/README.md`: the parity section's hand-summed totals (two "currently compares" lines
+  and four "All N values match" lines left by concurrent merges) are replaced by one sentence; the
+  per-test bullets carry the counts and the suite prints them.
 - **Abundance: a world cache load's semantic checks are ported and gated on the engine's verdicts.**
   `valid_world_landscape` decodes the landscape world's embedded ABWLA001 (a new reader, the
   writer's inverse), rebuilds the authority, replays its reference operation and re-derives every
