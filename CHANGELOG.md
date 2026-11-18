@@ -1,5 +1,11 @@
 ## Unreleased
 
+- **The performance chapter explains the `fib(32)` scheduler rows.** They mostly measure g++'s
+  recursive inlining in oneTBB's twin (46 to 50 million instructions for serial `fib(32)`, against
+  67 million for clang's C and 75 million for Grail's release build, which is clang's loop plus one
+  register move), not Grail's join, which costs about the same as oneTBB's per join. The chapter's
+  earlier explanation (hidden registers in Grail's calling convention) was wrong and is removed.
+
 - The FFI test shim builds for Windows without a C library's headers again: `immintrin.h` pulled in
   `<stdlib.h>` through `mm_malloc.h`, which a Linux host has no MSVC copy of, so the Windows check
   (and with it every post-landing run) failed before any case ran.

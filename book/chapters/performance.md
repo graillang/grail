@@ -248,8 +248,14 @@ that is a finding in its own right. Everything else is behind under either load:
   allocates nothing.
 - **The main thread is not a worker.** Joining from `main` posts the work and waits to be woken,
   as rayon does; oneTBB's main thread is a slot of its arena and joins directly.
-- **The calls themselves are slower.** Serial `fib(32)`, with no scheduler involved, is 3x
-  oneTBB's: Grail's calling convention carries three hidden registers through every call.
+- **The `fib(32)` rows measure GCC's recursive inlining more than the scheduler.** oneTBB's twin is
+  C++ built with g++, which inlines `fib` into itself: serial `fib(32)` takes 46 to 50 million
+  instructions there. LLVM never inlines a recursive call into itself, so clang's C (67 million)
+  and rayon's Rust don't get this either, and neither does Grail's release build (75 million, the
+  same loop as clang's with one more register move). Per join, Grail's work-stealing join costs
+  about 1,050 instructions against oneTBB's 920, and its main thread runs fewer instructions than
+  oneTBB's. What remains of the gap in the join rows is that serial difference plus the noise of
+  wall time on a loaded machine.
 - **The importer gets fewer rounds by design.** At most a quarter of the workers run Background
   work, where oneTBB lets its low-priority arena take every idle thread.
 
