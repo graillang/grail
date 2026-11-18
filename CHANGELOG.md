@@ -20,6 +20,11 @@
   (`lighting/common/abl_pass_common.hlsli` holds the shared push block) and structs another entry
   declares (`direct_lighting_characters.cs` binds `DirectPush` from `direct_lighting.cs`), still
   cross-checked against every block's own `OpMemberDecorate`.
+- **The Faraday cage's content is ported.** `abundance/src/faraday_cage.grl` carries
+  `item_content/faraday_cage` (cmake/tx/combat.cmake): the Faraday construction material (copper mesh
+  on steel plate), its composition, the mesh panel's authored recipe and the piece fill fractions;
+  49 values match a reference compiling `Private/item_content/faraday_cage.cpp`. The combat domain's
+  tx action layer needs the pinned build's action registry and is the next increment.
 - **The construction catalogue is computed and ported, with the shape monument placement
   reads.** `abundance/src/construction_catalog.grl` carries the ConstructionModule record (id,
   kind, dimensions, sorted occupied cells), the material tiers and build modules, and the
