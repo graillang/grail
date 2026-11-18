@@ -191,3 +191,61 @@ fn product_error(a:f64,b:f64,p:f64)->f64{
     ca:=134217729.0*a;ah:=ca-(ca-a);al:=a-ah;cb:=134217729.0*b;bh:=cb-(cb-b);bl:=b-bh;
     return ((ah*bh-p)+ah*bl+al*bh)+al*bl;
 }
+// asin after fdlibm's __ieee754_asin (what glibc's double asin evaluates):
+// the same rational approximation, the same two branches around |x| = 0.5 and
+// 0.975, and the same pi/4 reconstruction. The huge+x guard forces the inexact
+// flag for tiny x; the value is x either way.
+@no_block
+pub fn asin(x:f64)->f64{
+    hx:=high(x);ix:=hx&2147483647;
+    if ix>=1072693248{
+        lx:=i64(bits(x)&4294967295);
+        // |x| == 1: +-pi/2, split hi/lo so the sum rounds once.
+        if ((ix-1072693248)|lx)==0{return x*1.57079632679489655800e+00+x*6.12323399573676603587e-17;}
+        return (x-x)/(x-x);
+    }
+    if ix<1071644672{
+        if ix<1044381696{return x;}
+        t:=x*x;
+        p:=t*(1.66666666666666657415e-01+t*(-3.25565818622400915405e-01+t*(2.01212532134862925881e-01+t*(-4.00555345006794114027e-02+t*(7.91534994289814532176e-04+t*3.47933107596021167570e-05)))));
+        q:=1.0+t*(-2.40339491173441421878e+00+t*(2.02094576023350569471e+00+t*(-6.88283971605453293030e-01+t*7.70381505559019352791e-02)));
+        return x+x*(p/q);
+    }
+    w:=1.0-x.abs();t2:=w*0.5;
+    p2:=t2*(1.66666666666666657415e-01+t2*(-3.25565818622400915405e-01+t2*(2.01212532134862925881e-01+t2*(-4.00555345006794114027e-02+t2*(7.91534994289814532176e-04+t2*3.47933107596021167570e-05)))));
+    q2:=1.0+t2*(-2.40339491173441421878e+00+t2*(2.02094576023350569471e+00+t2*(-6.88283971605453293030e-01+t2*7.70381505559019352791e-02)));
+    s:=t2.sqrt();
+    if ix>=1072640819{
+        t:=1.57079632679489655800e+00-(2.0*(s+s*(p2/q2))-6.12323399573676603587e-17);
+        if hx<0{return -t;}return t;
+    }
+    w2:=f64_from_bits(bits(s)&18446744069414584320);
+    c:=(t2-w2*w2)/(s+w2);
+    r:=p2/q2;
+    pp:=2.0*s*r-(6.12323399573676603587e-17-2.0*c);
+    qq:=7.85398163397448278999e-01-2.0*w2;
+    tt:=7.85398163397448278999e-01-(pp-qq);
+    if hx<0{return -tt;}return tt;
+}
+// The exact remainder of a division (IEEE 754 remainder-of-division, C fmod):
+// no value is ever rounded, so this is the true remainder by construction.
+// NaN when either input is NaN, the divisor is zero or the dividend is
+// infinite; x itself when the divisor is infinite.
+@no_block
+pub fn fmod(x:f64,y:f64)->f64{
+    if x.is_nan()||y.is_nan(){return x+y;}
+    zero:=0.0;
+    if (bits(x)&9223372036854775807)==9218868437227405312{return zero/zero;}
+    if (bits(y)&9223372036854775807)==9218868437227405312{return x;}
+    if y==zero{return zero/zero;}
+    mut r=x;if r<zero{r=-r;}
+    mut d=y;if d<zero{d=-d;}
+    if r<d{return x;}
+    while r>=d{
+        mut s=d;
+        while s<=r/2.0{s=s*2.0;}
+        r=r-s;
+    }
+    if x<zero{return -r;}
+    return r;
+}
