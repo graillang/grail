@@ -36,7 +36,11 @@ intrinsics twins instead.
 | `dot_f32`, `dot_f64` | a strict-IEEE dot product over one million elements: a serial sum C does not vectorise, so the ratio is the distance to scalar C |
 
 `bench/rivals/` holds a Rust, a Go and a Zig twin of each program (and of `ffi_call`, which is on
-`gaps12-sched`), plus the scheduler twins (`sched-rayon/`, `sched_tbb.cpp`).
+`gaps12-sched`), plus the scheduler twins (`sched-rayon/`, `sched_tbb.cpp`). The engine-shaped programs (`hashmap`,
+`bintrees`, `strings`, `json`, `dyncall`, `iterchain`, `ecs`) and `chan` also have a C++20 twin,
+`NAME.cpp` (`std::unordered_map`, `std::unique_ptr` nodes, `std::string`, a `std::variant` DOM,
+virtual functions, ranges views, `std::vector<float>` columns, a mutex/condition-variable channel);
+each file's header states its idiomatic choice.
 `bun tools/bench-rivals.mjs` times all of them against Grail's two builds, and
 `bun tools/sched-rivals.mjs` the scheduler against rayon and oneTBB; the tables are in
 `docs/design/runtime-parity.md`, "Against other languages". `bench/results/` holds their latest
