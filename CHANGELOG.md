@@ -1,5 +1,18 @@
 ## Unreleased
 
+- **Abundance: the terrain palette classifier is ported and bit-exact.** `src/terrain_palette.grl`
+  implements `classify_terrain_surface` (the named primary/secondary surface that relabels the
+  subsurface's top metre, the continuous colour and the six overlay layers, the bedrock colour),
+  the field-grid samplers (`sample_terrain_palette` with its secondary-biome blend, the primary-only
+  query, the 9-probe blended layer weights, the bilinear bedrock field) and the three small modules
+  it reads: `evaluate_surface_ecology`/`resolve_surface_cover` and `derive_substrate_evidence`.
+  `src/biome_ecology.grl` adds the ecology underneath: `evaluate_biome_suitability` (every
+  candidate, the sub-biome transfers, the normalisation), `resolve_biome_blend`'s family-first
+  label, `biome_meadow_region` and the presentation-family fold. `tests/palette_test.grl` gates 121
+  digests — a 60,000-case synthetic sweep over both classifiers, a 60,000-case ecology sweep and
+  every cell of the fixture world through the samplers — against Abundance's own sources built at
+  `-ffp-contract=off`. Every one matches.
+
 - **The shader pipeline's layout grammar reads the geometry tree's shapes.** `abundance/tools/shader-lib.mjs`
   now skips a `template<...> struct` wrapper whole (`ABReadOnly<T>`, the `AB_LOAD_RO` NonWritable load
   helper) and drops leading `[[...]]` attribute runs before a field's type, so
