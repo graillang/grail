@@ -1,25 +1,56 @@
 module chan;
 use sync;
+use host;
 
 // A bounded multi-producer multi-consumer channel (docs/design/concurrency-model.md, D7: bounded MPMC,
-// no unbounded channel). The ring is allocated once, at creation; `send` waits while it is full and
-// `recv` while it is empty, both by parking (lib/sync.grl), so a waiting task gives its worker away
-// and a waiting thread sleeps. `close` wakes everyone: a send on a closed channel answers false and
-// drops its value, a recv answers None once the ring is empty.
+// no unbounded channel). It is crossbeam-channel's array flavour: a ring of `capacity` slots, each
+// with a stamp naming the operation that may use it next, and two counters - `head`, the next slot
+// to receive from, and `tail`, the next slot to send to. Neither side takes a lock:
+//
+//   send  claims the slot at `tail` by advancing `tail` with one compare-exchange, writes the value,
+//         and publishes it by storing the slot's stamp (`tail + 1`, release);
+//   recv  claims the slot at `head` once its stamp says a value is there, advances `head` the same
+//         way, reads the value, and frees the slot for the next lap (stamp `head + lap`, release).
+//
+// A counter is {lap, index}: the low bits below `mark` are the slot index, `mark` is the closed
+// bit (on `tail` only) and every bit from `lap` up counts laps, so a stamp a whole lap behind tells a
+// full ring from an empty one. A side that cannot go on spins and yields, as crossbeam's Backoff
+// does, and only then parks: it counts itself in `waiting_*`, reads the gate's
+// wake-up count, looks at the ring once more and sleeps on its Condition until the count moves. The other side looks at
+// that count after its own compare-exchange, so a hand-off that nobody is parked for never touches
+// the gate. Both the count and the counters are sequentially consistent, so either the parking side
+// sees the change or the changing side sees it parking - no wake-up is lost. `close` sets the mark
+// and wakes everyone: a send on a closed channel answers false and drops its value, a recv answers
+// None once the ring is empty.
 //
 // It is shared by reference between the threads or tasks that use it - wrap it in an `rc::Arc` to
-// hand it to `thread::spawn`.
-struct Ring<T> {
-    items: T?[],
-    head: u64,
-    len: u64,
-    closed: bool
+// hand it to `thread::spawn`. A task that waits spins on its worker for at most a few microseconds,
+// then parks and gives the worker away.
+pub unsafe struct Channel<T>: transferable, shareable {
+    // One block: `head`, `tail` and the two waiting counts each on a cache line of their own (as
+    // crossbeam pads them), then the slots, a stamp word and a value word each. `block` is what
+    // `alloc` gave and `base` the first 64-byte boundary in it. `cells` holds one `Atomic<u64>`
+    // handle per counter and per stamp, each naming its word in the block, so an operation is a
+    // method on `&Atomic<u64>`; the block owns the words and the table only names them.
+    block: *mut u64,
+    base: u64,
+    cells: *mut u64,
+    cap: u64,
+    mark: u64,
+    lap: u64,
+    gate: Mutex<u64>,
+    receivers: sync::Condition,
+    senders: sync::Condition
 }
-pub struct Channel<T> {
-    ring: Mutex<Ring<T>>,
-    not_empty: sync::Condition,
-    not_full: sync::Condition
-}
+
+// The cells, by their place in the table.
+const HEAD: u64 = 0;
+const TAIL: u64 = 1;
+const WAITING_RECEIVERS: u64 = 2;
+const WAITING_SENDERS: u64 = 3;
+const STAMPS: u64 = 4;
+// Where the slots start in the block, in bytes.
+const SLOTS: u64 = 256;
 
 // A channel holding at most `capacity` values (at least one).
 pub fn bounded<T>(capacity: u64) -> Channel<T> {
@@ -27,52 +58,267 @@ pub fn bounded<T>(capacity: u64) -> Channel<T> {
     if n == 0 {
         n = 1;
     }
-    mut items: T?[] = [];
-    for i in n {
-        items.push(None);
+    mut mark = 1;
+    while mark <= n {
+        mark = mark * 2;
     }
-    return Channel { ring: Mutex::new(Ring { items: items, head: 0, len: 0, closed: false }), not_empty: sync::condition(), not_full: sync::condition() };
+    unsafe {
+        // Zeroed: every counter starts at 0; slot i's stamp is i.
+        block := alloc(u64, SLOTS / 8 + 2 * n + 8);
+        at := block.addr();
+        base := wrapping_add(at, 63) - (wrapping_add(at, 63) % 64);
+        cells := alloc(u64, STAMPS + n);
+        for k in STAMPS {
+            cells.add(k).write(base + 64 * k);
+        }
+        for i in n {
+            ptr_from_addr(u64, base + SLOTS + 16 * i).write(i);
+            cells.add(STAMPS + i).write(base + SLOTS + 16 * i);
+        }
+        return Channel { block: block, base: base, cells: cells, cap: n, mark: mark, lap: mark * 2, gate: Mutex::new(0), receivers: sync::condition(), senders: sync::condition() };
+    }
 }
 
-fn shut<a, T>(r: (&a mut Ring<T>), unused: u64) -> u64 {
-    r.closed = true;
+// Waiting goes as crossbeam's Backoff does: `spin` doubles a run of CPU wait hints up to 64 (step 6),
+// `snooze` does the same and then yields the processor (steps 7 to 10), and past that the waiter
+// parks. A retry after a lost compare-exchange only spins.
+const SPIN_LIMIT: u64 = 6;
+const PATIENCE: u64 = 10;
+
+fn hints(step: u64) -> unit {
+    mut n = 1;
+    mut s = step;
+    while (s > 0) && (n < 64) {
+        n = n * 2;
+        s -= 1;
+    }
+    for i in n {
+        spin_hint();
+    }
+}
+// Answers the next step.
+fn spin(step: u64) -> u64 {
+    hints(step);
+    if step <= SPIN_LIMIT {
+        return step + 1;
+    }
+    return step;
+}
+fn snooze(step: u64) -> u64 {
+    if step <= SPIN_LIMIT {
+        hints(step);
+    } else {
+        host::yield_now();
+    }
+    return step + 1;
+}
+
+fn idle(g: (&mut u64), unused: u64) -> u64 {
+    return 0;
+}
+// The gate's payload counts wake-ups. A thread about to park reads it, looks at the ring once more,
+// and sleeps only until it changes; a waker bumps it under the gate before notifying. So a wake-up
+// that lands between the look and the sleep is seen either by the look or by the count.
+fn peek(g: (&mut u64), unused: u64) -> u64 {
+    return load(g);
+}
+fn bump(g: (&mut u64), unused: u64) -> u64 {
+    exchange(g, wrapping_add(load(g), 1));
     return 0;
 }
 
-// A value received leaves the ring's lock, so it may hold no borrow.
-impl<T: Owned> Channel<T> {
-    // Wait for room and send `value`; false when the channel is closed (the value is dropped).
-    pub fn send(self: (&Channel<T>), value: T) -> bool {
-        sent := self.not_full.wait_with(&self.ring, value, |r: (&Ring<T>), v: (&T)| -> bool r.closed || (r.len < r.items.len()), |r: (&mut Ring<T>), v: T| -> bool {
-            if r.closed {
-                return false;
-            }
-            at := (r.head + r.len) % r.items.len();
-            r.items[at] = Some(v);
-            r.len += 1;
-            return true;
-        });
-        self.not_empty.notify_one();
-        return sent;
+impl<T> Channel<T> {
+    // The atomic word the table names at `k`, for as long as the channel is borrowed.
+    fn cell<a>(self: (&a Channel<T>), k: u64) -> (&a Atomic<u64>) {
+        unsafe {
+            return self.cells.add(k).cast(Atomic<u64>).as_ref();
+        }
     }
-    // Wait for a value; None once the channel is closed and empty.
-    pub fn recv(self: (&Channel<T>)) -> T? {
-        got := self.not_empty.wait_with(&self.ring, 0, |r: (&Ring<T>), u: (&u64)| -> bool r.closed || (r.len != 0), |r: (&mut Ring<T>), u: u64| -> T? {
-            if r.len == 0 {
-                return None;
-            }
-            v := exchange(&mut r.items[r.head], None);
-            r.head = (r.head + 1) % r.items.len();
-            r.len -= 1;
-            return v;
-        });
-        self.not_full.notify_one();
-        return got;
+    // The counter after `at`, whose slot index is `index`: the next index, or index 0 a lap on.
+    fn next(self: (&Channel<T>), at: u64, index: u64) -> u64 {
+        if index + 1 < self.cap {
+            return wrapping_add(at, 1);
+        }
+        return wrapping_add(wrapping_sub(at, index), self.lap);
+    }
+    // A receiver could go on: a value is claimed or there, or the channel is closed.
+    fn can_recv(self: (&Channel<T>)) -> bool {
+        tail := self.cell(TAIL).load();
+        head := self.cell(HEAD).load();
+        return ((tail & self.mark) != 0) || (wrapping_sub(tail, tail & self.mark) != head);
+    }
+    // A sender could go on: the ring has room, or the channel is closed.
+    fn can_send(self: (&Channel<T>)) -> bool {
+        tail := self.cell(TAIL).load();
+        head := self.cell(HEAD).load();
+        return ((tail & self.mark) != 0) || (wrapping_add(head, self.lap) != tail);
+    }
+    // Wake one parked thread of a side, if one may be parked. The caller's compare-exchange came
+    // first, so a thread not yet counted will see its change when it looks before sleeping; the
+    // gate orders this notify after any counted thread's look.
+    fn wake_receiver(self: (&Channel<T>)) -> unit {
+        if self.cell(WAITING_RECEIVERS).load() != 0 {
+            self.gate.lock_with(0, bump);
+            self.receivers.notify_one();
+        }
+    }
+    fn wake_sender(self: (&Channel<T>)) -> unit {
+        if self.cell(WAITING_SENDERS).load() != 0 {
+            self.gate.lock_with(0, bump);
+            self.senders.notify_one();
+        }
+    }
+    fn park_receiver(self: (&Channel<T>)) -> unit {
+        self.cell(WAITING_RECEIVERS).fetch_add(1);
+        seen := self.gate.lock_with(0, peek);
+        if !self.can_recv() {
+            self.receivers.wait_with(&self.gate, seen, |g: (&u64), was: (&u64)| -> bool load(g) != load(was), idle);
+        }
+        self.cell(WAITING_RECEIVERS).fetch_sub(1);
+    }
+    fn park_sender(self: (&Channel<T>)) -> unit {
+        self.cell(WAITING_SENDERS).fetch_add(1);
+        seen := self.gate.lock_with(0, peek);
+        if !self.can_send() {
+            self.senders.wait_with(&self.gate, seen, |g: (&u64), was: (&u64)| -> bool load(g) != load(was), idle);
+        }
+        self.cell(WAITING_SENDERS).fetch_sub(1);
     }
     // No more values will be sent: waiting senders and receivers wake.
     pub fn close(self: (&Channel<T>)) -> unit {
-        self.ring.lock_with(0, shut<T>);
-        self.not_empty.notify_all();
-        self.not_full.notify_all();
+        was := self.cell(TAIL).fetch_or(self.mark);
+        if (was & self.mark) == 0 {
+            self.gate.lock_with(0, bump);
+            self.receivers.notify_all();
+            self.senders.notify_all();
+        }
+    }
+}
+
+// A value received crosses between threads, so it may hold no borrow.
+impl<T: Owned> Channel<T> {
+    // Wait for room and send `value`; false when the channel is closed (the value is dropped).
+    pub fn send(self: (&Channel<T>), value: T) -> bool {
+        mut step = 0;
+        mut tail = self.cell(TAIL).load_relaxed();
+        while true {
+            if (tail & self.mark) != 0 {
+                return false;
+            }
+            index := tail & (self.mark - 1);
+            stamp := self.cell(STAMPS + index).load_acquire();
+            if stamp == tail {
+                seen := self.cell(TAIL).compare_exchange(tail, self.next(tail, index));
+                if seen == tail {
+                    unsafe {
+                        ptr_from_addr(T, self.base + SLOTS + 16 * index + 8).write(value);
+                    }
+                    self.cell(STAMPS + index).store_release(wrapping_add(tail, 1));
+                    self.wake_receiver();
+                    return true;
+                }
+                tail = seen;
+                step = spin(step);
+            } else {
+                if wrapping_add(stamp, self.lap) == wrapping_add(tail, 1) {
+                    // The slot still holds last lap's value: full, unless a receiver is taking it.
+                    fence();
+                    if wrapping_add(self.cell(HEAD).load_relaxed(), self.lap) == tail {
+                        if step > PATIENCE {
+                            self.park_sender();
+                            step = 0;
+                        } else {
+                            step = snooze(step);
+                        }
+                    } else {
+                        step = spin(step);
+                    }
+                } else {
+                    // Another sender claimed the slot and has not published it yet.
+                    step = snooze(step);
+                }
+                tail = self.cell(TAIL).load_relaxed();
+            }
+        }
+        return false;
+    }
+    // Wait for a value; None once the channel is closed and empty.
+    pub fn recv(self: (&Channel<T>)) -> T? {
+        mut step = 0;
+        mut head = self.cell(HEAD).load_relaxed();
+        while true {
+            index := head & (self.mark - 1);
+            stamp := self.cell(STAMPS + index).load_acquire();
+            if stamp == wrapping_add(head, 1) {
+                seen := self.cell(HEAD).compare_exchange(head, self.next(head, index));
+                if seen == head {
+                    mut v: T? = None;
+                    unsafe {
+                        v = Some(ptr_from_addr(T, self.base + SLOTS + 16 * index + 8).read());
+                    }
+                    self.cell(STAMPS + index).store_release(wrapping_add(head, self.lap));
+                    self.wake_sender();
+                    return v;
+                }
+                head = seen;
+                step = spin(step);
+            } else {
+                if stamp == head {
+                    // The slot is free this lap: empty, unless a sender has claimed it.
+                    fence();
+                    tail := self.cell(TAIL).load_relaxed();
+                    if wrapping_sub(tail, tail & self.mark) == head {
+                        if (tail & self.mark) != 0 {
+                            return None;
+                        }
+                        if step > PATIENCE {
+                            self.park_receiver();
+                            step = 0;
+                        } else {
+                            step = snooze(step);
+                        }
+                    } else {
+                        step = spin(step);
+                    }
+                } else {
+                    // Another receiver claimed the slot and has not freed it yet.
+                    step = snooze(step);
+                }
+                head = self.cell(HEAD).load_relaxed();
+            }
+        }
+        return None;
+    }
+}
+
+// The values still in the ring are dropped with the channel, then its slots are freed.
+impl<T> Drop for Channel<T> {
+    fn drop(self: &mut Channel<T>) {
+        head := self.cell(HEAD).load();
+        tail := self.cell(TAIL).load();
+        hix := head & (self.mark - 1);
+        tix := tail & (self.mark - 1);
+        mut len = 0;
+        if hix < tix {
+            len = tix - hix;
+        } else if hix > tix {
+            len = self.cap - hix + tix;
+        } else if wrapping_sub(tail, tail & self.mark) != head {
+            len = self.cap;
+        }
+        for i in len {
+            mut at = hix + i;
+            if at >= self.cap {
+                at -= self.cap;
+            }
+            unsafe {
+                v := ptr_from_addr(T, self.base + SLOTS + 16 * at + 8).read();
+                drop(v);
+            }
+        }
+        unsafe {
+            free(self.cells);
+            free(self.block);
+        }
     }
 }

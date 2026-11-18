@@ -146,6 +146,10 @@ fn rt_syscall(n: u64, a: u64, b: u64, c: u64) -> u64 {
     if n == 141 {
         return raw_syscall(140, a, b, c);
     }
+    // sched_yield (rt_yield): without it a yield on aarch64 and riscv64 was a no-op.
+    if n == 24 {
+        return raw_syscall(124, a, b, c);
+    }
     return wrapping_sub(0, 38);
 }
 
@@ -465,26 +469,28 @@ fn rt_os_stack_warm(count: u64) -> u64 {
     }
     return 0;
 }
-// The monitor's barrier for taking a worker back from a foreign call (rt_sysmon). `setup` 1: can
-// this process retake at all - on x86-64 the call's marker is plain stores and a load, so it needs
-// membarrier, registered here (MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED); AArch64 and RV64 mark
-// with a sequentially consistent increment, which is its own barrier. `setup` 0: issue it
-// (MEMBARRIER_CMD_PRIVATE_EXPEDITED: every running thread of the process passes a full barrier).
 // Whether thread-record word 48 caches the foreign-call pair (rt_marker_cache).
 fn rt_os_marker_cached() -> u64 {
     return 1;
 }
+// The monitor's barrier for taking a worker back from a foreign call (rt_sysmon). The call's marker
+// is plain stores and a load on every Linux target, so the monitor needs membarrier: `setup` 1
+// registers it (MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED) and says whether this process can retake
+// at all; `setup` 0 issues it (MEMBARRIER_CMD_PRIVATE_EXPEDITED: every running thread of the process
+// passes a full barrier). The system call is 324 on x86-64 and 283 in the generic table (AArch64,
+// RV64).
 fn rt_os_retake_barrier(setup: u64) -> u64 {
+    mut n = 324;
     if raw_target() != 0 {
-        return 1;
+        n = 283;
     }
     if setup != 0 {
-        if rt_error(rt_syscall(324, 16, 0, 0)) {
+        if rt_error(raw_syscall(n, 16, 0, 0)) {
             return 0;
         }
         return 1;
     }
-    rt_syscall(324, 8, 0, 0);
+    raw_syscall(n, 8, 0, 0);
     return 1;
 }
 fn rt_os_sched_prepare() -> u64 {

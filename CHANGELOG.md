@@ -6,6 +6,35 @@
   cached check of a module that other modules read still requires a record carrying its interface
   (or the runtime's effect summary). A cold `grail check` of the 104k-line syn4000 runs 16.59 G ->
   15.16 G instructions (-8.6%), with identical output.
+- **Channels no longer take a lock.** `chan::bounded` is now crossbeam-channel's array design: a
+  ring of slots with a stamp each, and `head` and `tail` counters on cache lines of their own. A send
+  or a receive is one compare-exchange and a release store. A side that has to wait spins, then
+  yields, and parks only after that; nothing touches the parking gate unless someone is parked. On
+  `bench/chan` the release build goes from 14.7x the fastest rival's CPU time to the fastest of
+  all (best of 9, on a loaded machine: 0.060 s against Go's 0.087 and crossbeam's 0.119); the
+  development build goes from 17x to 2.4x. The API is unchanged, and values left in a channel are
+  dropped with it.
+- **`host::yield_now()`** gives up the processor for a moment: `sched_yield` on a thread, a switch
+  to another task on a pool worker.
+- **Fixed: a yield on AArch64 and RV64 Linux did nothing.** The runtime's `sched_yield` had no
+  entry in their system-call table, so the scheduler's own yields there returned "not
+  implemented"; it is system call 124 on both.
+
+- **Default `extern "C"` calls on AArch64 and RV64 Linux lost their atomic instruction too.** The
+  foreign-call marker counts out with a plain load, add and store (the `ldaxr`/`stlxr` loop and
+  `amoadd.d.aqrl` are gone) and reaches its counter in one load from the thread record; the
+  scheduler's monitor orders it with `membarrier` (system call 283), as on x86-64. A new FFI fixture,
+  `foreign_handoff`, checks on all three targets that a C call stuck for 120 ms still has its worker
+  handed on.
+
+- **The summary chart reads in words.** Its axis runs "32x, 8x, 2x, same, 2x, 8x, 32x" under
+  "◀ Grail faster / Grail slower ▶", and every note and table cell says "3.3x faster" or "1.96x
+  slower" instead of a bare ratio such as 0.31x.
+- **The performance chapter opens with every benchmark on one page.** A summary chart has one bar
+  per category (compile check and build, cold and after an edit; release and development run time;
+  release instructions; the scheduler): Grail's ratio to the fastest rival, the geometric mean of the
+  category's rows, with its best and worst rows marked. A table under it names them. It reads the
+  same committed results as the other charts (`{{perf:summary}}`).
 - **Generic code over a type that owns nothing has no drop bookkeeping.** In a specialisation, a
   type parameter bound to a plain type (`A = u64`) answered "needs drop" like an unknown type, so
   every value of it carried a drop flag, a drop-helper call guarded by it, and a callee-saved register

@@ -3923,14 +3923,13 @@ fn ffi_marker_enter<a>(c: (&a mut C), slot: u64) -> unit {
         mark(&mut c, done);
         o(&mut c, view("movq %r11,"));
     } else {
-        // AArch64 and RV64 run Grail code on the record (the thread pointer is switched only for the
-        // call itself), and %rax is free before the arguments are loaded.
-        o(&mut c, view("tpget\ncmpq $2,24(%rax)\n"));
-        jump(&mut c, view("jne"), none);
-        o(&mut c, view("movq 32(%rax),%rax\nmovq 320(%rax),%rax\nincq (%rax)\n"));
-        jump(&mut c, view("jmp"), done);
+        // AArch64 and RV64 (Linux) run Grail code on the record (the thread pointer is switched
+        // only for the call itself), and %rax is free before the arguments are loaded. Record word
+        // 48 is the block's foreign-call pair, or 0 off a worker (rt_marker_cache).
+        o(&mut c, view("tpget\nmovq 48(%rax),%rax\ntestq %rax,%rax\n"));
+        jump(&mut c, view("je"), done);
+        o(&mut c, view("incq (%rax)\n"));
         mark(&mut c, none);
-        o(&mut c, view("xorl %eax,%eax\n"));
         mark(&mut c, done);
         o(&mut c, view("movq %rax,"));
     }
@@ -3940,9 +3939,8 @@ fn ffi_marker_enter<a>(c: (&a mut C), slot: u64) -> unit {
 }
 // After the call, with its result in memory: count the marker out and look at the pair's `retaken`
 // word (8 bytes on). x86-64 Linux does both with plain instructions - the monitor pays for the
-// ordering with membarrier (docs/design/concurrency-model.md, 2.4.1); Windows x64 keeps a locked
-// increment, and AArch64/RV64 a sequentially consistent one, as their full barrier until theirs is
-// wired in. A non-zero `retaken` goes to rt_foreign_return, which settles the retake with one
+// ordering with membarrier (docs/design/concurrency-model.md, 2.4.1), and so do AArch64 and RV64
+// Linux; Windows x64 keeps a locked increment until its barrier is wired in. A non-zero `retaken` goes to rt_foreign_return, which settles the retake with one
 // compare-and-swap. A `blocking` call has its own leave hook.
 fn ffi_hooks_leave<a, b>(c: (&a mut C), slot: u64, block_here: bool, symbol: &b [u8]) -> unit {
     if block_here {
@@ -3970,7 +3968,7 @@ fn ffi_hooks_leave<a, b>(c: (&a mut C), slot: u64, block_here: bool, symbol: &b 
         stack_slot(&mut c, slot);
         o(&mut c, view(",%rdi\ntestq %rdi,%rdi\n"));
         jump(&mut c, view("je"), done);
-        o(&mut c, view("movl $1,%eax\natom.rmw add seqcst u64\nmovq 8(%rdi),%rax\ntestq %rax,%rax\n"));
+        o(&mut c, view("incq (%rdi)\nmovq 8(%rdi),%rax\ntestq %rax,%rax\n"));
         jump(&mut c, view("je"), done);
         o(&mut c, view("movq %rdi,%rsi\n"));
     }
@@ -11620,17 +11618,6 @@ fn pv_ir_atoms<a>(c: (&a mut C), lo: u64, hi: u64) -> Atom[] {
     return out;
 }
 // A statement keyword whose own conditions and statements report what they do as they are compiled.
-fn pv_compound<a, b>(t: &b [u8]) -> bool {
-    if (t.len() < 2) || (6 < t.len()) {
-        return false;
-    }
-    return same(view(t), view("if"))
-        || same(view(t), view("match"))
-        || same(view(t), view("while"))
-        || same(view(t), view("loop"))
-        || same(view(t), view("for"))
-        || same(view(t), view("unsafe"));
-}
 // A statement that calls may write through the names it mentions, so what they meant before it is
 // forgotten after it. A compound statement is not scanned here: its condition and its own statements
 // report themselves, which is the precision the token walk could not have.
@@ -11645,11 +11632,10 @@ fn pv_ir_statement<a>(c: (&a mut C), lo: u64, hi: u64) -> unit {
     if k == 123 {
         return ();
     }
-    if k == 1 {
-        t := tok_text(&mut c, lo);
-        if pv_compound(view(t)) {
-            return ();
-        }
+    // A compound statement (if, match, while, loop, for, unsafe) is read part by part, not here.
+    if (k == 1) && (is_at(&mut c, lo, view("if")) || is_at(&mut c, lo, view("match")) || is_at(&mut c, lo, view("while"))
+        || is_at(&mut c, lo, view("loop")) || is_at(&mut c, lo, view("for")) || is_at(&mut c, lo, view("unsafe"))) {
+        return ();
     }
     if !pv_span_calls(&mut c, lo, hi) {
         return ();
@@ -11856,13 +11842,14 @@ fn pv_unwritten<a, b>(c: (&a mut C), open: u64, end: u64, name: &b [u8]) -> bool
     }
     mut i = open + 1;
     while i < end {
+        // The tokens are compared where they are (is_at): this scan runs per statement and name.
         if kind_at(&mut c, i) == 1 {
-            if same(view(tok_text(&mut c, i)), view(name)) {
+            if is_at(&mut c, i, view(name)) {
                 nk := kind_at(&mut c, i + 1);
                 if (nk == 61) || ((261 < nk) & (nk < 269)) {
                     return false;
                 }
-                if (2 <= i) && (kind_at(&mut c, i - 2) == 38) && same(view(tok_text(&mut c, i - 1)), view("mut")) {
+                if (2 <= i) && (kind_at(&mut c, i - 2) == 38) && is_at(&mut c, i - 1, view("mut")) {
                     return false;
                 }
             }
@@ -37311,263 +37298,459 @@ fn indirect_call<a>(c: (&a mut C), value: Val, opened: u64) -> Val {
     return val(slot, resulttype);
 }
 fn builtin_id<a>(n: &a [u8]) -> u64 {
-    if same(view(n), view("Atomic")) {
-        return 30;
-    }
-    if same(view(n), view("Mutex")) {
-        return 31;
-    }
-    if same(view(n), view("parallel_map")) {
-        return 32;
-    }
-    if same(view(n), view("parallel_split")) {
-        return 43;
-    }
-    if same(view(n), view("parallel_for_zip")) {
-        return 67;
-    }
-    if same(view(n), view("parallel_spawn")) {
-        return 44;
-    }
-    if same(view(n), view("parallel_join")) {
-        return 45;
-    }
-    if same(view(n), view("parallel_with")) {
-        return 58;
-    }
-    if same(view(n), view("thread_spawn_raw")) {
-        return 59;
-    }
-    if same(view(n), view("parallel_class")) {
-        return 60;
-    }
-    if same(view(n), view("task_scope")) {
-        return 33;
-    }
-    if same(view(n), view("spawn")) {
-        return 34;
-    }
-    if same(view(n), view("join")) {
-        return 35;
-    }
-    if same(view(n), view("try_join")) {
-        return 55;
-    }
-    if same(view(n), view("fence")) {
-        return 63;
-    }
-    if same(view(n), view("fence_acquire")) {
-        return 64;
-    }
-    if same(view(n), view("fence_release")) {
-        return 65;
-    }
-    if same(view(n), view("spin_hint")) {
-        return 66;
-    }
-    if same(view(n), view("task_fail")) {
-        return 56;
-    }
-    if same(view(n), view("ignore_failure")) {
-        return 57;
-    }
-    if same(view(n), view("format")) {
-        return 36;
-    }
-    if same(view(n), view("view")) {
-        return 37;
-    }
-    if same(view(n), view("cstr")) {
-        return 39;
-    }
-    if same(view(n), view("cptr")) {
-        return 40;
-    }
-    if same(view(n), view("cptr_mut")) {
-        return 41;
-    }
-    if same(view(n), view("cnull")) {
-        return 42;
-    }
-    if same(view(n), view("cstr_bytes")) {
-        return 46;
-    }
-    if same(view(n), view("cslice")) {
-        return 47;
-    }
-    if same(view(n), view("ptr_of")) {
-        return 48;
-    }
-    if same(view(n), view("alloc")) {
-        return 49;
-    }
-    if same(view(n), view("free")) {
-        return 50;
-    }
-    if same(view(n), view("ptr_from_addr")) {
-        return 51;
-    }
-    if same(view(n), view("view_mut")) {
-        return 38;
-    }
-    if same(view(n), view("borrow")) {
-        return 13;
-    }
-    if same(view(n), view("borrow_mut")) {
-        return 14;
-    }
-    if same(view(n), view("load")) {
-        return 15;
-    }
-    if same(view(n), view("exchange")) {
-        return 16;
-    }
-    if same(view(n), view("wrapping_add")) {
-        return 19;
-    }
-    if same(view(n), view("wrapping_sub")) {
-        return 20;
-    }
-    if same(view(n), view("wrapping_mul")) {
-        return 21;
-    }
-    if same(view(n), view("wrapping_pow")) {
-        return 22;
-    }
-    if same(view(n), view("print")) {
-        return 17;
-    }
-    if same(view(n), view("println")) {
-        return 18;
-    }
-    if same(view(n), view("raw_load")) {
-        return 101;
-    }
-    if same(view(n), view("raw_store")) {
-        return 102;
-    }
-    if same(view(n), view("raw_byte")) {
-        return 103;
-    }
-    if same(view(n), view("raw_putbyte")) {
-        return 104;
-    }
-    if same(view(n), view("raw_load32")) {
-        return 136;
-    }
-    if same(view(n), view("raw_store32")) {
-        return 137;
-    }
-    if same(view(n), view("raw_map")) {
-        return 105;
-    }
-    if same(view(n), view("raw_state")) {
-        return 106;
-    }
-    if same(view(n), view("raw_syscall")) {
-        return 107;
-    }
-    if same(view(n), view("raw_target")) {
-        return 108;
-    }
-    if same(view(n), view("raw_win32")) {
-        return 133;
-    }
-    if same(view(n), view("raw_win_local")) {
-        return 134;
-    }
-    if same(view(n), view("raw_win_call")) {
-        return 135;
-    }
-    if same(view(n), view("raw_syscall4")) {
-        return 109;
-    }
-    if same(view(n), view("raw_atomic_load")) {
-        return 110;
-    }
-    if same(view(n), view("raw_atomic_store")) {
-        return 111;
-    }
-    if same(view(n), view("raw_atomic_cas")) {
-        return 112;
-    }
-    if same(view(n), view("raw_atomic_load_relaxed")) {
-        return 113;
-    }
-    if same(view(n), view("raw_atomic_load_acquire")) {
-        return 114;
-    }
-    if same(view(n), view("raw_atomic_store_relaxed")) {
-        return 115;
-    }
-    if same(view(n), view("raw_atomic_store_release")) {
-        return 116;
-    }
-    if same(view(n), view("raw_atomic_fetch_add")) {
-        return 138;
-    }
-    if same(view(n), view("raw_atomic_fetch_sub")) {
-        return 139;
-    }
-    if same(view(n), view("raw_atomic_swap")) {
-        return 140;
-    }
-    if same(view(n), view("raw_spin_hint")) {
-        return 141;
-    }
-    if same(view(n), view("raw_atomic_fence")) {
-        return 142;
-    }
-    if same(view(n), view("raw_thread_clone")) {
-        return 117;
-    }
-    if same(view(n), view("raw_call2")) {
-        return 118;
-    }
-    if same(view(n), view("raw_call3")) {
-        return 119;
-    }
-    if same(view(n), view("raw_tp_get")) {
-        return 120;
-    }
-    if same(view(n), view("raw_tp_set")) {
-        return 121;
-    }
-    if same(view(n), view("raw_switch")) {
-        return 122;
-    }
-    if same(view(n), view("raw_fadd")) {
-        return 123;
-    }
-    if same(view(n), view("raw_fsub")) {
-        return 124;
-    }
-    if same(view(n), view("raw_fmul")) {
-        return 125;
-    }
-    if same(view(n), view("raw_fdiv")) {
-        return 126;
-    }
-    if same(view(n), view("raw_flt")) {
-        return 127;
-    }
-    if same(view(n), view("raw_feq")) {
-        return 128;
-    }
-    if same(view(n), view("raw_fsqrt")) {
-        return 129;
-    }
-    if same(view(n), view("raw_f64_from_i64")) {
-        return 130;
-    }
-    if same(view(n), view("raw_i64_from_f64")) {
-        return 131;
-    }
-    if same(view(n), view("raw_import")) {
-        return 133;
-    }
-    if same(view(n), view("raw_sites")) {
-        return 143;
+    // Asked of every call's name: the length and first byte pick the few builtins it can be, so a
+    // name is compared with at most a handful of them, not all of them in turn.
+    k := n.len();
+    if k == 0 {
+        return 0;
+    }
+    f := n[0];
+    if k == 4 {
+        if f == 99 {
+            if same(view(n), view("cstr")) {
+                return 39;
+            }
+            if same(view(n), view("cptr")) {
+                return 40;
+            }
+            return 0;
+        }
+        if f == 102 {
+            if same(view(n), view("free")) {
+                return 50;
+            }
+            return 0;
+        }
+        if f == 106 {
+            if same(view(n), view("join")) {
+                return 35;
+            }
+            return 0;
+        }
+        if f == 108 {
+            if same(view(n), view("load")) {
+                return 15;
+            }
+            return 0;
+        }
+        if f == 118 {
+            if same(view(n), view("view")) {
+                return 37;
+            }
+            return 0;
+        }
+        return 0;
+    }
+    if k == 5 {
+        if f == 77 {
+            if same(view(n), view("Mutex")) {
+                return 31;
+            }
+            return 0;
+        }
+        if f == 97 {
+            if same(view(n), view("alloc")) {
+                return 49;
+            }
+            return 0;
+        }
+        if f == 99 {
+            if same(view(n), view("cnull")) {
+                return 42;
+            }
+            return 0;
+        }
+        if f == 102 {
+            if same(view(n), view("fence")) {
+                return 63;
+            }
+            return 0;
+        }
+        if f == 112 {
+            if same(view(n), view("print")) {
+                return 17;
+            }
+            return 0;
+        }
+        if f == 115 {
+            if same(view(n), view("spawn")) {
+                return 34;
+            }
+            return 0;
+        }
+        return 0;
+    }
+    if k == 6 {
+        if f == 65 {
+            if same(view(n), view("Atomic")) {
+                return 30;
+            }
+            return 0;
+        }
+        if f == 98 {
+            if same(view(n), view("borrow")) {
+                return 13;
+            }
+            return 0;
+        }
+        if f == 99 {
+            if same(view(n), view("cslice")) {
+                return 47;
+            }
+            return 0;
+        }
+        if f == 102 {
+            if same(view(n), view("format")) {
+                return 36;
+            }
+            return 0;
+        }
+        if f == 112 {
+            if same(view(n), view("ptr_of")) {
+                return 48;
+            }
+            return 0;
+        }
+        return 0;
+    }
+    if k == 7 {
+        if f == 112 {
+            if same(view(n), view("println")) {
+                return 18;
+            }
+            return 0;
+        }
+        if f == 114 {
+            if same(view(n), view("raw_map")) {
+                return 105;
+            }
+            if same(view(n), view("raw_flt")) {
+                return 127;
+            }
+            if same(view(n), view("raw_feq")) {
+                return 128;
+            }
+            return 0;
+        }
+        return 0;
+    }
+    if k == 8 {
+        if f == 99 {
+            if same(view(n), view("cptr_mut")) {
+                return 41;
+            }
+            return 0;
+        }
+        if f == 101 {
+            if same(view(n), view("exchange")) {
+                return 16;
+            }
+            return 0;
+        }
+        if f == 114 {
+            if same(view(n), view("raw_load")) {
+                return 101;
+            }
+            if same(view(n), view("raw_byte")) {
+                return 103;
+            }
+            if same(view(n), view("raw_fadd")) {
+                return 123;
+            }
+            if same(view(n), view("raw_fsub")) {
+                return 124;
+            }
+            if same(view(n), view("raw_fmul")) {
+                return 125;
+            }
+            if same(view(n), view("raw_fdiv")) {
+                return 126;
+            }
+            return 0;
+        }
+        if f == 116 {
+            if same(view(n), view("try_join")) {
+                return 55;
+            }
+            return 0;
+        }
+        if f == 118 {
+            if same(view(n), view("view_mut")) {
+                return 38;
+            }
+            return 0;
+        }
+        return 0;
+    }
+    if k == 9 {
+        if f == 114 {
+            if same(view(n), view("raw_store")) {
+                return 102;
+            }
+            if same(view(n), view("raw_state")) {
+                return 106;
+            }
+            if same(view(n), view("raw_win32")) {
+                return 133;
+            }
+            if same(view(n), view("raw_call2")) {
+                return 118;
+            }
+            if same(view(n), view("raw_call3")) {
+                return 119;
+            }
+            if same(view(n), view("raw_fsqrt")) {
+                return 129;
+            }
+            if same(view(n), view("raw_sites")) {
+                return 143;
+            }
+            return 0;
+        }
+        if f == 115 {
+            if same(view(n), view("spin_hint")) {
+                return 66;
+            }
+            return 0;
+        }
+        if f == 116 {
+            if same(view(n), view("task_fail")) {
+                return 56;
+            }
+            return 0;
+        }
+        return 0;
+    }
+    if k == 10 {
+        if f == 98 {
+            if same(view(n), view("borrow_mut")) {
+                return 14;
+            }
+            return 0;
+        }
+        if f == 99 {
+            if same(view(n), view("cstr_bytes")) {
+                return 46;
+            }
+            return 0;
+        }
+        if f == 114 {
+            if same(view(n), view("raw_load32")) {
+                return 136;
+            }
+            if same(view(n), view("raw_target")) {
+                return 108;
+            }
+            if same(view(n), view("raw_tp_get")) {
+                return 120;
+            }
+            if same(view(n), view("raw_tp_set")) {
+                return 121;
+            }
+            if same(view(n), view("raw_switch")) {
+                return 122;
+            }
+            if same(view(n), view("raw_import")) {
+                return 133;
+            }
+            return 0;
+        }
+        if f == 116 {
+            if same(view(n), view("task_scope")) {
+                return 33;
+            }
+            return 0;
+        }
+        return 0;
+    }
+    if k == 11 {
+        if f == 114 {
+            if same(view(n), view("raw_putbyte")) {
+                return 104;
+            }
+            if same(view(n), view("raw_store32")) {
+                return 137;
+            }
+            if same(view(n), view("raw_syscall")) {
+                return 107;
+            }
+            return 0;
+        }
+        return 0;
+    }
+    if k == 12 {
+        if f == 112 {
+            if same(view(n), view("parallel_map")) {
+                return 32;
+            }
+            return 0;
+        }
+        if f == 114 {
+            if same(view(n), view("raw_win_call")) {
+                return 135;
+            }
+            if same(view(n), view("raw_syscall4")) {
+                return 109;
+            }
+            return 0;
+        }
+        if f == 119 {
+            if same(view(n), view("wrapping_add")) {
+                return 19;
+            }
+            if same(view(n), view("wrapping_sub")) {
+                return 20;
+            }
+            if same(view(n), view("wrapping_mul")) {
+                return 21;
+            }
+            if same(view(n), view("wrapping_pow")) {
+                return 22;
+            }
+            return 0;
+        }
+        return 0;
+    }
+    if k == 13 {
+        if f == 102 {
+            if same(view(n), view("fence_acquire")) {
+                return 64;
+            }
+            if same(view(n), view("fence_release")) {
+                return 65;
+            }
+            return 0;
+        }
+        if f == 112 {
+            if same(view(n), view("parallel_join")) {
+                return 45;
+            }
+            if same(view(n), view("parallel_with")) {
+                return 58;
+            }
+            if same(view(n), view("ptr_from_addr")) {
+                return 51;
+            }
+            return 0;
+        }
+        if f == 114 {
+            if same(view(n), view("raw_win_local")) {
+                return 134;
+            }
+            if same(view(n), view("raw_spin_hint")) {
+                return 141;
+            }
+            return 0;
+        }
+        return 0;
+    }
+    if k == 14 {
+        if f == 105 {
+            if same(view(n), view("ignore_failure")) {
+                return 57;
+            }
+            return 0;
+        }
+        if f == 112 {
+            if same(view(n), view("parallel_split")) {
+                return 43;
+            }
+            if same(view(n), view("parallel_spawn")) {
+                return 44;
+            }
+            if same(view(n), view("parallel_class")) {
+                return 60;
+            }
+            return 0;
+        }
+        if f == 114 {
+            if same(view(n), view("raw_atomic_cas")) {
+                return 112;
+            }
+            return 0;
+        }
+        return 0;
+    }
+    if k == 15 {
+        if f == 114 {
+            if same(view(n), view("raw_atomic_load")) {
+                return 110;
+            }
+            if same(view(n), view("raw_atomic_swap")) {
+                return 140;
+            }
+            return 0;
+        }
+        return 0;
+    }
+    if k == 16 {
+        if f == 112 {
+            if same(view(n), view("parallel_for_zip")) {
+                return 67;
+            }
+            return 0;
+        }
+        if f == 114 {
+            if same(view(n), view("raw_atomic_store")) {
+                return 111;
+            }
+            if same(view(n), view("raw_atomic_fence")) {
+                return 142;
+            }
+            if same(view(n), view("raw_thread_clone")) {
+                return 117;
+            }
+            if same(view(n), view("raw_f64_from_i64")) {
+                return 130;
+            }
+            if same(view(n), view("raw_i64_from_f64")) {
+                return 131;
+            }
+            return 0;
+        }
+        if f == 116 {
+            if same(view(n), view("thread_spawn_raw")) {
+                return 59;
+            }
+            return 0;
+        }
+        return 0;
+    }
+    if k == 20 {
+        if f == 114 {
+            if same(view(n), view("raw_atomic_fetch_add")) {
+                return 138;
+            }
+            if same(view(n), view("raw_atomic_fetch_sub")) {
+                return 139;
+            }
+            return 0;
+        }
+        return 0;
+    }
+    if k == 23 {
+        if f == 114 {
+            if same(view(n), view("raw_atomic_load_relaxed")) {
+                return 113;
+            }
+            if same(view(n), view("raw_atomic_load_acquire")) {
+                return 114;
+            }
+            return 0;
+        }
+        return 0;
+    }
+    if k == 24 {
+        if f == 114 {
+            if same(view(n), view("raw_atomic_store_relaxed")) {
+                return 115;
+            }
+            if same(view(n), view("raw_atomic_store_release")) {
+                return 116;
+            }
+            return 0;
+        }
+        return 0;
     }
     return 0;
 }
@@ -41612,6 +41795,10 @@ fn int_type<a>(c: (&a mut C), bits: u64, signed: u64) -> u64 {
     return intern_full(&mut c, 18, bits, signed, u64[]);
 }
 fn int_name<a>(n: &a [u8]) -> u64 {
+    // Every name below is two to five bytes and starts with `u` or `i`: anything else is no integer.
+    if (n.len() < 2) || (5 < n.len()) || ((n[0] != 117) && (n[0] != 105)) {
+        return 0;
+    }
     if same(view(n), view("u8")) {
         return 8;
     }
@@ -61535,6 +61722,9 @@ pub fn main() -> u64 {
     // Dedicated threads. The ones that take a record's address are `unsafe`: lib/thread.grl is
     // their caller, and nothing checks the address.
     host_fn(&mut c, view("thread_self"), 0);
+    // Give up the processor for a moment (sched_yield on a thread; on a pool task, the worker goes
+    // to another task): lib/chan.grl's backoff between spinning and parking.
+    host_fn(&mut c, view("yield_now"), 0);
     host_fn(&mut c, view("thread_plain"), 0);
     host_fn(&mut c, view("thread_local_key"), 0);
     host_fn(&mut c, view("sleep_until_ms"), 0);

@@ -19332,6 +19332,38 @@
     "note": "lib/chan.grl: values arrive in order, close lets the rest drain, recv answers None and send false once closed; 4 producers x 20000 values through 8 slots to 4 consumers arrive exactly once"
   },
   {
+    "name": "chan-drops-values-left-in-the-ring",
+    "modules": [
+      "lib/chan.grl",
+      "lib/sync.grl",
+      "lib/time.grl"
+    ],
+    "source": "use chan;\nfn main() {\n    // Values that own memory, left in the ring when the channel is dropped, wrapping a lap first.\n    c := chan::bounded<u8[]>(3);\n    for i in 5 {\n        mut v: u8[] = [];\n        for j in i + 1 {\n            v.push(u8(j));\n        }\n        c.send(v);\n        if i < 3 {\n            got := c.recv()!;\n            println(got.len());\n        }\n    }\n    println(c.recv()!.len());\n    // The value of length 5 is still in the ring: the channel's drop frees it, or the run's leak\n    // check fails.\n}\n",
+    "stdout": "1\n2\n3\n4\n",
+    "targets": [
+      "x86_64"
+    ],
+    "note": "lib/chan.grl: values that own memory, sent around a 3-slot ring past a lap and left in it, are dropped with the channel (the exit leak check)"
+  },
+  {
+    "name": "chan-ping-through-one-slot-channels",
+    "modules": [
+      "lib/chan.grl",
+      "lib/sync.grl",
+      "lib/time.grl",
+      "lib/thread.grl",
+      "lib/rc.grl"
+    ],
+    "source": "use chan;\nuse thread;\nuse rc;\n// Two threads hand a counter back and forth through two one-slot channels: every send waits for\n// the other side's receive, so the spin, yield and park paths all run.\nfn main() {\n    there := rc::arc_new(chan::bounded<u64>(1));\n    back := rc::arc_new(chan::bounded<u64>(1));\n    t1 := there.clone();\n    b1 := back.clone();\n    echo := thread::spawn<u64>(thread::config(), |ctx: (&thread::Ctx)| -> u64 {\n        inbox := t1.get();\n        outbox := b1.get();\n        mut seen = 0;\n        while let Some(v) = inbox.recv() {\n            outbox.send(v + 1);\n            seen += 1;\n        }\n        return seen;\n    })!;\n    out := there.get();\n    reply := back.get();\n    mut v = 0;\n    for i in 20000 {\n        out.send(v);\n        v = reply.recv()!;\n    }\n    there.get().close();\n    println(v);\n    println(thread::join(echo));\n}\n",
+    "stdout": "20000\n20000\n",
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "lib/chan.grl: a ping-pong through capacity-1 channels (laps of one slot, waiting on both sides); on aarch64 and riscv64 it also runs host::yield_now (sched_yield is 124 there)"
+  },
+  {
     "name": "interface-generic-method-through-bound",
     "note": "an interface method generic over a callable parameter (`fn fold<A, G: FnMut(A, Self::Item) -> A>`, a default body) called through a bound `I: Seq` (was `generic argument shape mismatch`: the specialisation's binding of `I` met the implementation's concrete `Self`)",
     "source": "interface Seq {\n    type Item;\n    fn next(self: &mut Self) -> Self::Item?;\n    fn fold<A, G: FnMut(A, Self::Item) -> A>(self: Self, init: A, g: G) -> A {\n        mut it = self;\n        mut acc = init;\n        mut f = g;\n        while let Some(x) = it.next() { acc = f(acc, x); }\n        return acc;\n    }\n}\nstruct Count { n: u64, end: u64 }\nimpl Seq for Count {\n    type Item = u64;\n    fn next(self: &mut Self) -> u64? { if self.n == self.end { return None; } self.n += 1; return Some(self.n); }\n}\nfn total<I: Seq<Item = u64>>(it: I) -> u64 { return it.fold(0, |a: u64, x: u64| -> u64 a + x); }\nfn main() {\n    c := Count { n: 0, end: 4 };\n    println(c.fold(0, |a: u64, x: u64| -> u64 a + x));\n    println(total(Count { n: 0, end: 4 }));\n}\n",
