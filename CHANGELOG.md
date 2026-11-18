@@ -1,5 +1,10 @@
 ## Unreleased
 
+- **The performance chapter opens with every benchmark on one page.** A summary chart has one bar
+  per category (compile check and build, cold and after an edit; release and development run time;
+  release instructions; the scheduler): Grail's ratio to the fastest rival, the geometric mean of the
+  category's rows, with its best and worst rows marked. A table under it names them. It reads the
+  same committed results as the other charts (`{{perf:summary}}`).
 - **Generic code over a type that owns nothing has no drop bookkeeping.** In a specialisation, a
   type parameter bound to a plain type (`A = u64`) answered "needs drop" like an unknown type, so
   every value of it carried a drop flag, a drop-helper call guarded by it, and a callee-saved register

@@ -1,9 +1,9 @@
 import { buildCompiler, assemble, execute, hostTarget, targetName, triples } from './native.mjs';
-import { readFileSync, mkdirSync, writeFileSync, copyFileSync, rmSync } from 'node:fs';
+import { readFileSync, mkdirSync, writeFileSync, copyFileSync, rmSync, readdirSync } from 'node:fs';
 import { resolve, dirname, relative, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
-import { chart, numbers, provenance, renderResults } from './perf-charts.mjs';
+import { chart, numbers, provenance, renderResults, summary } from './perf-charts.mjs';
 
 export const root = resolve(import.meta.dir, '..');
 const source = join(root, 'book');
@@ -47,6 +47,12 @@ export const resultsDirectory = join(root, 'bench/results');
 export function perfBlock(spec, directory = resultsDirectory) {
   const [name, part] = spec.split('#');
   if (!/^[a-z][a-z0-9-]*$/.test(name)) throw new Error(`Invalid results name: ${name}`);
+  // `{{perf:summary}}`: every result file at once, one bar per category (tools/perf-charts.mjs).
+  if (name === 'summary') {
+    const files = {};
+    for (const f of readdirSync(directory)) if (f.endsWith('.json')) { const d = JSON.parse(readFileSync(join(directory, f), 'utf8')); if (d?.schema === 1) files[f.slice(0, -5)] = d; }
+    return summary(files);
+  }
   const data = JSON.parse(readFileSync(join(directory, `${name}.json`), 'utf8'));
   if (!part) return renderResults(data, name);
   if (part === 'provenance') return provenance(data);

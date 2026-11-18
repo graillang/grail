@@ -22,6 +22,15 @@ the user-space instructions executed (from `perf_event_open`, which load does no
 scheduler's figures are wall time by nature, the median of several rounds, with the load beside
 them.
 
+## Everything at a glance
+
+One bar per category: Grail's time (or instructions) over the fastest rival's in that category, the
+geometric mean of its rows, on a logarithmic axis centred on 1x. Left of the line Grail is ahead;
+right of it, behind. Each category's best and worst row are marked and named in the table under the
+chart, and the sections that follow chart every row.
+
+{{perf:summary}}
+
 ## Release builds
 
 The release build is Grail's LLVM backend: the compiler's own code lifted to LLVM IR and compiled
