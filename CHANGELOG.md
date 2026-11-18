@@ -1,5 +1,17 @@
 ## Unreleased
 
+- **The electrical grid's state machine and dispatch are ported, byte for byte against the
+  engine.** `abundance/src/power_grid.grl` carries `power_grid.hpp/.cpp` of
+  `cmake/tx/power.cmake` (minus the publication binding): the five record types and the EMP
+  projection, the acceptance rules, add/replace/set/remove over sorted unique ids with the
+  instance-generation bump and projection clearing, and `dispatch` — electrical islands by
+  union-find, per-island shortfall bounding battery discharge, Dinic's max flow in doubles with
+  the engine's 1e-7 epsilon, merit order (dispatch_order then id), load service in
+  PowerPriority rounds, discharge floors, and charging from a bus's unused generation assigned
+  to same-bus producers in merit order — plus `force_field_passable`.
+  `abundance/tests/power_grid_test.grl` prints 134 lines that match a reference linked from the
+  engine's own `power_grid.cpp` through `libabundance_gameplay_core.a`, including the engine's
+  own test scenarios. The FRPG1 snapshot codec is a later increment.
 - **`lib/earcut.grl`: mapbox earcut triangulation, ported from the vendored C++.** The Abundance
   water-geometry callers (`water_geometry.cpp`) triangulate their bank, island and raster-cell
   polygons with `mapbox::earcut<std::uint32_t>` rather than Clipper2's experimental triangulator, so
