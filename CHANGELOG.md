@@ -195,6 +195,17 @@
   gradient table, ab::pm's straddle lerp, f64 octave accumulators narrowed once); 144 values
   matched against the header compiled with the worldgen library's `-ffp-contract=off`. These are
   the bands the coherent terrain relief is built from.
+- **The kinematic mover's state wire is ported, bit-exact against the engine.**
+  `abundance/src/mover_state.grl` carries `MoverState` with its traversal and climb, and the
+  version-6, 567-byte wire both ways: f64 positions and traversal vectors, f32 velocity, ground
+  normal, yaw and approach speed, the four collision proofs, and every validity rule the engine's
+  decoder applies (version, enum bounds, certified flags, finite vectors, a non-negative approach
+  speed, lowering only while descending, climbing never on the ground, and the mantling
+  consistency set). `abundance/tests/mover_state_test.grl` decodes six states the engine built and
+  serialised (walking, falling, flying, swimming, roped climbing, a ledge-catch mantle) and ten
+  malformed variants, re-encodes every accepted one and compares each field's bits with the
+  engine's `serialize_mover_state` / `deserialize_mover_state` (257 reference lines). This is the
+  seam the movement kernel and the app's replay trace both sit on.
 
 - Abundance port: `abundance/src/lake_topology.grl` is the `<cache>.lake-topology` sidecar
   (docs/BOOT_LAKE_TOPOLOGY_CACHE.md) in both directions: the "ABWLTSC1" magic with the writing
