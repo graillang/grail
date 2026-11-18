@@ -1,5 +1,7 @@
 ## Unreleased
 
+- `tools/abundance-test.mjs`: the references map had two identical `checkpoint` entries; the first
+  was shadowed and dead, and is deleted. No behavior change.
 - **The Abundance gameplay kernel's shared vocabulary and table codec are ported**
   (`abundance/src/tx.grl`, the stage-6 base every gameplay domain builds on): action-kind and
   table-name identity hashes, the effect-id and engine-id ranges, all 55 refusal codes with the
