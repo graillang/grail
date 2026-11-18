@@ -1,5 +1,11 @@
 ## Unreleased
 
+- **The shader pipeline takes `materials/`, 3 of its 9 entries.** `debug_view`, `mean_albedo` and the
+  screen-tile builder: 20 KB of SPIR-V at pin `ca1f1bc05b`, the layout pin growing from 61 to 64
+  structs. All six `resolve*` passes stay recorded as skipped: a material resolve shades a G-buffer and
+  needs the terrain page contract, so materials is the one area that is mostly blocked rather than
+  mostly taken.
+
 - **The shader pipeline takes `vfx/`, 12 of its 14 entries.** The blast, dust and glass vertex/pixel
   pairs, both sorts, the dust motion pass, the glass scene copy, surface decals and thermal heat:
   265 KB of SPIR-V at pin `ca1f1bc05b`, the layout pin growing from 54 to 61 structs. The two
