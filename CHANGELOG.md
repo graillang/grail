@@ -1,5 +1,12 @@
 ## Unreleased
 
+- **Scheduler: precise wake-ups** - a fork that finds a parked worker and nobody searching now takes
+  one specific worker off an idle list and counts it as searching *before* waking it (Go/rayon
+  style), so while the wake lands every other fork sees a searcher on its way and wakes nobody;
+  each parked worker sleeps on its own word. `bench/sched.grl` issues 64 futex wakes per run in the
+  release build instead of 23,480 (88 instead of 27,070 in the development build; fib(32) x 20 nested
+  joins: 8 instead of 9,318), with 11% fewer user cycles in the release build. No wake is lost: the
+  argument is in docs/design/scheduler.md.
 - **Native backend: iterator chains run 18% fewer instructions** (bench/iterchain: 1100M -> 897M
   user-space instructions in the development build). A direct call to a capture-free closure now
   zeroes its environment register with `xorq %rax,%rax`, which the optimiser reads as a write that
