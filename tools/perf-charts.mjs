@@ -11,10 +11,11 @@
 
 const escape = text => String(text).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 // One colour per language, the same in every chart; Grail's builds share the book's accent family.
-const palette = { grail: ['#d9480f', '#f08c00', '#f59f00'], c: '#4263eb', rust: '#8d5524', go: '#0b7285', zig: '#7048e8', tbb: '#2b8a3e', rayon: '#8d5524', other: '#868e96' };
+const palette = { grail: ['#d9480f', '#f08c00', '#f59f00'], c: '#4263eb', cpp: '#c2255c', rust: '#8d5524', go: '#0b7285', zig: '#7048e8', tbb: '#2b8a3e', rayon: '#8d5524', other: '#868e96' };
 function colourOf(column, grailIndex) {
   if (column.grail) return palette.grail[Math.min(grailIndex, palette.grail.length - 1)];
   const key = column.key.toLowerCase();
+  if (key.startsWith('cpp')) return palette.cpp;
   if (key.startsWith('c')) return palette.c;
   if (key.startsWith('rust')) return palette.rust;
   if (key.startsWith('go')) return palette.go;
@@ -204,4 +205,86 @@ export function summary(files) {
   const body = cats.map(c => `<tr><td>${escape(c.label)}</td><td class="${c.mean <= 1 ? 'perf-met' : 'perf-missed'}">${rel(c.mean)}</td><td>${c.behind} of ${c.rows.length}</td><td>${escape(c.best.name)}: ${rel(c.best.ratio)}</td><td>${escape(c.worst.name)}: ${rel(c.worst.ratio)}</td><td><code>${escape(String(c.commit).slice(0, 8))}</code> ${escape(c.date)}</td></tr>`).join('');
   const table = `<div class="perf-table"><table><caption>Every category: how Grail compares with the fastest rival (geometric mean), the rows where it is slower, and its best and worst rows</caption><thead><tr><th>category</th><th>Grail vs the fastest rival</th><th>rows where Grail is slower</th><th>best row</th><th>worst row</th><th>measured on</th></tr></thead><tbody>${body}</tbody></table></div>`;
   return `<section class="perf-results perf-summary">${svg}${table}</section>`.replace(/\n/g, ' ');
+}
+
+// The languages at a glance: one bar per language, the geometric mean over every program of the
+// language's time as a multiple of the fastest language's on that program (1x = the fastest on
+// every one). Release builds read the release tables of the run-time, engine and parallel files (the
+// parallel one at its most workers only, so ecs_par is one program, not three); development builds
+// read the dev tables, Grail's native backend against the rivals' debug builds (Go has one build, so
+// it is in both). A language without a twin of some program is averaged over the programs it has,
+// and its bar says over how many. Nothing is measured here.
+export const overviewPanels = [
+  { id: 'release', label: 'Release builds', table: 'release', languages: [['c', 'C'], ['cpp', 'C++'], ['rust-release', 'Rust'], ['go', 'Go'], ['zig-fast', 'Zig'], ['grail-llvm', 'Grail']] },
+  { id: 'dev', label: 'Development builds', table: 'dev', languages: [['go', 'Go'], ['rust-dev', 'Rust dev'], ['zig-debug', 'Zig Debug'], ['grail-native', 'Grail-native']] },
+];
+const overviewFiles = ['bench-rivals', 'engine', 'parallel'];
+
+// Per panel: its programs (rows) and, per language, the geometric mean of its ratios to each
+// program's fastest, how many programs it has a figure for and how many it is the fastest on.
+export function overviewRows(files) {
+  return overviewPanels.map(panel => {
+    const programs = [];
+    for (const file of overviewFiles) {
+      const table = files[file]?.tables?.find(t => t.id === panel.table);
+      if (!table) continue;
+      // A parallel file has a row per worker count (`ecs_par x8`): only its most workers count.
+      const most = Math.max(0, ...table.rows.map(r => Number(r.name.match(/ x(\d+)$/)?.[1] ?? 0)));
+      for (const row of table.rows) {
+        if (most && !row.name.endsWith(` x${most}`)) continue;
+        const values = Object.fromEntries(panel.languages.map(([key]) => [key, row.values[key]]).filter(([, v]) => Number.isFinite(v) && v > 0));
+        const best = Math.min(...Object.values(values));
+        if (Object.keys(values).length < 2) continue; // nothing to compare against
+        programs.push({ name: row.name, file, ratios: Object.fromEntries(Object.entries(values).map(([k, v]) => [k, v / best])) });
+      }
+    }
+    const languages = panel.languages.map(([key, label]) => {
+      const ratios = programs.map(p => p.ratios[key]).filter(Number.isFinite);
+      const mean = ratios.length ? Math.exp(ratios.reduce((s, r) => s + Math.log(r), 0) / ratios.length) : undefined;
+      return { key, label, grail: key.startsWith('grail'), mean, count: ratios.length, fastest: ratios.filter(r => r === 1).length, missing: programs.filter(p => !Number.isFinite(p.ratios[key])).map(p => p.name) };
+    });
+    return { ...panel, programs, languages };
+  });
+}
+
+export function overview(files) {
+  const panels = overviewRows(files).filter(p => p.programs.length);
+  const left = 110, width = 420, right = 330, bar = 15, gap = 5, panelGap = 30, top = 58;
+  // Each panel has its own linear scale, from 0 to its slowest language's mean.
+  let spread = 1.5;
+  const x = r => (r / spread) * (width - 50); // the bar's value label goes after it
+  const parts = [];
+  parts.push(`<text x="0" y="13" class="perf-axis perf-direction">Lower is better: each language's time as a multiple of the fastest language's, geometric mean over the programs.</text>`);
+  parts.push(`<text x="0" y="27" class="perf-axis">1x would be the fastest on every program. A language without a twin of some program is averaged over the programs it has.</text>`);
+  let y = top;
+  for (const panel of panels) {
+    spread = Math.max(1.5, ...panel.languages.map(l => l.mean).filter(Number.isFinite));
+    const ticks = [1, 1.5, 2, 3, 4, 6, 8, 12, 16].filter(t => t <= spread);
+    // The panel's heading, its axis labels under it, then its bars with the grid behind them.
+    parts.push(`<text x="0" y="${y}" class="perf-label">${escape(`${panel.label} (${panel.programs.length} programs)`)}</text>`);
+    const gridTop = y + 16, bars = panel.languages.length;
+    for (const t of ticks) {
+      const px = left + x(t);
+      parts.push(`<line x1="${px.toFixed(1)}" x2="${px.toFixed(1)}" y1="${gridTop - 3}" y2="${gridTop + 4 + bars * (bar + gap)}" class="perf-grid"${t === 1 ? ' stroke-width="2"' : ''}/><text x="${px.toFixed(1)}" y="${gridTop - 5}" class="perf-tick" text-anchor="middle">${t}x</text>`);
+    }
+    y = gridTop + 2;
+    for (const lang of panel.languages) {
+      if (!Number.isFinite(lang.mean)) { parts.push(`<text x="${left - 8}" y="${y + bar - 3}" class="perf-label" text-anchor="end">${escape(lang.label)}</text><text x="${left + 3}" y="${y + bar - 3}" class="perf-missing">not measured</text>`); y += bar + gap; continue; }
+      const colour = colourOf({ key: lang.key, grail: lang.grail }, 0);
+      const of = lang.count < panel.programs.length ? `over ${lang.count} of ${panel.programs.length} programs` : `over all ${lang.count}`;
+      parts.push(`<text x="${left - 8}" y="${y + bar - 3}" class="perf-label${lang.grail ? ' perf-grail-text' : ''}" text-anchor="end">${escape(lang.label)}</text>`);
+      parts.push(`<rect x="${left}" y="${y}" width="${Math.max(2, x(lang.mean)).toFixed(1)}" height="${bar}" fill="${colour}"${lang.grail ? ' class="perf-grail"' : ''}><title>${escape(`${lang.label}: ${lang.mean.toFixed(2)}x the fastest, ${of}; the fastest on ${lang.fastest}`)}</title></rect>`);
+      parts.push(`<text x="${(left + x(lang.mean) + 5).toFixed(1)}" y="${y + bar - 3}" class="perf-value${lang.grail ? ' perf-grail-text' : ''}">${lang.mean.toFixed(2)}x</text>`);
+      parts.push(`<text x="${left + width + 8}" y="${y + bar - 3}" class="perf-unit">${escape(`fastest on ${lang.fastest} of ${lang.count}${lang.count < panel.programs.length ? `; no twin of ${lang.missing.join(', ')}` : ''}`.slice(0, 70))}</text>`);
+      y += bar + gap;
+    }
+    y += panelGap;
+  }
+  const sources = overviewFiles.filter(f => files[f]).map(f => `${f} ${String(files[f].commit).slice(0, 8)} ${String(files[f].date ?? '').slice(0, 10)}`).join('; ');
+  parts.push(`<text x="0" y="${y - 8}" class="perf-axis perf-source">${escape(`From bench/results: ${sources}.`)}</text>`);
+  const height = y;
+  const svg = `<figure class="perf-chart" id="chart-overview"><svg viewBox="0 0 ${left + width + right} ${height}" width="100%" role="img" aria-label="The languages at a glance: each one's time as a multiple of the fastest, geometric mean over the programs" xmlns="http://www.w3.org/2000/svg">${parts.join('')}</svg><figcaption>The languages at a glance: per language, the geometric mean over the run-time, engine and parallel programs (the parallel one at its most workers) of its time as a multiple of the fastest language's on that program. Lower is better; 1x is the fastest everywhere.</figcaption></figure>`;
+  const body = panels.map(panel => panel.languages.filter(l => Number.isFinite(l.mean)).map(l => `<tr><td>${escape(panel.label)}</td><td${l.grail ? ' class="perf-grail-col"' : ''}>${escape(l.label)}</td><td>${l.mean.toFixed(2)}x</td><td>${l.count} of ${panel.programs.length}${l.missing.length ? ` (no twin of ${escape(l.missing.join(', '))})` : ''}</td><td>${l.fastest}</td></tr>`).join('')).join('');
+  const table = `<div class="perf-table"><table><caption>Each language's time as a multiple of the fastest on each program, geometric mean; the programs it was measured on and how many it was the fastest on</caption><thead><tr><th>builds</th><th>language</th><th>geometric mean vs the fastest</th><th>programs</th><th>fastest on</th></tr></thead><tbody>${body}</tbody></table></div>`;
+  return `<section class="perf-results perf-overview">${svg}${table}</section>`.replace(/\n/g, ' ');
 }

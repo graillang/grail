@@ -22,6 +22,20 @@ the user-space instructions executed (from `perf_event_open`, which load does no
 scheduler's figures are wall time by nature, the median of several rounds, with the load beside
 them.
 
+## The languages at a glance
+
+One bar per language. For each program of the run-time, engine and parallel charts below (the
+parallel one at eight workers), every language's time is divided by the fastest language's time on
+that program, so the fastest scores 1x there. A language's bar is the geometric mean of those
+multiples over the programs: 1x would mean it was the fastest on every one, and 1.5x that it is
+typically takes half as long again as the fastest. The release panel sets C, C++, Rust, Go, Zig and
+Grail's LLVM build side by side. The development panel sets Grail's native backend against the
+rivals' debug builds (Go has one build, so it appears in both panels). Each panel has its own
+linear scale. A language that has no twin of some program is averaged over the programs it has, and
+the table says which ones it lacks.
+
+{{perf:overview}}
+
 ## Everything at a glance
 
 One bar per category: how much faster or slower Grail is than the fastest rival in that category,

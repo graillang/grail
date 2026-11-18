@@ -1,5 +1,20 @@
 ## Unreleased
 
+- **The book compares Grail with C++ too, and sets the six languages side by side.**
+  `tools/bench-rivals.mjs` has a `C++ -O2` release column (`clang++ -std=c++20 -O2
+  -ffp-contract=off`, plus the twin's `// bench-cflags:` line, and -pthread when it uses
+  `<thread>`), built from `bench/rivals/NAME.cpp` wherever that file exists. A program without one
+  shows "not measured", and every best-of and ratio skips it. The run-time and parallel programs
+  have C++20 twins: std::vector and std::span, std::inner_product, std::transform, std::merge,
+  std::vector<bool> for the sieve, and std::jthread per frame for `ecs_par` (`CPP_THREADS` sets the
+  workers). Each prints byte for byte what its C twin prints. Best-of-5 CPU time on a loaded
+  machine: on par with C on dot, fnv, matmul, nbody and ffi_call; faster on sieve (0.43x, eight flags
+  to a byte), sort (0.64x, std::merge) and ecs_par at 4 workers (0.67x wall time against OpenMP); and
+  1.10-1.16x slower on xform (a run-time overlap check where C has `restrict`). A new
+  `{{perf:overview}}` chart at the top of the Performance chapter shows one bar per language: the
+  geometric mean over the run-time, engine and parallel (8-worker) programs of its time as a multiple
+  of the fastest language's on each, for release builds (C, C++, Rust, Go, Zig, Grail-LLVM) and for
+  development builds (Go, Rust dev, Zig Debug, Grail-native).
 - **Faster float loops in development builds (native backend): `ecs` runs 3.69 G instructions instead of
   7.31 G (Go: 3.02 G), `ecs_par` 4.96 G instead of 10.66 G (Go: 4.32 G).** The optimiser now (1) keeps
   the data of vectors and slices that are stable across a loop in r8..r11/rdx when the loop makes no

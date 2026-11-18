@@ -34,6 +34,7 @@ export function versions() {
   const first = argv => { try { return run(argv).stdout.split('\n')[0].trim(); } catch { return 'not installed'; } };
   return {
     clang: first(['clang', '--version']),
+    'clang++': first(['clang++', '--version']),
     'g++': first(['g++', '--version']),
     rustc: first(['rustc', '--version']),
     cargo: first(['cargo', '--version']),
@@ -105,13 +106,14 @@ export function toolchains() {
   const ok = argv => { try { return spawnSync(argv[0], argv.slice(1), { encoding: 'utf8' }).status === 0; } catch { return false; } };
   const have = {
     c: ok(['clang', '--version']),
+    cpp: ok(['clang++', '--version']),
     rust: ok(['rustc', '--version']) && ok(['cargo', '--version']),
     go: ok(['go', 'version']),
     zig: ok(['zig', 'version']),
     tbb: ok(['g++', '--version']) && ['/usr/include/oneapi/tbb.h', '/usr/local/include/oneapi/tbb.h'].some(existsSync),
   };
   const missing = Object.entries(have).filter(([, v]) => !v).map(([k]) => k);
-  if (missing.length) console.log(`note: not installed here, so not measured: ${missing.map(k => ({ c: 'clang', rust: 'rustc/cargo', go: 'go', zig: 'zig', tbb: 'g++ with oneTBB' })[k]).join(', ')}`);
+  if (missing.length) console.log(`note: not installed here, so not measured: ${missing.map(k => ({ c: 'clang', cpp: 'clang++', rust: 'rustc/cargo', go: 'go', zig: 'zig', tbb: 'g++ with oneTBB' })[k]).join(', ')}`);
   return have;
 }
 
