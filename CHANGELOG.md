@@ -12,6 +12,9 @@
   `gr_sdl_pref_path`: SDL allocates the pref path with SDL_malloc and Grail has no CPtr-to-CStr cast,
   so the shim copies the text out and frees the buffer.
 
+- `abundance/PORTING.md` records the evaluation-order trap that cost a byte-identical fill: gcc
+  sequences a call's arguments right to left, braced-init lists left to right, and a draw hoisted
+  out of its branch changes the stream — with the grep that audits a module for it.
 - **The damage domain's placed-object entry points are ported.** `abundance/src/damage_actions.grl`
   carries `actions/damage/placed_damage` (cmake/tx/damage): the book rows, `strike_placed`'s skips,
   refusal wording ("damage.placed_energy") and wreck threshold, `first_placed_hit`'s box slab test and
