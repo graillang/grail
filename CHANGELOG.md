@@ -1,5 +1,13 @@
 ## Unreleased
 
+- Fixed: a struct whose closure field is `Fn<.., Owned>` can be moved into a `lock_with` callback again.
+  `struct Spec { body: Fn<Share, Owned>((&T), u64) -> u64, deps: u64[] }` was refused with "this value
+  holds a borrow its type cannot show": the borrow walk counted every closure type as possibly holding
+  a capture, so the reference the closure merely *takes as a parameter* looked like one. An `Owned`
+  closure type names whatever it borrows (the rule `owned_walk` and `capture_hides_loan` already use),
+  so it - and a record holding one - holds no hidden borrow; a call-scoped `Fn(..)` still may, and the
+  `closure-hidden-loan-*` refusals are unchanged. Case
+  `closure-owned-field-reference-param-through-lock-with`.
 - **The Jolt surface closes with the overlap query.** `gr_jolt_overlap_capsule` is one `CollideShape`
   of the same capsule the cast sweeps, stopped at the first hit: `abundance/src/jolt.grl` now answers
   the core's `overlap` contract (a boolean, with `invalid_request` for a capsule shorter than its own

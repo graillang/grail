@@ -19789,6 +19789,15 @@
     "note": "the spelling that keeps a closure passed through an intermediate function: `Fn<Owned, Share>` on the parameter and the field. A non-capturing literal and one capturing a local copy are stored through `lock_with` and called later"
   },
   {
+    "name": "closure-owned-field-reference-param-through-lock-with",
+    "source": "use sync;\nstruct T { x: u64 }\nunsafe struct Spec: transferable, shareable { body: Fn<Share, Owned>((&T), u64) -> u64, deps: u64[] }\nstruct Box { jobs: Spec[] }\nfn keep(b: (&mut Box), s: Spec) -> u64 { b.jobs.push(s); return 0; }\nfn run0(b: (&mut Box), x: u64) -> u64 { return (b.jobs[0].body)(&T{x: x}, b.jobs[0].deps.len()); }\nfn store(m: (&Mutex<Box>), f: Fn<Share, Owned>((&T), u64) -> u64) -> u64 {\n    return m.lock_with(Spec{body: f, deps: u64[1, 2]}, keep);\n}\nfn main() {\n    m := Mutex::new(Box{jobs: Spec[]});\n    println(store(&m, |t: &T, k: u64| -> u64 { return t.x * k; }));\n    println(m.lock_with(7, run0));\n}\n",
+    "modules": [
+      "lib/sync.grl"
+    ],
+    "stdout": "0\n14\n",
+    "note": "a record whose closure field is `Fn<.., Owned>` holds no borrow its type cannot show (the type names what the closure borrows), so it moves into `lock_with`'s context; a reference the closure only takes as a parameter is not a capture. The call-scoped `Fn(..)` shapes stay refused (`closure-hidden-loan-*`)"
+  },
+  {
     "name": "closure-record-built-at-literal-through-lock-with-runs",
     "source": "use sync;\nstruct Spec { body: Fn<Share>(u64) -> u64 }\nstruct Box { jobs: Spec[] }\nfn keep(b: (&mut Box), s: Spec) -> u64 { b.jobs.push(s); return 0; }\nfn run0(b: (&mut Box), x: u64) -> u64 { return (b.jobs[0].body)(x); }\nfn submit(m: (&Mutex<Box>), p: (&u64)) {\n    q := *p;\n    r := m.lock_with(Spec{body: |x: u64| -> u64 { return x + q; }}, keep);\n}\nfn main() {\n    k := 5;\n    m := Mutex::new(Box{jobs: Spec[]});\n    submit(&m, &k);\n    println(m.lock_with(1, run0));\n}\n",
     "modules": [
