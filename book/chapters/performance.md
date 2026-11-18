@@ -24,10 +24,11 @@ them.
 
 ## Everything at a glance
 
-One bar per category: Grail's time (or instructions) over the fastest rival's in that category, the
-geometric mean of its rows, on a logarithmic axis centred on 1x. Left of the line Grail is ahead;
-right of it, behind. Each category's best and worst row are marked and named in the table under the
-chart, and the sections that follow chart every row.
+One bar per category: how much faster or slower Grail is than the fastest rival in that category,
+taking the geometric mean of the category's rows. A green bar to the left of the centre line means
+Grail is faster, a red bar to the right that it is slower, on a logarithmic scale. Each category's
+best and worst row are marked and named in the table under the chart, and the sections that follow
+chart every row.
 
 {{perf:summary}}
 
