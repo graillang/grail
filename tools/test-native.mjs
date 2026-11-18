@@ -17,7 +17,7 @@ import { spawn } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { root, compilerSources, hostTarget, targetName, buildCompiler, compileProgram, execute, useAssemblerOf } from './native.mjs';
 
-const legacyReferenceSyntax = /\b(?:borrow|borrow_mut)\s*\(|\b(?:read|mut)\s*</;
+const legacyReferenceSyntax = /\b(?:borrow|borrow_mut)\s*\(|(?<!\bfn )\b(?:read|mut)\s*</;
 const targetNames = ['x86_64', 'aarch64', 'riscv64', 'macos-x86_64', 'macos-aarch64'];
 const usage = `usage: bun tools/test-native.mjs [TARGET] [PATHS...] [--filter REGEX] [--shard i/n]
                                   [--jobs N] [--list] [--fail-fast] [--update]
@@ -125,7 +125,8 @@ function checkSources(cases) {
   for (const directory of ['compiler/tests', 'book/examples', 'abundance/src', 'abundance/tests']) {
     for (const file of readdirSync(join(root, directory)).filter(f => f.endsWith('.grl'))) {
       const path = join(root, directory, file);
-      assert.doesNotMatch(readFileSync(path, 'utf8'), legacyReferenceSyntax, `${path}: legacy fixture reference syntax`);
+      // Line comments are prose, not syntax: `read through a borrow (` is not a legacy reference.
+      assert.doesNotMatch(readFileSync(path, 'utf8').replace(/\/\/.*$/gm, ''), legacyReferenceSyntax, `${path}: legacy fixture reference syntax`);
     }
   }
 }
