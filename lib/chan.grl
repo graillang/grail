@@ -15,8 +15,12 @@ use host;
 // A counter is {lap, index}: the low bits below `mark` are the slot index, `mark` is the closed
 // bit (on `tail` only) and every bit from `lap` up counts laps, so a stamp a whole lap behind tells a
 // full ring from an empty one. A side that cannot go on spins and yields, as crossbeam's Backoff
-// does, and only then parks: it counts itself in `waiting_*`, reads the gate's
-// wake-up count, looks at the ring once more and sleeps on its Condition until the count moves. The other side looks at
+// does, and only then parks. While it spins on a full or empty ring it watches only the stamp of
+// the slot it wants, looking after every CPU wait hint, so it sees the hand-off as soon as it lands
+// and leaves the other side's counter alone; a side that waits for another to finish with a slot
+// yields rather than spins, so a preempted peer does not cost it a whole time slice. To park it
+// counts itself in `waiting_*`, reads the gate's wake-up count, looks at the ring once more and
+// sleeps on its Condition until the count moves. The other side looks at
 // that count after its own compare-exchange, so a hand-off that nobody is parked for never touches
 // the gate. Both the count and the counters are sequentially consistent, so either the parking side
 // sees the change or the changing side sees it parking - no wake-up is lost. `close` sets the mark
@@ -85,14 +89,18 @@ pub fn bounded<T>(capacity: u64) -> Channel<T> {
 const SPIN_LIMIT: u64 = 6;
 const PATIENCE: u64 = 10;
 
-fn hints(step: u64) -> unit {
+// How many hints a step waits: 2^step, at most 64.
+fn hint_count(step: u64) -> u64 {
     mut n = 1;
     mut s = step;
     while (s > 0) && (n < 64) {
         n = n * 2;
         s -= 1;
     }
-    for i in n {
+    return n;
+}
+fn hints(step: u64) -> unit {
+    for i in hint_count(step) {
         spin_hint();
     }
 }
@@ -140,6 +148,20 @@ impl<T> Channel<T> {
             return wrapping_add(at, 1);
         }
         return wrapping_add(wrapping_sub(at, index), self.lap);
+    }
+    // Wait at most 2^step CPU wait hints (64 at most) for the stamp at `k` to move off `stamp`,
+    // looking at it after every hint: a hand-off is seen the moment it lands, not at the end of a run
+    // of hints, and only the slot's line is read, so the other side's counter is not pulled away
+    // from it. Answers the next step.
+    fn watch(self: (&Channel<T>), k: u64, stamp: u64, step: u64) -> u64 {
+        n := hint_count(step);
+        cell := self.cell(k);
+        mut i = 0;
+        while (i < n) && (cell.load_relaxed() == stamp) {
+            spin_hint();
+            i += 1;
+        }
+        return step + 1;
     }
     // A receiver could go on: a value is claimed or there, or the channel is closed.
     fn can_recv(self: (&Channel<T>)) -> bool {
@@ -222,16 +244,17 @@ impl<T: Owned> Channel<T> {
             } else {
                 if wrapping_add(stamp, self.lap) == wrapping_add(tail, 1) {
                     // The slot still holds last lap's value: full, unless a receiver is taking it.
-                    fence();
-                    if wrapping_add(self.cell(HEAD).load_relaxed(), self.lap) == tail {
-                        if step > PATIENCE {
+                    if step <= SPIN_LIMIT {
+                        step = self.watch(STAMPS + index, stamp, step);
+                    } else {
+                        fence();
+                        if (wrapping_add(self.cell(HEAD).load_relaxed(), self.lap) == tail) && (step > PATIENCE) {
                             self.park_sender();
                             step = 0;
                         } else {
+                            // Still full, or a receiver that took the slot is not done with it.
                             step = snooze(step);
                         }
-                    } else {
-                        step = spin(step);
                     }
                 } else {
                     // Another sender claimed the slot and has not published it yet.
@@ -265,20 +288,25 @@ impl<T: Owned> Channel<T> {
             } else {
                 if stamp == head {
                     // The slot is free this lap: empty, unless a sender has claimed it.
-                    fence();
-                    tail := self.cell(TAIL).load_relaxed();
-                    if wrapping_sub(tail, tail & self.mark) == head {
-                        if (tail & self.mark) != 0 {
-                            return None;
-                        }
-                        if step > PATIENCE {
-                            self.park_receiver();
-                            step = 0;
+                    if step <= SPIN_LIMIT {
+                        step = self.watch(STAMPS + index, stamp, step);
+                    } else {
+                        fence();
+                        tail := self.cell(TAIL).load_relaxed();
+                        if wrapping_sub(tail, tail & self.mark) == head {
+                            if (tail & self.mark) != 0 {
+                                return None;
+                            }
+                            if step > PATIENCE {
+                                self.park_receiver();
+                                step = 0;
+                            } else {
+                                step = snooze(step);
+                            }
                         } else {
+                            // A sender has claimed the slot and not published it yet.
                             step = snooze(step);
                         }
-                    } else {
-                        step = spin(step);
                     }
                 } else {
                     // Another receiver claimed the slot and has not freed it yet.

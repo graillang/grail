@@ -22,6 +22,10 @@ worker has the task. Chains of tasks are therefore LIFO for the worker that spaw
 what makes a fork-join recursion run its children depth-first, and FIFO for thieves, which is what
 spreads a burst.
 
+The head lives a line away from the tail, the buffer and the mask (`rt_deque_head`, deque + 1024),
+and the owner keeps the head it read last beside it: a push reads the shared head only when that
+bound says full. On one line, every steal's CAS cost a burst's pusher a miss per push.
+
 The buffer is fixed at 131072 entries. That is deliberate: a growing Chase-Lev needs memory
 reclamation for the old buffer (a thief may still be reading it), and a fixed buffer needs none.
 A push that does not fit spills to the shared **injection ring**, which is also where a spawn or a
@@ -38,22 +42,24 @@ jobs come first because some stack is inside a join waiting for them.
 
 ## Parking and waking
 
-Every worker parks on one 64-bit sequence word in the scheduler block, with the platform's address
+A parked worker sleeps on its own **wake word** (worker block word 384) with the platform's address
 wait: `FUTEX_WAIT`/`FUTEX_WAKE` on Linux, `WaitOnAddress`/`WakeByAddressSingle` on Windows, and
 `__ulock_wait`/`__ulock_wake` on macOS - all through runtime operation 202, so the portable code
-never knows which.
+never knows which. The parked workers are an **idle list**: a bit mask in the scheduler block (word
+272, bit i for worker i - there are at most 64), guarded by a small lock (word 264) that is taken
+only when a worker parks, leaves the list, or is taken off it by a waker. Beside them, on the same
+line, is the **idle word** (256): parked workers in the high half - always the number of bits in the
+mask - and searching workers in the low half. A push reads only the idle word.
 
-The protocol has no lost wakeups:
-
-1. The worker reads the sequence, then looks for work (`rt_worker_loop`; the read used to come
-   after the look, which left a window in which a push went unnoticed until the next one).
-2. If it finds none it publishes itself as parked and waits on the sequence with the value it read.
-3. A pusher bumps the sequence *unconditionally* and wakes one waiter if one is parked.
-
-A push that lands between the read and the wait changes the value the waiter is waiting on, so the
-wait returns immediately; a push after the wait starts sees the parked count and wakes a thread. A
-woken worker that still finds work notifies another, which is how a spawn burst reaches every worker
-without a wake per task.
+A waker does not wake "some" worker: it takes one specific worker off the list and counts it as
+searching in the same step, under the lock (`rt_idle_wake`), sets that worker's wake word to 2, and
+only then makes the system call. A wake takes microseconds to land; because the woken worker already
+counts as searching, every push meanwhile sees a searcher on its way and wakes nobody. (Counted only
+once it ran, each fork of a nested join saw "parked, nobody searching" in that window and woke
+another: about 6,000 to 28,000 wakes per `bench/sched.grl` run, and `rt_notify` a quarter of all
+parallel CPU. Now a run issues one or two hundred.) A woken worker goes straight to searching. A
+woken worker that finds work and was the last searcher wakes another (below), which is how a spawn
+burst reaches every worker without a wake per task.
 
 A finished task wakes its joiner onto the *waker's* deque, so a `join` in a task on worker B pushes
 the joiner onto B's deque and the next pop is cheap. Wakeups that come from the reactor or an
@@ -83,12 +89,15 @@ only by its forker, after it has seen the job done.
   which is what its forker is waiting for.
 
 **Classes.** Each worker has a job deque per class (Frame, Normal, Background) and there is a job
-ring per class. A worker takes Frame work, then Normal work, then tasks, then Background work, and
+ring per class. A worker takes injected tasks (the reactor's wakes, spawns from other threads), then Frame
+work, then Normal work, then its own and stolen tasks, then Background work, and
 reserves one of the Background cap's slots (a CAS) before it takes a Background job; the job gives
 it back when it finishes. A job's class is its parent's; a root fork takes the class its stack was
 given by `pool::with_class` (record word 112). An entry found in a class's queue whose record now
-has another class is a stale entry naming a later job, and is skipped rather than claimed. Every
-61st step a worker looks at the injected tasks first.
+has another class is a stale entry naming a later job, and is skipped rather than claimed. The
+injected tasks come first on every step, not every 61st as before: behind the jobs, a woken I/O
+task waited in the ring while the workers kept finding frame jobs (bench/frame.grl's I/O task woke
+up to a millisecond late in the development build).
 
 **Loops split by halving.** A parallel call forks the upper half of its leaves as one job and
 descends into the lower half, joining on the way back. The leaves are a function of the element
@@ -140,31 +149,49 @@ about 1.8 us to about 450 ns.
 A worker that runs out of work *searches* first - 64 more looks, yielding every sixteenth - and only
 then parks; a fork wakes a parked worker only when one is parked and none is searching
 (`rt_notify`). In a join the forker nearly always takes its own fork back before anyone could, so a
-wake would only start a worker that finds nothing and parks again: the old rule (bump the sequence
-and wake whenever any worker is parked) cost two system calls and a write to one shared line per
-fork, which was most of a join's 2 us and why nested joins did not scale. Measured: 100,000 joins
-on a worker issue 15 wakes, where every one of them used to.
+wake would only start a worker that finds nothing and parks again. The fast path of `rt_notify` is a
+full barrier and one load of the idle word; the idle word itself changes only on real transitions
+(a worker starts or stops searching, parks, or is taken by a waker).
 
-**No wakeup is lost.** Two pairs of accesses, each a store then a load, with a full barrier
-between, on both sides (Dekker):
+**No wakeup is lost** - the invariant is that queued work is never left while every worker is
+parked. Two pairs of accesses, each a store then a load, with a full barrier between, on both sides
+(Dekker):
 
 - the pusher: publish the work (the deque's tail store or the ring's), full barrier
-  (`rt_full_fence`: a locked CAS on a frame word, no shared write), load `parked` (scheduler word 96)
-  and `searching` (jobs word 416);
-- a parking worker: `searching -= 1` (a locked RMW, a full barrier), load the sequence, `parked += 1`
-  (a locked RMW, a full barrier), look at every queue once more, and only then wait on the sequence
-  with the value it loaded.
+  (`rt_full_fence`), load the idle word; if it shows a parked worker and no searcher, take the idle
+  lock, re-read the word, and if that still holds take a worker (`rt_idle_wake`);
+- a parking worker, still counted as searching: one atomic update of the idle word under the idle
+  lock that puts it on the list and moves it from searching to parked (`rt_idle_park`), its wake word
+  set to 1, a full barrier, one more look at every queue - which runs what it finds - and only then a
+  wait on its wake word for as long as the word is 1.
 
-In the single total order of the barriers either the pusher's load of `parked`/`searching` comes
-after the worker's increment of `parked` - then it sees a parked worker and, unless one is
-searching, bumps the sequence and wakes - or the worker's last look comes after the pusher's
-publication and finds the work. A searching worker the pusher counted is one whose last look comes
-later still, so it finds the work too. A bump between the worker's sequence load and its wait makes
-the wait return at once. And a worker stops counting as searching *before* it runs what it found
-(`rt_worker_run`, worker word 280): counted while running, its own forks would see "someone is
-searching" and wake nobody - which happened, and is what `sched-fork-reaches-a-thief` pins. `sched-wake-not-lost-under-constant-parking` would hang if any of this
-were wrong; it runs on x86-64, AArch64 and RV64 (qemu, which is not a weak machine: real ARM
-hardware is still owed).
+In the single total order of the barriers, either the pusher's load comes after the worker's update
+- then it sees a parked worker and, unless one is searching, takes one off the list and wakes it - or
+the worker's last look comes after the publication and finds the work. A searcher the pusher saw
+ends its search after that load, in one of three ways: it parks, and its last look comes later
+still, so it finds the work; it finds other work and others are still searching, which defers to
+them in the same way; or it finds other work as the *last* searcher, and then it notifies itself
+(`rt_worker_run`) - a load of the idle word that comes after the publication and acts on it as the
+pusher's would have. A worker taken by a waker counts as searching from that moment, and every look
+it makes comes after its wake. A wake whose system call lands before the worker waits cannot be
+missed: the waker set the wake word to 2 under the lock first, and the wait sleeps only while the
+word is 1.
+
+Two cases need care. The last look may *find* work while the worker is on the list: `rt_worker_run`
+sees word 280 = 2 and takes the worker off the list under the lock before running anything
+(`rt_idle_leave`); if a waker took it meanwhile, it was counted as searching, and that count ends
+here as any searcher's does (so the last-searcher rule applies to it too). A stale system call from
+that waker may land on a later park: the worker re-checks its word and waits again. And a worker
+stops counting as searching *before* it runs what it found (word 280): counted while running, its
+own forks would see "someone is searching" and wake nobody - which happened, and is what
+`sched-fork-reaches-a-thief` pins.
+
+Two hangs had exactly the shape the invariant forbids, and both rules stay: a push into a non-empty
+deque still notifies (skipping it hung `task-scopes-join-cancel-abandon`, because a task can spin
+until another task runs), and the last searcher to find work wakes another for what may be queued
+behind it. `sched-wake-not-lost-under-constant-parking` would hang if any of this were wrong; it
+runs on x86-64, AArch64 and RV64 (qemu, which is not a weak machine: real ARM hardware is still
+owed).
 
 ## Stacks
 

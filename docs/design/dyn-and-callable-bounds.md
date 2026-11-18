@@ -271,3 +271,20 @@ needs four things, all in `compiler/optimize.grl` and its interaction with the e
 The LLVM path lifts this same assembly, so each step is checked on both backends (the lifter must
 see the spliced copies as ordinary code, not as calls). Estimated several days; it is held for a
 decision (it is not in progress).
+
+### 7.1 Two copy-quality steps taken (branch gap-iterchain)
+
+Before any of the four steps above, two smaller costs went: bench/iterchain natively is 1100M ->
+897M instructions (the hand loop with the same vector fill is 327M). (a) The capture-free direct
+call's `xorl %eax,%eax` was an unknown instruction to the optimiser (every register live), so the
+loads computing the unused closure value stayed: it is `xorq %rax,%rax` now and they die. (b) A leaf's
+copy is forwarded and dead-def'd after its slots become registers, and a slot register is zeroed at
+the copy's start only when the copy still names it (`x * 2` went from 8 instructions to 4).
+
+Per element the chain is now ~57 instructions: the slice loop (~16, it reloads `v`'s data pointer
+and moves the closure environment through a callee-saved register each iteration), Map's closure
+(~22: frame, the stack copy of Filter's closure whose address it passes - item 2 - and the call)
+and Filter's (~19: frame, `&x` - an address-taken slot - and the predicate and sum copies). What is
+left is items 1-4: Filter's closure becomes a leaf only once its predicate is copied in *and*
+`leaq slot` followed by loads through it is read as the slot itself, Map's after that, and the
+size cap must admit Map's copy with Filter's inside.

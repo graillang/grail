@@ -64,6 +64,9 @@ pub struct Body {
     lscope: u64,
     // This body's slot type facts by N/8, `(what << 8) | width`, 0 for none (filled by `build`).
     sfact: u64[],
+    // By N/8: 1 when every slot fact for the slot types it f32 (the word is then an f32 value
+    // widened, whatever stores it: the LLVM lifter's `accept_slots` rule), 0 otherwise.
+    sf32: u64[],
     // The loop-stability facts (llvm FACT_LOOP_STABLE) of this body, as pairs: the header's slot by
     // N/8 and the loop head's label number (filled by `build`).
     stable: u64[],
@@ -1365,6 +1368,11 @@ pub fn reads<a>(o: (&a Body), i: u64) -> u64 {
         }
         return m;
     }
+    // optimize.grl `xmm_late`/`f32_indexed`: a 4-byte access's check alone (122), and `movss` to and
+    // from `(%D,%rsi,4)` (123 load, D operand 0; 124 store, D operand 1): rsi and the registers named.
+    if (op == 122) || (op == 123) || (op == 124) {
+        return 64 | src | dst;
+    }
     if is_desc_op(op) {
         // The index (rsi, or the register optimize.grl `desc_regs` put in the low byte of m1, +1)
         // and the hoisted data and len registers the operands name; the byte store also its value
@@ -1440,6 +1448,11 @@ pub fn writes<a>(o: (&a Body), i: u64) -> u64 {
         return dst_writes(&o, i);
     }
     if op == 121 {
+        return 0;
+    }
+    // The check alone and the indexed `movss` lines write no general register (a failed check does
+    // not come back).
+    if (op == 122) || (op == 123) || (op == 124) {
         return 0;
     }
     if is_float_op(op) {
@@ -1560,6 +1573,7 @@ pub fn new_body() -> Body {
         inl_rel: u8[],
         lscope: 0,
         sfact: u64[],
+        sf32: u64[],
         stable: u64[],
         slotmap: u64[],
         edits: 0,
@@ -1842,11 +1856,13 @@ pub fn build<a, b, c, d>(o: (&a mut Body), s: &b [u8], facts: (&c llvm::Facts), 
     exchange(&mut o.ret2, 0);
     exchange(&mut o.pair_widths, u64[]);
     o.sfact.clear();
+    o.sf32.clear();
     o.stable.clear();
     exchange(&mut o.dd_at, 0);
     o.slotmap.clear();
     for n in o.maxslot / 8 + 2 {
         o.sfact.push(0);
+        o.sf32.push(0);
     }
     if (o.name.len() != 0) && (ix.count != 0) {
         mut h: u64 = 2166136261;
@@ -1874,6 +1890,15 @@ pub fn build<a, b, c, d>(o: (&a mut Body), s: &b [u8], facts: (&c llvm::Facts), 
                         if (n < o.sfact.len()) && (o.sfact[n] == 0) {
                             put(&mut o.sfact, n, (llvm::fact_what(facts, i) << 8) | (llvm::fact_width(facts, i) & 255));
                         }
+                        if n < o.sf32.len() {
+                            // 1: f32 so far; 2: some fact says otherwise, for good.
+                            f32 := (llvm::fact_what(facts, i) == 1) && (llvm::fact_width(facts, i) == 4);
+                            if !f32 {
+                                put(&mut o.sf32, n, 2);
+                            } else if o.sf32[n] == 0 {
+                                put(&mut o.sf32, n, 1);
+                            }
+                        }
                     }
                     if kind == llvm::FACT_PAIR {
                         pairs.push(i);
@@ -1888,6 +1913,11 @@ pub fn build<a, b, c, d>(o: (&a mut Body), s: &b [u8], facts: (&c llvm::Facts), 
                 }
             }
             at = ix.next[i];
+        }
+        for n in o.sf32.len() {
+            if o.sf32[n] != 1 {
+                put(&mut o.sf32, n, 0);
+            }
         }
         // In table order, as the facts were recorded; a pair's width (0 recorded as 2 words).
         mut k = pairs.len();

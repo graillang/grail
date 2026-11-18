@@ -594,8 +594,10 @@ or yields a handle whose drop waits. The only detach is `thread::detach`, and it
   `book/chapters/concurrency.md` admits today). A job inherits its scope's class. No priority
   inheritance: `Frame` code must not take a lock `Background` code holds across a wait, and
   `@no_wait` on the background callback proves it.
-- **Fairness.** Owner LIFO, thief FIFO, as now. Every 61st take checks the injection queue first so
-  a self-feeding worker cannot starve injected work. No preemption: a compute loop that must not
+- **Fairness.** Owner LIFO, thief FIFO, as now. Every step checks the task injection ring first
+  (wakes from the reactor, spawns from other threads), so a self-feeding worker cannot starve
+  injected work and a woken I/O task waits at most one job (it was every 61st take, which left the
+  I/O task of bench/frame.grl up to a millisecond late). No preemption: a compute loop that must not
   hog a worker is a parallel loop, which splits.
 - **Wake latency.** A parked worker costs a futex round trip to wake. `idle_spin_us` lets workers
   spin briefly before parking, the standard job-system trade of CPU for frame-time variance.

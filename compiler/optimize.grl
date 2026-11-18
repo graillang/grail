@@ -818,7 +818,12 @@ fn dead_after<a>(o: (&a ir::Body), i: u64, r: u64, budget: u64) -> bool {
                 }
             }
         }
-        if op == 29 || op == 30 {
+        // At `ret` the caller reads only the result registers and the callee-saved ones: a
+        // caller-saved register's value dies there. `leave` touches only %rsp and %rbp.
+        if op == 30 {
+            return (((ir::caller_saved() & (all_regs_mask() ^ ir::result_live(&o))) >> r) & 1) != 0;
+        }
+        if (op == 29) && ((r == 4) || (r == 5)) {
             return false;
         }
     }
@@ -2210,8 +2215,26 @@ fn leaf_op<a>(name: &a [u8]) -> u64 {
 }
 fn emit_line<a, b>(o: (&a mut ir::Body), s: &b [u8], i: u64) {
     op := o.op[i];
-    if ir::is_desc_op(op) {
+    if ir::is_desc_op(op) || (op == 122) {
         desc_expansion(&mut o, i);
+        return ();
+    }
+    // xmm_late: `movss %xmmN,(%D,%rsi,4)`, D in operand 1.
+    if op == 124 {
+        app(&mut o.out, view("movss "));
+        emit_operand(&mut o, view(s), i, 0);
+        app(&mut o.out, view(",(%"));
+        reg_name(&mut o, o.v1[i]);
+        app(&mut o.out, view(",%rsi,4)\n"));
+        return ();
+    }
+    // f32_indexed: `movss (%D,%rsi,4),%xmmN`, D in operand 0.
+    if op == 123 {
+        app(&mut o.out, view("movss (%"));
+        reg_name(&mut o, o.v0[i]);
+        app(&mut o.out, view(",%rsi,4),"));
+        emit_operand(&mut o, view(s), i, 1);
+        o.out.push(10);
         return ();
     }
     if (op == 86) || (op == 87) {
@@ -2543,6 +2566,10 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
     array_imms(&mut o, view(s), last);
     const_branches(&mut o, view(s), last);
     dead_defs(&mut o, view(s), first, last);
+    if zero_tests(&mut o, view(s), last) {
+        dead_stores(&mut o, &mut f, first, last);
+        dead_defs(&mut o, view(s), first, last);
+    }
     // No whole-body SSE liveness (xmm_dead_flow) but in the late re-run below.
     mut noflow = xflow_new(0);
     // Float constants loaded before a loop's head (loop_consts): register and width, the head line,
@@ -2753,6 +2780,71 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
         if pal.len() != 0 {
             gpr_colour(&o, &mut f, &own, ns, &pal, &mut mslot, &mut mreg);
         }
+        // Colouring may leave registers of the palette to no slot (slots whose lives do not overlap
+        // share one), and the greedy may stop with one register left: a slice it had no two
+        // registers left for takes them, as it would have. `spare` holds the registers, `sidx`
+        // their index in `chosen` (chosen.len() for one not yet in it).
+        mut spare = u64[];
+        mut sidx = u64[];
+        for c in chosen.len() {
+            if slots[c] != 0 {
+                mut used = false;
+                for x in mreg.len() {
+                    if mreg[x] == chosen[c] {
+                        used = true;
+                    }
+                }
+                if !used {
+                    spare.push(chosen[c]);
+                    sidx.push(c);
+                }
+            }
+        }
+        if spare.len() != 0 {
+            for r in avail.len() - next {
+                spare.push(avail[next + r]);
+                sidx.push(chosen.len());
+            }
+        }
+        mut sp = 0;
+        while sp < spare.len() {
+            mut bd = dslot.len();
+            mut dw = 15;
+            for k in dslot.len() {
+                mut own_reg = false;
+                for x in mslot.len() {
+                    if mslot[x] == dslot[k] {
+                        own_reg = true;
+                    }
+                }
+                if (ddata[k] == 99) && (f.bad[dslot[k]] == 0) && !own_reg && (sp + 1 + dneed[k] <= spare.len()) && (dwt[k] > dw) {
+                    bd = k;
+                    dw = dwt[k];
+                }
+            }
+            if bd == dslot.len() {
+                break;
+            }
+            ir::put(&mut f.bad, dslot[bd], 1);
+            // Its length's copy keeps the register colouring gave it, if any.
+            ir::put(&mut dalias, bd, 0);
+            ir::put(&mut ddata, bd, spare[sp]);
+            ir::put(&mut dlen, bd, spare[sp]);
+            mut take = 1;
+            if dneed[bd] != 0 {
+                ir::put(&mut dlen, bd, spare[sp + 1]);
+                take = 2;
+            }
+            for q in take {
+                if sidx[sp + q] < chosen.len() {
+                    ir::put(&mut slots, sidx[sp + q], 0);
+                } else {
+                    chosen.push(spare[sp + q]);
+                    slots.push(0);
+                }
+            }
+            sp += take;
+        }
         // The accessors of a slice with registers read them: `x.len()` is a move of the length, the
         // others become their 90..97 forms.
         for i in last {
@@ -2900,6 +2992,9 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
     xmm_memops(&mut o, view(s), last);
     xmm_copies(&mut o, view(s), last, &mut noflow);
     index_cse(&mut o, view(s), last);
+    // Last, so the SSE and addressing patterns above still see the `%rax` moves they match.
+    lea_moves(&mut o, view(s), last);
+    commuted_loads(&mut o, view(s), last);
     dead_defs(&mut o, view(s), first, last);
     // Slots read only by text emitted outside the lines: a stable sequence's slot (item 6).
     mut keep = u64[];
@@ -2945,6 +3040,8 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
         }
         zkeep = slots_live_in(&o, view(s), &zc, prologue);
     }
+    xmm_late(&mut o, view(s), last, &mut flows);
+    f32_indexed(&mut o, view(s), last);
     fstart := o.out.len();
     for i in last {
         if (newframe != 0) & (i + 1 == last) {
@@ -3394,24 +3491,36 @@ fn shrink_wrap<a>(o: (&a mut ir::Body), start: u64) {
             out.push(10);
         }
     }
-    // The remainder usually opens with the original guard's own dead `jmp L` (or with `L:`):
-    // falling into it is the jump.
+    // The remainder opens with what followed the original guard's `ret`: up to the next label no
+    // path reaches it (the guard's own `jmp` past its `else`, usually), so its instructions are
+    // dropped. When `L:` is among the labels that follow, falling into them is the jump.
     mut jl = copy_line(view("jmp "));
     put_line(&mut jl, view(target));
     mut ll = copy_line(view(target));
     ll.push(58);
-    mut first = r;
-    while (first < lines.len()) && sw_site(view(lines[first])) {
+    mut dead = r;
+    while (dead < lines.len()) && !sw_label(view(lines[dead])) {
+        dead += 1;
+    }
+    mut falls = false;
+    mut first = dead;
+    while (first < lines.len()) && (sw_label(view(lines[first])) || (lines[first].len() == 0) || (lines[first][0] == 46)) {
+        if sw_is(view(lines[first]), view(ll)) {
+            falls = true;
+        }
         first += 1;
     }
-    falls := (first < lines.len()) && (sw_is(view(lines[first]), view(jl)) || sw_is(view(lines[first]), view(ll)));
     if !falls {
         put_line(&mut out, view(jl));
         out.push(10);
     }
     while r < lines.len() {
-        put_line(&mut out, view(lines[r]));
-        out.push(10);
+        l := view(lines[r]);
+        // Before `dead` only directives and site labels are kept: the instructions are unreachable.
+        if (dead <= r) || (l.len() == 0) || (l[0] == 46) {
+            put_line(&mut out, l);
+            out.push(10);
+        }
         r += 1;
     }
     while o.out.len() > start {
@@ -3442,6 +3551,10 @@ fn sw_starts<a, b>(l: &a [u8], t: &b [u8]) -> bool {
 }
 fn sw_ends<a, b>(l: &a [u8], t: &b [u8]) -> bool {
     return (t.len() <= l.len()) && ir::at(view(l), l.len() - t.len(), t);
+}
+// A label a jump can name: one that ends in `:` and is not a site label.
+fn sw_label<a>(l: &a [u8]) -> bool {
+    return (l.len() != 0) && (l[l.len() - 1] == 58) && !sw_site(l);
 }
 // A statement marker the site table reads (`.gpos`, `.gposa`, `.gbase`, `.gkind`; or the
 // `.Lgs<n>:` label it makes of one): no jump targets it, and it moves with what it marks.
@@ -3983,7 +4096,7 @@ fn xmm_dead_after<a, b>(o: (&a ir::Body), s: &b [u8], i: u64, r: u64, depth: u64
     return false;
 }
 // Whole-body SSE liveness for the late re-run of the copy passes (xmm_dead_flow): the registers live
-// after each line, for returns that end every register (out0) and that read them all (out1), each
+// after each line, for returns that end every register (out0) and that read %xmm0 (out1), each
 // valid while the body has had no edit since (`at` is o.edits + 1). `left` bounds the recomputations.
 struct XFlow {
     at0: u64,
@@ -3999,8 +4112,9 @@ fn xflow_new(left: u64) -> XFlow {
 // answer xmm_dead_after's bounded walk cannot give when the next write is around a loop's back edge
 // or nothing in the loop names r again. A call that returns, an unknown instruction or a jump the
 // optimiser cannot follow reads every register; an unchanged line that names a register in a way
-// its operands do not show reads it too. `ret_live`: a return reads every register (an exported
-// callback's float result), else a return ends them. No recomputation left is "not dead".
+// its operands do not show reads it too. `ret_live`: a return reads %xmm0 (an exported callback's
+// float result, export_fret; Grail's own functions return floats in %rax), else a return ends every
+// register. No recomputation left is "not dead".
 fn xmm_dead_flow<a, b>(o: (&a ir::Body), s: &b [u8], i: u64, r: u64, ret_live: bool, fl: (&mut XFlow)) -> bool {
     if r > 15 {
         return false;
@@ -4011,7 +4125,7 @@ fn xmm_dead_flow<a, b>(o: (&a ir::Body), s: &b [u8], i: u64, r: u64, ret_live: b
                 return false;
             }
             fl.left -= 1;
-            fl.out1 = xmm_live_out(&o, view(s), 65535);
+            fl.out1 = xmm_live_out(&o, view(s), 1);
             fl.at1 = o.edits + 1;
         }
         return ((fl.out1[i] >> r) & 1) == 0;
@@ -4239,7 +4353,7 @@ fn xmm_narrow<a, b>(o: (&a mut ir::Body), s: &b [u8], lsrc: (&u64[]), ldst: (&u6
     for c in xslots.len() {
         ok.push(1);
     }
-    // The constant stores to round once the slot is known to be narrow.
+    // The constant and f32-typed general-register stores to round once the slot is known to be narrow.
     mut kconst = u64[];
     // A load into a general register (`movq %xmmS,%rax`, a returned accumulator) widens through
     // %xmm15, so it is allowed only when the body uses %xmm15 for nothing else.
@@ -4288,6 +4402,13 @@ fn xmm_narrow<a, b>(o: (&a mut ir::Body), s: &b [u8], lsrc: (&u64[]), ldst: (&u6
                 if (o.op[p] == 10) && (o.k0[p] == 1) && (o.v0[p] == o.v0[i]) {
                     good = true;
                 }
+            }
+            // A slot the front end types f32 holds an f32 value widened, whatever stores it (an
+            // argument register, a call's result): the store rounds it to binary32 (op 121), exactly.
+            if !good && (op == 1) && (o.k0[i] == 1) && (c < xslots.len()) && (xslots[c] < o.sf32.len())
+                && (o.sf32[xslots[c]] != 0) {
+                good = true;
+                kconst.push(i);
             }
             if !good && (c < ok.len()) {
                 ir::put(&mut ok, c, 0);
@@ -4539,7 +4660,7 @@ fn desc_expansion<a>(o: (&a mut ir::Body), i: u64) {
     if (o.m1[i] & 255) != 0 {
         index = (o.m1[i] & 255) - 1;
     }
-    if op < 95 {
+    if (op < 95) || (op == 122) {
         n := ir::uniq_take(&mut o);
         app(&mut o.out, view("cmpq %"));
         reg_name(&mut o, len);
@@ -4561,7 +4682,9 @@ fn desc_expansion<a>(o: (&a mut ir::Body), i: u64) {
         out_number(&mut o, n);
         app(&mut o.out, view(":\n"));
     }
-    if ((o.m1[i] >> 8) & 1) != 0 {
+    // Folded into the access after it (desc_regs), or the check of a 4-byte access whose load
+    // f32_indexed moved into the `movss` after it.
+    if (((o.m1[i] >> 8) & 1) != 0) || (op == 122) {
         return ();
     }
     if op == 89 {
@@ -4596,13 +4719,15 @@ fn desc_expansion<a>(o: (&a mut ir::Body), i: u64) {
         app(&mut o.out, view(",1),%rax\n"));
     }
 }
-// The registers a slice accessor with its descriptor in registers (89..97) reads, the counterpart of
-// `array_regs`: the index copied into %rsi earlier in the same straight line (`movq %rX,%rsi`, X
-// unwritten since) is read from X itself, so the copy can die; and an element address (`leaq`, 90,
-// 93, 95, 97) that only feeds one load or store through it right after - `(%rax)`, or `(%rR)` after
-// copies `movq %rax,%rR` - becomes that access's own operand `(%rD,%rX,W)`, without the `leaq` or
-// the copies. Every register that held the address must be dead after the access (or be its
-// destination), and nothing between may read one or write D or X.
+// Element addresses into their accesses, the counterpart of `array_regs` for slices with their
+// descriptor in registers: an element address (`leaq`, 90, 93, 95, 97) that only feeds one load or
+// store through it right after - `(%rax)`, or `(%rR)` after copies `movq %rax,%rR` - becomes that
+// access's own operand `(%rD,%rX,W)`, without the `leaq` or the copies, X the register the index was
+// copied into %rsi from earlier in the same straight line (`movq %rX,%rsi`, X unwritten since) so
+// the copy can die, else %rsi. Every register that held the address must be dead after the access
+// (or be its destination), and nothing between may read one or write D or X. m1 records the fold
+// (bit 8) and X (+1, low byte) on a checked accessor (its check stays), an unchecked one goes; an
+// accessor not folded keeps m1 0 and its index in %rsi.
 fn desc_regs<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
     mut any = false;
     for i in last {
@@ -4615,7 +4740,7 @@ fn desc_regs<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
     }
     lo := live_out(&mut o);
     for i in last {
-        // An accessor a run before folded stays as it is; one it gave an index register keeps it.
+        // An accessor a run before folded stays as it is.
         if (o.del[i] != 0) || !ir::is_desc_op(o.op[i]) || (((o.m1[i] >> 8) & 1) != 0) {
             continue;
         }
@@ -4624,10 +4749,6 @@ fn desc_regs<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
         mut index = 6;
         mut p = i;
         mut steps = 0;
-        if (o.m1[i] & 255) != 0 {
-            index = (o.m1[i] & 255) - 1;
-            steps = 48;
-        }
         while (0 < p) && (steps < 48) {
             p -= 1;
             if (o.del[p] != 0) || (o.op[p] == 101) {
@@ -4656,117 +4777,26 @@ fn desc_regs<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
                 break;
             }
         }
+        // The fold reads the index from X, or from %rsi when a copy of the address needs X; an
+        // accessor it does not fold is left as it was, index in %rsi, for xmm_late and f32_indexed.
         mut flags = 0;
-        if index != 6 {
-            flags = index + 1;
-        }
         if (op == 90) || (op == 93) || (op == 95) || (op == 97) {
-            mut w = 8;
-            if (op == 93) || (op == 97) {
-                w = 4;
-            }
-            // The registers holding the address, and the copies that put it there.
-            mut held = 1;
-            mut copies = u64[];
-            mut y = next_live(&o, i, last);
-            mut n = 0;
-            while (y < last) && (n < 8) {
-                n += 1;
-                yo := o.op[y];
-                if (yo == 100) || (yo == 0) || (yo == 15) || (yo == 29) || (yo == 30) || ir::is_jump(yo) {
-                    break;
+            if desc_fold(&mut o, view(s), last, &lo, i, index) {
+                flags = 256;
+                if index != 6 {
+                    flags = flags | (index + 1);
                 }
-                if (yo == 1) && (o.k0[y] == 1) && (o.k1[y] == 1) && (((held >> o.v0[y]) & 1) != 0) && (o.v1[y] < 16) {
-                    d := o.v1[y];
-                    if (d == data) || (d == index) || (d == 4) || (d == 5) {
-                        break;
-                    }
-                    held = held | (1 << d);
-                    copies.push(y);
-                    y = next_live(&o, y, last);
-                    continue;
-                }
-                if (yo == 1) || (yo == 28) || (yo == 98) || (yo == 77) || (yo == 78) {
-                    // Which operand is `(%rR)` for a register R holding the address.
-                    mut at = 2;
-                    mut r = 99;
-                    for jj in 2 {
-                        mut k = o.k0[y];
-                        mut a = o.s0[y];
-                        mut e = o.e0[y];
-                        if jj != 0 {
-                            k = o.k1[y];
-                            a = o.s1[y];
-                            e = o.e1[y];
-                        }
-                        if k == 4 {
-                            for c in 16 {
-                                if (((held >> c) & 1) != 0) && paren_reg(view(s), a, e, c) {
-                                    at = jj;
-                                    r = c;
-                                }
-                            }
-                        }
-                    }
-                    if at != 2 {
-                        // The other operand: a load's destination may be one of them; a store's
-                        // source must not read one.
-                        mut ok = true;
-                        if at == 1 {
-                            if (ir::mask_of(o.k0[y], o.v0[y], o.m0[y]) & held) != 0 {
-                                ok = false;
-                            }
-                        } else if (o.k1[y] != 1) && (o.k1[y] != 6) && (o.k1[y] != 7) {
-                            ok = false;
-                        }
-                        wr := ir::writes(&o, y);
-                        for c in 16 {
-                            if ok && (((held >> c) & 1) != 0) && (((wr >> c) & 1) == 0) && (((lo[y] >> c) & 1) != 0) {
-                                ok = false;
-                            }
-                        }
-                        if ok {
-                            start := o.gen.len();
-                            app_gen(&mut o, view("(%"));
-                            gen_reg(&mut o, data);
-                            app_gen(&mut o, view(",%"));
-                            gen_reg(&mut o, index);
-                            o.gen.push(44);
-                            gen_number(&mut o, w);
-                            o.gen.push(41);
-                            end := o.gen.len();
-                            set_operand(&mut o, y, at, 5, 0);
-                            if at == 0 {
-                                ir::put(&mut o.m0, y, (1 << data) | (1 << index));
-                            } else {
-                                ir::put(&mut o.m1, y, (1 << data) | (1 << index));
-                            }
-                            bump(&mut o);
-                            set_range(&mut o, y, at, start, end);
-                            for c in copies.len() {
-                                kill(&mut o, copies[c]);
-                            }
-                            flags = flags | 256;
-                        }
-                    }
-                    break;
-                }
-                if (ir::reads(&o, y) & held) != 0 {
-                    break;
-                }
-                wr := ir::writes(&o, y);
-                if (((wr >> data) & 1) != 0) || (((wr >> index) & 1) != 0) {
-                    break;
-                }
-                held = held & (wr ^ 65535);
-                if held == 0 {
-                    break;
-                }
-                y = next_live(&o, y, last);
+            } else if (index != 6) && desc_fold(&mut o, view(s), last, &lo, i, 6) {
+                flags = 256;
             }
         }
-        ir::put(&mut o.m1, i, flags);
-        bump(&mut o);
+        if (flags != 0) && (op >= 95) {
+            // Folded and unchecked: nothing of the accessor is left to emit.
+            kill(&mut o, i);
+        } else {
+            ir::put(&mut o.m1, i, flags);
+            bump(&mut o);
+        }
     }
 }
 // The registers live after each line, by live_pass's rules: its label sets to a fixed point, then
@@ -4825,9 +4855,10 @@ fn live_out<a>(o: (&a mut ir::Body)) -> u64[] {
 //   (the general register's write dies when nothing else reads it; the copy usually folds into its
 //   reader, xmm_copies);
 //   the binary32 operation with a binary32-exact constant f32_const_ops rewrites after the optimiser,
-//   `movabsq $K,%rcx; cvtss2sd %xmmA,%xmm0; movq %rcx,%xmm1; OPsd %xmm1,%xmm0; cvtsd2ss %xmm0,%xmm0`,
-//   is `movaps %xmmA,%xmm0; OPss %xmmF,%xmm0` with K's binary32 bits in F, when %rcx and %xmm1 are
-//   dead after it (they no longer hold the constant).
+//   `movabsq $K,%rR; cvtss2sd %xmmA,%xmm0; movq %rR,%xmm1; OPsd %xmm1,%xmm0; cvtsd2ss %xmm0,%xmm0`
+//   (the widening and the move in either order, A not %xmm1), is `movaps %xmmA,%xmm0; OPss
+//   %xmmF,%xmm0` with K's binary32 bits in F, when R and %xmm1 are dead after it (they no longer
+//   hold the constant).
 // `pre` collects the register (bits 0..7) and width (bit 8 for binary32), `pre_line` the loop head,
 // `pre_val` the bits.
 fn loop_consts<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64, pre: (&mut u64[]), pre_line: (&mut u64[]), pre_val: (&mut u64[]), fl: (&mut XFlow)) {
@@ -4991,20 +5022,31 @@ fn loop_consts<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64, pre: (&mut u64
             mut c = last;
             mut opl = last;
             mut n = last;
-            if (single == 0) && (r == 1) && (k == 1) {
-                c0 := prev_live(&o, b);
+            if (single == 0) && (k == 1) {
+                // The operation right after the constant's move and the widening of A, in either order.
                 o1 := next_live(&o, b, last);
-                if (c0 < b) && (o1 < last) {
-                    n1 := next_live(&o, o1, last);
-                    if (n1 < last) && (c0 == next_live(&o, w, last)) && (o.op[c0] == 65) && (xmm_no(&o, view(s), c0, 1) == 0) && (xmm_no(&o, view(s), c0, 0) != 99)
-                        && (59 < o.op[o1]) && (o.op[o1] < 64) && (xmm_no(&o, view(s), o1, 0) == 1) && (xmm_no(&o, view(s), o1, 1) == 0)
+                mut c0 = prev_live(&o, b);
+                mut first = c0;
+                if (o1 < last) && !((c0 < b) && (o.op[c0] == 65)) {
+                    c0 = next_live(&o, b, last);
+                    first = b;
+                }
+                mut op1 = o1;
+                if c0 == o1 {
+                    op1 = next_live(&o, c0, last);
+                }
+                if (c0 < last) && (op1 < last) && (first < last) && (o.op[c0] == 65) && (xmm_no(&o, view(s), c0, 1) == 0) {
+                    a0 := xmm_no(&o, view(s), c0, 0);
+                    n1 := next_live(&o, op1, last);
+                    if (n1 < last) && (a0 != 99) && (a0 != 1) && ((first == c0) || (first == b)) && (w < first)
+                        && (59 < o.op[op1]) && (o.op[op1] < 64) && (xmm_no(&o, view(s), op1, 0) == 1) && (xmm_no(&o, view(s), op1, 1) == 0)
                         && (o.op[n1] == 66) && (xmm_no(&o, view(s), n1, 0) == 0) && (xmm_no(&o, view(s), n1, 1) == 0) && (f32_exact_bits(v) != 0) {
                         if lo.len() == 0 {
                             lo = live_out(&mut o);
                         }
-                        if (((lo[n1] >> 1) & 1) == 0) && xmm_dead_flow(&o, view(s), n1, 1, true, fl) {
+                        if (((lo[n1] >> r) & 1) == 0) && xmm_dead_flow(&o, view(s), n1, 1, true, fl) {
                             c = c0;
-                            opl = o1;
+                            opl = op1;
                             n = n1;
                             single = 256;
                             v = f32_exact_bits(v) - 1;
@@ -5053,6 +5095,116 @@ fn loop_consts<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64, pre: (&mut u64
         }
     }
 }
+// desc_regs's fold of accessor i's element address (`leaq (%D,%X,W),%rax`, X = `index`) into the one
+// load or store after it that reads it through `(%rax)` or copies of it; true when it was made.
+fn desc_fold<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64, lo: (&u64[]), i: u64, index: u64) -> bool {
+    op := o.op[i];
+    data := o.v0[i];
+    mut w = 8;
+    if (op == 93) || (op == 97) {
+        w = 4;
+    }
+    // The registers holding the address, and the copies that put it there.
+    mut held = 1;
+    mut copies = u64[];
+    mut y = next_live(&o, i, last);
+    mut n = 0;
+    while (y < last) && (n < 8) {
+        n += 1;
+        yo := o.op[y];
+        if (yo == 100) || (yo == 0) || (yo == 15) || (yo == 29) || (yo == 30) || ir::is_jump(yo) {
+            break;
+        }
+        if (yo == 1) && (o.k0[y] == 1) && (o.k1[y] == 1) && (((held >> o.v0[y]) & 1) != 0) && (o.v1[y] < 16) {
+            d := o.v1[y];
+            if (d == data) || (d == index) || (d == 4) || (d == 5) {
+                break;
+            }
+            held = held | (1 << d);
+            copies.push(y);
+            y = next_live(&o, y, last);
+            continue;
+        }
+        if (yo == 1) || (yo == 28) || (yo == 98) || (yo == 77) || (yo == 78) {
+            // Which operand is `(%rR)` for a register R holding the address.
+            mut at = 2;
+            mut r = 99;
+            for jj in 2 {
+                mut k = o.k0[y];
+                mut a = o.s0[y];
+                mut e = o.e0[y];
+                if jj != 0 {
+                    k = o.k1[y];
+                    a = o.s1[y];
+                    e = o.e1[y];
+                }
+                if k == 4 {
+                    for c in 16 {
+                        if (((held >> c) & 1) != 0) && paren_reg(view(s), a, e, c) {
+                            at = jj;
+                            r = c;
+                        }
+                    }
+                }
+            }
+            if at != 2 {
+                // The other operand: a load's destination may be one of them; a store's
+                // source must not read one.
+                mut ok = true;
+                if at == 1 {
+                    if (ir::mask_of(o.k0[y], o.v0[y], o.m0[y]) & held) != 0 {
+                        ok = false;
+                    }
+                } else if (o.k1[y] != 1) && (o.k1[y] != 6) && (o.k1[y] != 7) {
+                    ok = false;
+                }
+                wr := ir::writes(&o, y);
+                for c in 16 {
+                    if ok && (((held >> c) & 1) != 0) && (((wr >> c) & 1) == 0) && (((lo[y] >> c) & 1) != 0) {
+                        ok = false;
+                    }
+                }
+                if ok {
+                    start := o.gen.len();
+                    app_gen(&mut o, view("(%"));
+                    gen_reg(&mut o, data);
+                    app_gen(&mut o, view(",%"));
+                    gen_reg(&mut o, index);
+                    o.gen.push(44);
+                    gen_number(&mut o, w);
+                    o.gen.push(41);
+                    end := o.gen.len();
+                    set_operand(&mut o, y, at, 5, 0);
+                    if at == 0 {
+                        ir::put(&mut o.m0, y, (1 << data) | (1 << index));
+                    } else {
+                        ir::put(&mut o.m1, y, (1 << data) | (1 << index));
+                    }
+                    bump(&mut o);
+                    set_range(&mut o, y, at, start, end);
+                    for c in copies.len() {
+                        kill(&mut o, copies[c]);
+                    }
+                    return true;
+                }
+            }
+            break;
+        }
+        if (ir::reads(&o, y) & held) != 0 {
+            break;
+        }
+        wr := ir::writes(&o, y);
+        if (((wr >> data) & 1) != 0) || (((wr >> index) & 1) != 0) {
+            break;
+        }
+        held = held & (wr ^ 65535);
+        if held == 0 {
+            break;
+        }
+        y = next_live(&o, y, last);
+    }
+    return false;
+}
 // Whether s[a..e] is `(%R)` for general register r.
 fn paren_reg<b>(s: &b [u8], a: u64, e: u64, r: u64) -> bool {
     names := u8[][
@@ -5062,6 +5214,266 @@ fn paren_reg<b>(s: &b [u8], a: u64, e: u64, r: u64) -> bool {
         copy_text(view("(%r12)")), copy_text(view("(%r13)")), copy_text(view("(%r14)")), copy_text(view("(%r15)"))
     ];
     return ir::same_range(view(s), a, e, view(names[r]));
+}
+// dead_after, with a return ending the path with r dead when r is a caller-saved register that
+// carries no result (rcx, rsi, rdi, r8..r11: results come back in rax and rdx).
+fn dead_to_ret<a>(o: (&a ir::Body), i: u64, r: u64, budget: u64) -> bool {
+    last := o.op.len();
+    if budget == 0 {
+        return false;
+    }
+    scratch := (r == 1) || (r == 6) || (r == 7) || ((7 < r) && (r < 12));
+    mut j = i;
+    mut steps = 0;
+    while steps < 40 {
+        steps += 1;
+        j = next_insn(&o, j, last);
+        if j >= last {
+            return false;
+        }
+        op := o.op[j];
+        // `leave` reads and writes neither (a tail call's `jmp` after it would find the argument
+        // registers live: an unknown target, not dead).
+        if op == 29 {
+            continue;
+        }
+        if op == 30 {
+            return scratch;
+        }
+        if ((ir::reads(&o, j) >> r) & 1) != 0 {
+            return false;
+        }
+        if op == 0 {
+            return false;
+        }
+        if ((ir::writes(&o, j) >> r) & 1) != 0 {
+            return true;
+        }
+        if ir::is_jump(op) && op != 15 {
+            t := jump_target(&o, j);
+            if t >= last {
+                return false;
+            }
+            if op == 16 {
+                j = t;
+            } else if !dead_to_ret(&o, t, r, budget - 1) {
+                return false;
+            }
+        }
+    }
+    return false;
+}
+// Last cleanups of f32 element stores, before f32_indexed and emission:
+// - `movaps %xmmA,%xmmA` is nothing;
+// - an element's address (93 checked, 97 not: `leaq (%D,%rsi,4),%rax`) passed through plain register
+//   copies to `movss %xmmN,(%R)` is `movss %xmmN,(%D,%rsi,4)` (124) after the check alone (122),
+//   when %rax and every copy are dead after the store and the lines between write none of them,
+//   nor %rsi or D, and read none of the copies;
+// - `movaps %xmmA,%xmmT; OPss %xmmB,%xmmT; movss %xmmT,M` with A and T dead after (B not T) is
+//   `OPss %xmmB,%xmmA; movss %xmmA,M`.
+fn xmm_late<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64, fl: (&mut XFlow)) {
+    for i in last {
+        if (o.del[i] == 0) && (o.op[i] == 68) {
+            x := xmm_no(&o, view(s), i, 0);
+            if (x != 99) && (x == xmm_no(&o, view(s), i, 1)) {
+                kill(&mut o, i);
+            }
+        }
+    }
+    mut stores = u64[];
+    mut addrs = u64[];
+    mut copies = u64[];
+    mut cfrom = u64[];
+    for j in last {
+        if (o.del[j] != 0) || (o.op[j] != 78) || (o.k1[j] != 4) || (xmm_no(&o, view(s), j, 0) == 99) {
+            continue;
+        }
+        // The address is one general register, `(%R)` (rax..rdi).
+        a := o.s1[j];
+        e := o.e1[j];
+        m := o.m1[j];
+        if (e - a != 6) || (s[a] != 40) || (s[a + 1] != 37) || (m == 0) || ((m & (m - 1)) != 0) || (m > 255) {
+            continue;
+        }
+        mut r = 0;
+        while ((m >> r) & 1) == 0 {
+            r += 1;
+        }
+        mut chain = 1 << r;
+        mut wmask = 0;
+        mut rmask = 0;
+        mut mine = u64[];
+        mut found = last;
+        mut p = j;
+        for step in 8 {
+            p = prev_live(&o, p);
+            if p >= j {
+                break;
+            }
+            op := o.op[p];
+            if (op == 100) || (op == 0) || (op == 15) || (op == 29) || (op == 30) || ir::is_jump(op) {
+                break;
+            }
+            if ((op == 93) || (op == 97)) && (r == 0) {
+                // Not one desc_regs already gave its index register or folded: it leaves %rax alone.
+                if o.m1[p] == 0 {
+                    found = p;
+                }
+                break;
+            }
+            if (op == 1) && (o.k0[p] == 1) && (o.k1[p] == 1) && (o.v1[p] == r) && (o.v0[p] < 16) && (o.v0[p] != r) {
+                // A copy into the register the store (or a later copy) reads: follow its source.
+                // Nothing after it up to the store may have written the source.
+                src := o.v0[p];
+                if ((wmask >> src) & 1) != 0 {
+                    break;
+                }
+                mine.push(p);
+                r = src;
+                chain = chain | (1 << r);
+                continue;
+            }
+            wmask = wmask | ir::writes(&o, p);
+            rmask = rmask | ir::reads(&o, p);
+        }
+        if found == last {
+            continue;
+        }
+        d := o.v0[found];
+        if ((wmask & chain) != 0) || ((rmask & chain) != 0) || (((wmask >> 6) & 1) != 0) || (((wmask >> d) & 1) != 0) {
+            continue;
+        }
+        mut dead = true;
+        for x in 16 {
+            if (((chain >> x) & 1) != 0) && !dead_to_ret(&o, j, x, 6) {
+                dead = false;
+            }
+        }
+        if !dead {
+            continue;
+        }
+        stores.push(j);
+        addrs.push(found);
+        cfrom.push(copies.len());
+        for q in mine.len() {
+            copies.push(mine[q]);
+        }
+    }
+    cfrom.push(copies.len());
+    for k in stores.len() {
+        j := stores[k];
+        i := addrs[k];
+        d := o.v0[i];
+        ir::put(&mut o.op, j, 124);
+        set_operand(&mut o, j, 1, 1, d);
+        ir::put(&mut o.chg, j, 1);
+        bump(&mut o);
+        if o.op[i] == 97 {
+            kill(&mut o, i);
+        } else {
+            ir::put(&mut o.op, i, 122);
+            bump(&mut o);
+        }
+        for q in cfrom[k + 1] - cfrom[k] {
+            kill(&mut o, copies[cfrom[k] + q]);
+        }
+    }
+    // `movq %S,%rax; OPq $k,%rax; movq %rax,%D` with %rax dead after is `movq %S,%D; OPq $k,%D`
+    // (an index's increment into its register); the first move goes when S is D.
+    for a in last {
+        if (o.del[a] != 0) || (o.op[a] != 1) || (o.k0[a] != 1) || (o.k1[a] != 1) || (o.v1[a] != 0) || (o.v0[a] > 15) {
+            continue;
+        }
+        b := next_live(&o, a, last);
+        if (b >= last) || !ir::arith(o.op[b]) || (o.k0[b] != 3) || (o.k1[b] != 1) || (o.v1[b] != 0) {
+            continue;
+        }
+        c := next_live(&o, b, last);
+        if (c >= last) || (o.op[c] != 1) || (o.k0[c] != 1) || (o.v0[c] != 0) || (o.k1[c] != 1) {
+            continue;
+        }
+        d := o.v1[c];
+        if (d == 0) || (d == 4) || (d == 5) || (d > 15) || !dead_to_ret(&o, c, 0, 6) {
+            continue;
+        }
+        set_operand(&mut o, b, 1, 1, d);
+        ir::put(&mut o.chg, b, 1);
+        if o.v0[a] == d {
+            kill(&mut o, a);
+        } else {
+            set_operand(&mut o, a, 1, 1, d);
+            ir::put(&mut o.chg, a, 1);
+        }
+        bump(&mut o);
+        kill(&mut o, c);
+    }
+    for c in last {
+        if (o.del[c] != 0) || (o.op[c] != 68) {
+            continue;
+        }
+        ra := xmm_no(&o, view(s), c, 0);
+        rt := xmm_no(&o, view(s), c, 1);
+        if (ra == 99) || (rt == 99) || (ra == rt) {
+            continue;
+        }
+        u := next_live(&o, c, last);
+        if (u >= last) || !xmm_arith(o.op[u]) || (xmm_no(&o, view(s), u, 1) != rt) {
+            continue;
+        }
+        rb := xmm_no(&o, view(s), u, 0);
+        if (rb == 99) || (rb == rt) {
+            continue;
+        }
+        j := next_live(&o, u, last);
+        if (j >= last) || !((o.op[j] == 78) || (o.op[j] == 124)) || (xmm_no(&o, view(s), j, 0) != rt) {
+            continue;
+        }
+        if (!xmm_dead_to_exit(&o, view(s), j, rt, 6) && !xmm_dead_flow(&o, view(s), j, rt, false, fl))
+            || (!xmm_dead_to_exit(&o, view(s), j, ra, 6) && !xmm_dead_flow(&o, view(s), j, ra, false, fl)) {
+            continue;
+        }
+        copy_operand(&mut o, u, 1, c, 0);
+        copy_operand(&mut o, j, 0, c, 0);
+        kill(&mut o, c);
+    }
+}
+// An f32 element of a slice with `data` in a register, loaded into an SSE register: the address
+// (93 checked, 97 not) then `movss (%rax),%xmmN`, or the checked load (94) then `movd %eax,%xmmN`,
+// with %rax dead after, is `movss (%D,%rsi,4),%xmmN` (123) after the check alone (122). Runs last,
+// just before emission: no pass after it reads 122 or 123.
+fn f32_indexed<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
+    for i in last {
+        op := o.op[i];
+        // Only an accessor desc_regs left as it was: the index in %rsi, the address in %rax.
+        if (o.del[i] != 0) || !((op == 93) || (op == 94) || (op == 97)) || (o.m1[i] != 0) {
+            continue;
+        }
+        j := next_live(&o, i, last);
+        if j >= last {
+            continue;
+        }
+        mut fits = false;
+        if (op != 94) && (o.op[j] == 78) && (o.k0[j] == 4) && ir::same_range(view(s), o.s0[j], o.e0[j], view("(%rax)")) {
+            fits = true;
+        }
+        if (op == 94) && (o.op[j] == 70) && (o.k0[j] == 6) && ir::same_range(view(s), o.s0[j], o.e0[j], view("%eax")) {
+            fits = true;
+        }
+        if !fits || !((o.k1[j] == 7) || ((o.k1[j] == 6) && is_xmm_text(view(s), o.s1[j], o.e1[j]))) || !dead_after(&o, j, 0, 6) {
+            continue;
+        }
+        data := o.v0[i];
+        ir::put(&mut o.op, j, 123);
+        set_operand(&mut o, j, 0, 1, data);
+        ir::put(&mut o.chg, j, 1);
+        bump(&mut o);
+        if op == 97 {
+            kill(&mut o, i);
+        } else {
+            ir::put(&mut o.op, i, 122);
+            bump(&mut o);
+        }
+    }
 }
 // Slices whose `data` and `len` the optimiser can keep in registers, and their accessors. A slot the
 // fact table calls a slice descriptor (`desc`) qualifies when it is written once, by a register,
@@ -6032,6 +6444,44 @@ fn const_branches<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
         }
     }
 }
+// `cmpq $0,X; je L; movq $0,X; L:` leaves X zero on both paths, and `cmpq $0,X; je L; L:` does
+// nothing: with the flags not read at L, the test and the jump go (the store stays). These are the
+// drop flags of a body's borrowed slices, whose release emits no code: tested and cleared at the
+// exit, they otherwise keep a slot read and a callee-saved register taken. Whether any went.
+fn zero_tests<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) -> bool {
+    mut any = false;
+    for i in last {
+        if (o.del[i] != 0) || (o.op[i] != 6) || (o.k0[i] != 3) || !is_zero_imm(view(s), o.s0[i], o.e0[i])
+            || !((o.k1[i] == 1) || (o.k1[i] == 2)) {
+            continue;
+        }
+        j := next_live(&o, i, last);
+        if (j >= last) || !((o.op[j] == 17) || (o.op[j] == 18)) || (o.k0[j] != 4) {
+            continue;
+        }
+        t := jump_target(&o, j);
+        if (t >= last) || (t <= j) || (o.op[t] != 100) || reads_flags(&o, t, last) {
+            continue;
+        }
+        // Nor may L start with a jump, whose target could read them.
+        n := next_insn(&o, t, last);
+        if (n >= last) || ir::is_jump(o.op[n]) {
+            continue;
+        }
+        mut m = next_live(&o, j, last);
+        if (m < t) && (o.op[m] == 1) && (o.k0[m] == 3) && is_zero_imm(view(s), o.s0[m], o.e0[m])
+            && (o.k1[m] == o.k1[i]) && (o.v1[m] == o.v1[i]) {
+            m = next_live(&o, m, last);
+        }
+        if m != t {
+            continue;
+        }
+        kill(&mut o, i);
+        kill(&mut o, j);
+        any = true;
+    }
+    return any;
+}
 // Whether the code reached at line i (after labels and directives) may read the flags: a
 // conditional jump, a set, an add or subtract with carry, or anything the optimiser does not know.
 fn reads_flags<a>(o: (&a ir::Body), i: u64, last: u64) -> bool {
@@ -6553,6 +7003,114 @@ fn const_muls<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
         kill(&mut o, i);
     }
 }
+// A register plus a constant through %rax: `movq %A,%rax; addq/subq $k,%rax; movq %rax,%D` - an
+// argument `n - 1` the prover showed cannot wrap - is `leaq [-]k(%A),%D` when %rax is dead after it
+// and nothing reads the flags the `addq`/`subq` set (flags_dead_after).
+fn lea_moves<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
+    for i in last {
+        if (o.del[i] != 0) || (o.op[i] != 1) || (o.k0[i] != 1) || (o.k1[i] != 1) || (o.v1[i] != 0) {
+            continue;
+        }
+        a := o.v0[i];
+        if (a == 0) || (a == 4) || (15 < a) {
+            continue;
+        }
+        j := next_live(&o, i, last);
+        if (j >= last) || !((o.op[j] == 4) || (o.op[j] == 5)) || (o.k1[j] != 1) || (o.v1[j] != 0) {
+            continue;
+        }
+        k1 := imm_value(&o, view(s), j);
+        if (k1 == 0) || (k1 - 1 > 2147483647) {
+            continue;
+        }
+        m := next_live(&o, j, last);
+        if (m >= last) || (o.op[m] != 1) || (o.k0[m] != 1) || (o.v0[m] != 0) || (o.k1[m] != 1) {
+            continue;
+        }
+        d := o.v1[m];
+        if (d == 0) || (d == 4) || (15 < d) {
+            continue;
+        }
+        if !flags_dead_after(&o, m, last) || !dead_after(&o, m, 0, 6) {
+            continue;
+        }
+        start := o.gen.len();
+        if o.op[j] == 5 {
+            o.gen.push(45);
+        }
+        gen_number(&mut o, k1 - 1);
+        app_gen(&mut o, view("(%"));
+        gen_reg(&mut o, a);
+        o.gen.push(41);
+        end := o.gen.len();
+        ir::put(&mut o.op, j, 3);
+        bump(&mut o);
+        set_operand(&mut o, j, 0, 5, 0);
+        ir::put(&mut o.m0, j, 1 << a);
+        bump(&mut o);
+        set_range(&mut o, j, 0, start, end);
+        set_operand(&mut o, j, 1, 1, d);
+        kill(&mut o, i);
+        kill(&mut o, m);
+    }
+}
+// A call's result combined with an earlier value: `movq %rax,%R; movq X,%rax; addq %R,%rax` (X a
+// frame slot or another register) is `addq X,%rax` when %R is dead after it - the operation
+// commutes, and so do the flags it sets (`addq`, `andq`, `orq`, `xorq`).
+fn commuted_loads<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
+    for i in last {
+        if (o.del[i] != 0) || (o.op[i] != 1) || (o.k0[i] != 1) || (o.v0[i] != 0) || (o.k1[i] != 1) {
+            continue;
+        }
+        r := o.v1[i];
+        if (r == 0) || (r == 4) || (r == 5) || (15 < r) {
+            continue;
+        }
+        j := next_live(&o, i, last);
+        if (j >= last) || (o.op[j] != 1) || (o.k1[j] != 1) || (o.v1[j] != 0) {
+            continue;
+        }
+        if !((o.k0[j] == 2) || ((o.k0[j] == 1) && (o.v0[j] != 0) && (o.v0[j] != r) && (o.v0[j] < 16))) {
+            continue;
+        }
+        m := next_live(&o, j, last);
+        if m >= last {
+            continue;
+        }
+        op := o.op[m];
+        if !((op == 4) || (op == 8) || (op == 9) || (op == 10)) || (o.k0[m] != 1) || (o.v0[m] != r) || (o.k1[m] != 1) || (o.v1[m] != 0) {
+            continue;
+        }
+        if !dead_after(&o, m, r, 6) {
+            continue;
+        }
+        copy_operand(&mut o, m, 0, j, 0);
+        kill(&mut o, i);
+        kill(&mut o, j);
+    }
+}
+// Whether the flags after line i are written before anything could read them, in the straight
+// line that follows (labels pass: a reader after one reads what this path set). A jump, an
+// unparsed line or `incq` (which keeps CF) ends the search without a proof.
+fn flags_dead_after<a>(o: (&a ir::Body), i: u64, last: u64) -> bool {
+    mut j = i;
+    mut steps = 0;
+    while steps < 8 {
+        steps += 1;
+        j = next_insn(&o, j, last);
+        if j >= last {
+            return false;
+        }
+        op := o.op[j];
+        if (op == 15) || ((3 < op) && (op < 11)) {
+            return true;
+        }
+        if !((op == 1) || (op == 2) || (op == 3)) {
+            return false;
+        }
+    }
+    return false;
+}
 // Scaled indices kept in scratch registers (CSE of `i*3`): nbody's element accesses each compute
 // `leaq (%rX,%rX,2),%rax; [addq $k,%rax;] movq %rax,%rsi` and load `(%rB,%rsi,8)`. In one straight
 // line (no jump, call, unknown instruction or jump-target label) the first such index for a given X
@@ -6869,6 +7427,12 @@ fn inline_candidate<a, b, c>(o: (&a mut ir::Body), s: &b [u8], prologue: u64, ch
                         return ();
                     }
                     used = used | m;
+                    // What an instruction touches without naming it (`mulq` and `divq` write
+                    // %rdx:%rax) is no free register either. A call here never returns, or ends the
+                    // body, so what it clobbers is not live after it.
+                    if op != 15 {
+                        used = used | ir::reads(&o, i) | ir::writes(&o, i);
+                    }
                 }
             }
         }
@@ -6937,6 +7501,14 @@ fn inline_candidate<a, b, c>(o: (&a mut ir::Body), s: &b [u8], prologue: u64, ch
             }
         }
     }
+    // The copy is the body's lines with its slots in registers, and what forwarding could not do
+    // through a slot it can do through a register: a value stored and loaded back is the register
+    // it was stored from, so the loads go, and then the stores nothing reads.
+    if chosen.len() == 0 {
+        mut g = new_facts(o.maxslot / 8 + 1);
+        forward(&mut o, &mut g, view(s), 0, last);
+        dead_defs(&mut o, view(s), 0, last);
+    }
     // A scratch register for each promoted register.
     mut moved = u64[];
     for c in chosen.len() {
@@ -6971,9 +7543,10 @@ fn inline_candidate<a, b, c>(o: (&a mut ir::Body), s: &b [u8], prologue: u64, ch
             o.out.push(10);
         }
     }
-    // Cleared (non-parameter) slots start at zero, as the frame zeroing guaranteed.
+    // Cleared (non-parameter) slots start at zero, as the frame zeroing guaranteed - those whose
+    // register the copy still names.
     for x in slots.len() {
-        if o.zfrom * 8 < slots[x] + 1 {
+        if (o.zfrom * 8 < slots[x] + 1) && copy_names(&o, view(s), prologue, &dead, regs[x]) {
             app(&mut o.out, view("movq $0,%"));
             reg_name(&mut o, regs[x]);
             o.out.push(10);
@@ -7027,6 +7600,23 @@ fn inline_candidate<a, b, c>(o: (&a mut ir::Body), s: &b [u8], prologue: u64, ch
     absolute := ir::absolute_positions(view(body), o.gbase);
     exchange(&mut o.inl_rel, body);
     inl_file(&mut o, name, absolute, unit);
+}
+// Whether a line of the copy (after the prologue, live and reachable) names register `r`. A call
+// that does not return (a failed check's report) is handed its arguments by lines that name them,
+// so what else it could read is not counted.
+fn copy_names<a, b, c>(o: (&a ir::Body), s: &c [u8], prologue: u64, dead: (&b u64[]), r: u64) -> bool {
+    for i in o.op.len() {
+        if (prologue < i) && (o.del[i] == 0) && (dead[i] == 0) && (o.op[i] != 100) && (o.op[i] != 101) {
+            mut m = ir::mask_of(o.k0[i], o.v0[i], o.m0[i]) | ir::mask_of(o.k1[i], o.v1[i], o.m1[i]);
+            if !((o.op[i] == 15) && never_returns(&o, view(s), i)) {
+                m = m | ir::reads(&o, i) | ir::writes(&o, i);
+            }
+            if ((m >> r) & 1) != 0 {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 // The 64-bit name of register `r`, as reg_name spells it.
 fn reg_text<a>(out: (&a mut u8[]), r: u64) {

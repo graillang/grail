@@ -12,6 +12,78 @@
   as `f32_const_ops` does; and (4) re-runs the SSE copy folding after those, with whole-body SSE
   liveness for the scratch registers a loop's last statement leaves. Cases
   `opt-loop-registers-float-consts`, `opt-loop-registers-float-consts-asm`.
+- **Scheduler: precise wake-ups** - a fork that finds a parked worker and nobody searching now takes
+  one specific worker off an idle list and counts it as searching *before* waking it (Go/rayon
+  style), so while the wake lands every other fork sees a searcher on its way and wakes nobody;
+  each parked worker sleeps on its own word. `bench/sched.grl` issues 64 futex wakes per run in the
+  release build instead of 23,480 (88 instead of 27,070 in the development build; fib(32) x 20 nested
+  joins: 8 instead of 9,318), with 11% fewer user cycles in the release build. No wake is lost: the
+  argument is in docs/design/scheduler.md.
+- Faster: plain recursive calls (`fib(32)`, the scheduler chart's serial row) in both builds. Native:
+  after a guard with no `else` whose block never falls through (`if n < 2 { return n; }`) the prover
+  keeps the failed condition, so `n - 1` and `n - 2` carry no overflow check; shrink-wrapping drops the
+  unreachable `jmp` it left at the head of the body; `movq %A,%rax; subq $k,%rax; movq %rax,%D` becomes
+  `leaq -k(%A),%D` and `movq %rax,%R; movq X,%rax; addq %R,%rax` becomes `addq X,%rax`; and a
+  caller-saved register other than the result is dead at `ret`. fib(32): 105.8M -> 74.0M instructions.
+  Release: the LLVM lifter derives a `cmpq`'s flags from `icmp`s of its operands instead of
+  `ssub.with.overflow`, which GVN merged with the later `n - 2` and kept live across the recursive call;
+  fib now compiles to clang -O2's code for the C twin, 77.0M -> 67.0M instructions (C: 67.1M).
+- Fixed (native): the inliner could hand a small body's copy a scratch register the body writes
+  without naming it (`mulq` and `divq` write %rdx:%rax), corrupting a value kept there; seen as a
+  segfault in `llvm-escaped-multiword-slots` once `sum3` became small enough to inline. Such
+  registers now count as used.
+- Performance (development build): `xform_f32`'s loop is 13 instructions where it was 30, and the
+  program runs in 0.17 s where it took 0.44 (callgrind: 5.76G instructions to 2.75G). An `f32`
+  parameter stays binary32 in its SSE register (`x[i] * a` is `mulss`, not a widening, `mulsd` and a
+  rounding); the no-op drop flags of borrowed slices, tested and cleared only at the exit, no longer
+  hold callee-saved registers, and a register the live-range colouring leaves free goes to a slice's
+  `data` and `len`, so `y[i]`'s check no longer reloads the descriptor; f32 element loads and stores
+  through such a slice are one indexed `movss`. Fixed on the way: an inlined body could keep a value
+  in `%rdx` across a `mulq` that overwrites it (case `inline-mulq-slot-not-in-rdx`), and AArch64 and
+  RISC-V now lower a binary32 constant's `movd` into a float register. Cases
+  `f32-parameter-binary32-slices-in-registers`, `f32-parameter-binary32-other-targets`,
+  `f32-slice-in-registers-index-error`.
+- **Native backend: iterator chains run 18% fewer instructions** (bench/iterchain: 1100M -> 897M
+  user-space instructions in the development build). A direct call to a capture-free closure now
+  zeroes its environment register with `xorq %rax,%rax`, which the optimiser reads as a write that
+  reads nothing, so the loads that computed the closure value die (`xorl` was an unknown instruction
+  to it: every register live, nothing before it removed). And the copy of a small leaf that the
+  optimiser pastes over each call to it is forwarded and cleared of dead definitions once its frame
+  slots are registers - a value stored and loaded back is the register it came from - and a slot's
+  register is zeroed at the copy's start only when the copy still names it. Output is unchanged.
+- Performance: a fork/join (`pool::join`, `parallel_map`'s splits, `pool::with_class`) costs fewer
+  instructions and two fewer full barriers. A job record's pending and free states are now written
+  with release stores (each was an `xchg` on x86-64); the stack a fork goes on is looked up once per
+  join instead of three times; the trampoline that called a join's first branch is gone (the record
+  calls the callback directly). The record maker also stays within six arguments, so the release
+  build keeps it on the optimised path. Measured with one worker on fib(32) with nested joins: 1434 ->
+  1318 user instructions per join in the development build, 561 -> 503 in release.
+- Performance: a burst of spawns from a main thread's task scope costs the spawning thread about 30%
+  less CPU (24 workers: main-thread user time over 6M spawns and joins 0.84 s -> 0.57 s; user cycles
+  of five 100k bursts 300M -> 225M, median of 7). A spawn touches fewer contended lines: a
+  task deque's head, which every steal writes, moved off the line of the tail the owner writes (and
+  the owner reads it only when its last-read head says full); the parked and searching worker counts
+  that every push reads are one word on a line of their own instead of two words on two hot lines;
+  and a new task record clears its first 296 bytes, not all 496 - the waiter block's held slots are
+  set up the first time the task waits.
+- **Performance: a task woken by a timer or a ready descriptor runs at the next scheduling step.**
+  Every worker step now looks at the task injection ring (the reactor's wakes, spawns from other
+  threads) before taking jobs; it looked only every 61st step, so while frame jobs kept the workers
+  busy a woken I/O task waited in the ring. In bench/frame.grl the time from the reactor's wake to
+  the I/O task running fell from a worst of about 940 us to 140 us in the development build (126 to
+  38 us in release, the median of eight runs' worst, load ~25 on 24 CPUs); the median round's
+  lateness from 189 to 76 us (dev) and 103 to 73 us (release). Frame times are unchanged. What is
+  left of the worst lateness is the kernel waking the reactor thread and the file read itself.
+
+- Faster: `chan` hand-offs between threads. A sender or receiver spinning on a full or empty ring
+  now watches only the stamp of the slot it wants, looking after every CPU wait hint, instead of
+  re-reading the other side's counter behind a fence between ever longer runs of hints: it sees the
+  hand-off as soon as it lands and no longer pulls the counter line away from the side about to
+  compare-exchange it. A side waiting for a peer that claimed a slot and has not finished with it
+  yields after the spin phase instead of spinning on (a preempted peer cost it a time slice). On
+  bench/chan.grl (release, CPU time, interleaved, loaded host) the ping case went from 0.045 to
+  0.011-0.017 s median (Go 0.022-0.029 s) and the whole program from 0.16-0.28 s to 0.086-0.144 s
+  median, 0.10-0.20 s to 0.055-0.088 s best (Go 0.083-0.098 s median).
 - Fixed: a closure type written outside a parameter list (a struct field, a local's type) can take a
   reference parameter: `struct S { body: Fn<Owned>(&T) -> u64 }` was "elided output reference needs one
   input lifetime". Its elided lifetime is a fresh input of each call, as inside a function's parameter
