@@ -627,6 +627,25 @@
   `rhi_swapchain_probe`'s eight validation messages are fixed: the instance now asks for Vulkan 1.2
   through a real `VkApplicationInfo`, and teardown waits for the last present. The suite validates
   it against Abundance's pinned layer.
+- **Abundance's localisation Catalog is ported: JSON tables and draw-time translation.** `abundance/src/
+  localization_catalog.grl` carries `ab::loc::Catalog` of `cmake/tx/localization.cmake`'s
+  localization.cpp: per-language tables loaded from JSON (nlohmann's accepted language over
+  `lib/json` - `//` and `/* */` comments and a BOM outside strings, std::map key order, a repeated
+  key keeping its last value), the loader's exact refusals ("not a JSON object", "bad plural form
+  '<k>' in <id>", "value of <id> is neither text nor plural forms", "duplicate id <id> (also in
+  <source>)", a failed load keeping the rows it already inserted), ids/size/source_of, text and
+  plural lookups with English fallback, and `translate()`: exact then case-folded English, the
+  closing-punctuation and ellipsis core, named-placeholder templates ordered by specificity,
+  number+unit pairs, the eleven " · "/": "/newline separators, recursive capture translation with
+  number detection (strtod over the digits), localised punctuation, the memo (including
+  output-as-input) and the recorded misses. The process-wide catalog/active-language globals are
+  host glue and stay unported. `abundance/tests/parity/localization_catalog.cpp` compiles the
+  engine's localization.cpp and prints 495 lines; `localization_catalog_test.grl` reproduces them
+  byte for byte.
+- Reported, not fixed here: `lib/json`'s `allow_duplicate_keys` path leaks one allocation (a
+  ten-line `json::parse_with` of `{"a":"1","a":"2"}` aborts in `rt_leak_exit`), so the Catalog's
+  parity fixtures use no file with a repeated key even though the loader keeps the flag, because
+  the engine accepts such files.
 - Fixed: a struct partly moved before a loop (`f := r.inner;`) no longer makes the loop refuse with "loop
   backedge consumes entry storage: `r` is moved out of it" when the body only reads it. The backedge check
   now counts what the body consumes: a place that dies in the body, one that was whole at entry and is
