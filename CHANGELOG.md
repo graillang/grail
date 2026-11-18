@@ -1,5 +1,17 @@
 ## Unreleased
 
+- **Abundance: the mesa landform builder is ported and bit-exact.** `src/coherent_mesa.grl` gains
+  `build_mesa_landforms`: the per-region window, the rigid set (water, lakes, visible rivers, the
+  window edge, rigid classes and extra rigid cells) with its fade, the chamfer distances to the main
+  washes, slot washes and rigid ground, the warped disc with rim-growing retreat, the pre-existing
+  depressions handed back to the water stage, the pediment (a 15 % quantile of the active heights)
+  and the dipping caprock, the landform itself (plateau cap, escarpments retreating from every main
+  wash more toward the rim, concave feet, slot canyons cut by the small washes), the isolated spires
+  on the outer pediment, the pit-free closing flood, and the Mesa mask share, cap and raise counts.
+  `tests/coherent_mesa_test.grl` now also matches Abundance's own `build_mesa_landforms`
+  (`-ffp-contract=off`) over the same synthetic world: heights, mask and counts, 21 of 21 lines.
+  Not ported yet: the Mesa-style stepped-hills site list and the Mesa mark/biome hooks.
+
 - **The Jolt surface closes with the overlap query.** `gr_jolt_overlap_capsule` is one `CollideShape`
   of the same capsule the cast sweeps, stopped at the first hit: `abundance/src/jolt.grl` now answers
   the core's `overlap` contract (a boolean, with `invalid_request` for a capsule shorter than its own
