@@ -8,6 +8,17 @@
   CMake-mirrored kernel and terrain trees stay recorded as skipped with the include that blocks each
   (`docs/design/abundance-shaders.md`). Vendoring geometry also brings the material and flora headers
   its closure reaches into `abundance/shaders/`, so those areas are now header-complete.
+- **The water area's CDLOD selection is ported.** `abundance/src/render_policy_water.grl` carries
+  `engine/water/cdlod.cpp` (Strugar's continuous distance-dependent LOD around a world-fixed grid:
+  the per-level ranges from the leaf size and range factor, the recursion that draws a node at its
+  own level where the children's finer range does not reach it and refines where it does, the
+  quarter-node fallback at the parent's lattice, the beyond-range ring out to the horizon, and the
+  emitted `WaterNodeGpu` fields including the corner parity and the geomorph range), plus the pure
+  constants the FFT ocean's LUTs and the caustics volume are shaped by (cascade patch sides,
+  fetch steps, kCausticsN/Slices/Mips). 9573 reference lines. The FFT ocean's spectrum
+  (`ocean.cpp`'s `make_sea_state`/`make_fetch_amplitudes`/`make_cascades`, riding
+  `abundance/ocean_sea_state.hpp`) is a substantial portable spectrum and the water area's next
+  increment, not a line item here.
 - **The Abundance tools lane records the last five tools' boundaries.** `abundance/README.md` now
   states exactly what each remaining tool needs: ui_snapshot's engine frame-stream format and
   rasteriser arithmetic, soundscape_render's audio/sky cores and ffmpeg rain loops,
