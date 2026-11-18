@@ -48776,7 +48776,12 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
         if eat(&mut c, view(")")) {
             return val(imm(&mut c, 0), 1);
         }
-        mut v = expr(&mut c, 0);
+        // A grouping passes an f32 context in (`(1.0 + 2.0) / 3.0` in an f32 binding).
+        mut inner = NO_TYPE;
+        if (c.raw == 0) && (expected != NO_TYPE) && is_f32(&mut c, expected) {
+            inner = expected;
+        }
+        mut v = expr_expected(&mut c, 0, inner);
         expect(&mut c, view(")"));
         return v;
     }
@@ -51038,8 +51043,25 @@ fn expr_rest<a>(c: (&a mut C), min: u64, expected: u64, lstart: u64, first: Val)
                             }
                             get(&mut c, t, view("%rax"));
                             mut snap = save(&mut c);
+                            // `x: f32 = 1.0 / 3.0`: a bare float literal on the left of arithmetic in
+                            // an f32 context is rounded from its text to f32, as it would be alone;
+                            // the right operand then adopts f32 from it. Without this both
+                            // literals stayed f64 and the binding was refused.
+                            if (c.raw == 0) && left_flit && (expected != NO_TYPE) && is_f32(&mut c, expected)
+                                && is_float(&mut c, ty) && !is_f32(&mut c, ty)
+                                && ((k == 43) || (k == 45) || (k == 42) || (k == 47)) {
+                                snap = float_literal_slot(&mut c, lftok, lfneg);
+                                ty = expected;
+                                left_flit = false;
+                            }
                             rstart := c.pos;
-                            mut right = expr(&mut c, p + u64(k != 267));
+                            // An f32 left operand of arithmetic hands the f32 context to the right,
+                            // so `1.0 + 2.0 * 3.0` in an f32 binding is f32 throughout.
+                            mut rexpected = NO_TYPE;
+                            if (c.raw == 0) && is_f32(&mut c, ty) && ((k == 43) || (k == 45) || (k == 42) || (k == 47)) {
+                                rexpected = ty;
+                            }
+                            mut right = expr_expected(&mut c, p + u64(k != 267), rexpected);
                             rend := c.pos;
                             // `x == None` / `x != None`: a bare None on the right takes the left
                             // operand's optional type.

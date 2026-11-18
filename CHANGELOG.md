@@ -21,6 +21,11 @@
   glibc exactly), which the field-of-view focal length needs. The AgX display transform, its looks
   and night vision are shader-only (`core/display.ps.hlsl`) and the .cube grade parse writes
   straight into a Vulkan buffer, so neither is a render policy. 947 reference lines, bit exact.
+- **A float literal expression in an `f32` context is computed as `f32`.** `x: f32 = 1.0 / 3.0;`
+  was refused (with the mismatch reported at the next use); now a bare float literal on the left of
+  arithmetic is rounded from its text to `f32`, the right operand and a grouping inherit the context,
+  and precedence carries it, so `(1.0 + 2.0) / 3.0` and `1.0 + 2.0 * 3.0` are single-precision
+  arithmetic like C's. An `f64` context is unchanged. Pinned by `f32-annotated-local-float-literals`.
 - Fixed: a struct partly moved before a loop (`f := r.inner;`) no longer makes the loop refuse with "loop
   backedge consumes entry storage: `r` is moved out of it" when the body only reads it. The backedge check
   now counts what the body consumes: a place that dies in the body, one that was whole at entry and is
