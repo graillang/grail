@@ -1,5 +1,13 @@
 ## Unreleased
 
+- **The shader pipeline's layout grammar reads the geometry tree's shapes.** `abundance/tools/shader-lib.mjs`
+  now skips a `template<...> struct` wrapper whole (`ABReadOnly<T>`, the `AB_LOAD_RO` NonWritable load
+  helper) and drops leading `[[...]]` attribute runs before a field's type, so
+  `geometry/abgeo_layout.hlsli` parses. A struct the grammar cannot read (the `AB_F3(x)` macro fields of
+  `ABGeoFrame`) is recorded with its reason and is fatal only if that struct is actually bound as a
+  uniform or push-constant block, since most of the tree's records are loaded by address and never
+  pinned. `docs/design/abundance-shaders.md` records the vendored/blocked inventory per area and the
+  mirror-tree includes that block the rest.
 - **The job scheduler test calls methods on captured `Arc`s directly.** Since the compiler treats a
   `&self` method on a captured value as a shared call, the free-function helpers `jobsched_test.grl`
   used to reach its shared counters are deleted.
