@@ -11,6 +11,15 @@
 - **The job scheduler test calls methods on captured `Arc`s directly.** Since the compiler treats a
   `&self` method on a captured value as a shared call, the free-function helpers `jobsched_test.grl`
   used to reach its shared counters are deleted.
+- **The lighting area's renderer-side policies are ported.** `abundance/src/render_policy_lighting.grl`
+  carries `render_policy/lighting_convergence.cpp` (the arrival-time Lumen budget policy: frame-time
+  smoothing, arrival/hold/fade weight, the headroom cap that keeps a slow frame from buying more work,
+  the scaled integer budgets, the settle window, and the near-arrival classifier) and
+  `render_policy/light_flicker.hpp` (a flame's fractal value-noise flicker, its gust term and a failing
+  lamp's dropout, as a pure function of the profile and time). 327 reference lines against the engine's
+  own sources; the fixtures are the engine's `lighting_convergence_tests.cpp` cases. u32 hash
+  arithmetic wraps as the C does, written out because Grail's checked arithmetic refuses the overflow
+  (and refuses a negative-to-unsigned conversion, which `std::uint32_t(int64_t)` wraps in C++).
 - **The post area's optics and the display's CPU half are ported.** `abundance/src/
   render_policy_optics.grl` carries `render_policy/bloom.hpp` (the paired Gaussian scatter kernel
   post.bloom uploads, its half-sample edge reflection, its sigma/scatter sanitation) and
