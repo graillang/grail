@@ -1,0 +1,238 @@
+// BC4/BC5 block compression: the high-quality single-channel encoder Abundance's
+// engine/materials/src/bc_encode.cpp reaches through rgbcx (bc7enc_rdo b9438627), for the
+// formats the abtex writer compresses this way — BC4 from RGBA8 channel 0, BC5 from channels
+// 0 and 1 (Private/bc_encode.cpp:59-87; rgbcx::encode_bc4_hq/encode_bc5_hq with the engine's
+// defaults: search radius 3, both the 8-value and the 6-value encoding).
+//
+// The encoder is rgbcx's brute-force endpoint search: the block's min/max sample seed candidate
+// endpoints, a 7x7 window around them is searched under both encodings, and each candidate is
+// scored by nearest-value selection. Block bytes are identical to the vendored encoder's,
+// including its tie rules (first minimal index wins, the search order is mode then low then
+// high delta).
+//
+// Texels outside the image are edge-replicated, so extents that are not multiples of 4 encode
+// the same blocks as the engine. (BC7 and BC6H are separate encoders — bc7e and the ISPC texture
+// compressor — and are not ported here.)
+module bc_encode;
+
+const SEARCH_RAD: u64 = 3;
+const U64_MAX: u64 = 18446744073709551615;
+
+// `base + delta` clamped to [0, 255], where delta = d - SEARCH_RAD for d in 0 .. 2*SEARCH_RAD.
+fn clamp_delta(base: u64, d: u64) -> u64 {
+    if d >= SEARCH_RAD {
+        v := base + (d - SEARCH_RAD);
+        if v > 255 {
+            return 255;
+        }
+        return v;
+    }
+    need := SEARCH_RAD - d;
+    if base < need {
+        return 0;
+    }
+    return base - need;
+}
+
+// (a - b)^2 for byte values.
+fn sq_diff(a: u64, b: u64) -> u64 {
+    if a >= b {
+        d := a - b;
+        return d * d;
+    }
+    d := b - a;
+    return d * d;
+}
+
+// rgbcx bc4_block::get_block_values: the eight interpolated values a block can name.
+// l == the first endpoint, h == the second; l > h is the 8-value encoding, otherwise the
+// 6-value one (whose values 6 and 7 are the constants 0 and 255).
+fn block_values(l: u64, h: u64) -> u64[] {
+    mut v = u64[];
+    v.push(l);
+    v.push(h);
+    if l > h {
+        v.push((l * 6 + h) / 7);
+        v.push((l * 5 + h * 2) / 7);
+        v.push((l * 4 + h * 3) / 7);
+        v.push((l * 3 + h * 4) / 7);
+        v.push((l * 2 + h * 5) / 7);
+        v.push((l + h * 6) / 7);
+    } else {
+        v.push((l * 4 + h) / 5);
+        v.push((l * 3 + h * 2) / 5);
+        v.push((l * 2 + h * 3) / 5);
+        v.push((l + h * 4) / 5);
+        v.push(0);
+        v.push(255);
+    }
+    return v;
+}
+
+// rgbcx::encode_bc4_hq for one block and one channel: 8 bytes (two endpoints, then sixteen
+// 3-bit selectors packed little-endian).
+fn encode_channel(block: &[u8], channel: u64) -> u8[] {
+    mut samples = u8[];
+    for i in 16 {
+        samples.push(block[i * 4 + channel]);
+    }
+    mut min_val: u64 = 255;
+    mut max_val: u64 = 0;
+    for i in 16 {
+        v := samples[i];
+        if v < min_val {
+            min_val = v;
+        }
+        if v > max_val {
+            max_val = v;
+        }
+    }
+    mut out = u8[];
+    if min_val == max_val {
+        // The 6-value encoding of a constant block: equal endpoints, every selector 0.
+        out.push(min_val);
+        out.push(min_val);
+        for k in 6 {
+            out.push(0);
+        }
+        return out;
+    }
+    mut hi_cand = u64[];
+    mut lo_cand = u64[];
+    for d in 2 * SEARCH_RAD + 1 {
+        hi_cand.push(clamp_delta(max_val, d));
+        lo_cand.push(clamp_delta(min_val, d));
+    }
+    mut best_err: u64 = U64_MAX;
+    mut best = u8[];
+    for k in 8 {
+        best.push(0);
+    }
+    for mode in 2 {
+        for ld in 2 * SEARCH_RAD + 1 {
+            for hd in 2 * SEARCH_RAD + 1 {
+                mut e0 = hi_cand[hd];
+                mut e1 = lo_cand[ld];
+                if e0 == e1 {
+                    continue;
+                }
+                // Mode 0 wants the 8-value encoding (first endpoint larger), mode 1 the
+                // 6-value one.
+                if mode == 0 {
+                    if e0 <= e1 {
+                        t := e0;
+                        e0 = e1;
+                        e1 = t;
+                    }
+                } else {
+                    if e0 > e1 {
+                        t := e0;
+                        e0 = e1;
+                        e1 = t;
+                    }
+                }
+                vals := block_values(e0, e1);
+                mut trial_err: u64 = 0;
+                mut sels = u8[];
+                for i in 16 {
+                    sels.push(0);
+                }
+                for i in 16 {
+                    mut best_index_err: u64 = U64_MAX;
+                    mut best_index: u64 = 0;
+                    for j in 8 {
+                        err := sq_diff(vals[j], samples[i]);
+                        if err < best_index_err {
+                            best_index_err = err;
+                            best_index = j;
+                            if err == 0 {
+                                break;
+                            }
+                        }
+                    }
+                    trial_err += best_index_err;
+                    if trial_err >= best_err {
+                        break;
+                    }
+                    sels[i] = best_index;
+                }
+                if trial_err < best_err {
+                    best_err = trial_err;
+                    mut sel_vals: u64 = 0;
+                    for i in 16 {
+                        sel_vals = sel_vals | (sels[i] << (i * 3));
+                    }
+                    best[0] = e0;
+                    best[1] = e1;
+                    for k in 6 {
+                        best[2 + k] = (sel_vals >> (k * 8)) & 255;
+                    }
+                }
+            }
+        }
+    }
+    return best;
+}
+
+// The 4x4 block at (bx, by) of 4-byte texels, edge-replicated at the image border
+// (bc_encode.cpp:20-28 gather_block).
+fn gather<a>(rgba8: &a [u8], width: u64, height: u64, bx: u64, by: u64) -> u8[] {
+    mut out = u8[];
+    for y in 4 {
+        for x in 4 {
+            mut sx = bx * 4 + x;
+            if sx >= width {
+                sx = width - 1;
+            }
+            mut sy = by * 4 + y;
+            if sy >= height {
+                sy = height - 1;
+            }
+            o := (sy * width + sx) * 4;
+            for c in 4 {
+                out.push(rgba8[o + c]);
+            }
+        }
+    }
+    return out;
+}
+
+// BC4 of a tightly packed RGBA8 image (channel 0): 8 bytes per 4x4 block, row-major.
+pub fn encode_bc4<a>(rgba8: &a [u8], width: u64, height: u64) -> u8[] {
+    bw := (width + 3) / 4;
+    bh := (height + 3) / 4;
+    mut out = u8[];
+    for by in bh {
+        for bx in bw {
+            block := gather(rgba8, width, height, bx, by);
+            b := encode_channel(&block, 0);
+            for k in 8 {
+                out.push(b[k]);
+            }
+        }
+    }
+    return out;
+}
+
+// BC5 of a tightly packed RGBA8 image (channels 0 and 1): 16 bytes per 4x4 block.
+// rgbcx::encode_bc5_hq is two encode_bc4_hq calls, so the first half of every block is
+// exactly the BC4 block of channel 0.
+pub fn encode_bc5<a>(rgba8: &a [u8], width: u64, height: u64) -> u8[] {
+    bw := (width + 3) / 4;
+    bh := (height + 3) / 4;
+    mut out = u8[];
+    for by in bh {
+        for bx in bw {
+            block := gather(rgba8, width, height, bx, by);
+            c0 := encode_channel(&block, 0);
+            c1 := encode_channel(&block, 1);
+            for k in 8 {
+                out.push(c0[k]);
+            }
+            for k in 8 {
+                out.push(c1[k]);
+            }
+        }
+    }
+    return out;
+}

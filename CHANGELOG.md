@@ -406,6 +406,16 @@
   compiler's. A new `fastnoise` suite gates 610 values against the vendored header built with
   `-ffp-contract=off`, the flags its worldgen library uses: this is the substrate on which the
   generator's terrain bytes are reproducible at all.
+- **Abundance's BC4/BC5 block compressor is ported and gated byte for byte.** `lib/bc_encode.grl`
+  carries rgbcx's high-quality single-channel encoder as the engine's
+  `engine/materials/src/bc_encode.cpp` calls it (search radius 3, both the 8-value and 6-value
+  encodings, edge replication for extents that are not multiples of 4): BC4 from RGBA8 channel 0
+  and BC5 from channels 0 and 1. `abundance/tests/bc_encode_test.grl` compares every block byte
+  of eight fixtures (gradients, flat, noise, a single-pixel edge and a checker; 8x8/20x12/4x4
+  aligned, 6x10/33x17/8x10 unaligned, 1x1) against the engine's driver compiled over the pinned
+  rgbcx, and a `lib-bc4bc5` corpus case pins the same encoder without the Abundance checkout.
+  BC7 (bc7e ISPC) and BC6H (ISPC texture compressor) remain unported and are recorded in
+  abundance/README.md, with the parity program already emitting their reference output on demand.
 
 - **The electrical grid's state machine and dispatch are ported, byte for byte against the
   engine.** `abundance/src/power_grid.grl` carries `power_grid.hpp/.cpp` of
