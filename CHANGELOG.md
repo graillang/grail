@@ -1,5 +1,10 @@
 ## Unreleased
 
+- **A cold check spends less on per-function store bookkeeping.** Each body's key is hashed once
+  (it was hashed three times: lookup, filing and the body record); units are encoded straight into
+  the module's pack buffer, with the checksum's input built in one reused buffer; and a body key's
+  column comes from the lexer's token instead of rescanning the file. syn4000 cold check: 3.60G to
+  3.51G instructions (-2.6%).
 - **The performance chapter explains the `fib(32)` scheduler rows.** They mostly measure g++'s
   recursive inlining in oneTBB's twin (46 to 50 million instructions for serial `fib(32)`, against
   67 million for clang's C and 75 million for Grail's release build, which is clang's loop plus one

@@ -1173,6 +1173,7 @@ struct C {
     fn_wlens: u64[],
     fn_wdata: u8[],
     fn_wslots: u64[],
+    fn_wscratch: u8[],
     // `--fn-cache-quiet`: use the store, print no report line.
     fn_quiet: u64,
     // `--object PATH`: assemble in this process (compiler/asm_x86.grl) and write the object to PATH;
@@ -1180,10 +1181,6 @@ struct C {
     object: u8[],
     fn_flags: u8[],
     fn_surface: u8[],
-    fn_at_file: u64,
-    fn_at_off: u64,
-    fn_at_line: u64,
-    fn_at_col: u64,
     // `--shift-declarations N`: tuple declarations synthesised before the first body (a test switch).
     shift_decls: u64,
     // Parallel bodies (par_start): 1 while forked workers compile bodies into units; this process's
@@ -19984,38 +19981,15 @@ fn fn_open<a, b>(c: (&a mut C), unit: &b [u8]) -> bool {
     return true;
 }
 
-// Where a declaration starts, as `.gpos` will print it: its line and column in its file. Bodies are
-// walked in source order, so the cursor moves forward; a position before it (a replay) restarts.
-// The line and column are what makes a body edit inside one function leave every *later* function's
-// key alone: byte offsets would shift with it, positions do not.
+// Where a declaration starts, as `.gpos` will print it: its line and column in its file, which the
+// lexer worked out for its first token (byte columns, 1-based, as `.gpos` counts them). The line and
+// column are what makes a body edit inside one function leave every *later* function's key alone:
+// byte offsets would shift with it, positions do not.
 fn fn_place<a>(c: (&a mut C), pos: u64) -> FnPlace {
-    mut st: u64 = 0;
     if c.toks.len() <= pos {
         return FnPlace { line: 0, col: 0 };
     }
-    st = c.toks[pos].start;
-    if (c.fn_at_file != c.file) | (st < c.fn_at_off) {
-        exchange(&mut c.fn_at_file, c.file);
-        exchange(&mut c.fn_at_off, 0);
-        exchange(&mut c.fn_at_line, 1);
-        exchange(&mut c.fn_at_col, 1);
-    }
-    mut line = c.fn_at_line;
-    mut col = c.fn_at_col;
-    mut i = c.fn_at_off;
-    while (i < st) & (i < c.src.len()) {
-        if c.src[i] == 10 {
-            line += 1;
-            col = 1;
-        } else {
-            col += 1;
-        }
-        i += 1;
-    }
-    exchange(&mut c.fn_at_off, st);
-    exchange(&mut c.fn_at_line, line);
-    exchange(&mut c.fn_at_col, col);
-    return FnPlace { line: line, col: col };
+    return FnPlace { line: c.toks[pos].line, col: c.toks[pos].col };
 }
 
 // The rules that keep a body from being a unit in this pass, as indices into `fn_uses`/`fn_why`.
@@ -20483,21 +20457,21 @@ fn fn_key<a, b, d>(c: (&a mut C), unit: &b [u8], symbol: &d [u8], from: u64, to:
     // The declaration and the signature as they are, each after its length: the key is hashed once,
     // for the file's name, rather than each piece being hashed into it first.
     push_bytes(&mut key, view("\ndecl "));
-    push_bytes(&mut key, view(decimal_bytes(to - from)));
+    decimal(&mut key, to - from);
     key.push(32);
     key.append(c.src[from: to]);
     push_bytes(&mut key, view("\nsig "));
-    push_bytes(&mut key, view(decimal_bytes(sig.len())));
+    decimal(&mut key, sig.len());
     key.push(32);
     key.append(view(sig));
     push_bytes(&mut key, view("\nfile "));
-    push_bytes(&mut key, view(decimal_bytes(c.file)));
+    decimal(&mut key, c.file);
     push_bytes(&mut key, view("\ncolumn "));
-    push_bytes(&mut key, view(decimal_bytes(place.col)));
+    decimal(&mut key, place.col);
     push_bytes(&mut key, view("\nordinal "));
-    push_bytes(&mut key, view(decimal_bytes(scope_next(&c))));
+    decimal(&mut key, scope_next(&c));
     push_bytes(&mut key, view("\nraw "));
-    push_bytes(&mut key, view(decimal_bytes(c.raw)));
+    decimal(&mut key, c.raw);
     key.push(10);
     return key;
 }
@@ -21377,10 +21351,10 @@ fn fn_pack_keep<a, b, d>(c: (&a mut C), name: &b [u8], u: (&d fncache::Unit)) ->
     if fncache::index_find(&c.fn_wslots, &c.fn_wnames, name) != 0 {
         return ();
     }
-    bytes := fncache::encode(u);
-    c.fn_woffs.push(c.fn_wdata.len());
-    c.fn_wlens.push(bytes.len());
-    c.fn_wdata.append(view(bytes));
+    at := c.fn_wdata.len();
+    fncache::encode_into(&mut c.fn_wdata, &mut c.fn_wscratch, u);
+    c.fn_woffs.push(at);
+    c.fn_wlens.push(c.fn_wdata.len() - at);
     c.fn_wnames.push(copy_bytes(name));
     i := c.fn_wnames.len() - 1;
     fncache::index_put(&mut c.fn_wslots, &c.fn_wnames, i);
@@ -22005,6 +21979,9 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     // checking, its lowering and its emission. A body that misses is emitted below, taken as a unit
     // at the end of this function, filed, and applied the same way.
     mut fn_key_text = u8[];
+    // The key's hash, the unit's name in the store: taken once, for the lookup, the filing and the
+    // body record alike.
+    mut fn_key_name = u8[];
     mut fn_marks_at = u64[];
     mut fn_candidate = 0;
     mut fn_line = 0;
@@ -22058,9 +22035,9 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         if key.len() != 0 {
             from_worker := par_unit.key.len() != 0;
             mut hit = par_unit;
+            fn_key_name = fncache::hash(view(key));
             if (hit.key.len() == 0) & (c.fn_dir.len() != 0) {
-                hname := fncache::hash(view(key));
-                hit = fn_load_unit(&mut c, view(hname), c.check_only != 0);
+                hit = fn_load_unit(&mut c, view(fn_key_name), c.check_only != 0);
                 par_outcome = 2;
             }
             if hit.key.len() != 0 {
@@ -22081,7 +22058,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                         // optimiser's memo (optimize.grl one_body) misses for every unchanged body.
                         llvm::facts_truncate(&mut c.facts, fact_mark);
                         fn_apply(&mut c, &hit, &regs, fn_line, position, claimed_alloc, claimed_panic, claimed_block);
-                        hit_name := fncache::hash(view(key));
+                        hit_name := fn_key_name.copy();
                         c.fn_used.push(hit_name.copy());
                         // Every unit the run applied - a store hit or a body worker's - goes into
                         // the pack the run files.
@@ -22533,7 +22510,8 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             // The file's name is the key's hash; the key record itself travels inside the entry,
             // so two keys that collide make a miss and never a wrong hit.
             if c.fn_dir.len() != 0 {
-                filed_name := fncache::hash(view(produced.key));
+                // `produced.key` is this body's key (fn_key_text), so its name is the one taken above.
+                filed_name := fn_key_name.copy();
                 // A body worker files nothing when the run packs its units: it hands the unit to
                 // the parent, which keeps it.
                 if !(fn_packed(&c) & (c.par_me != 0)) {
@@ -22562,7 +22540,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             }
             made_ord := scope_next(&c);
             fn_apply(&mut c, &produced, &regs, fn_line, position, claimed_alloc, claimed_panic, claimed_block);
-            made_name := fncache::hash(view(produced.key));
+            made_name := fn_key_name.copy();
             made_regs := produced.regs.copy();
             dr_note(&mut c, position, end, made_ord, view(unit), view(made_name), view(made_regs));
         } else {
@@ -61871,14 +61849,11 @@ pub fn main() -> u64 {
         fn_wlens: u64[],
         fn_wdata: u8[],
         fn_wslots: u64[],
+        fn_wscratch: u8[],
         object: u8[],
         fn_quiet: 0,
         fn_flags: u8[],
         fn_surface: u8[],
-        fn_at_file: 0,
-        fn_at_off: 0,
-        fn_at_line: 1,
-        fn_at_col: 1,
         shift_decls: 0,
         par_on: 0,
         par_me: 0,
