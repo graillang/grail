@@ -1,5 +1,11 @@
 ## Unreleased
 
+- **The macro coastline's rasterisers are ported bit for bit.** `rasterize_macro_land_field`
+  (Catmull-Rom upsampling of the coarse node grid) and `rasterize_valley_field` (every valley's
+  warped distance, arc position, corridor weight, rising floor and broad tilt blended by tilt^4,
+  bilinearly upsampled) join worldgen_macro_coast; 816 values - four rasters over twelve plans,
+  hashed cell by cell - match the worldgen library.
+
 - **World loot's per-fill rules are ported.** `abundance/src/world_loot_rules.grl` carries
   `world_loot_sealed_mask` (each compartment sealed when mix64(site ^ cycle<<32 ^ 0x5EA1<<8 ^
   compartment) as a double in [0,1) falls below the kind's seal chance), `world_loot_work_seconds`
