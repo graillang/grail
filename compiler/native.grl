@@ -11618,17 +11618,6 @@ fn pv_ir_atoms<a>(c: (&a mut C), lo: u64, hi: u64) -> Atom[] {
     return out;
 }
 // A statement keyword whose own conditions and statements report what they do as they are compiled.
-fn pv_compound<a, b>(t: &b [u8]) -> bool {
-    if (t.len() < 2) || (6 < t.len()) {
-        return false;
-    }
-    return same(view(t), view("if"))
-        || same(view(t), view("match"))
-        || same(view(t), view("while"))
-        || same(view(t), view("loop"))
-        || same(view(t), view("for"))
-        || same(view(t), view("unsafe"));
-}
 // A statement that calls may write through the names it mentions, so what they meant before it is
 // forgotten after it. A compound statement is not scanned here: its condition and its own statements
 // report themselves, which is the precision the token walk could not have.
@@ -11643,11 +11632,10 @@ fn pv_ir_statement<a>(c: (&a mut C), lo: u64, hi: u64) -> unit {
     if k == 123 {
         return ();
     }
-    if k == 1 {
-        t := tok_text(&mut c, lo);
-        if pv_compound(view(t)) {
-            return ();
-        }
+    // A compound statement (if, match, while, loop, for, unsafe) is read part by part, not here.
+    if (k == 1) && (is_at(&mut c, lo, view("if")) || is_at(&mut c, lo, view("match")) || is_at(&mut c, lo, view("while"))
+        || is_at(&mut c, lo, view("loop")) || is_at(&mut c, lo, view("for")) || is_at(&mut c, lo, view("unsafe"))) {
+        return ();
     }
     if !pv_span_calls(&mut c, lo, hi) {
         return ();
@@ -11854,13 +11842,14 @@ fn pv_unwritten<a, b>(c: (&a mut C), open: u64, end: u64, name: &b [u8]) -> bool
     }
     mut i = open + 1;
     while i < end {
+        // The tokens are compared where they are (is_at): this scan runs per statement and name.
         if kind_at(&mut c, i) == 1 {
-            if same(view(tok_text(&mut c, i)), view(name)) {
+            if is_at(&mut c, i, view(name)) {
                 nk := kind_at(&mut c, i + 1);
                 if (nk == 61) || ((261 < nk) & (nk < 269)) {
                     return false;
                 }
-                if (2 <= i) && (kind_at(&mut c, i - 2) == 38) && same(view(tok_text(&mut c, i - 1)), view("mut")) {
+                if (2 <= i) && (kind_at(&mut c, i - 2) == 38) && is_at(&mut c, i - 1, view("mut")) {
                     return false;
                 }
             }
