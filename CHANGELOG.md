@@ -1,5 +1,11 @@
 ## Unreleased
 
+- **Release builds lift the drop glue too.** The content-addressed helpers (`.D…` drop glue, `.P…`)
+  are frameless, so the lifter's function split ran each one on into the next helper's `.weak`
+  directive and refused it; they stayed native calls LLVM could not inline. A symbol directive that
+  introduces the next function now ends the open one. bench/bintrees in release: 3.85 G -> 3.78 G
+  instructions and 0.29 s -> 0.25 s; dyncall -3%, strings -1%; outputs identical.
+
 - The FFI test shim builds for Windows without a C library's headers again: `immintrin.h` pulled in
   `<stdlib.h>` through `mm_malloc.h`, which a Linux host has no MSVC copy of, so the Windows check
   (and with it every post-landing run) failed before any case ran.

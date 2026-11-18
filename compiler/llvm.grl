@@ -841,6 +841,29 @@ fn is_local_label<a>(name: &a [u8]) -> bool {
 // The stream's text functions: a non-.L label in .text up to its `.set .Fn,SIZE` (or the next
 // label or section change for frameless functions). Pushed sections (`.pushsection` ...
 // `.popsection`: constant pools, statics) are moved to the data lines.
+// Whether the symbol directives starting at line i are the preamble of the function whose label
+// comes next: only directives and local labels stand between them and a label the first one names.
+fn preamble_of_next<a>(lines: (&a u8[][]), i: u64) -> bool {
+    first := view(lines[i]);
+    mut k = i;
+    while k < lines.len() {
+        line := view(lines[k]);
+        if starts(line, view(".weak ")) || starts(line, view(".hidden ")) || starts(line, view(".globl ")) || starts(line, view(".type ")) {
+            k += 1;
+            continue;
+        }
+        name := label_of(line);
+        if (name.len() != 0) && (name.len() + 1 == line.len()) {
+            if is_local_label(view(name)) {
+                k += 1;
+                continue;
+            }
+            return has(first, view(name));
+        }
+        return false;
+    }
+    return false;
+}
 fn split<a>(lines: (&a u8[][]), funcs: (&a mut Func[]), data: (&a mut u8[][])) -> unit {
     mut text = 1;
     mut open = 0;
@@ -885,6 +908,19 @@ fn split<a>(lines: (&a u8[][]), funcs: (&a mut Func[]), data: (&a mut u8[][])) -
             funcs.push(Func { name: name, first: i + 1, end: i + 1, frame: 0, framed: 0 });
             open = 1;
             continue;
+        }
+        // A symbol directive (`.weak`, `.hidden`, `.globl`, `.type`) after a frameless function's
+        // body belongs to the next function: it ends the open one (the content-addressed helpers -
+        // drop glue `.D…`, `.P…` - are frameless and are followed by the next one's `.weak`), and is
+        // kept with the data lines, where a binding directive means the same wherever it stands.
+        if (open != 0) && (starts(line, view(".weak ")) || starts(line, view(".hidden ")) || starts(line, view(".globl ")) || starts(line, view(".type "))) && preamble_of_next(&lines, i) {
+            last := funcs.len() - 1;
+            if !has(line, view(funcs[last].name)) {
+                funcs[last].end = i;
+                open = 0;
+                data.push(copy(line));
+                continue;
+            }
         }
         if open != 0 {
             if starts(line, view(".set .F")) {
