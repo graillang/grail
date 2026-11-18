@@ -63,7 +63,11 @@ const rest = roundsAt >= 0 ? argv.filter((_, i) => i !== roundsAt && i !== round
 const names = rest.length ? rest
   : readdirSync(join(root, 'bench')).filter(f => f.endsWith('.grl')).map(f => f.slice(0, -4))
     // A program with no C twin measures itself (bench/README.md) and is not part of the comparison.
-    .filter(name => existsSync(join(root, 'bench', `${name}.c`))).sort();
+    .filter(name => existsSync(join(root, 'bench', `${name}.c`)))
+    // The SIMD programs take a round count and print their own timing line: tools/bench-simd.mjs
+    // runs them against their intrinsics twins. Run here with no argument they exit with a usage
+    // message, which failed both of the gate's runtime-bench legs.
+    .filter(name => !name.startsWith('simd_')).sort();
 const work = mkdtempSync(join(tmpdir(), 'grail-bench-'));
 let failed = 0;
 const ratios = [];

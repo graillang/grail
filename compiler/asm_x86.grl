@@ -3551,9 +3551,22 @@ fn mov<a>(o: (&a mut A)) {
             shape(&mut o);
         }
     } else if want(&mut o, 2, 3, 1) {
-        enc(&mut o, 0, 1, 0x8b, 1, rn(&o, 1), 0, 0);
+        if cls(&o, 1) == 16 {
+            // movq m64, %xmm: F3 0F 7E. The general load (8B) named the SSE register's number as
+            // a general register's, so the value went to %rax..%r15 instead.
+            enc(&mut o, 4, 0, 0x7e0f, 2, rn(&o, 1), 0, 0);
+        } else {
+            enc(&mut o, 0, 1, 0x8b, 1, rn(&o, 1), 0, 0);
+        }
     } else if want(&mut o, 2, 1, 3) {
-        enc(&mut o, 0, 1, 0x89, 1, rn(&o, 0), 1, 0);
+        if cls(&o, 0) == 16 {
+            // movq %xmm, m64: 66 0F D6, clang's choice. The general store (89) wrote %rax..%r15 in
+            // place of the SSE register - a callback entry saving its float arguments around
+            // rt_adopt_record saved the general registers instead.
+            enc(&mut o, 1, 0, 0xd60f, 2, rn(&o, 0), 1, 0);
+        } else {
+            enc(&mut o, 0, 1, 0x89, 1, rn(&o, 0), 1, 0);
+        }
     } else if want(&mut o, 2, 2, 1) || want(&mut o, 2, 2, 3) {
         if o.im_sym == 0 && !fits32(o.im_add) {
             if o.ok[1] != 1 {
@@ -3721,6 +3734,13 @@ fn execute<a>(o: (&a mut A), id: u64) {
         } else if (o.nops == 1) && (o.ok[0] == 5) {
             o.ok[0] = 1;
             enc(&mut o, 0, 0, 0xff, 1, 4, 0, 0);
+        } else if (o.nops == 1) && (o.ok[0] == 4) && (o.d_sym != 0) && (o.sym_bind[o.d_sym - 1] != 0) {
+            // A tail jump to a global or weak symbol takes the call's relocation, as clang writes
+            // it: a weak definition here (a generic instance several modules emit) is the one the
+            // linker may replace, so a jump resolved in place could reach the copy it dropped.
+            o.buf.push(0xe9);
+            disp_expr(&mut o);
+            field(&mut o, 4, FX_CALL, 4);
         } else {
             branch(&mut o, IT_JMP, 0);
         }

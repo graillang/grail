@@ -213,7 +213,10 @@ try {
   {
     const membersWin = compileProgram(compiler, [join(root, 'tests/debug_members.grl')], join(work, 'windows-members'), { debug: true });
     const types = ok(['llvm-pdbutil', 'dump', '--types', membersWin.pdb]).stdout;
-    for (const [structure, size, fields] of [['Outer', 48, [['count', 0], ['ratio', 8], ['inner', 16], ['pos', 24], ['label', 40]]], ['Inner', 16, [['id', 0], ['tag', 8]]], ['Pos', 16, [['row', 0], ['col', 8]]], ['Pt', 12, [['x', 0], ['y', 4], ['w', 8]]], ['u8[]', 24, [['data', 0], ['len', 8], ['cap', 16]]]]) {
+    // `inner` is inline (unboxed-values.md): a record field is the record's words in place, so
+    // Outer is 56 bytes with `pos` at 32 - what the compiled code reads (`o.inner.id` at 16 with no
+    // pointer to follow, `o.pos.row` at 32, `o.label` at 48).
+    for (const [structure, size, fields] of [['Outer', 56, [['count', 0], ['ratio', 8], ['inner', 16], ['pos', 32], ['label', 48]]], ['Inner', 16, [['id', 0], ['tag', 8]]], ['Pos', 16, [['row', 0], ['col', 8]]], ['Pt', 12, [['x', 0], ['y', 4], ['w', 8]]], ['u8[]', 24, [['data', 0], ['len', 8], ['cap', 16]]]]) {
       const full = new RegExp(`LF_STRUCTURE \\[size = \\d+\\] \`${structure.replace(/[[\]]/g, '\\$&')}\`\\s+vtable: <no type>, base list: <no type>, field list: (0x[0-9A-F]+)\\s+options: , sizeof ${size}`);
       const found = types.match(full);
       assert.ok(found, `CodeView has no full definition of ${structure} (sizeof ${size})`);

@@ -20,7 +20,9 @@
 Each `NAME.grl` has a C twin `NAME.c` that prints the same numbers. `bun tools/bench.mjs [NAME...]`
 builds both (C with `clang -O2 -ffp-contract=off`), checks the outputs agree and prints the times
 and the ratio; `GRAIL_BACKEND=llvm` builds the Grail side through the LLVM backend, and `--rounds N`
-pairs the runs on a busy machine. See the header of `tools/bench.mjs`.
+pairs the runs on a busy machine. See the header of `tools/bench.mjs`. The `simd_*` programs take a
+round count and print their own timing line, so `bun tools/bench-simd.mjs` times them against their
+intrinsics twins instead.
 
 | program | what it measures |
 |---|---|

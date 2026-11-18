@@ -3705,6 +3705,27 @@ fn gc_slot<a, b>(slots: (&a u64[]), names: (&b u8[][]), name: &b [u8]) -> u64 {
     }
     return at;
 }
+// A file's bytes, or nothing when it has gone. Every build on the machine shares the store, and
+// another build's collection folds the use lists - removing each list it read - and evicts records
+// between this one's listing of a directory and its read of what it listed: `host::read_file` aborts
+// on a missing file, which killed that build (the front-end fuzzer's SIGABRTs, four jobs at a time).
+// A list or a mark that has gone says less about recency, which only orders eviction.
+fn read_if_present<a>(path: &a [u8]) -> u8[] {
+    fd := host::open(view(path), 0);
+    if 9223372036854775807 < fd {
+        return u8[];
+    }
+    mut out = u8[];
+    while true {
+        chunk := host::read_fd(fd, 65536);
+        if chunk.len() == 0 {
+            break;
+        }
+        push_bytes(&mut out, view(chunk));
+    }
+    host::close(fd);
+    return out;
+}
 fn cache_gc<a>(root: &a [u8], cap: u64) -> u64[] {
     now := cache_generation(view(root));
     fn_dir := fn_store(view(root));
@@ -3719,7 +3740,7 @@ fn cache_gc<a>(root: &a [u8], cap: u64) -> u64[] {
     if host::exists(view(used_dir)) != 0 {
         lists := host::list_dir(view(used_dir));
         for l in lists.len() {
-            text := host::read_file(view(path_join(view(used_dir), view(item(&lists, l)))));
+            text := read_if_present(view(path_join(view(used_dir), view(item(&lists, l)))));
             rows := lines(view(text));
             for r in rows.len() {
                 w := words(view(item(&rows, r)));
@@ -3778,7 +3799,7 @@ fn cache_gc<a>(root: &a [u8], cap: u64) -> u64[] {
             used := cat(view(path), view(".used"));
             mut g = 0;
             if host::exists(view(used)) != 0 {
-                g = number_of(view(host::read_file(view(used))));
+                g = number_of(view(read_if_present(view(used))));
             }
             size := gc_size(view(path));
             entries.push(GcEntry { path: path, used: used, size: size, generation: g });
@@ -3840,7 +3861,7 @@ fn cache_gc<a>(root: &a [u8], cap: u64) -> u64[] {
             mut referenced = u8[];
             for i in entries.len() {
                 if (gone[i] == 0) && (entries[i].used.len() != 0) {
-                    text := host::read_file(view(entries[i].path));
+                    text := read_if_present(view(entries[i].path));
                     mut run = 0;
                     for x in text.len() {
                         if hex_byte(text[x]) {

@@ -509,6 +509,29 @@
   BC7 (bc7e ISPC) and BC6H (ISPC texture compressor) remain unported and are recorded in
   abundance/README.md, with the parity program already emitting their reference output on demand.
 
+- **Fixed (RISC-V): an `f32` accumulator kept in a register and started at `0.0` read as NaN.** The
+  optimiser keeps such a value in an SSE register in single precision and clears it with `xorps`,
+  which the RISC-V translation wrote as a double zero (`fmv.d.x`); RISC-V reads a single from a
+  floating-point register as NaN unless its upper half is all ones, so `total(&v[1: 4])` printed
+  `NaN`. A register the function reads only in single precision is now cleared with `fmv.w.x`, the
+  NaN-boxed binary32 zero (typed-slices, riscv64).
+- **Fixed: the internal x86-64 assembler encoded `movq` between an SSE register and memory as a
+  general-register move.** `movq %xmmN, mem` was assembled as `mov %rN, mem` (and the load the same
+  way), so a C-callback entry that saves its float argument registers around `rt_adopt_record`
+  saved general registers instead, and the float arguments a callback received were whatever those
+  held. It is now `66 0F D6` / `F3 0F 7E`, as clang writes it. A tail `jmp` to a global or weak
+  symbol keeps its relocation, as clang's does, instead of being resolved in place: a weak
+  definition is the one the linker may replace. The assembler oracle (every corpus program's object
+  against clang's, byte for byte) passes again: 2156 programs.
+- **Fixed: a build could abort while another build collected the shared cache.** Every build on the
+  machine shares the build store, and a collection folds the per-function use lists, removing each
+  one it read; a second build collecting at the same moment read a list that had just gone, and
+  `host::read_file` aborts on a missing file (SIGABRT, no message). The collection now reads use
+  lists, use marks and records with a read that answers nothing for a file that has gone - which only
+  weakens the recency that orders eviction. The front-end fuzzer, four jobs at a time, hit it on
+  most runs; it is now clean, and it no longer counts the other targets' platform modules
+  (`darwin.grl`, `os-windows.grl`), which are refused as they stand on this host, as baseline
+  regressions.
 - **The electrical grid's state machine and dispatch are ported, byte for byte against the
   engine.** `abundance/src/power_grid.grl` carries `power_grid.hpp/.cpp` of
   `cmake/tx/power.cmake` (minus the publication binding): the five record types and the EMP

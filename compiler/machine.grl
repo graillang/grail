@@ -9,7 +9,10 @@ struct Out {
     target: u64,
     win: u64,
     plat: u64,
-    next: u64
+    next: u64,
+    // RISC-V: the SSE registers (bit n for %xmmn) the current function reads only in single
+    // precision (xmm_singles), which `xorps` must clear to a NaN-boxed binary32 zero.
+    single: u64
 }
 fn eq<a, b>(a: &a [u8], b: &b [u8]) -> bool {
     if a.len() != b.len() {
@@ -1208,7 +1211,7 @@ pub fn has_atomics<a>(input: &a [u8]) -> bool {
     return false;
 }
 pub fn atomics_x86<a>(input: &a [u8]) -> u8[] {
-    mut o = Out { text: u8[], target: 0, win: 0, plat: 0, next: 1 };
+    mut o = Out { text: u8[], target: 0, win: 0, plat: 0, next: 1, single: 0 };
     mut start = 0;
     for i in input.len() {
         if input[i] == 10 {
@@ -3646,6 +3649,89 @@ fn freg<a>(target: u64, s: &a [u8], single: bool) -> u8[] {
     out.push(48 + k % 10);
     return out;
 }
+// %xmmN's N, or 99 for anything else.
+fn xmm_number<a>(r: &a [u8]) -> u64 {
+    if (r.len() < 5) || (r.len() > 6) || !starts(view(r), view("%xmm")) {
+        return 99;
+    }
+    mut n = 0;
+    for i in r.len() - 4 {
+        d := r[4 + i];
+        if (d < 48) || (d > 57) {
+            return 99;
+        }
+        n = n * 10 + d - 48;
+    }
+    return n;
+}
+// The SSE registers (bit n for %xmmn) the function starting at `from` reads only in single
+// precision, through its last line before the next non-local label: read by a single-precision form
+// and by no double one. A register copy (`movaps`) is neither: the scratch %xmm0 the optimiser copies
+// an f32 accumulator through is also widened in place and read as a double, and that says nothing
+// about the accumulator's own register.
+fn xmm_singles<a>(input: &a [u8], from: u64) -> u64 {
+    mut sread = 0;
+    mut dread = 0;
+    mut start = from;
+    for i in input.len() - from {
+        at := from + i;
+        if input[at] != 10 {
+            continue;
+        }
+        line := trim(view(input[start: at]));
+        start = at + 1;
+        if line.len() == 0 {
+            continue;
+        }
+        if (line[0] != 46) && (line[line.len() - 1] == 58) {
+            break;
+        }
+        mut sp = 0;
+        while (sp < line.len()) && (line[sp] != 32) {
+            sp += 1;
+        }
+        if sp == line.len() {
+            continue;
+        }
+        op := line[: sp];
+        ops := trim(view(line[sp + 1:]));
+        mut comma = 0;
+        while (comma < ops.len()) && (ops[comma] != 44) {
+            comma += 1;
+        }
+        a := xmm_number(view(trim(view(ops[: comma]))));
+        mut b = 99;
+        if comma < ops.len() {
+            b = xmm_number(view(trim(view(ops[comma + 1:]))));
+        }
+        // Forms that read both operands in one precision, and forms that read only the first.
+        both_s := eq(view(op), view("addss")) || eq(view(op), view("subss")) || eq(view(op), view("mulss"))
+            || eq(view(op), view("divss")) || eq(view(op), view("ucomiss")) || eq(view(op), view("comiss"));
+        both_d := eq(view(op), view("addsd")) || eq(view(op), view("subsd")) || eq(view(op), view("mulsd"))
+            || eq(view(op), view("divsd")) || eq(view(op), view("ucomisd")) || eq(view(op), view("comisd"));
+        first_s := eq(view(op), view("cvtss2sd")) || eq(view(op), view("sqrtss")) || eq(view(op), view("movss"))
+            || eq(view(op), view("cvttss2si")) || eq(view(op), view("cvtss2si")) || eq(view(op), view("movd"));
+        first_d := eq(view(op), view("cvtsd2ss")) || eq(view(op), view("sqrtsd")) || eq(view(op), view("movsd"))
+            || eq(view(op), view("cvttsd2si")) || eq(view(op), view("cvtsd2si")) || eq(view(op), view("movq"));
+        if both_s || first_s {
+            if a < 16 {
+                sread = sread | (1 << a);
+            }
+            if both_s && (b < 16) {
+                sread = sread | (1 << b);
+            }
+        }
+        if both_d || first_d {
+            if a < 16 {
+                dread = dread | (1 << a);
+            }
+            if both_d && (b < 16) {
+                dread = dread | (1 << b);
+            }
+        }
+    }
+    return sread & (dread ^ 65535);
+}
 // The SSE forms the native front end and the optimiser write for float arithmetic, on AArch64 and
 // RISC-V: moves between SSE and general registers, register copies, clearing, the four operations
 // and sqrt in both precisions, and the two conversions. Compares and integer conversions arrive as
@@ -3789,7 +3875,15 @@ fn float_sse<a, b, c, d>(o: (&a mut Out), op: &b [u8], src: &c [u8], dst: &d [u8
             put(&mut o, view(fd));
             put(&mut o, view(",#0\n"));
         } else {
-            put(&mut o, view("fmv.d.x "));
+            // A register the function reads only as binary32 is cleared to binary32 zero: RISC-V
+            // reads a single from a floating-point register as NaN unless its upper 32 bits are
+            // all ones, so the double zero made an f32 accumulator started at 0.0 NaN.
+            n := xmm_number(view(dst));
+            if (n < 16) && (((o.single >> n) & 1) != 0) {
+                put(&mut o, view("fmv.w.x "));
+            } else {
+                put(&mut o, view("fmv.d.x "));
+            }
             put(&mut o, view(fd));
             put(&mut o, view(",zero\n"));
         }
@@ -4320,7 +4414,7 @@ pub fn lower<a>(input: &a [u8], target: u64, plat: u64) -> u8[] {
         isa = 1;
         win = 1;
     }
-    mut out = Out { text: u8[], target: isa, win: win, plat: plat, next: 1 };
+    mut out = Out { text: u8[], target: isa, win: win, plat: plat, next: 1, single: 0 };
     // Frame constants are known before instruction selection (no unresolved immediate expressions).
     mut start = 0;
     for i in input.len() {
@@ -4347,6 +4441,9 @@ pub fn lower<a>(input: &a [u8], target: u64, plat: u64) -> u8[] {
                         || (line[line.len() - 1] == 58)
                         || starts(view(line), view("rt_state:"))
                         || starts(view(line), view("rt_tls_record:")) {
+                        if (target == 2) && (line[0] != 46) && (line[line.len() - 1] == 58) {
+                            out.single = xmm_singles(view(input), start);
+                        }
                         put(&mut out, view((line)));
                         put(&mut out, view("\n"));
                     } else {
