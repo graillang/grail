@@ -1,5 +1,17 @@
 ## Unreleased
 
+- **The Abundance gameplay kernel's shared vocabulary and table codec are ported**
+  (`abundance/src/tx.grl`, the stage-6 base every gameplay domain builds on): action-kind and
+  table-name identity hashes, the effect-id and engine-id ranges, all 55 refusal codes with the
+  engine's own names, the Writer/Reader byte codec (little-endian words, IEEE-754 bit patterns
+  with -0.0/NaN/infinity payloads preserved, bounded strings/sequences, opaque payloads beyond
+  codec_max_string, exact consumption, nothing produced on failure), the stamp/receipt records,
+  and the changeset - ops sorted by (table, key), flows merged by (resource, reason) and summed,
+  FNV hash over the encoding - plus the codec's hostile-input refusals and three malformed
+  changesets both implementations reject. Gated by `tests/parity/tx.cpp` against the engine's own
+  headers and the compiled `libabundance_gameplay_core.a` (`-ffp-contract=off`): 235 reference
+  lines, all matched by `abundance/tests/tx_test.grl`.
+
 - **Every performance chart is re-measured with the machine idle** (load average under 3; release
   compiler with PGO on main bcf78e5a). Every compile row now beats the fastest rival: the cold
   check of the 104,000-line program is 0.93x Zig's instructions (3.05 against 3.28 billion). Channels
