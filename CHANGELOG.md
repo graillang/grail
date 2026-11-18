@@ -36,6 +36,17 @@
   (exact step at the kind's speed, arrival within half a metre, the cell as the step's cap, the
   atan2 yaw, and charging to a full cell). `abundance/tests/logistics_network_test.grl` prints 86
   lines that match a reference compiling the engine's own `logistics_network.cpp`.
+- **The Abundance procedural vocal synthesiser is ported, sample for sample.** `abundance/src/
+  audio_vocal.grl` carries `ab::audio::synthesise_vocal` of `cmake/tx/character.cmake`'s audio
+  side (Private/audio/vocal_synthesis.cpp; the domain's `audio/` directory is this lane's):
+  splitmix64-seeded glottal pulse trains through two-pole vowel-formant resonators, the thud and
+  heartbeat layers, the laboured-breath cycle with its heartbeat schedule, the ten kinds' voices at
+  their per-kind pitches/lengths/harshening, and the edge-faded peak normalisation to PCM16 (0.9,
+  0.8 for Breath). `abundance/tests/parity/audio_vocal.cpp` compiles the engine's own
+  synthesiser with -ffp-contract=off and prints 646 values; `abundance/tests/audio_vocal_test.grl`
+  reproduces every one - ten kinds x 3 severities x 2 variants x 2 timbres, each compared by sample
+  count, an FNV-1a hash over the int16 stream, and the first/last/peak samples, plus the invalid
+  kind and non-finite parameters (empty) and six breath-cycle lengths.
 - **The island generator's province layer is ported.** `abundance/src/worldgen_provinces.grl`
   carries the six-type lithospheric recipe table (and the rock inverse), ab::ProvinceSummary, the
   splitmix64 Random helper with its bounded/shuffle draws, and make_provinces' shuffle plus
