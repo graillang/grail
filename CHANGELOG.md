@@ -1,5 +1,20 @@
 ## Unreleased
 
+- **The island's world features are ported: sites, cave entrances, strategic regions and transport
+  corridors, with the seeded fields and portable math they are placed by.** `abundance/src/
+  worldgen_pm.grl` ports ab::pm exactly (sin/cos over the header's Cody-Waite reduction - not
+  lib/math.grl's fdlibm, which differs in the last bit - plus lerp, hypot and std::remainder);
+  `worldgen_field.grl` carries mix64/hash01/value-fbm noise and sample_grid from the world
+  generator; `worldgen_subsurface.grl` the seeded bedrock and the cave-openness field (tubes,
+  chambers, the connected tunnel); `worldgen_world.grl` the raster state; `worldgen_features.grl`
+  the pass itself: the defensibility raster, the shared site census (11 kinds, thresholds, caps,
+  the farmland reserve, spaced greedy selection, per-site measures), entrance probing on the 220 m
+  grid with the 520 m separation, the 4x4 strategic regions and the corridors joining major
+  complementary sites. `features_test.grl` re-derives all of it from three generated worlds and
+  matches `parity/features.txt` line for line: 4302 bit-exact values, including the two
+  intermediate rasters' digests, a cell-for-cell defensibility agreement and the entrance score
+  tie count (zero on every seed, which is what makes the C++'s unstable sort order reproducible).
+  `abundance/tests/parity/features.cpp` is the reference, built against the worldgen library.
 - **Abundance's content tool is ported: `inspect`, `cook` and `verify` reach byte parity.**
   `abundance/src/content.grl` reproduces `engine/tools/content.py`'s bounded manifest inventory and
   audio-index closure, the deterministic cook into a SHA256-named package (same directory name, same
