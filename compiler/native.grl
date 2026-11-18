@@ -31564,11 +31564,11 @@ fn frame_alloc<a>(c: (&a mut C), words: u64) -> u64 {
 // them, and the LLVM lifter skips it (the aggregate fact's `what` 1). Zeroing the words of every
 // such temporary at every entry was most of a recursive parser's per-call cost.
 fn frame_alloc_fresh<a>(c: (&a mut C), words: u64, ty: u64) -> u64 {
-    mut fresh_words = 0;
-    if plain(&mut c, ty) {
-        fresh_words = 1;
-    }
-    return frame_alloc_as(&mut c, words, fresh_words);
+    // An owning value made here is written whole before anything reads it too: its constructor (or
+    // copy, or the call that returns it) fills it at once, and its drop runs only under the drop
+    // flag set after that. An inline enum writes only its variant's payload, and its drop reads only
+    // that payload. So its words need no zeroing either (json's `Value |? Error`, every node).
+    return frame_alloc_as(&mut c, words, 1);
 }
 fn frame_alloc_as<a>(c: (&a mut C), words: u64, written: u64) -> u64 {
     mut first = 0;
@@ -31599,7 +31599,7 @@ fn frame_from_registers<a>(c: (&a mut C), words: u64, ty: u64) -> u64 {
         first = fresh(&mut c);
     }
     if c.facts_fn.len() != 0 {
-        llvm::fact_aggregate(&mut c.facts, copy_bytes(view(c.facts_fn)), first, words, u64(plain(&mut c, ty)));
+        llvm::fact_aggregate(&mut c.facts, copy_bytes(view(c.facts_fn)), first, words, 1);
     }
     o(&mut c, view("movq %rax,"));
     stack_slot(&mut c, first);
