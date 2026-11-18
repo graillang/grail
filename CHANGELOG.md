@@ -17,9 +17,13 @@
   the engine's 1e-7 epsilon, merit order (dispatch_order then id), load service in
   PowerPriority rounds, discharge floors, and charging from a bus's unused generation assigned
   to same-bus producers in merit order — plus `force_field_passable`.
-  `abundance/tests/power_grid_test.grl` prints 134 lines that match a reference linked from the
+  `abundance/tests/power_grid_test.grl` prints 175 lines that match a reference linked from the
   engine's own `power_grid.cpp` through `libabundance_gameplay_core.a`, including the engine's
-  own test scenarios. The FRPG1 snapshot codec is a later increment.
+  own test scenarios and its FRPG1 codec legs: the encoded size and FNV hash, the decode/encode
+  round trip, trailing bytes, an over-limit bus count, an unknown-bus snapshot and a corrupted
+  producer kind byte all refused with the live state unchanged, the canonical-zero rule that
+  refuses every -0.0 snapshot field and setter, and the instance-generation table the encoder
+  appends once a record is replaced.
 - **`lib/earcut.grl`: mapbox earcut triangulation, ported from the vendored C++.** The Abundance
   water-geometry callers (`water_geometry.cpp`) triangulate their bank, island and raster-cell
   polygons with `mapbox::earcut<std::uint32_t>` rather than Clipper2's experimental triangulator, so
