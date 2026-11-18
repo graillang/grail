@@ -1,5 +1,12 @@
 ## Unreleased
 
+- **The Abundance damage model's rules are ported.** `abundance/src/damage.grl` adds `answer()` (the
+  stress gate, kind factors, absorb and penetration, every refusal), `sphere_cells`, tree and body
+  resistances, `health_damage`, plate layers and the authored tool table with `tool_stroke` and
+  `felling_stroke`; 323 values match a reference compiling `Private/damage.cpp`. `sphere_cells` weights
+  cells with a local correctly rounded double-double `pow`: `lib/math.grl`'s `pow` is one ulp off
+  glibc on about 40 % of irrational exponents. One known limit is recorded: glibc's FMA `pow` itself
+  misrounds within a few thousandths of an ulp of a midpoint (0.5^sqrt 6).
 - **Abundance's megaplants_import is ported as a plan, byte-identical to the reference's
   invocations.** `abundance/src/megaplants_import.grl` discovers the extracted variants, names the
   canopy family, picks the bark set and tile size, applies the leaf-atlas rule (with its flat-colour
