@@ -8,6 +8,14 @@
   CMake-mirrored kernel and terrain trees stay recorded as skipped with the include that blocks each
   (`docs/design/abundance-shaders.md`). Vendoring geometry also brings the material and flora headers
   its closure reaches into `abundance/shaders/`, so those areas are now header-complete.
+- **The geometry runtime's demand planning is ported.** `abundance/src/render_policy_geometry.grl`
+  carries `engine/geometry/runtime/root_queue.hpp` (the page pool's missing-root queues: add/remove
+  with the ~0u sentinel and the resumable cursor, the ordered removal that keeps the rest in order,
+  and the nearest-waiter sort with ties by mesh id) and `runtime/page_demand.hpp` (the CPU demand
+  closure: coarse-first postorder over a mesh's page dependency graph, iterative, deduplicated per
+  priority batch and mesh-local base, installing a page only after its children). 282 reference
+  lines against the engine's own headers, driven by the fixtures of
+  `tests/engine_geometry_root_queue_tests.cpp` and `tests/engine_geometry_page_demand_tests.cpp`.
 - **The water area's CDLOD selection is ported.** `abundance/src/render_policy_water.grl` carries
   `engine/water/cdlod.cpp` (Strugar's continuous distance-dependent LOD around a world-fixed grid:
   the per-level ranges from the leaf size and range factor, the recursion that draws a node at its
