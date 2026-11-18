@@ -14,6 +14,10 @@
   straight from it and do two-address arithmetic in place, wherever the scratch is dead after.
   Development builds, outputs identical: ecs_par 18.3G to 15.2G instructions (-17%), dot_f32 -10%,
   xform_f32 -9%, ecs -8%, matmul -7%; f64 code unchanged.
+- `bench/results/compile.json` re-measured with the PGO release compiler of main d086c472: a cold
+  check of the 104 000-line program is 1.10x Zig's instructions (from 1.29x); every other row is
+  below the fastest rival.
+
 - **Release builds lift the `dyn` adapter thunks.** A thunk (`.C<hash>_N`) adjusts the receiver and
   tail-calls the method with `jmp *%r11`; the lifter refused it, so every `dyn` call went through a
   native thunk and a second jump. It is now a call and a return in IR, which LLVM inlines the method
