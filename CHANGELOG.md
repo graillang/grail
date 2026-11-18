@@ -1,5 +1,17 @@
 ## Unreleased
 
+- **Abundance's content tool is ported: `inspect`, `cook` and `verify` reach byte parity.**
+  `abundance/src/content.grl` reproduces `engine/tools/content.py`'s bounded manifest inventory and
+  audio-index closure, the deterministic cook into a SHA256-named package (same directory name, same
+  `package.json`, same payloads) and the verify that re-derives the identity — in Python's exact
+  canonical form (`sort_keys`, compact separators, `ensure_ascii=False`, `repr` float layout), with
+  SHA-256 from `lib/sha256.grl`. The suite drives the ported program and the reference with the same
+  argv and diffs stdout, stderr and the exit status over 15 scenarios: the real
+  `engine/content/switch_inventory.json`, a payload/audio fixture, cook and its idempotent repeat, a
+  package the *Python* tool cooked (the implementations verify each other), corrupted and renamed
+  packages, and eight refusals. New `--only=NAME` runs a single tool's program. Recorded boundaries:
+  `gc`/`heal`/`cook-cache`'s flock (no advisory locks or link counts in `fs`), `start` (execve), and
+  interpreter-worded OSError/TypeError cases.
 - **FastNoiseLite, the noise the world generator is built on, is a bit-exact Grail port.** All six
   noise types, fBm/ridged/ping-pong, the cellular distance/return matrix, the 3D rotation types and
   domain warp, in both template instantiations (the generator samples with doubles); the four
