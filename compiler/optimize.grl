@@ -2842,14 +2842,69 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
             }
         }
         if (o.zline != 0) & (i + 1 == o.zline) {
+            mut kept = 0;
+            mut lo = 0;
+            mut hi = 0;
             mut k = o.zfrom;
             while k < o.zto + 1 {
                 if zkeep[k - o.zfrom] != 0 {
-                    app(&mut o.out, view("movq $0,-"));
-                    out_number(&mut o, k * 8);
-                    app(&mut o.out, view("(%rbp)\n"));
+                    kept += 1;
+                    if lo == 0 {
+                        lo = k;
+                    }
+                    hi = k;
                 }
                 k += 1;
+            }
+            if (o.zbig != 0) && (16 < kept) {
+                // Runs of kept slots (a gap of fewer than 4 cleared words joins two runs): a short run
+                // is cleared with stores, a long one with its own `rep stosq` from its highest slot's
+                // address (slot k is at -8k(%rbp)) up. A large frame's live slots are often a few at
+                // each end, and clearing the span between them was clearing the whole frame.
+                mut a = 0;
+                k = o.zfrom;
+                while k < o.zto + 2 {
+                    mut live = false;
+                    if k < o.zto + 1 {
+                        live = zkeep[k - o.zfrom] != 0;
+                    }
+                    if live {
+                        if a == 0 {
+                            a = k;
+                        }
+                        hi = k;
+                    } else if (a != 0) && ((k > o.zto) || (k - hi >= 4)) {
+                        if hi - a + 1 <= 6 {
+                            mut j = a;
+                            while j < hi + 1 {
+                                if zkeep[j - o.zfrom] != 0 {
+                                    app(&mut o.out, view("movq $0,-"));
+                                    out_number(&mut o, j * 8);
+                                    app(&mut o.out, view("(%rbp)\n"));
+                                }
+                                j += 1;
+                            }
+                        } else {
+                            app(&mut o.out, view("leaq -"));
+                            out_number(&mut o, hi * 8);
+                            app(&mut o.out, view("(%rbp),%rdi\nmovq $"));
+                            out_number(&mut o, hi - a + 1);
+                            app(&mut o.out, view(",%rcx\nxorl %eax,%eax\nrep stosq\n"));
+                        }
+                        a = 0;
+                    }
+                    k += 1;
+                }
+            } else {
+                k = o.zfrom;
+                while k < o.zto + 1 {
+                    if zkeep[k - o.zfrom] != 0 {
+                        app(&mut o.out, view("movq $0,-"));
+                        out_number(&mut o, k * 8);
+                        app(&mut o.out, view("(%rbp)\n"));
+                    }
+                    k += 1;
+                }
             }
         }
         if (xinit.len() != 0) & (i == prologue) {
@@ -2883,7 +2938,7 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
     }
     // A body whose parameter's {data, len} words are loaded into registers at the entry (dregs: a
     // view parameter, unboxed-values.md) is not a copy of the lines after the prologue: it stays a call.
-    if (prologue != 0) & (xchosen.len() == 0) & (o.zline != 0) & (dregs.len() == 0) {
+    if (prologue != 0) & (xchosen.len() == 0) & (o.zline != 0) & (o.zbig == 0) & (dregs.len() == 0) {
         inline_candidate(&mut o, view(s), prologue, &chosen, &zchosen);
     }
 }
@@ -6428,7 +6483,12 @@ fn compact<a, b>(o: (&a mut ir::Body), s: &b [u8], prologue: u64, ns: u64) -> u6
     // A small frame is cleared with direct stores instead of `rep stosq` (leaq/movq/xorl/rep).
     words := (used * 8 + 15) / 16 * 16 / 8;
     exchange(&mut o.zline, 0);
-    if words < params + 17 {
+    // A large frame is no longer cleared whole either: of its cleared range only the slots that may
+    // be read before they are written are (slots_live_in), with direct stores when they are few and
+    // one `rep stosq` over their span otherwise. Clearing every word of a 4 KB frame on every call
+    // was most of a large function's entry.
+    exchange(&mut o.zbig, u64(words >= params + 17));
+    if true {
         for i in last {
             if (o.op[i] == 3) & (o.k1[i] == 1) & (o.v1[i] == 7) & (o.k0[i] == 4) {
                 if ir::at(view(s), o.s0[i], view("-.F")) {
