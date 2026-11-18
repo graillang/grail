@@ -1,5 +1,13 @@
 ## Unreleased
 
+- Performance: a burst of spawns from a main thread's task scope costs the spawning thread about 30%
+  less CPU (24 workers: main-thread user time over 6M spawns and joins 0.84 s -> 0.57 s; user cycles
+  of five 100k bursts 300M -> 225M, median of 7). A spawn touches fewer contended lines: a
+  task deque's head, which every steal writes, moved off the line of the tail the owner writes (and
+  the owner reads it only when its last-read head says full); the parked and searching worker counts
+  that every push reads are one word on a line of their own instead of two words on two hot lines;
+  and a new task record clears its first 296 bytes, not all 496 - the waiter block's held slots are
+  set up the first time the task waits.
 - Fixed: a closure type written outside a parameter list (a struct field, a local's type) can take a
   reference parameter: `struct S { body: Fn<Owned>(&T) -> u64 }` was "elided output reference needs one
   input lifetime". Its elided lifetime is a fresh input of each call, as inside a function's parameter

@@ -1127,9 +1127,12 @@ fn rt_alloc_shared(n: u64) -> u64 {
             }
         }
     }
-    return rt_alloc_shared_slow(n);
+    return rt_alloc_shared_slow(n, n);
 }
-fn rt_alloc_shared_slow(n: u64) -> u64 {
+// The first `clear` bytes of a reused block are cleared (rt_alloc clears them all); a fresh block
+// is all zero anyway. Clearing less is for a record whose tail is set up on first use
+// (rt_task_record_new).
+fn rt_alloc_shared_slow(n: u64, clear: u64) -> u64 {
     if n < 262129 {
         tp := raw_tp_get();
         if tp != 0 {
@@ -1163,7 +1166,7 @@ fn rt_alloc_shared_slow(n: u64) -> u64 {
                         raw_store(wrapping_add(ptr, 40), 0);
                     } else {
                         mut i = 0;
-                        while i < n {
+                        while i < clear {
                             raw_store(wrapping_add(ptr, i), 0);
                             i = wrapping_add(i, 8);
                         }
@@ -3185,6 +3188,16 @@ fn rt_main_waiter_ready() -> u64 {
     raw_store(b + 48, 1);
     return b;
 }
+// A task record for a spawn, cleared through its waiter block's header (words 240..288) but not
+// the four held slots after it: rt_waiter marks those free the first time the task waits, and most
+// tasks never do. Clearing all 496 bytes made every spawn of a burst write eight lines - the
+// record's last use left them in the cache of the worker that ran it - where half of them do.
+fn rt_task_record_new() -> u64 {
+    if raw_load(raw_state() + 3416) == 0 {
+        return rt_alloc(rt_task_record_size());
+    }
+    return rt_alloc_shared_slow(rt_task_record_size(), 296);
+}
 fn rt_task_record_size() -> u64 {
     // 240 bytes of task record and the waiter block (56 bytes and four held slots of 48): 488,
     // rounded to 16, because a runner record is carved right after the last and a waiter block's
@@ -3206,6 +3219,15 @@ fn rt_waiter_peek() -> u64 {
 fn rt_waiter() -> u64 {
     t := rt_current();
     if t != 0 {
+        if raw_load(t + 288) == 0 {
+            // The first wait of this record: its held slots were not cleared (rt_task_record_new),
+            // and a slot is free while its kind word (+32) is 0.
+            mut i = 0;
+            while i < 4 {
+                raw_store(t + 328 + i * 48, 0);
+                i += 1;
+            }
+        }
         raw_store(t + 280, t);
         raw_store(t + 288, 4);
         return t + 240;
@@ -5513,19 +5535,20 @@ fn rt_env_is(name: u64, value: u64) -> u64 {
 //  24 park/wake sequence (futex word)
 //  32 worker count  40 reactor handle  48 fence descriptor  56 reactor batch epoch
 //  64 blocking-call warning flag  72 worker array
-//  96 parked workers (atomic)  104 timer lock  112 timer count  120 timer capacity
+// 104 timer lock  112 timer count  120 timer capacity
 // 128 timer heap (Windows: one entry per pending sleep)  136 holder of the external slot (0 none);
 // the worker array has one block more than the worker count, the external slot's
 // 144 how many open task scopes of the external slot's holder hold it (rt_scope_take; only the
 //     holder reads or writes it)
+// 256 the idle word (rt_idle_word), on a line of its own
 // 1024..1112 the task injection ring (rt_task_ring): 0 lock  8 head  16 tail  80 buffer  88 capacity
 // Worker block (raw_map, one page per worker):
-//   0 deque buffer  8 deque head (atomic)  16 deque tail (atomic)  24 deque mask
+//   0 deque buffer  16 deque tail (atomic)  24 deque mask (word 8 is unused: the head is at 1024)
 //  32 scheduler  40 index  48 thread record  56 free-stack list head  64 free-stack count
 //  72 steal random state  80 deque capacity
 //  88 fault-handler alternate stack  96..112 its sigaltstack record (sp, flags, size)
-// 128..208 the job deque, laid out as the task deque is from word 0 (buffer, head, tail, mask, and
-//     the capacity at +80), so the same three deque functions serve both
+// 128..208 the job deque, laid out as the task deque is from word 0 (buffer, tail, mask, and the
+//     capacity at +80, the head at +1024), so the same three deque functions serve both
 // 224 this worker's runner (0 none)  232 the job handed to the runner  240 free job records
 // 248 their count  264 help-depth high-water mark  272 steps taken (the fairness tick)
 // 280 1 while this worker is counted as searching (rt_worker_loop, rt_worker_run)
@@ -5535,6 +5558,8 @@ fn rt_env_is(name: u64, value: u64) -> u64 {
 // 344 the worker count and 352 the block array, copied from the scheduler block for the steal scans
 // 512..592 the Frame job deque, 640..720 the Background job deque (the Normal one is at 128)
 // 896..1024 the CPU mask a pinned worker hands the kernel
+// 1024, 1152, 1536, 1664 the four deques' heads (rt_deque_head: deque + 1024), each on a line of its
+//     own, and 64 bytes after each the head its owner last read (rt_deque_push)
 //
 // The deque is a Chase-Lev deque with a fixed capacity (rt_deque_capacity, 131072 entries): the
 // owner pushes and pops at the bottom, a thief steals at the top with a CAS on the head. A fixed
@@ -5712,7 +5737,7 @@ fn rt_work_queued(s: u64) -> u64 {
     mut i = 0;
     while i <= workers {
         w := raw_load(array + i * 8);
-        if (raw_atomic_load(w + 8) < raw_atomic_load(w + 16)) | (raw_atomic_load(w + 136) < raw_atomic_load(w + 144)) | (raw_atomic_load(w + 520) < raw_atomic_load(w + 528)) {
+        if (raw_atomic_load(rt_deque_head(w)) < raw_atomic_load(w + 16)) | (raw_atomic_load(rt_deque_head(w + 128)) < raw_atomic_load(w + 144)) | (raw_atomic_load(rt_deque_head(w + 512)) < raw_atomic_load(w + 528)) {
             return 1;
         }
         i += 1;
@@ -5861,19 +5886,24 @@ fn rt_worker_self() -> u64 {
     }
     return raw_load(tp + 32);
 }
-// Bump the sequence unconditionally and wake a parked worker when there may be one: a worker that
-// read the sequence before looking for work either finds the new work or its wait fails with the
-// changed value, so no wake can be lost even when the parked count read is stale.
+// The workers parked (high half, rt_worker_loop) and searching (low half): one word, which every
+// push reads (rt_notify). As two words on two lines - the parked count here, the searching count in
+// the jobs block - a burst's pusher missed on both, since the searching count changes each time a
+// worker starts or stops looking and workers park and wake throughout a burst.
+fn rt_idle_word(s: u64) -> u64 {
+    return s + 256;
+}
 // New work is queued. Wake a parked worker only when there is one and no worker is searching: a
 // searching worker will find the work, and in a join the forker usually takes its own fork back
 // before anyone could. The fence orders the push before the reads, as the parking worker orders its
 // count before its last look (rt_worker_loop), so one of the two always sees the other.
 fn rt_notify(s: u64) -> u64 {
     rt_full_fence();
-    if raw_atomic_load(s + 96) == 0 {
+    idle := raw_atomic_load(rt_idle_word(s));
+    if (idle >> 32) == 0 {
         return 0;
     }
-    if raw_atomic_load(raw_load(rt_state_jobs()) + 416) != 0 {
+    if (idle & 4294967295) != 0 {
         return 0;
     }
     raw_atomic_fetch_add(s + 24, 1);
@@ -5885,14 +5915,26 @@ fn rt_notify(s: u64) -> u64 {
 // Owner push and pop at the bottom (the tail), thieves steal at the top (the head) with a CAS. The
 // owner's tail store is the release that publishes the slot; a thief's CAS on the head is what
 // claims it, and a lost CAS means somebody else has the task.
+//
+// The head is a line away from the tail, the buffer and the mask: every steal writes it, and on the
+// tail's line it cost a burst's pusher (a main thread's task scope, every worker stealing from it)
+// a miss on each push - for the head the push read and for the tail it then wrote.
+fn rt_deque_head(w: u64) -> u64 {
+    return w + 1024;
+}
 fn rt_deque_push(w: u64, t: u64) -> u64 {
     tail := raw_atomic_load(w + 16);
-    head := raw_atomic_load(w + 8);
     // Full when the tail has advanced a capacity past the head. Addition, not subtraction: an
     // emptied deque is left with head == tail, but a thief may advance the head between the two
-    // loads, and tail - head must not wrap (checked arithmetic would abort).
-    if head + raw_load(w + 80) <= tail {
-        return 0;
+    // loads, and tail - head must not wrap (checked arithmetic would abort). The head only grows,
+    // so the one this owner read last (+1088, 0 at first) is a lower bound, and the shared head is
+    // read only when that bound says full.
+    if raw_load(w + 1088) + raw_load(w + 80) <= tail {
+        head := raw_atomic_load(rt_deque_head(w));
+        raw_store(w + 1088, head);
+        if head + raw_load(w + 80) <= tail {
+            return 0;
+        }
     }
     raw_store(raw_load(w) + (tail & raw_load(w + 24)) * 8, t);
     raw_atomic_store_release(w + 16, tail + 1);
@@ -5905,7 +5947,7 @@ fn rt_deque_pop(w: u64) -> u64 {
     }
     tail = tail - 1;
     raw_atomic_store(w + 16, tail);
-    head := raw_atomic_load(w + 8);
+    head := raw_atomic_load(rt_deque_head(w));
     if head <= tail {
         task := raw_load(raw_load(w) + (tail & raw_load(w + 24)) * 8);
         if head == tail {
@@ -5913,7 +5955,7 @@ fn rt_deque_pop(w: u64) -> u64 {
             // Tail is restored whether or not the CAS wins, so an emptied deque is left with
             // head == tail; leaving tail one below head would make the next push's size
             // computation go negative.
-            if raw_atomic_cas(w + 8, head, head + 1) != head {
+            if raw_atomic_cas(rt_deque_head(w), head, head + 1) != head {
                 raw_atomic_store(w + 16, tail + 1);
                 return 0;
             }
@@ -5925,11 +5967,11 @@ fn rt_deque_pop(w: u64) -> u64 {
     return 0;
 }
 fn rt_deque_steal(v: u64) -> u64 {
-    head := raw_atomic_load(v + 8);
+    head := raw_atomic_load(rt_deque_head(v));
     tail := raw_atomic_load(v + 16);
     if head < tail {
         task := raw_load(raw_load(v) + (head & raw_load(v + 24)) * 8);
-        if raw_atomic_cas(v + 8, head, head + 1) == head {
+        if raw_atomic_cas(rt_deque_head(v), head, head + 1) == head {
             return task;
         }
     }
@@ -6078,7 +6120,7 @@ fn rt_worker_loop(worker: u64) -> u64 {
     }
     rt_os_stack_warm(rt_sched_setting(32));
     spin := rt_sched_setting(48);
-    searching := raw_load(rt_state_jobs()) + 416;
+    searching := rt_idle_word(s);
     while true {
         if raw_load(tp + 32) != worker {
             // The block went to a spare while this thread was in a blocking foreign call.
@@ -6134,7 +6176,7 @@ fn rt_worker_loop(worker: u64) -> u64 {
         // sequence before it, so a wake that lands between the look and the wait changes the word
         // the wait compares.
         seq := raw_atomic_load(s + 24);
-        raw_atomic_fetch_add(s + 96, 1);
+        raw_atomic_fetch_add(rt_idle_word(s), 4294967296);
         // A full barrier between the count and the last look: a sequentially consistent RMW is not
         // one on AArch64 or RV64 (LL/SC with acquire/release lets a later plain load pass the store),
         // and on those targets the Dekker pair needs it on both sides (rt_notify has the other).
@@ -6142,7 +6184,7 @@ fn rt_worker_loop(worker: u64) -> u64 {
         if rt_worker_step(s, worker) == 0 {
             rt_syscall_low(202, s + 24, 128, seq);
         }
-        raw_atomic_fetch_sub(s + 96, 1);
+        raw_atomic_fetch_sub(rt_idle_word(s), 4294967296);
     }
     return 0;
 }
@@ -6211,7 +6253,7 @@ fn rt_worker_run(s: u64, w: u64, t: u64) -> u64 {
         // searcher finds the work; but it finds one entry, and that entry may spin until the
         // next one runs (two tasks that meet). Without this the next one waited, every other
         // worker parked, for ever (task-scopes-join-cancel-abandon, about once in 60 runs).
-        if raw_atomic_fetch_sub(raw_load(rt_state_jobs()) + 416, 1) == 1 {
+        if (raw_atomic_fetch_sub(rt_idle_word(s), 1) & 4294967295) == 1 {
             rt_notify(s);
         }
     }
@@ -6263,7 +6305,7 @@ fn rt_worker_run(s: u64, w: u64, t: u64) -> u64 {
     }
     // Work still queued here means a stopped sibling can help: this is what spreads a spawn burst
     // across every worker instead of one push, one wake.
-    if (raw_load(w + 16) != raw_load(w + 8)) | (raw_load(w + 144) != raw_load(w + 136)) {
+    if (raw_load(w + 16) != raw_load(rt_deque_head(w))) | (raw_load(w + 144) != raw_load(rt_deque_head(w + 128))) {
         rt_notify(s);
     }
     return 0;
@@ -6345,8 +6387,7 @@ fn rt_worker_run_detached(t: u64) -> u64 {
 // 40 carve pointer, 48 carve bytes left, 56 free runner records, 64 a word that stays zero (a
 // runner's cancel token), 72 free failure records (rt_job_failure_release), 104 workers started (thread-per-task mode); the Frame ring at 128 and the
 // Background ring at 256, laid out like the Normal one at 0; 400 Background jobs running, 408 the
-// cap on them (background_cap), 416 workers searching for work (rt_worker_loop, rt_notify), 424
-// wakes issued (a futex wake each; GRAIL_SCHED_STATS prints it).
+// cap on them (background_cap), 424 wakes issued (a futex wake each; GRAIL_SCHED_STATS prints it).
 //
 // CLASSES. A job is Frame (0), Normal (1) or Background (2), in record word 112. Each worker has a
 // deque per class and there is a ring per class. A worker takes Frame work, then Normal work, then
@@ -6721,7 +6762,7 @@ fn rt_job_take_background(s: u64, w: u64) -> u64 {
 // after the look is found by the next one, and its push notifies (rt_notify) as any push does.
 fn rt_job_background_queued(w: u64) -> u64 {
     mine := rt_job_deque(w, 2);
-    if raw_atomic_load(mine + 8) < raw_atomic_load(mine + 16) {
+    if raw_atomic_load(rt_deque_head(mine)) < raw_atomic_load(mine + 16) {
         return 1;
     }
     ring := rt_job_ring_at(raw_load(rt_state_jobs()), 2);
@@ -6733,7 +6774,7 @@ fn rt_job_background_queued(w: u64) -> u64 {
     mut i = 0;
     while i < blocks {
         v := rt_job_deque(raw_load(array + i * 8), 2);
-        if raw_atomic_load(v + 8) < raw_atomic_load(v + 16) {
+        if raw_atomic_load(rt_deque_head(v)) < raw_atomic_load(v + 16) {
             return 1;
         }
         i += 1;
@@ -6789,7 +6830,7 @@ fn rt_job_steal(w: u64, class: u64) -> u64 {
         victim := (start + i) % blocks;
         if victim != mine {
             v := raw_load(array + victim * 8) + off;
-            if raw_atomic_load(v + 8) < raw_atomic_load(v + 16) {
+            if raw_atomic_load(rt_deque_head(v)) < raw_atomic_load(v + 16) {
                 r := rt_deque_steal(v);
                 if (r != 0) && (raw_load(r + 112) == class) {
                     return r;
@@ -6931,7 +6972,7 @@ fn rt_job_leap(s: u64, r: u64, claimed: u64) -> u64 {
     }
     // r's descendants are r's class, so they are in that class's deque.
     v := rt_job_deque(raw_load(raw_load(s + 72) + index * 8), raw_load(r + 112));
-    head := raw_atomic_load(v + 8);
+    head := raw_atomic_load(rt_deque_head(v));
     tail := raw_atomic_load(v + 16);
     if tail <= head {
         return 0;
@@ -6943,7 +6984,7 @@ fn rt_job_leap(s: u64, r: u64, claimed: u64) -> u64 {
     if rt_job_descends(k, r) == 0 {
         return 0;
     }
-    if raw_atomic_cas(v + 8, head, head + 1) != head {
+    if raw_atomic_cas(rt_deque_head(v), head, head + 1) != head {
         return 0;
     }
     return k;
@@ -7456,12 +7497,14 @@ fn rt_background_wait_us() -> u64 {
     mut i = 0;
     while i <= workers {
         mut d = 0;
+        mut head = 0;
         if i < workers {
             d = rt_job_deque(raw_load(raw_load(s + 72) + i * 8), 2);
+            head = raw_atomic_load(rt_deque_head(d));
         } else {
             d = rt_job_ring_at(j, 2);
+            head = raw_atomic_load(d + 8);
         }
-        head := raw_atomic_load(d + 8);
         tail := raw_atomic_load(d + 16);
         mut at = head;
         while (at < tail) & (at < head + 4096) {
@@ -7765,7 +7808,7 @@ fn rt_cancel(s: u64) -> u64 {
 // A failed task has no result: word 80 is never written and its dropper is never called.
 fn rt_task_spawn(s: u64, f: u64, item: u64, arity: u64, dropper: u64) -> u64 {
     // Word 152 holds the task's OS thread handle in thread-per-task mode (0 in green mode).
-    t := rt_alloc(rt_task_record_size());
+    t := rt_task_record_new();
     raw_store(t + 40, f);
     raw_store(t + 48, item);
     raw_store(t + 56, raw_load(s + 16));
