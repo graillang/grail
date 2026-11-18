@@ -1,5 +1,9 @@
 ## Unreleased
 
+- Fixed: a closure type written outside a parameter list (a struct field, a local's type) can take a
+  reference parameter: `struct S { body: Fn<Owned>(&T) -> u64 }` was "elided output reference needs one
+  input lifetime". Its elided lifetime is a fresh input of each call, as inside a function's parameter
+  list. Case `closure-type-field-reference-param`.
 - Fixed: a closure that calls a `self: &T` method of a captured struct is `Fn`, not `FnMut` (it was refused
   with "a closure that mutates a captured value is FnMut"): the capture scan now looks the method up
   on the struct and counts a shared receiver as a read; `&mut self`, by-value `self` and names the

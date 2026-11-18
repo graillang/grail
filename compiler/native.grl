@@ -17373,6 +17373,14 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
             + closure_bounds_list(&mut c, same(view(first), view("FnMut")), &mut closure_regions);
         expect(&mut c, view("("));
         mut params = u64[];
+        // A reference a closure's parameter takes is an input of each call: written where no
+        // parameter list is being read (a struct field, a local's type), its elided lifetime is
+        // a fresh one, as it is inside a function's parameter list.
+        mut entered = false;
+        if (c.parsing_input == 0) & (c.output_region == 0) {
+            exchange(&mut c.parsing_input, 1);
+            entered = true;
+        }
         if !eat(&mut c, view(")")) {
             while true {
                 ty := parse_type(&mut c);
@@ -17382,6 +17390,9 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
                 }
                 expect(&mut c, view(","));
             }
+        }
+        if entered {
+            exchange(&mut c.parsing_input, 0);
         }
         if 5 < params.len() {
             fail(&mut c, view("closure type exceeds five parameters"));
