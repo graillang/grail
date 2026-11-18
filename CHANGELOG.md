@@ -151,6 +151,16 @@
 - The feature and cave fixtures are regenerated against the Abundance pin `ca1f1bc05b` (generator
   123). Only the worlds' identity hash moved (and with it each cave network's binding hash); every
   site, entrance, region, corridor, node and passage is unchanged, and both suites match.
+- **The render graph's compiled-plan cache is ported, and the engine's own cache verdicts are the
+  gate.** `abundance/src/render_graph.grl` now hashes each frame's declarations (passes, accesses,
+  attachments, every resource descriptor and import entry state), looks the hash up in a 16-slot LRU,
+  and reuses a matching plan — culling, queues, segments, every recorded barrier and the imported
+  resources' exit states — or compiles and records one. The parity reference captures the engine's
+  [core.graph] line after each frame, so hits, misses and the miss reason are compared: the imports
+  fixture hits on frame 3, and a new five-frame fixture walks a first-frame miss, a changed pass, a
+  heap re-placement, a hit and a second re-placement. The plan output is unchanged by a replay (which
+  is what ABE_GRAPH_CACHE_CHECK asserts in the engine); disabling the replay changes 6 lines.
+  `abundance/tests/parity/render_graph.txt` is now 2699 lines.
 
 - Fixed: a struct partly moved before a loop (`f := r.inner;`) no longer makes the loop refuse with "loop
   backedge consumes entry storage: `r` is moved out of it" when the body only reads it. The backedge check
