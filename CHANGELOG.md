@@ -1,5 +1,11 @@
 ## Unreleased
 
+- **Abundance's item_icons_check is ported, byte-identical to the built reference.**
+  `abundance/src/item_icons.grl` reads `ui/icons/index.json`, applies the UI's stem rule and reports
+  every catalogue item without a picture; the catalogue (the gameplay economy, stage 6) is an input
+  file of the reference's own `--keys` output. The suite diffs four runs (1949 lines) against
+  `build-engine/engine/ui/ab-item-icons-check`.
+
 - **Abundance's megaplants_import is ported as a plan, byte-identical to the reference's
   invocations.** `abundance/src/megaplants_import.grl` discovers the extracted variants, names the
   canopy family, picks the bark set and tile size, applies the leaf-atlas rule (with its flat-colour
