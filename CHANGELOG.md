@@ -22,6 +22,15 @@
   intermediate rasters' digests, a cell-for-cell defensibility agreement and the entrance score
   tie count (zero on every seed, which is what makes the C++'s unstable sort order reproducible).
   `abundance/tests/parity/features.cpp` is the reference, built against the worldgen library.
+- **The world model's reset drops the clock with the session, and the epoch/iteration rules get
+  their own gates.** `abundance/src/world_model.grl`'s `reset` now zeroes the canonical clock:
+  `Session::reset` drops the `HostCore` and a fresh `create` starts at time zero, so keeping the
+  old frontier was wrong. The replay proves the two staleness rules a frame boundary exists for:
+  identical state under a different `game_epoch` produces different frame bytes (so no cache
+  survives an epoch), and iteration is the key order — spawns arriving 5, 4, 6 read 1, 4, 5, 6,
+  a duplicate is refused and an erase in the middle leaves the rest ascending (1 201 reference
+  lines).
+
 - **Abundance's content tool is ported: `inspect`, `cook` and `verify` reach byte parity.**
   `abundance/src/content.grl` reproduces `engine/tools/content.py`'s bounded manifest inventory and
   audio-index closure, the deterministic cook into a SHA256-named package (same directory name, same
