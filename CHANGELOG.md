@@ -1,5 +1,17 @@
 ## Unreleased
 
+- **The Abundance combat core is ported and gated bit for bit.** `abundance/src/combat_core.grl`
+  carries detmath's own Cody-Waite `sin_cos` over the fdlibm kernels, `splitmix64` and the shot/effect
+  hashes, octahedral aim coding, the rewind window, spread, the fire interval, the 13-zone hitbox
+  tables and `hitbox_set`, `interpolate_remote` and the 16-tick hit history ring, and the
+  exactly-once hit ledger; `combat_trace.grl` adds the one shot resolver (`trace_shot` against
+  capsules with water as a medium), `ballistic_step`, `line_vs_capsule`, `step_projectile` and area
+  effects with fragment shots. The replication record's quantiser and the damage material table they
+  answer through are ported alongside (`server_replication.grl`, `damage.grl`). The committed
+  reference compiles Abundance's six combat sources, `damage.cpp` and `replication_store.cpp` at
+  83d90ed95e; 1548 values match exactly, including the ledger's malformed-image refusals. The
+  chunked collision view (world triangles, back-face penetration, sweep/raycast narrow phase) is the
+  next increment.
 - **The crafting screen's classifier is ported.** `abundance/src/crafting_menu.grl` carries
   `ui/crafting_menu.hpp/.cpp` of `cmake/tx/crafting_menu.cmake`: the ten categories and their
   display labels (Machines reads "Facilities"), every sub-type group with its display rank and
