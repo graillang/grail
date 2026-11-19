@@ -86,8 +86,9 @@ an `f32` type and transcendental functions as methods (they live in `lib/math.gr
 
 ## Math library (`lib/math.grl`)
 
-`math::exp`, `ln`, `log2`, `log10`, `sin`, `cos`, `tan`, `atan`, `atan2`, `pow`, `powi`, `sqrt`,
-`abs`, `floor`, `ceil`, `round` (half away from zero) and the constants `PI`, `TAU`, `E`, `LN2`,
+Methods of `f64` (`x.exp()`, `ln`, `log2`, `log10`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`,
+`y.atan2(x)`, `pow`, `powi`, `hypot`, `fmod`, `exp2`) and of `f32` (the same names), beside the
+compiler's own `sqrt`, `abs`, `floor`, `ceil`, `trunc` and `round` (half away from zero), and the constants `PI`, `TAU`, `E`, `LN2`,
 `LN10`, `SQRT2`, written in Grail after fdlibm. Against Rust's std on 1,150 random inputs, every
 function except `pow` is within 1 ulp and `pow` within 12 ulp; trigonometric functions use
 Cody-Waite reduction and are accurate for |x| < 1e6 (larger arguments lose precision).

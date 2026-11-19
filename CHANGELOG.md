@@ -1,5 +1,22 @@
 ## Unreleased
 
+- **Methods on every built-in type, and integers have Rust's everyday ones.** Every program now gets
+  `lib/scalar.grl` beside `core`: each integer type has `min`, `max`, `clamp`, `pow`, `abs`/`signum`
+  (signed), `checked_add`/`_sub`/`_mul`/`_div` (`None` on overflow), `saturating_add`/`_sub`,
+  `wrapping_add`/`_sub`/`_mul`, `count_ones`, `leading_zeros`, `trailing_zeros` and `to_string`;
+  `char` gains `to_digit`, `is_digit`, the `is_ascii_*` family, `to_ascii_uppercase`/`_lowercase`,
+  `eq_ignore_ascii_case`, `is_control` and `to_string`; floats have `x.to_bits()` and
+  `f64::from_bits(b)` / `f32::from_bits(b)`. `use math;` gives `f64` and `f32` their functions as
+  methods - `x.sin()`, `y.atan2(x)`, `x.powi(3)`, `x.hypot(y)`, `x.fmod(y)` and the rest - and the free
+  `math::sin`... forms are gone, as are `math::sqrt`/`abs`/`floor`/`ceil`/`round` (the built-in
+  methods) and `strings::from_u64`/`from_i64` (`x.to_string()`). The compiler lets a
+  standard-library impl give methods to any built-in receiver (every integer, `char`, `*T`, `T?`,
+  tuples, `Mutex<T>`; `impl u64` used to be refused), refuses one that would shadow a built-in
+  method, and calls a scalar's associated function through the type's name. **Breaking:** an
+  inherent impl on a built-in type is now the standard library's alone; a program writes an
+  interface instead (`impl Twice for u64`), whose methods on a built-in receiver resolve only where
+  the interface is in scope - declared in the module, or its module named in a `use` line - with an
+  ambiguity error when two such interfaces define the name.
 - **Faster `sort` in both builds: a merge loop's bounds checks and header loads leave the loop.**
   Release (`--release --overflow=wrap`) `sort` runs 4.53 G instructions instead of 6.94 G (C: 4.26 G)
   and 0.885 s of CPU time against C's 0.793 s (1.12x; it was 1.30x), Rust 0.836, Go 0.828 and C++

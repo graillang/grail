@@ -22,23 +22,12 @@ fn scale2(x:f64,k:i64)->f64{
     while n< -1000{y=y*f64_from_bits(23*4503599627370496);n+=1000;}
     return y*f64_from_bits(u64(1023+n)*4503599627370496);
 }
-@no_block
-pub fn sqrt(x:f64)->f64{return x.sqrt();}
-@no_block
-pub fn abs(x:f64)->f64{return x.abs();}
-@no_block
-pub fn floor(x:f64)->f64{return x.floor();}
-@no_block
-pub fn ceil(x:f64)->f64{return x.ceil();}
-// Halves round away from zero, like C's round().
-@no_block
-pub fn round(x:f64)->f64{return x.round();}
 // glibc's own exp (lib/math_glibc.grl): the engine calls the C library, so this is the value a
 // parity test sees. fdlibm's formulation differs in the last bit on some inputs.
 @no_block
-pub fn exp(x:f64)->f64{return math_glibc::exp(x);}
+fn exp(x:f64)->f64{return math_glibc::exp(x);}
 @no_block
-pub fn ln(value:f64)->f64{
+fn ln(value:f64)->f64{
     mut x=value;mut hx=high(x);lx:=bits(x)&4294967295;mut k=0i64;
     if hx<1048576{
         if ((hx&2147483647)==0)&(lx==0){return -1.0/0.0;}
@@ -81,9 +70,9 @@ fn split_log(value:f64,scale:f64,exponent_hi:f64,exponent_lo:f64)->f64{
     z:=y*exponent_lo+scale*ln(x);return z+y*exponent_hi;
 }
 @no_block
-pub fn log10(x:f64)->f64{return split_log(x,4.34294481903251816668e-01,3.01029995663611771306e-01,3.69423907715893078616e-13);}
+fn log10(x:f64)->f64{return split_log(x,4.34294481903251816668e-01,3.01029995663611771306e-01,3.69423907715893078616e-13);}
 @no_block
-pub fn log2(x:f64)->f64{return math_glibc::log2(x);}
+fn log2(x:f64)->f64{return math_glibc::log2(x);}
 fn kernel_sin(x:f64,y:f64,iy:u64)->f64{
     z:=x*x;v:=z*x;
     r:=8.33333333332248946124e-03+z*(-1.98412698298579493134e-04+z*(2.75573137070700676789e-06+z*(-2.50507602534068634195e-08+z*1.58969099521155010221e-10)));
@@ -98,7 +87,7 @@ fn kernel_cos(x:f64,y:f64)->f64{
 struct Reduced{n:i64,y0:f64,y1:f64}
 fn exponent_of(x:f64)->i64{return i64((bits(x)>>52)&2047);}
 fn reduce(x:f64)->Reduced{
-    n:=i64(round(x*6.36619772367581382433e-01));fnv:=f64(n);
+    n:=i64((x*6.36619772367581382433e-01).round());fnv:=f64(n);
     mut r=x-fnv*1.57079632673412561417e+00;mut w=fnv*6.07710050650619224932e-11;mut y0=r-w;
     j:=exponent_of(x);
     if j-exponent_of(y0)>16{
@@ -108,7 +97,7 @@ fn reduce(x:f64)->Reduced{
     return Reduced{n:n,y0:y0,y1:(r-y0)-w};
 }
 @no_block
-pub fn sin(x:f64)->f64{
+fn sin(x:f64)->f64{
     if (high(x)&2147483647)<=1072243195{return kernel_sin(x,0.0,0);}
     if x.is_nan()||((high(x)&2147483647)>=2146435072){return 0.0/0.0;}
     red:=reduce(x);q:=red.n&3;
@@ -116,7 +105,7 @@ pub fn sin(x:f64)->f64{
     if q==2{return -kernel_sin(red.y0,red.y1,1);}return -kernel_cos(red.y0,red.y1);
 }
 @no_block
-pub fn cos(x:f64)->f64{
+fn cos(x:f64)->f64{
     if (high(x)&2147483647)<=1072243195{return kernel_cos(x,0.0);}
     if x.is_nan()||((high(x)&2147483647)>=2146435072){return 0.0/0.0;}
     red:=reduce(x);q:=red.n&3;
@@ -124,9 +113,9 @@ pub fn cos(x:f64)->f64{
     if q==2{return -kernel_cos(red.y0,red.y1);}return kernel_sin(red.y0,red.y1,1);
 }
 @no_block
-pub fn tan(x:f64)->f64{return sin(x)/cos(x);}
+fn tan(x:f64)->f64{return sin(x)/cos(x);}
 @no_block
-pub fn atan(value:f64)->f64{
+fn atan(value:f64)->f64{
     hx:=high(value);ix:=hx&2147483647;mut x=value;mut id=-1i64;
     if ix>=1141899264{if x.is_nan(){return x;}if hx>0{return 1.57079632679489655800e+00+6.12323399573676603587e-17;}return -1.57079632679489655800e+00-6.12323399573676603587e-17;}
     if ix<1071382528{if ix<1044381696{return x;}}
@@ -146,19 +135,19 @@ pub fn atan(value:f64)->f64{
     r:=hi-((x*(s1+s2)-lo)-x);if hx<0{return -r;}return r;
 }
 @no_block
-pub fn atan2(y:f64,x:f64)->f64{
+fn atan2(y:f64,x:f64)->f64{
     if x.is_nan()||y.is_nan(){return x+y;}
     if x>0.0{return atan(y/x);}
     if x<0.0{if y<0.0{return atan(y/x)-PI;}return atan(y/x)+PI;}
     if y>0.0{return PI/2.0;}if y<0.0{return -PI/2.0;}return 0.0;
 }
 @no_block
-pub fn powi(x:f64,n:i64)->f64{
+fn powi(x:f64,n:i64)->f64{
     mut base=x;mut e=n;if e<0{base=1.0/x;e=-e;}mut result=1.0;
     while e>0{if (e&1)==1{result=result*base;}base=base*base;e=e>>1;}return result;
 }
 @no_block
-pub fn pow(x:f64,y:f64)->f64{
+fn pow(x:f64,y:f64)->f64{
     if y==0.0{return 1.0;}
     if (y.floor()==y)&(y.abs()<2147483648.0){return powi(x,i64(y));}
     if y==0.5{return x.sqrt();}
@@ -177,7 +166,7 @@ fn product_error(a:f64,b:f64,p:f64)->f64{
 // 0.975, and the same pi/4 reconstruction. The huge+x guard forces the inexact
 // flag for tiny x; the value is x either way.
 @no_block
-pub fn asin(x:f64)->f64{
+fn asin(x:f64)->f64{
     hx:=high(x);ix:=hx&2147483647;
     if ix>=1072693248{
         lx:=i64(bits(x)&4294967295);
@@ -211,7 +200,7 @@ pub fn asin(x:f64)->f64{
 // acos: arccos in [0, pi], fdlibm's twin of asin above (same rational, the same pi/2 hi/lo split);
 // about 1 ulp, NaN outside [-1, 1].
 @no_block
-pub fn acos(x:f64)->f64{
+fn acos(x:f64)->f64{
     hx:=high(x);ix:=hx&2147483647;
     if ix>=1072693248{
         lx:=i64(bits(x)&4294967295);
@@ -240,7 +229,7 @@ fn acos_r(z:f64)->f64{
 // NaN when either input is NaN, the divisor is zero or the dividend is
 // infinite; x itself when the divisor is infinite.
 @no_block
-pub fn fmod(x:f64,y:f64)->f64{
+fn fmod(x:f64,y:f64)->f64{
     if x.is_nan()||y.is_nan(){return x+y;}
     zero:=0.0;
     if (bits(x)&9223372036854775807)==9218868437227405312{return zero/zero;}
@@ -281,7 +270,7 @@ fn two_sum(a:f64,b:f64)->HypotPair{
 }
 
 @no_block
-pub fn hypot(x:f64,y:f64)->f64{
+fn hypot(x:f64,y:f64)->f64{
     mut a = x.abs();
     mut b = y.abs();
     if b>a{const_swap:=a;a=b;b=const_swap;}
@@ -432,7 +421,7 @@ fn f32_top(x: f32) -> u64 {
 
 
 @no_block
-pub fn expf(x: f32) -> f32 {
+fn expf(x: f32) -> f32 {
     xd := f64(x);
     abstop := f32_top(x);
     if abstop >= 1067 {
@@ -464,7 +453,7 @@ pub fn expf(x: f32) -> f32 {
 }
 
 @no_block
-pub fn exp2f(x: f32) -> f32 {
+fn exp2f(x: f32) -> f32 {
     xd := f64(x);
     abstop := f32_top(x);
     if abstop >= 1072 {
@@ -527,7 +516,7 @@ fn logf_split(x: f32) -> LogfSplit {
 }
 
 @no_block
-pub fn logf(x: f32) -> f32 {
+fn logf(x: f32) -> f32 {
     sp := logf_split(x);
     if sp.is_special {
         return sp.special;
@@ -544,7 +533,7 @@ pub fn logf(x: f32) -> f32 {
 }
 
 @no_block
-pub fn log2f(x: f32) -> f32 {
+fn log2f(x: f32) -> f32 {
     sp := logf_split(x);
     if sp.is_special {
         return sp.special;
@@ -651,12 +640,12 @@ fn sincosf_eval(y: f32, cosine: bool) -> f32 {
 }
 
 @no_block
-pub fn sinf(x: f32) -> f32 {
+fn sinf(x: f32) -> f32 {
     return sincosf_eval(x, false);
 }
 
 @no_block
-pub fn cosf(x: f32) -> f32 {
+fn cosf(x: f32) -> f32 {
     return sincosf_eval(x, true);
 }
 
@@ -774,110 +763,6 @@ fn powf_exp2(xd: f64, sign_bias: u64) -> f64 {
 }
 
 @no_block
-pub fn powf(x: f32, y: f32) -> f32 {
-    mut sign_bias = u64(0);
-    mut ix = f32_bits(x);
-    iy := f32_bits(y);
-    if (wrapping_sub(ix, 8388608) >= 2130706432) || powf_zeroinfnan(iy) {
-        // Either x < 2^-126 (so 0, subnormal, inf or nan) or y is 0, inf or nan.
-        if powf_zeroinfnan(iy) {
-            if dbl32(iy) == 0 {
-                // y is zero: 1 for every x, except that a signaling x is quieted by x + y.
-                if f32_signaling(x) {
-                    return x + y;
-                }
-                return 1.0;
-            }
-            if ix == 1065353216 {
-                if f32_signaling(y) {
-                    return x + y;
-                }
-                return 1.0;
-            }
-            if (dbl32(ix) > 4278190080) || (dbl32(iy) > 4278190080) {
-                return x + y;
-            }
-            if dbl32(ix) == 2130706432 {
-                return 1.0;
-            }
-            if (dbl32(ix) < 2130706432) == ((iy & 2147483648) == 0) {
-                // |x| < 1 with y == inf, or |x| > 1 with y == -inf.
-                return 0.0;
-            }
-            return y * y;
-        }
-        if powf_zeroinfnan(ix) {
-            mut x2 = x * x;
-            if ((ix & 2147483648) != 0) && (powf_checkint(iy) == 1) {
-                x2 = -x2;
-                sign_bias = 1;
-            }
-            if (dbl32(ix) == 0) && ((iy & 2147483648) != 0) {
-                // pow(+-0, negative): a signed infinity from glibc's __math_divzerof.
-                if sign_bias != 0 {
-                    return f32_from_bits(4286578688);
-                }
-                return f32_from_bits(2139095040);
-            }
-            if (iy & 2147483648) != 0 {
-                return 1.0 / x2;
-            }
-            return x2;
-        }
-        // x and y are finite and non-zero.
-        if (ix & 2147483648) != 0 {
-            yi := powf_checkint(iy);
-            if yi == 0 {
-                // A negative x to a non-integer power: glibc's __math_invalidf.
-                return f32_from_bits(2143289344);
-            }
-            if yi == 1 {
-                sign_bias = 65536;
-            }
-            ix = ix & 2147483647;
-        }
-        if ix < 8388608 {
-            // Normalize a subnormal x so its exponent becomes negative.
-            ix = f32_bits(x * f32_from_bits(1258291200)) & 2147483647;
-            ix = wrapping_sub(ix, 192937984);
-        }
-    }
-    ylogx := f64(y) * powf_log2(ix);
-    // |y*log2(x)| >= 126: the result cannot be computed by exp2 without a range check.
-    if ((bits(ylogx) >> 47) & 65535) >= 32959 {
-        if ylogx <= -150.0 {
-            // glibc's __math_uflowf: a signed zero.
-            if sign_bias != 0 {
-                return f32_from_bits(2147483648);
-            }
-            return 0.0;
-        }
-        if ylogx < -149.0 {
-            // glibc's __math_may_uflowf: (0x1.4p-75)^2 is the smallest float, signed.
-            z := f32_from_bits(438304768) * f32_from_bits(438304768);
-            if sign_bias != 0 {
-                return -z;
-            }
-            return z;
-        }
-        if ylogx > f64_from_bits(4638707616188585329) {
-            // |x^y| > 0x1.fffffffd1d571p+6: glibc's __math_oflowf, a signed infinity.
-            if sign_bias != 0 {
-                return f32_from_bits(4286578688);
-            }
-            return f32_from_bits(2139095040);
-        }
-        if ylogx > f64_from_bits(4638707616185559778) {
-            // 0x1.fffffffa3aae2p+6 and above: glibc asks whether rounding 1.0f + 0x1p-25f would
-            // move it away from 1 (in round-to-nearest it does not), and saturates otherwise.
-            if sign_bias != 0 {
-                return f32_from_bits(4286578687);
-            }
-            return f32_from_bits(2139095039);
-        }
-    }
-    return f32(powf_exp2(ylogx, sign_bias));
-}
 
 // The coefficient `i` of asinf's table whose base word is `tab` (0 b[], 16 C0, 28 C1).
 fn asinf_coef(tab: u64, i: u64) -> f64 {
@@ -901,7 +786,7 @@ fn asinf_poly12(z: f64, tab: u64) -> f64 {
 }
 
 @no_block
-pub fn asinf(x: f32) -> f32 {
+fn asinf(x: f32) -> f32 {
     ax := dbl32(f32_bits(x));
     if ax > 2130706432 {
         // |x| > 1: NaN (a NaN passes through as x + x).
@@ -964,4 +849,187 @@ pub fn asinf(x: f32) -> f32 {
         r = -r;
     }
     return f32(r);
+}
+
+// ---- the methods ------------------------------------------------------------------------------
+// `x.sin()`, `y.atan2(x)`, `x.powi(3)`: the functions above as methods of f64 and f32, next to the
+// compiler's own `sqrt`, `abs`, `floor`, `ceil`, `trunc`, `round`, `min` and `max`. An f32 method
+// is the f32 routine where this module has one (sinf, expf, powf, ...), and otherwise the f64
+// routine rounded once to f32.
+impl f64 {
+    @no_block
+    pub fn sin(self) -> f64 { return sin(self); }
+    @no_block
+    pub fn cos(self) -> f64 { return cos(self); }
+    @no_block
+    pub fn tan(self) -> f64 { return tan(self); }
+    @no_block
+    pub fn asin(self) -> f64 { return asin(self); }
+    @no_block
+    pub fn acos(self) -> f64 { return acos(self); }
+    @no_block
+    pub fn atan(self) -> f64 { return atan(self); }
+    // The angle of the point (other, self): `y.atan2(x)`, as Rust writes it.
+    @no_block
+    pub fn atan2(self, other: f64) -> f64 { return atan2(self, other); }
+    @no_block
+    pub fn exp(self) -> f64 { return exp(self); }
+    @no_block
+    pub fn exp2(self) -> f64 { return pow(2.0, self); }
+    @no_block
+    pub fn ln(self) -> f64 { return ln(self); }
+    @no_block
+    pub fn log2(self) -> f64 { return log2(self); }
+    @no_block
+    pub fn log10(self) -> f64 { return log10(self); }
+    @no_block
+    pub fn pow(self, exponent: f64) -> f64 { return pow(self, exponent); }
+    @no_block
+    pub fn powi(self, exponent: i64) -> f64 { return powi(self, exponent); }
+    @no_block
+    pub fn hypot(self, other: f64) -> f64 { return hypot(self, other); }
+    // The remainder of self / other with the sign of self, like C's fmod and Rust's `%` on floats.
+    @no_block
+    pub fn fmod(self, other: f64) -> f64 { return fmod(self, other); }
+}
+impl f32 {
+    @no_block
+    pub fn sin(self) -> f32 { return sinf(self); }
+    @no_block
+    pub fn cos(self) -> f32 { return cosf(self); }
+    @no_block
+    pub fn tan(self) -> f32 { return f32(tan(f64(self))); }
+    @no_block
+    pub fn asin(self) -> f32 { return asinf(self); }
+    @no_block
+    pub fn acos(self) -> f32 { return f32(acos(f64(self))); }
+    @no_block
+    pub fn atan(self) -> f32 { return f32(atan(f64(self))); }
+    @no_block
+    pub fn atan2(self, other: f32) -> f32 { return f32(atan2(f64(self), f64(other))); }
+    @no_block
+    pub fn exp(self) -> f32 { return expf(self); }
+    @no_block
+    pub fn exp2(self) -> f32 { return exp2f(self); }
+    @no_block
+    pub fn ln(self) -> f32 { return logf(self); }
+    @no_block
+    pub fn log2(self) -> f32 { return log2f(self); }
+    @no_block
+    pub fn log10(self) -> f32 { return f32(log10(f64(self))); }
+    // powf itself, written as the method: a signaling NaN must reach the special-value checks as it was
+    // passed, so there is no second call for it to cross.
+    @no_block
+    pub fn pow(self, exponent: f32) -> f32 {
+        x := self;
+        y := exponent;
+        mut sign_bias = u64(0);
+        mut ix = f32_bits(x);
+        iy := f32_bits(y);
+        if (wrapping_sub(ix, 8388608) >= 2130706432) || powf_zeroinfnan(iy) {
+            // Either x < 2^-126 (so 0, subnormal, inf or nan) or y is 0, inf or nan.
+            if powf_zeroinfnan(iy) {
+                if dbl32(iy) == 0 {
+                    // y is zero: 1 for every x, except that a signaling x is quieted by x + y.
+                    if f32_signaling(x) {
+                        return x + y;
+                    }
+                    return 1.0;
+                }
+                if ix == 1065353216 {
+                    if f32_signaling(y) {
+                        return x + y;
+                    }
+                    return 1.0;
+                }
+                if (dbl32(ix) > 4278190080) || (dbl32(iy) > 4278190080) {
+                    return x + y;
+                }
+                if dbl32(ix) == 2130706432 {
+                    return 1.0;
+                }
+                if (dbl32(ix) < 2130706432) == ((iy & 2147483648) == 0) {
+                    // |x| < 1 with y == inf, or |x| > 1 with y == -inf.
+                    return 0.0;
+                }
+                return y * y;
+            }
+            if powf_zeroinfnan(ix) {
+                mut x2 = x * x;
+                if ((ix & 2147483648) != 0) && (powf_checkint(iy) == 1) {
+                    x2 = -x2;
+                    sign_bias = 1;
+                }
+                if (dbl32(ix) == 0) && ((iy & 2147483648) != 0) {
+                    // pow(+-0, negative): a signed infinity from glibc's __math_divzerof.
+                    if sign_bias != 0 {
+                        return f32_from_bits(4286578688);
+                    }
+                    return f32_from_bits(2139095040);
+                }
+                if (iy & 2147483648) != 0 {
+                    return 1.0 / x2;
+                }
+                return x2;
+            }
+            // x and y are finite and non-zero.
+            if (ix & 2147483648) != 0 {
+                yi := powf_checkint(iy);
+                if yi == 0 {
+                    // A negative x to a non-integer power: glibc's __math_invalidf.
+                    return f32_from_bits(2143289344);
+                }
+                if yi == 1 {
+                    sign_bias = 65536;
+                }
+                ix = ix & 2147483647;
+            }
+            if ix < 8388608 {
+                // Normalize a subnormal x so its exponent becomes negative.
+                ix = f32_bits(x * f32_from_bits(1258291200)) & 2147483647;
+                ix = wrapping_sub(ix, 192937984);
+            }
+        }
+        ylogx := f64(y) * powf_log2(ix);
+        // |y*log2(x)| >= 126: the result cannot be computed by exp2 without a range check.
+        if ((bits(ylogx) >> 47) & 65535) >= 32959 {
+            if ylogx <= -150.0 {
+                // glibc's __math_uflowf: a signed zero.
+                if sign_bias != 0 {
+                    return f32_from_bits(2147483648);
+                }
+                return 0.0;
+            }
+            if ylogx < -149.0 {
+                // glibc's __math_may_uflowf: (0x1.4p-75)^2 is the smallest float, signed.
+                z := f32_from_bits(438304768) * f32_from_bits(438304768);
+                if sign_bias != 0 {
+                    return -z;
+                }
+                return z;
+            }
+            if ylogx > f64_from_bits(4638707616188585329) {
+                // |x^y| > 0x1.fffffffd1d571p+6: glibc's __math_oflowf, a signed infinity.
+                if sign_bias != 0 {
+                    return f32_from_bits(4286578688);
+                }
+                return f32_from_bits(2139095040);
+            }
+            if ylogx > f64_from_bits(4638707616185559778) {
+                // 0x1.fffffffa3aae2p+6 and above: glibc asks whether rounding 1.0f + 0x1p-25f would
+                // move it away from 1 (in round-to-nearest it does not), and saturates otherwise.
+                if sign_bias != 0 {
+                    return f32_from_bits(4286578687);
+                }
+                return f32_from_bits(2139095039);
+            }
+        }
+        return f32(powf_exp2(ylogx, sign_bias));
+    }
+    @no_block
+    pub fn powi(self, exponent: i64) -> f32 { return f32(powi(f64(self), exponent)); }
+    @no_block
+    pub fn hypot(self, other: f32) -> f32 { return f32(hypot(f64(self), f64(other))); }
+    @no_block
+    pub fn fmod(self, other: f32) -> f32 { return f32(fmod(f64(self), f64(other))); }
 }

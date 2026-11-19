@@ -1027,6 +1027,12 @@ struct C {
     deny_ambient: u64,
     host_optin: u64,
     host_modules: u8[][],
+    // The modules each module names in a `use` line, as pairs (use_from[i] uses use_to[i]); every
+    // module read from source also has the pair (m, m), so a module with no pair at all is one this
+    // compile read from its interface. An interface method on a built-in receiver resolves only
+    // where its interface is in scope (interface_in_scope).
+    use_from: u8[][],
+    use_to: u8[][],
     // Capability diagnostics for the parallel surface (docs/design/parallelism.md): the reason code
     // of the first denied leaf and the field path that reached it. `capability_begin` resets both,
     // so a rejection names the offending field instead of repeating the whole type.
@@ -16420,6 +16426,42 @@ fn source_type_name<a>(c: (&a mut C), ty: u64) -> u8[] {
         out.push(93);
         return out;
     }
+    if (k == 27) || (k == 5) {
+        out.push(91);
+        if k == 5 {
+            push_bytes(&mut out, view("u8"));
+        } else {
+            push_bytes(&mut out, view(source_type_name(&mut c, arg)));
+        }
+        out.push(93);
+        return out;
+    }
+    if k == 34 {
+        out.push(42);
+        if ty_mode(&mut c, ty) != 0 {
+            push_bytes(&mut out, view("mut "));
+        }
+        push_bytes(&mut out, view(source_type_name(&mut c, arg)));
+        return out;
+    }
+    if k == 13 {
+        push_bytes(&mut out, view("Mutex<"));
+        push_bytes(&mut out, view(source_type_name(&mut c, arg)));
+        out.push(62);
+        return out;
+    }
+    if (k == 8) && same(view(c.decls[arg].module), view(".tuple")) {
+        out.push(40);
+        elems := type_args(&mut c, ty);
+        for i in elems.len() {
+            if i != 0 {
+                push_bytes(&mut out, view(", "));
+            }
+            push_bytes(&mut out, view(source_type_name(&mut c, elems[i])));
+        }
+        out.push(41);
+        return out;
+    }
     if k == 7 {
         out.push(38);
         if ty_mode(&mut c, ty) != 0 {
@@ -23576,12 +23618,62 @@ fn builtin_contains<a>(c: (&a mut C), ty: u64) -> bool {
     elem := ty_arg(&mut c, ty);
     return integer(&mut c, elem) || is_bool(&mut c, elem);
 }
+// The methods the compiler itself answers on a float, a `char`, a raw pointer and a `Mutex`
+// (collection_method): a library impl adds to these lists, and may not take one of their names over.
+fn builtin_method_name<a, b>(c: (&a mut C), k: u64, name: &b [u8]) -> bool {
+    n := view(name);
+    if k == 21 {
+        return same(n, view("sqrt"))
+            || same(n, view("abs"))
+            || same(n, view("floor"))
+            || same(n, view("ceil"))
+            || same(n, view("trunc"))
+            || same(n, view("round"))
+            || same(n, view("min"))
+            || same(n, view("max"))
+            || same(n, view("is_nan"))
+            || same(n, view("is_finite"))
+            || same(n, view("is_infinite"))
+            || same(n, view("next_up"))
+            || same(n, view("next_down"));
+    }
+    if k == 22 {
+        return char_method(n);
+    }
+    if k == 34 {
+        return same(n, view("addr"))
+            || same(n, view("is_null"))
+            || same(n, view("cast"))
+            || same(n, view("add"))
+            || same(n, view("sub"))
+            || same(n, view("read"))
+            || same(n, view("write"))
+            || same(n, view("as_ref"))
+            || same(n, view("as_mut"));
+    }
+    if k == 13 {
+        return same(n, view("lock_with"));
+    }
+    return false;
+}
 // A method that would set what a protocol name means is refused where it is defined, so no call site
 // silently changes meaning: the message says what the name is and asks for another one.
 fn inherent_protocol_refused<a, b>(c: (&a mut C), owner: u64, name: &b [u8], at: u64) -> unit {
     ty := inherent_owner_type(&mut c, owner);
     if ty == NO_TYPE {
         return ();
+    }
+    if builtin_method_name(&mut c, ty_kind(&mut c, ty), name) {
+        mut msg = copy_bytes(view("`"));
+        push_bytes(&mut msg, view(name));
+        push_bytes(&mut msg, view("` is a built-in method of `"));
+        push_bytes(&mut msg, view(source_type_name(&mut c, ty)));
+        push_bytes(
+            &mut msg,
+            view("`, so an inherent impl cannot define it: the compiler answers that name itself, and the impl's method would shadow it. Give this method another name.")
+        );
+        exchange(&mut c.pos, at);
+        fail(&mut c, view(msg));
     }
     if !protocol_method_name(&mut c, ty_kind(&mut c, ty), name) {
         return ();
@@ -23661,7 +23753,7 @@ fn inherent_match<a, b>(c: (&a mut C), pattern: u64, actual: u64, map: (&b mut u
             return false;
         }
     }
-    if (pk == 5) || (pk == 6) || (pk == 7) || (pk == 27) {
+    if (pk == 5) || (pk == 6) || (pk == 7) || (pk == 13) || (pk == 27) || (pk == 34) {
         if ty_mode(&mut c, pattern) != ty_mode(&mut c, a) {
             return false;
         }
@@ -23896,28 +23988,59 @@ fn ambiguous_inherent_fail<a, b>(c: (&a mut C), ty: u64, name: &b [u8]) -> unit 
 // Register (signature pass) or find (later passes) a written-type impl's record. The later passes
 // re-parse the same header, so the key is looked up by the type: every pass must name the same
 // module `.inherent_<key-1>`, and pick the same type arguments when a method is called.
+// A built-in type that is spelled with a declaration underneath: `T?` (`result::Option<T>`) and a
+// tuple. An impl on one is an impl on the written type, like `impl<T> T[]`, not on the declaration.
+fn written_named<a>(c: (&a mut C), ty: u64) -> bool {
+    if ty_kind(&mut c, ty) != 8 {
+        return false;
+    }
+    if is_option_storage(&mut c, ty) {
+        return true;
+    }
+    return same(view(c.decls[ty_arg(&mut c, ty)].module), view(".tuple"));
+}
 fn inherent_type_key<a>(c: (&a mut C), ty: u64, pass: u64) -> u64 {
     k := ty_kind(&mut c, ty);
-    // A scalar (`u64`, `u32`, `bool`, `char`, `f64`), a string, a byte vector, a vector of any
-    // element, the byte view `[u8]`, and the slice `[T]`.
+    // Every built-in type a value can have: an integer, `bool`, `char`, a float, a string, a byte
+    // vector, a vector of any element, the byte view `[u8]`, the slice `[T]`, a raw pointer `*T`,
+    // `Mutex<T>`, an optional `T?` and a tuple.
     if !(
         (k == 0)
+            || (k == 1)
             || (k == 3)
             || (k == 4)
             || (k == 5)
             || (k == 6)
+            || (k == 13)
             || (k == 18)
             || (k == 19)
             || (k == 21)
             || (k == 22)
             || (k == 27)
+            || (k == 34)
+            || written_named(&mut c, ty)
     ) {
         fail(
             &mut c,
             view(
-                "an inherent impl's type must be a scalar, a string, a vector, a slice or a type this module declares; a reference, a `dyn` interface and a bare type parameter have no inherent methods"
+                "an inherent impl's type must be a built-in type (an integer, `bool`, `char`, a float, a string, a vector, a slice, a raw pointer, `Mutex<T>`, `T?` or a tuple) or a type this module declares; a reference, a `dyn` interface and a bare type parameter have no inherent methods"
             )
         );
+    }
+    // Rust's coherence rule: the methods a built-in type has are the language's and its standard
+    // library's, so a program cannot change what `x.abs()` means for everyone else. A program
+    // extends a built-in type through an interface, whose methods resolve only where it is in scope.
+    if !ct_std_file(&mut c, c.file) {
+        mut msg = copy_bytes(view("an inherent impl on the built-in type `"));
+        push_bytes(&mut msg, view(source_type_name(&mut c, ty)));
+        push_bytes(&mut msg, view("` belongs to the standard library"));
+        help := copy_bytes(
+            view(
+                "declare an interface and implement it for the type - `interface Twice { fn twice(&self) -> u64; }` and `impl Twice for u64 { ... }` - and its methods are callable as `x.twice()` in every module that declares the interface or names its module in a `use` line"
+            )
+        );
+        diag_help(&mut c, view(help));
+        fail(&mut c, view(msg));
     }
     // One key per impl header: two blocks that spell the same owner type and the same parameters
     // are one impl (Rust merges them), so their methods share a module and a duplicate name is the
@@ -24066,7 +24189,7 @@ fn implementation<a>(c: (&a mut C), pass: u64) -> unit {
         module := module_copy(&mut c);
         ty := parse_inherent_owner(&mut c);
         mut owner = 0;
-        if ty_kind(&mut c, ty) == 8 {
+        if (ty_kind(&mut c, ty) == 8) && !written_named(&mut c, ty) {
             // A declared type: the owner is the declaration, and its arguments must be this impl's
             // own parameters, in order.
             owner = ty_arg(&mut c, ty) + 1;
@@ -28488,13 +28611,23 @@ fn resolve_modules<a>(c: (&a mut C), offset: u64) -> unit {
         i += 1;
     }
     // `core` is part of every program that has it: `Some(x)` and `None` lower to its constructors.
-    // It is the one name asked for without a `use` line, and a root with no core.grl has no core.
-    if !mod_known(&c, view("core")) {
-        found := mod_find(&c, view("core"));
-        if found.len() != 0 {
-            c.mod_names.push(copy_bytes(view("core")));
-            queue.push(found.copy());
-            c.mod_files.push(found);
+    // `scalar` is too: the methods of the integers, `char` and the floats' bits (`x.abs()`,
+    // `c.to_digit(10)`, `f64::from_bits(b)`), which a program calls without importing anything.
+    // They are the two names asked for without a `use` line, and a root without the file has
+    // neither. (`scalar` is not in core because the published bootstrap compiles core, and it does
+    // not accept an impl on `u64`.)
+    for implicit in 2 {
+        mut name = "core";
+        if implicit == 1 {
+            name = "scalar";
+        }
+        if !mod_known(&c, view(name)) {
+            found := mod_find(&c, view(name));
+            if found.len() != 0 {
+                c.mod_names.push(copy_bytes(view(name)));
+                queue.push(found.copy());
+                c.mod_files.push(found);
+            }
         }
     }
     mut k = 0;
@@ -28579,6 +28712,37 @@ fn print_inputs<a>(c: (&a mut C), count: u64) -> unit {
 
 // Modules that declared `use host;`. Recorded per module so a replayed generic body is checked
 // against its defining module, not against whichever file was parsed last.
+// Record that module `from` names `to` in a `use` line (once: every pass reads the header again).
+fn note_use<a, b, d>(c: (&a mut C), from: &b [u8], to: &d [u8]) -> unit {
+    if !uses_module(&c, from, to) {
+        c.use_from.push(copy_bytes(from));
+        c.use_to.push(copy_bytes(to));
+    }
+    return ();
+}
+fn uses_module<a, b, d>(c: (&a C), from: &b [u8], to: &d [u8]) -> bool {
+    for i in c.use_from.len() {
+        if same(view(c.use_from[i]), view(from)) && same(view(c.use_to[i]), view(to)) {
+            return true;
+        }
+    }
+    return false;
+}
+// Whether interface `iface`'s methods are in scope in the module being compiled: it declares the
+// interface, or it names the interface's module in a `use` line (Rust's rule that a trait's methods
+// need the trait in scope). A module this compile read from its interface file recorded no `use`
+// lines, so its replayed bodies are taken as already checked.
+fn interface_in_scope<a>(c: (&a mut C), iface: u64) -> bool {
+    here := module_copy(&mut c);
+    home := c.interfaces[iface - 1].module.copy();
+    if same(view(here), view(home)) {
+        return true;
+    }
+    if !uses_module(&c, view(here), view(here)) {
+        return true;
+    }
+    return uses_module(&c, view(here), view(home));
+}
 fn host_opted<a, b>(c: (&a C), m: &b [u8]) -> bool {
     for i in c.host_modules.len() {
         if same(view(c.host_modules[i]), view(m)) {
@@ -28626,8 +28790,11 @@ fn toplevel<a>(c: (&a mut C), pass: u64) -> unit {
     exchange(&mut c.module, m);
     exchange(&mut c.imports, Import[]);
     exchange(&mut c.host_optin, 0);
+    here := module_copy(&mut c);
+    note_use(&mut c, view(here), view(here));
     while eat(&mut c, view("use")) {
         m = ident(&mut c);
+        note_use(&mut c, view(here), view(m));
         // `use host;` (or `use host::name;`) is this module's explicit opt-in to the ambient
         // `host::` interface; --deny-ambient-host refuses host:: references without it.
         if same(view(m), view("host")) {
@@ -29482,6 +29649,15 @@ fn dr_append<a>(c: (&a mut C), text: u8[]) -> unit {
 // still valid) and the parser walks the new tail as ordinary top-level items.
 fn dr_parse_tail<a>(c: (&a mut C), pass: u64) -> unit {
     text := exchange(&mut c.dr_tail, u8[]);
+    // The generated bodies call each field's own `clone`, `debug`, `hash`, ... - an interface method
+    // on a built-in field type - so the derived interfaces' modules are in scope in this module, as
+    // the `impl ops::Eq for ...` headers the derive writes already name them.
+    here_module := module_copy(&mut c);
+    note_use(&mut c, view(here_module), view("ops"));
+    note_use(&mut c, view(here_module), view("order"));
+    note_use(&mut c, view(here_module), view("hash"));
+    note_use(&mut c, view(here_module), view("clone"));
+    note_use(&mut c, view(here_module), view("debug"));
     mut before = c.toks.len();
     while before != 0 {
         before = before - 1;
@@ -36432,6 +36608,37 @@ fn two_phase_order<a, b>(c: (&a mut C), ranges: (&b u64[])) -> u64[] {
     }
     return order;
 }
+// The module of the inherent impl that gives the scalar type spelled `m` (`f64`, `u32`, `char`,
+// `bool`) the function `name`, or empty: `f64::from_bits(b)` names a type, not a module.
+fn scalar_static<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> u8[] {
+    mut ty = NO_TYPE;
+    code := int_name(m);
+    if code != 0 {
+        ty = int_type_named(&mut c, code);
+    } else if same(view(m), view("f64")) {
+        ty = float_type(&mut c);
+    } else if same(view(m), view("f32")) {
+        ty = f32_type(&mut c);
+    } else if same(view(m), view("char")) {
+        ty = char_type(&mut c);
+    } else if same(view(m), view("bool")) {
+        ty = bool_type(&mut c);
+    }
+    if ty == NO_TYPE {
+        return u8[];
+    }
+    for i in c.inherent_types.len() {
+        key := inherent_type_base() + i + 1;
+        if same_type(&mut c, c.inherent_types[i], ty) == 0 {
+            continue;
+        }
+        owner := inherent_type_module(key);
+        if find_func(&mut c, view(owner), view(name)) != 0 {
+            return owner;
+        }
+    }
+    return u8[];
+}
 fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
     // The program point the prover reads: everything up to the callee's name holds when the call is
     // made, and the arguments (which follow) are what it proves about.
@@ -36448,6 +36655,13 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
         if d != 0 {
             owner := private_module(view(".inherent_"), d - 1);
             f = find_func(&mut c, view(owner), view(name));
+        }
+    }
+    if f == 0 {
+        // `f64::from_bits(b)`: an associated function a standard-library impl gives a scalar.
+        owner := scalar_static(&mut c, view(m), view(name));
+        if owner.len() != 0 {
+            return call(&mut c, view(owner), view(name));
         }
     }
     if f == 0 {
@@ -47268,9 +47482,13 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
     name := ident(&mut c);
     expect(&mut c, view("("));
     mut value = value;
-    if literal_receiver & char_method(view(name)) {
+    if literal_receiver {
+        // A character literal is a char wherever `char` has the method - built in, or from a
+        // library impl (`'7'.to_digit(10)`); an integer literal stays an integer.
         ch := char_type(&mut c);
-        value = val(value.t, ch);
+        if char_method(view(name)) || ((kind_at(&mut c, c.lit_start) == 4) && (inherent_method_for(&mut c, ch, view(name)) != 0)) {
+            value = val(value.t, ch);
+        }
     }
     input := value.t;
     inty := value.ty;
@@ -47325,9 +47543,9 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
         exchange(&mut c.has_receiver, 1);
         return call(&mut c, view(owner), view(name));
     }
-    if k == 34 {
-        return pointer_method(&mut c, val(xt, xty), xty, view(name));
-    }
+    // `T?` and a tuple are declarations underneath, but the impls that give them methods are written
+    // for the type (`impl<T> T?`), so their methods are looked up below, after the declaration's own.
+    mut written = false;
     if k == 8 {
         d := ty_arg(&mut c, xty);
         mut owner = private_module(view(".inherent_"), d);
@@ -47394,14 +47612,18 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
             exchange(&mut c.has_receiver, 1);
             return call(&mut c, view(owner), view(name));
         }
-        field := find_field(&mut c, d, view(name));
-        ft := field_type(&mut c, xty, field);
-        if ty_kind(&mut c, ft) != 12 {
-            fail(&mut c, view("record field is not callable"));
+        if written_named(&mut c, xty) && (inherent_method_for(&mut c, xty, view(name)) != 0) {
+            written = true;
+        } else {
+            field := find_field(&mut c, d, view(name));
+            ft := field_type(&mut c, xty, field);
+            if ty_kind(&mut c, ft) != 12 {
+                fail(&mut c, view("record field is not callable"));
+            }
+            slot := field_load(&mut c, xt, xty, field, 0);
+            projected := alias_field(&mut c, slot, ft, xt, field, 0);
+            return indirect_call(&mut c, projected, 1);
         }
-        slot := field_load(&mut c, xt, xty, field, 0);
-        projected := alias_field(&mut c, slot, ft, xt, field, 0);
-        return indirect_call(&mut c, projected, 1);
     }
     // `item.name()` on a type parameter bounded by interfaces: the bound that declares `name`
     // (Rust's method syntax on generic bounds; `Interface::name(item)` is the same call).
@@ -47513,10 +47735,12 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
         }
     }
     // A method an inherent impl gives a *written* type: `impl<T> T[] { ... }`, `impl [u8] { ... }`,
-    // `impl string { ... }`. It resolves before any interface method of the same name (Rust's
-    // order), and before the builtin collection methods below - which an impl may not redefine at
-    // all (protocol_method_name). A declared type's own methods were looked up above (k == 8).
-    if (k != 8) & !(same(view(name), view("contains")) & builtin_contains(&mut c, xty)) {
+    // `impl string { ... }`, `impl u64 { ... }`. It resolves before any interface method of the same
+    // name (Rust's order), and before the builtin methods below - which an impl may not redefine at
+    // all (protocol_method_name, builtin_method_name), except that `contains` on a vector of integers
+    // or bools stays the compiler's own (builtin_contains). A declared type's own methods were looked
+    // up above (k == 8).
+    if ((k != 8) || written) & !(same(view(name), view("contains")) & builtin_contains(&mut c, xty)) {
         mut method = inherent_method_for(&mut c, xty, view(name));
         // A byte vector or a string is byte text: when no impl names it as it stands, the impls of
         // `[u8]` are the ones it is asking for, and the receiver is viewed for the call below.
@@ -47595,12 +47819,23 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
         mut owner = u8[];
         mut method = 0;
         mut picked = 0;
+        // A bound parameter's method is its bound's, whatever is in scope where the generic body
+        // is replayed; a concrete built-in receiver sees only the interfaces in scope here.
+        scoped := ty_kind(&mut c, xty) != 10;
+        mut hidden = 0;
         for i in c.implementations.len() {
             // stays: a vector element read is a loan, so it conflicts with the call's &mut.
             ity := c.implementations[i].ty;
             mut fits = same_type(&mut c, ity, concrete) != 0;
             if !fits {
                 fits = impl_bindings(&mut c, i + 1, concrete).len() != 0;
+            }
+            contract := c.implementations[i].contract;
+            if fits && scoped && !interface_in_scope(&mut c, contract) {
+                if find_func(&mut c, view(private_module(view(".impl_"), i + 1)), view(name)) != 0 {
+                    hidden = contract;
+                }
+                fits = false;
             }
             if fits {
                 candidate := private_module(view(".impl_"), i + 1);
@@ -47655,6 +47890,29 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
             }
             return v;
         }
+        // Only an out-of-scope interface defines the name, and the compiler does not answer it
+        // itself: say which interface, and what brings it into scope.
+        collection := (k == 3) || (k == 4) || (k == 5) || (k == 6) || (k == 27) || is_array(&mut c, xty);
+        if (hidden != 0) && !collection && !builtin_method_name(&mut c, k, view(name)) {
+            home := c.interfaces[hidden - 1].module.copy();
+            mut msg = copy_bytes(view("`"));
+            push_bytes(&mut msg, view(name));
+            push_bytes(&mut msg, view("` is a method of the interface `"));
+            push_bytes(&mut msg, view(home));
+            push_bytes(&mut msg, view("::"));
+            push_bytes(&mut msg, view(c.interfaces[hidden - 1].name));
+            push_bytes(&mut msg, view("`, which is not in scope in this module"));
+            mut help = copy_bytes(view("add `use "));
+            push_bytes(&mut help, view(home));
+            push_bytes(&mut help, view(";` to this module to call it on `"));
+            push_bytes(&mut help, view(source_type_name(&mut c, xty)));
+            push_bytes(&mut help, view("`"));
+            diag_help(&mut c, view(help));
+            fail(&mut c, view(msg));
+        }
+    }
+    if k == 34 {
+        return pointer_method(&mut c, val(xt, xty), xty, view(name));
     }
     if k == 11 {
         return atomic_method(&mut c, val(xt, xty), view(name));
@@ -47818,7 +48076,12 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
     }
     if c.raw == 0 {
         if (k != 3) & (k != 4) & (k != 5) & (k != 6) & (k != 27) {
-            fail(&mut c, view("collection method requires collection/view"));
+            mut msg = copy_bytes(view("`"));
+            push_bytes(&mut msg, view(source_type_name(&mut c, xty)));
+            push_bytes(&mut msg, view("` has no method `"));
+            push_bytes(&mut msg, view(name));
+            push_bytes(&mut msg, view("`"));
+            fail(&mut c, view(msg));
         }
     }
     if same(view(name), view("len")) {
@@ -59761,6 +60024,17 @@ fn iface_enc_env<a>(c: (&a mut C), decl: u64, deps: (&a mut u64[])) -> u8[] {
     return body;
 }
 // Every item of one module, in name order, with the bytes it will occupy and the names it cites.
+// The methods of written-type impl `key` that module `m` wrote.
+fn iface_written_methods<a, b>(c: (&a mut C), key: u64, m: &b [u8]) -> u64[] {
+    all := iface_func_ids(&mut c, view(inherent_type_module(key)));
+    mut mine = u64[];
+    for i in all.len() {
+        if same(view(c.funcs[all[i]].home), view(m)) {
+            mine.push(all[i]);
+        }
+    }
+    return mine;
+}
 fn iface_items<a>(c: (&a mut C), m: &a [u8]) -> IItem[] {
     mut items = IItem[];
     decls := iface_decl_ids(&mut c, view(m));
@@ -59946,13 +60220,12 @@ fn iface_items<a>(c: (&a mut C), m: &a [u8]) -> IItem[] {
     // interface carries it.
     mut written = u64[];
     mut spelled = u8[][];
+    // Two modules may write the same header (`impl f64` in core and in math): one impl, whose
+    // methods each module's interface carries for the methods it wrote.
     for i in c.inherent_types.len() {
         key := inherent_type_base() + i + 1;
-        methods := iface_func_ids(&mut c, view(inherent_type_module(key)));
+        methods := iface_written_methods(&mut c, key, view(m));
         if methods.len() == 0 {
-            continue;
-        }
-        if !same(view(c.funcs[methods[0]].home), view(m)) {
             continue;
         }
         mut spell_deps = u64[];
@@ -59964,8 +60237,7 @@ fn iface_items<a>(c: (&a mut C), m: &a [u8]) -> IItem[] {
     worder := iface_sorted(&spelled);
     for i in worder.len() {
         key := written[worder[i]];
-        owner_module := inherent_type_module(key);
-        methods := iface_func_ids(&mut c, view(owner_module));
+        methods := iface_written_methods(&mut c, key, view(m));
         mut deps = u64[];
         mut body = u8[];
         iface_w_type(&mut c, &mut body, &mut deps, c.inherent_types[key - inherent_type_base() - 1]);
@@ -64010,6 +64282,8 @@ pub fn main() -> u64 {
         deny_ambient: 0,
         host_optin: 0,
         host_modules: u8[][],
+        use_from: u8[][],
+        use_to: u8[][],
         cap_denial: 0,
         cap_segs: u8[][],
         iface_dir: u8[],

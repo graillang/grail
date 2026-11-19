@@ -1751,13 +1751,18 @@ fn resolved_groups<a, d>(store: (&d mut Cache), command: (&a u8[][]), at: u64, l
             }
             if (in_prelude == 0) & !eq(view(name), view("runtime")) {
                 groups[g].uses.push(copy(view("core")));
+                // `scalar` (the integers', `char`'s and the floats' methods) is every module's
+                // dependency in the same way, except its own and the prelude's.
+                if (group_of(&groups, view("scalar")) != 0) & !eq(view(name), view("scalar")) {
+                    groups[g].uses.push(copy(view("scalar")));
+                }
             }
         }
     }
     return groups;
 }
 // The program's own modules. The runtime and platform files are the base group every program has,
-// and the standard library's core prelude is compiled whether a module names it or not, so neither
+// and the standard library's core prelude (with `scalar`) is compiled whether a module names it or not, so neither
 // makes a program multi-module: what is left is what the program is made of.
 fn program_modules<a>(groups: (&a ModuleGroup[])) -> u64 {
     mut n = groups.len();
@@ -1765,6 +1770,9 @@ fn program_modules<a>(groups: (&a ModuleGroup[])) -> u64 {
         n -= 1;
     }
     if group_of(&groups, view("core")) != 0 {
+        n -= 1;
+    }
+    if group_of(&groups, view("scalar")) != 0 {
         n -= 1;
     }
     return n;
