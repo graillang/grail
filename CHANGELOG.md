@@ -34,6 +34,10 @@
   build counts it where it stands. Only `unwrap_or` and the free `core.unwrap_option` function existed,
   so a ported line like `v.get(k).unwrap()` had to be rewritten. Cases `option-unwrap-method` and
   `option-unwrap-on-none-traps`.
+- **Job bodies take the scheduler by reference.** `submit`, `submit_deps`, `post` and
+  `executor_submit` take `Fn<Share, Owned>((&JobScheduler), u64, u64) -> u64`, so a body asks
+  `job_cancelled`, `job_preempt_requested` and `job_yield` through the scheduler it is lent. The
+  `rc::Arc` handle the bodies took while a struct field's reference parameter was refused is gone.
 - **The book's sidebar drops its "Find a topic" subtitle;** the search box (labelled for screen readers) sits under the title.
 - **The languages overview chart reads plainly.** Its bars start at 1× (the fastest language's time)
   on one logarithmic scale shared by the release and development groups, each group lists the
