@@ -8,6 +8,10 @@
   an inline record already is. A plain `[u64; 2]` exchanged out of a field also no longer overwrites
   that field (corpus case `move-array-field`).
 
+- **The character's traversal rules are ported (group 2b).** Low-ledge climb admission and motion
+  gating, the wall-face and floor probes, landing targets and support samples, climb pace and stage
+  timing, body-climb progress, and the hatch-ladder rules (module ids, reach, rotated points, grab
+  geometry, hatch shape, rungs, top frame, paces, pull-up and exit readiness); 407 values match.
 - **Item content's vocabulary and starter catalogue are ported.** `abundance/src/item_content.grl`
   carries `item_content_catalog.hpp`/`item_content_fwd.hpp` and the starter definition from
   `Private/item_content_catalog.cpp`: the ten ItemContentCategories with their labels (and the
