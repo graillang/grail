@@ -109,6 +109,36 @@
   yards are not ported: they need `ab::infinite::MonumentSite` and `monument_outside()` from the
   world-model lane, so callers pass no monuments and the module says so.
 
+- **The Abundance procedural impact/predator/pickup synthesiser is ported, sample for sample.**
+  `abundance/src/audio_procedural.grl` carries `ABSynthesiseProceduralImpact`,
+  `ABSynthesisePredatorVoice` and `ABSynthesisePickupTick` of
+  `Private/audio/procedural_synthesis_detail.cpp` (cmake/tx/character.cmake's audio side): the
+  engine's FRandomStream LCG and its float construction, the impact's pitch-swept body with the
+  low-passed contact crunch, the predator voice's howl and rough pulsed growl (Square of a double
+  sine, harmonics through sinf), and the pickup tick's soft thump, inharmonic stone partials or
+  brighter metal ring with its click, each peak-normalised and truncated to PCM16 as the C++ casts
+  it. The float maths uses lib/math's glibc-exact `sinf` where the engine calls `std::sin` on a
+  float and its double kernels elsewhere, with the C++'s float/double widths kept apart.
+  `abundance/tests/parity/audio_procedural.cpp` compiles the engine's synthesiser with
+  `-ffp-contract=off` and prints 195 values; `abundance/tests/audio_procedural_test.grl`
+  reproduces every one - 7 intensities (including out-of-range and NaN) and 2 howl modes across
+  three seeds each, four sound classes across three seeds, each compared by sample count, an
+  FNV-1a hash over the int16 stream and its first/last/peak samples.
+- **The Abundance UI design system and shape tessellator are ported, vertex for vertex.** `abundance/src/
+  ui_design.grl` carries `Public/abundance/ui/design_system.hpp`: linear `Rgba` with `srgb`/`mix`/
+  `fade`/`visible`, the palette (and its high-contrast variant), the type scale, the 4 px spacing
+  grid, corner radii, `ShapeStyle` with its scale, the five elevations and the five grade frames.
+  `abundance/src/ui_shape_mesh.grl` carries `ui/shape_mesh.hpp`: `Mesh`/`Rect`, the rounded-rectangle
+  outline, `fill_rounded`, `ring` with its vertical fade, `shadow`, `glow`, `shape`, `radial`,
+  `quad`, `arc`, `polyline`, `stroke_path` with mitred joins and round caps, `disc` and `bar`.
+  The float maths goes through lib/math's glibc-exact `cosf`/`sinf` (a float operand in the C++ is
+  the single-precision call), so vertices agree bit for bit. `abundance/tests/parity/ui_shapes.cpp`
+  compiles the two headers and prints 360 values; `abundance/tests/ui_shapes_test.grl` reproduces
+  every one - palette and grade colours, the elevation surfaces, the type scale, and per-shape
+  vertex/index counts with FNV-1a hashes over the whole vertex stream (x, y, r, g, b, a as binary32
+  patterns) and the index list, across 60 fixtures including the degenerate ones (invalid rects,
+  invisible colours, a zero-length polyline, a hairpin stroke, fractional and out-of-range bar
+  values).
 - **The Jolt surface closes with the overlap query.** `gr_jolt_overlap_capsule` is one `CollideShape`
   of the same capsule the cast sweeps, stopped at the first hit: `abundance/src/jolt.grl` now answers
   the core's `overlap` contract (a boolean, with `invalid_request` for a capsule shorter than its own
