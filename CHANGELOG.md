@@ -1,5 +1,8 @@
 ## Unreleased
 
+- Fixed: `frame_loop_test.grl`'s submit callback takes the scheduler's `rc::Arc<JobScheduler>` handle; the
+  `SchedulerRef` wrapper it still named was deleted with the scheduler's production-surface landing, so
+  `--only=frame_loop` failed to compile. The frame loop's digests are unchanged.
 - **The Jolt surface closes with the overlap query.** `gr_jolt_overlap_capsule` is one `CollideShape`
   of the same capsule the cast sweeps, stopped at the first hit: `abundance/src/jolt.grl` now answers
   the core's `overlap` contract (a boolean, with `invalid_request` for a capsule shorter than its own
