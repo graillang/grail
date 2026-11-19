@@ -67,6 +67,18 @@
   `initial` suite compares `s00_initial` and the five fields the real `generate_world` dumps beside it
   (AB_COHERENT_STAGE_DUMP) for three worlds: 306 values, every f32 byte.
 
+- **The terrain page pool's bookkeeping is ported, slice / lifetime / job-order half.**
+  `abundance/src/render_policy_page_book.grl` carries `terrain_gpu/page_book.cpp`: the slice atlas
+  with its per-key cap and the GPU fence (a freed slice is reusable only after its serial completed),
+  the page lifetime from request through generated, evicted and freed once unheld, the stable
+  need-ordered job queue with the near lane's tier cut and the same-batch parent rule, the world
+  envelope until a page's measurement arrives (stale stamps and non-finite bounds ignored, changes
+  inside the 8 m quantum silent), lost and lost-inputs, decision passes, revival of a held evicted
+  page, the PageEvents, the counters, and the NodePages queries (mapped with the drawn page and the
+  real-over-foundation rule, find with the edit-delta widening, hold, release, set_drawn). 141
+  reference lines from one scripted session against the engine's own `page_book.cpp`. The page hash
+  table and the GPU page records (`take_upload`) are the next increment; `reset()` is not ported
+  because it fences slices in an unordered_map's iteration order.
 - **The derelict monument layouts are complete: the library, arms depot, factory, orchard and dam
   templates join the farm, and pieces resolve through the construction catalogue.**
   `abundance/src/monument_layout.grl` now carries the rest of `monument_layout.cpp` (`panels` and the
