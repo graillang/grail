@@ -59,6 +59,16 @@
   two stand-ins with the page-ready rule they share. 262 reference lines. The page pool's own
   bookkeeping (`page_book.hpp`, `node_set.hpp`) and the residency manager's selection are their own
   increments.
+- **The render graph plan now carries what the RHI executor asked for.** `Dispatch` names the
+  pipeline bound when the group was issued (`Dispatch.pipeline`, a caller-defined id the executor maps
+  to its own object; `abundance_render_graph::bind(g, pass, id)` reads like the engine's pass body),
+  and `Pass.pipeline` carries the last bind even when nothing is dispatched; `CreateInfo` is keyed by
+  resource index and stays per placed resource; each colour attachment carries its `mip` and `aspect`;
+  and `submit_waits(plan, segment)` applies the empty-submit rule, dropping waits naming a queue with
+  no segment this frame (`device_check().dropped_waits` counts them). The parity reference captures
+  vkCmdBindPipeline before each vkCmdDispatch and resolves create names back to resource indices, so
+  all four are gated: 3004 lines match.
+
 - **The book's sidebar drops its "Find a topic" subtitle;** the search box (labelled for screen readers) sits under the title.
 - **The languages overview chart reads plainly.** Its bars start at 1× (the fastest language's time)
   on one logarithmic scale shared by the release and development groups, each group lists the
