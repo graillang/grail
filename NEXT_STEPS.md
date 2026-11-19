@@ -1,37 +1,45 @@
-# Lane abn-gp-combat: resume point
+# abn_wg_hydro — resume point
 
-State at the 2026-11-19 budget wind-down (OpenCode weekly window ~11%, resets 2026-11-23).
+Last landed / queued when this was written: `fabc0339` (stepped-hills planner, gated 6/6) — queued
+behind the land queue; `b20568a7` (coasts port) and `313787f7` (coasts ria/spit fixture, 58/58) are
+the previous two. If the queue shows anything earlier than `fabc0339` on main, re-queue the branch.
 
-## On main from this lane
-- combat_core (1548 values), damage rules (323), combat world queries (374), faraday_cage (49),
-  placed_damage (135), character rules group 1 (140), character group 2a look/fall/survival/tool (321),
-  character group 2b traversal (407).
+## Done (on main or queued)
 
-## Unfinished, in order
-1. **Character group 2c: weapon view + held equipment.** It was written but not green and was
-   reverted for the wind-down (the scratch copy was removed when the harness cleared `.work`; rewrite
-   it from `character/{weapon_view_rules,held_equipment_rules}.hpp` and the presentation half of
-   `firearm_profile.hpp`). State before reverting: the module compiled and the 636-line reference
-   generated; the test failed at one type mismatch near the `held.remote_cart` case
-   (`HeldFacts`/`select_held_presentation` call sites), then would have needed the usual parity
-   pass. Ids already checked against the headers: weapons 90010 / 1802 / 1803 / 1502 / 82701 /
-   87001 / 87009 / 87003 / 87005 / 87006 / 86006; attachment modules are the ASCII constants
-   (MODSUPPR etc.); tools surveyor 2319, tapping knife 24402, crowbar 87500, paint rollers
-   24960-24967, spray cans 24970-24977, wrench set 84126; munitions 86004/86005/86017/86018/86800.
-2. **Character group 2d:** `firearm_profile.hpp`'s carry maths (`aim_solution`, `hip_pose`,
-   `optic_line_height_cm`, `is_profiled_firearm`, `fires_over_session`, `is_automatic`), and
-   `held_item_hold.hpp` if that header is also in `cmake/tx/character.cmake`.
-3. **actions/combat on the tx layer** (`combat_strike`, `combat_defence`, `combat_weapon_state`,
-   `combat_weapon`, `combat_emp*`, `combat_factory_defence`, `factory_defence_frontier`,
-   `item_content/emp_warheads`). Reference path: `ABUNDANCE_ROOT=$HOME/abundance-pin/src
-   ABUNDANCE_BUILD=$HOME/abundance-pin/build`, a test action driving the engine's own functions
-   through `Engine::submit` (pattern: `abundance/tests/parity/placed_damage.cpp`).
-4. skills, survival, explosives, anticheat, security (same pattern).
+| Increment | Gate |
+|---|---|
+| Palette classifier + ecology (`src/terrain_palette.grl`) | generated world, cell-for-cell |
+| Mountains (`src/mountain_shape.grl`) | 14/14 digest lines |
+| Crags (`src/coherent_crags.grl`) | 60/60 lines, five configurations |
+| Mesa planner / builder / hooks (`src/coherent_mesa.grl`) | 48/48 lines, four planner configurations + builder + marks + biomes |
+| Feature composition (`src/feature_composition.grl`) | 10/10 lines |
+| Coasts (`src/coherent_coasts.grl`) | 38/38 lines + ria/spit fixture 58/58 |
+| Stepped-hills planner (`src/coherent_stepped_hills.grl`) | 6/6 lines |
 
-## Not mine / boundaries
-- `lib/math.grl`'s double `pow` is still not glibc-exact; `damage.grl` keeps its local corrected
-  double-double `pow` until abn_langfix lands one (director's plan).
-- `combat_trace.grl`'s chunk-query + capsule sweep now live in `collision_query.grl` (abn_ecs). Rebase
-  before touching either.
-- The pinned build at `~/abundance-pin` is the only trustworthy reference for tx-layer symbols; the
-  in-tree `build/libabundance_gameplay_core.a` is stale (predates the collision tie-break).
+## Next, in order
+
+1. **Stepped hills, second increment** — `apply_stepped_hills` and `compose_stepped_hill_marks` from
+   `Private/coherent_stepped_hills.cpp:403-940`: the strata column (`build_column`,
+   `build_mesa_column`, `proportion_unit`, `remap`), `apply_site` (risers, benches, talus, the
+   water/rigid fades, the closing flood), the trap-riser mask and the mark weights. Reference:
+   extend `tests/parity/coherent_stepped_hills.cpp` with an apply pass over the forced sites.
+2. **Oil** (`Private/coherent_oil.cpp`, 1532 lines) — plan, salt-dome relief/sinks, `finish_oil_system`.
+3. **Volcanic** (`Private/coherent_volcanic.cpp`, 2665 lines) — split into two landings if it is
+   naturally two passes.
+
+## Known gaps
+
+- **Coasts fjord profile**: unexercised. Needs a stem confined for more than 1200 m; the valley
+  fixture's drowned reach is shorter. Extend `coherent_coasts_valley.bin`'s valley north or raise
+  `head_rise_max` tolerance by widening the floor only above the 1200 m mark.
+- **Stepped-hills natural sites**: the 12 km fixture selects none, in the engine and the port alike,
+  so the trap/dry/plateau scoring runs but ends below `natural_min_score`. A world with a bigger,
+  flatter basalt plateau would select one.
+- **Mesa multi-region**: covered — `mesa.multi` keeps four regions with separation and rank rejects.
+
+## Discipline
+
+`--only` while iterating; at most one full suite before a landing; scratch in `.work`; rebase on
+`origin/main` before each landing; explicit `git add` paths; CHANGELOG in the same commit; report each
+SHA to `/root`. Do not edit `worldgen_macro_coast/macro_world/mountains/landform/provinces/noise/
+coherent_field/fastnoiselite.grl` — those belong to `abn_wg_terrain`.
