@@ -118,6 +118,17 @@
   carve the landform, no cell reaches the cap) and with the wash thresholds out of reach (the tops
   reach the caprock, 74 cap cells), which exercises the cap branch too. 36 of 36 lines.
 
+- **The terrain page pool's bounds and cache-invalidation rules are ported.** `abundance/src/
+  render_policy_page_bounds.grl` carries `terrain_gpu/page_policy.hpp`: per-quadrant page bounds and
+  their range over a quadrant mask, the world envelope a page publishes until its generation pass
+  measures it (with the overshoot that says the envelope is wrong), the 8 m outward quantisation that
+  keeps culling stable, a drawn node's culling range (morph parent, the measured max |own - parent|,
+  edge-snap targets and fade sources, the skirt and the canopy lift), the shadow invalidation
+  threshold with its morph height-error model and the state that decides it, and the quantised
+  ray-tracing camera a level's BLAS refits follow. With the helpers it reads from `tile_key.hpp` and
+  `node_binding.hpp` (tile/cell size, parent, morph band, skirt). 206 reference lines. Also records
+  the terrain server boundary in the README: its demand order is not gated, because it is not
+  observable without a client-stream test hook, and its key math is private/static.
 - Added: `^=` is a compound assignment, like `+=` and the rest: `x ^= 3` in a local, a record field
   (`a.n ^= 15`) and an indexed element (`v[i] ^= 3`), at the target's own integer width. It was
   "expected `=`" - the lexer's multibyte table had no `^=` token (kind 275) - and it is still refused
