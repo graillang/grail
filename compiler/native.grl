@@ -32557,8 +32557,36 @@ fn holder_drop<a>(c: (&a mut C), ty: u64) -> unit {
 // A value that is about to be owned or moved and is still an interior address gets a box of its
 // own holding a copy of the words, and the slot holds the box from here on.
 fn materialise<a>(c: (&a mut C), slot: u64, ty: u64) -> unit {
-    // An interior array is copied into storage of its own when it is bound or moved (move_value).
+    // An array is copied into storage of its own when it is bound or moved (move_value). One held
+    // inline in a record (an interior address) is copied here first, before anything swaps or
+    // stores through it: `exchange(&mut m.a, n.a)` swapped the words inside `n`, and `m.a = n.a`
+    // stored them after `move_out` had left them in place. The field's words are then left zero
+    // when its elements own something, as a record's are below, so the holder's in-place drop
+    // finds nothing there (`a := n.a` with `a: [string; 2]` freed both strings twice).
     if is_array(&mut c, ty) {
+        mut found = c.interior.len();
+        for i in c.interior.len() {
+            if c.interior[i] == slot {
+                found = i;
+            }
+        }
+        if found == c.interior.len() {
+            return ();
+        }
+        c.interior[found] = 18446744073709551615;
+        copy := array_fresh_copy(&mut c, slot, ty);
+        if array_owned(&mut c, ty) {
+            get(&mut c, slot, view("%rcx"));
+            for j in array_bytes(&mut c, ty) / 8 {
+                o(&mut c, view("movq $0,"));
+                on(&mut c, j * 8);
+                o(&mut c, view("(%rcx)\n"));
+            }
+        }
+        get(&mut c, copy, view("%rax"));
+        o(&mut c, view("movq %rax,"));
+        stack_slot(&mut c, slot);
+        c.out.push(10);
         return ();
     }
     if framed(&mut c, ty) {
@@ -35178,7 +35206,12 @@ fn array_literal<a>(c: (&a mut C), ty: u64) -> Val {
         require_type(&mut c, v.ty, elem);
         if (count == 0) & is(&mut c, view(";")) {
             if needs_drop(&mut c, elem) {
-                fail(&mut c, view("a repeated element must be a plain value; give each owned element"));
+                fail(
+                    &mut c,
+                    view(
+                        "a repeated element must be a plain value: `[x; N]` writes N byte copies of one value, so an element that holds storage (a record, a string, a vector) would be shared by every element and dropped once per element; give the elements (`[a, b, c]`) or fill the array in a loop"
+                    )
+                );
             }
             advance(&mut c);
             r := ct_expr(&mut c, 0);
@@ -40544,6 +40577,11 @@ fn exchange_into<a>(c: (&a mut C), a: Val, b: Val) -> Val {
     require_write(&mut c, a.t);
     destination := target_of(&mut c, a.t);
     seed_storage(&mut c, destination, ty);
+    // A source still at an interior address (a record field held inline, `exchange(&mut m.v, n.v)`)
+    // gets storage of its own before its words are swapped or read: `move_out` below would do it
+    // after the swap, copying the old value out from under the returned slot and zeroing the field
+    // it still points at.
+    materialise(&mut c, b.t, b.ty);
     if subword(&mut c, ty) {
         // A plain sub-word value, possibly in tagged narrow storage: read the old value, write the new.
         old := ref_load(&mut c, a.t, ty);
@@ -48659,7 +48697,12 @@ fn collection_body<a>(
                 if (c.raw == 0) & (bytes == 0) {
                     element := ty_arg(&mut c, ty);
                     if needs_drop(&mut c, element) {
-                        fail(&mut c, view("a repeated element must be a plain value; build owned elements with push"));
+                        fail(
+                            &mut c,
+                            view(
+                                "a repeated element must be a plain value: `T[x; N]` writes N byte copies of one value, so an element that holds storage (a record, a string, a vector) would be shared by every element and dropped once per element; push each element in a loop"
+                            )
+                        );
                     }
                 }
                 nstart := c.pos;
@@ -49766,6 +49809,9 @@ fn primary_word<a>(n: &a [u8]) -> u64 {
         if same(n, view("f32_bits")) {
             return 14;
         }
+        if same(n, view("f64_bits")) {
+            return 19;
+        }
         return 0;
     }
     if (k == 10) && (f == 98) {
@@ -50503,6 +50549,22 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
                 require_type(&mut c, value.ty, 0);
                 ty := float_type(&mut c);
                 return val(value.t, ty);
+            }
+        }
+        if (fsp == 19) {
+            // An f64's exact pattern, sign and NaN payload included (a signaling NaN stays
+            // signaling): the f64 twin of `f32_bits`. `bits(x)` reads every NaN as the one
+            // canonical quiet NaN instead, so results agree across targets; this is for code that
+            // must see the operand it was given, such as a libm port's signaling-NaN test.
+            if (find_local(&mut c, view(first)) == 0)
+                & (find_func(&mut c, view(m), view(first)) == 0) {
+                advance(&mut c);
+                value := expr(&mut c, 0);
+                expect(&mut c, view(")"));
+                if !is_float(&mut c, value.ty) || is_f32(&mut c, value.ty) {
+                    fail(&mut c, view("f64_bits needs an f64 (an f32's pattern is f32_bits)"));
+                }
+                return val(value.t, 0);
             }
         }
         mut named = int_name(view(first));

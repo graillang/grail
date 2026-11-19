@@ -757,7 +757,11 @@ like `` `inv_view_proj_unjittered` is at offset 704 by the HLSL's rules but 752 
 block``.
 
 An entry whose closure reaches the engine's mirrored kernel/terrain trees (`AbundanceTerrain/`,
-`AbundanceKernel/`) is refused by the vendoring tool until a mirror step exists. Today that is
-`sky/rain_splash.cs`. `post/dof_gather.cs` reaches `abundance/render/dof_sampling.ush` through the
-GameplayCore include root, which the tool does vendor.
+`AbundanceKernel/`, `world/terrain_contract/`) is vendored against a reproduction of that mirror step:
+`vendor-shaders.mjs` applies the engine's own include rewrites to those three source trees and commits
+the result under `abundance/shaders/<prefix>/`, so `-I abundance/shaders` resolves the paths the engine's
+build root does. `post/dof_gather.cs` reaches `abundance/render/dof_sampling.ush` through the GameplayCore
+include root, which the tool vendors directly. All 212 entries of the ten areas are vendored; one,
+`geometry/geo_canopy_far.cs`, has no committed module yet because `dxc -O3` peaks near 16 GB on it at this
+pin (`docs/design/abundance-shaders.md`).
 

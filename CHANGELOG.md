@@ -1,5 +1,395 @@
 ## Unreleased
 
+- **The landing service removes each leg's build cache when the leg ends.** Every gate leg and retry
+  had a fresh `GRAIL_CACHE_DIR` in /tmp that nothing removed - about 17k files each - and /tmp (a
+  tmpfs) ran out of inodes after two days of landings.
+
+- Fixed: the suite rebuilds a shim library when the commit has moved since that shim was built, not
+  only when the library is absent. A library built at an older commit links as a successful build and
+  then fails on a symbol the port now calls (`gr_sdl_pref_path`, `gr_jolt_overlap_capsule`), which the
+  mtime-based up-to-date check cannot see when a checkout moves source files without touching a
+  neighbour. Each shim is now stamped with the commit it was built at.
+- **Abundance port: a dispatch takes its pipeline from the render graph plan.** The executor reads
+  each `Dispatch.pipeline` (the id the plan records when a body binds), falling back to the body's id
+  for a plan that carries none, and rebinds the pipeline, its push-constant block and the bindless
+  sets whenever the id changes - so one body can run two pipelines. `rhi_graph_probe` binds through
+  `abundance_render_graph::bind` and checks the plan's id reaches the dispatch.
+- Reference pin moved from `ca1f1bc05b` to `28a31e5089` (18 commits of the run's own work: held-item
+  grips and first-person carry, chunk collision, edit cost, flora tile placement, terrain render
+  runtime, the render graph, world spawn, cluster geometry, trail terrain). `~/abundance-pin` was
+  rebuilt from the new commit, all seven reference libraries plus the `blu-mode` library that
+  `abundance_gameplay_core` now links. Every parity gate therefore re-checks the port against the
+  current reference rather than one a day out of date.
+- **glibc's sin and cos are ported.** `lib/math_glibc.grl` gains the IBM Accurate Mathematical
+  Library's `do_sin`/`do_cos` over `__sincostab` (440 doubles) and `reduce_sincos`, with the FMA
+  sites the x86-64 build fuses (settled against the host's libm the way `exp`/`pow` were). The
+  mover's yaw is quantized to 16 bits, so the whole domain is 65 536 angles: the gate runs every
+  one of them plus a general sweep and six named inputs and matches the host bit for bit
+  (`abundance/tests/libm_trig_test.grl`, 20 reference lines). glibc's `rem_pio2` branch
+  (|x| >= 105414350) is not carried and the port answers NaN there rather than a wrong value.
+
+- Fixed: `frame_loop_test.grl`'s submit callback takes `&JobScheduler` (the scheduler's bodies became
+  references), and the harness no longer names `abundance/src/frame_loop.grl` twice — a module listed
+  twice on one command line was compiled twice, so its constants collided ("a constant named `frames`
+  is already declared"). The module list is now de-duplicated before every compile.
+- **The window's overlay hook is ported: `poll(hook)` feeds ImGui's SDL3 backend its events.** The
+  SDL platform shim keeps a hook slot and calls it inside its poll, before decoding, because a text
+  event's string is SDL's temporary memory; the imgui platform shim supplies
+  `ImGui_ImplSDL3_ProcessEvent`'s address and reads back what the overlay saw (`input_state`,
+  `key_down`, `text_events`). `platform_window.grl` installs or clears it; `imgui_overlay_probe.grl`
+  gates it headless: with the hook ImGui sees the motion, the button, the key and the character,
+  without it nothing, and the engine's `InputState` is the same either way - a reader, not a filter.
+  The synthetic pushes now carry the window id and the keycode too, which is what ImGui's backend
+  matches events by.
+- **PNG sources load in Grail.** `abundance/src/image_io.grl` ports `image_io.cpp`'s `decode_png`: the chunk walk,
+  zlib inflate through `lib/zlib.grl`, the five row filters, 8- and 16-bit samples and the engine's grey/RGB expansion
+  and 1/255 or 1/65535 scaling. `abundance/tests/png_test.grl` matches all 754 lines the engine's own loader prints
+  over six fixtures (8-bit grey, grey+alpha, RGB, RGBA; 16-bit RGB and RGBA), every pixel's float bits; palette and
+  interlaced PNGs are refused with the reason. EXR, JPEG and TIFF remain with the C++ importer. Content QA's sRGB
+  transfer now uses `lib/math_glibc.grl`'s glibc-exact double `pow`, replacing the 256-entry table, and still matches
+  its 44 lines.
+
+- **Moving an array out of a record field no longer frees its elements twice.** `a := n.a`,
+  `m.a = n.a`, `eat(n.a)` and `exchange(&mut m.a, n.a)`, with `n.a: [string; 2]` held inline in a
+  record, left the field's words in place, so the record's drop and the new owner's both freed the
+  same strings (an abort at exit; for the assignment, a crash on the copy). The array is now copied
+  into storage of its own before anything swaps or stores through it, and the field is left zero, as
+  an inline record already is. A plain `[u64; 2]` exchanged out of a field also no longer overwrites
+  that field (corpus case `move-array-field`).
+
+- **The character's traversal rules are ported (group 2b).** Low-ledge climb admission and motion
+  gating, the wall-face and floor probes, landing targets and support samples, climb pace and stage
+  timing, body-climb progress, and the hatch-ladder rules (module ids, reach, rotated points, grab
+  geometry, hatch shape, rungs, top frame, paces, pull-up and exit readiness); 407 values match.
+- **The shader pipeline reproduces the engine's CMake mirror step, and the inventory is complete.**
+  `abundance/tools/vendor-shaders.mjs` now applies `engine/CMakeLists.txt`'s `abe_mirror_shaders`
+  rewrites to the three mirrored source trees (`AbundanceKernel/`, `AbundanceTerrain/`,
+  `world/terrain_contract/`) and commits the 49 generated files under `abundance/shaders/<prefix>/`, so
+  `-I abundance/shaders` resolves the virtual include paths DXC sees in the engine's build. With that,
+  the 32 entries that were recorded as skipped are vendored and built: the inventory goes from 180 to
+  **211 built entries and 25,695,156 bytes of SPIR-V at pin `ca1f1bc05b`, with 69 shared structs pinned
+  field by field**, covering all 212 entries of the ten areas. The one entry without a module,
+  `geometry/geo_canopy_far.cs`, is excluded on purpose and recorded under `not_built`: `dxc -O3` peaks at
+  about 16 GB on it at this pin and the host's OOM watchdog kills it (the engine cut that to 2.9 GB in
+  `a533814a49`). The generator also waits for headroom and retries a compile the kernel killed, and the
+  whole-inventory recompile moved behind `--check --recompile`, so a suite run on a shared host never
+  rebuilds two hundred shaders.
+
+- **Item content's vocabulary and starter catalogue are ported.** `abundance/src/item_content.grl`
+  carries `item_content_catalog.hpp`/`item_content_fwd.hpp` and the starter definition from
+  `Private/item_content_catalog.cpp`: the ten ItemContentCategories with their labels (and the
+  `"Item"` default), `item_content_display_name` (the four historical keys — `part.mechanical`,
+  `part.electronic`, `weapon.ak47`, `weapon.ak47_magazine` — the namespace split, capitalisation,
+  underscores and hyphens collapsing to single spaces, and the 28-word acronym list, so `SMG`,
+  `HDPE` and `CO2` read as acronyms), the 49 starter items (id, stable id, category,
+  starter-supplied) and 49 logistics resources (density, form) generated from the engine's own
+  `starter_item_content_definition()`, and the catalogue's lookups by resource id, stable id and
+  resource. `abundance/tests/item_content_test.grl` prints 435 lines that match a reference
+  linking the engine's own catalogue. Recipes and recipe access, machine archetypes,
+  knowledge/resource nodes/salvage sources, construction materials/modules/parts, the full
+  validation report and the append_* content builders are the next item_content increments.
+- **Abundance: the coherent-profile coasts are ported and bit-exact.** `src/coherent_coasts.grl`
+  carries `shape_coasts`: the ocean flood and shoreline frame, the exact squared distance transform
+  with its nearest shore cell, the rock-resistance field (province, patch noise, hinterland relief),
+  the shoreline warp with its invertibility damping, the flow to the sea and the drowned-valley
+  inlets (stem tracing, thalweg and confinement measurement, trough sections, the bank rounding),
+  sheer faces on resistant headlands, skerries and islets, spits, the repair that turns water cut off
+  from the sea into wet land, and the final elevation clamp. Gated against Abundance's own
+  `coherent_coasts.cpp` over a synthetic 5 km plateau island in two configurations (everything on;
+  the warp off with a protection disc over part of the coast): 38 of 38 lines, both the heights and
+  the whole report. The engine's parallel loops are reproduced serially; each writes only its own
+  cell and the one shared reduction is a Boolean OR. A second fixture isolates the paths the island
+  leaves dark: a straight steep-walled valley whose banks stand high within 120 m of the stem and
+  whose catchment drains into it carries a drowned-valley **ria** (3158 cells carved), and a straight
+  soft coast over a shallow shelf carries a **spit**. Both match, 58 of 58 lines. Still unexercised:
+  the fjord trough profile (its stem must stay confined for more than 1200 m; this valley's drowned
+  reach is shorter).
+
+- **The construction-kit accumulator is ported, bit for bit.** `abundance/src/procgen_kit_acc.grl`
+  carries `kit_acc.hpp`: per-slot surfaces, the Basis/Xform and its quaternion/arc/axis-angle
+  constructors, the round-side quality floor, and `grid`/`grid_out`/`fan`/`lathe`/`tube` (welded
+  smooth normals, metre UVs, seam duplication, parallel transport). `kitacc_test.grl` matches
+  `parity/kitacc.txt`: 166 values, the reference driving the header directly.
+- Abundance port: `abundance/src/tx_schema.grl` is one schema-driven codec for the 'ABTW' table
+  payloads whose wire layout follows from their C++ type alone - 47 of the 51 tables the
+  hand-written codecs do not cover, so with `tx_tables.grl` 62 of the 65 registered tables now
+  decode and re-encode exactly. Each table carries its grammar (bool, sized integers, f32/f64 bits,
+  string, byte vector, vector, array, optional, pair, struct) as data; decoding applies the field
+  codec's rules exactly (strings at most 65536 and the remaining bytes, byte vectors bounded only by
+  the remaining bytes, object sequences at most 2^22 and one per remaining byte, bool and optional
+  tags refused above 1, exact consumption) into a token stream that re-encodes byte for byte, and
+  `verdict` returns "" or the engine's "payload does not load (table N name)" text. The reference
+  `abundance/tests/parity/tx_schema.cpp` reads every grammar off the engine's own types with a
+  `Schema<T>` that mirrors `Writer::value` branch for branch, writes each table's default blob from
+  the registry, fills a non-empty value of each type through its own fields, encodes it with the
+  engine's Writer, checks it back with the engine's Reader, prints a leaf trace walked from the value
+  itself, and refuses 121 truncated, trailing and over-count payloads; `tx_schema_test.grl` matches
+  all 279 lines - the schema registry against the types, every blob byte for byte and every value
+  leaf by leaf. The trade `CrossWorldTable` is ported too: its codec lives in a .cpp over a struct
+  the headers do not show, so the reference mirrors that struct, encodes the mirror with the engine's
+  Writer and requires the engine's own save to produce the same bytes, which pins the grammar
+  `{b,s,{f64,f64,f64},f64,[u32],[(u64,u64)],B}`; the engine's 125-byte filled table (ledger bound to
+  its world) decodes, traces and re-encodes byte for byte, with truncated and trailing refusals.
+  `power.power_dispatch` became fully generic too once the reference included the private header
+  that reflects its dispatch result, so 63 of the 65 registered tables are exact and 279 lines match.
+  `construction.facility_site` is ported as well: its save writes one byte-blob per site (a vector of
+  vectors of bytes) and each blob is the site record - 21 fields whose fuel state holds plain nested
+  offer/receipt values rather than optionals (an `optional` model reads 8 bytes too many) - so the
+  port decodes the book, then every site, and refuses a zero or repeated site id as the engine's
+  insert() does; 282 lines match. One table remains a named boundary: `drones.fleet`, whose codec
+  (`DroneFleetRegistry::encode`, drone_fleet.cpp) is a catalog-driven persistence format of its own.
+
+- **The player field map's model is ported.** `abundance/src/field_map_presentation.grl` carries
+  `ab::FieldMapPresentationModel` (Private/field_map_presentation.cpp), the root of the world map
+  code: validation and normalisation of a disclosed observation (the revision, bounds, cell, player,
+  per-kind caps, ids, discovery, paths inside the bounds, waterway widths, reading ranges,
+  confidence), the bounded and trimmed text, undiscovered routes/waterways/landmarks dropped and
+  undiscovered tiles blanked, sorting by id and duplicate refusal; the Applied/Duplicate/Conflict/
+  Stale/Invalid verdicts; the query's clamps; and the view - tiles, routes, waterways with their
+  stroke scale and patterns, every feature with its uncertainty and accessible label, filter and
+  search, selection and focus, previous/next/pan/zoom/grid/legend navigation, the legend, the scale
+  and the screen-reader summary. Its `format_number` reproduces the engine exactly, including the
+  trailing-zero strip that also turns whole numbers such as 100 into "1" (an engine bug, reported,
+  not corrected here). `abundance/tests/parity/field_map_presentation.cpp` (generated with the test
+  from one operation list) prints 3399 lines over 70 operations and 17 observations;
+  `abundance/tests/field_map_presentation_test.grl` reproduces them.
+- **The coherent generator's first elevation raster is reproduced byte for byte.** `abundance/src/
+  worldgen_initial.grl` runs the initial pass end to end - provinces, the preset-tilted range config,
+  the macro world, coherent passes, the Saturday2d82 range field, the valley field and the landform
+  plan - and then the per-cell base elevation (province datum and relief, broad and compact-ridge
+  relief, the massif dome, the legacy/macro coastline blend, divide uplift and the valley pull). The
+  `initial` suite compares `s00_initial` and the five fields the real `generate_world` dumps beside it
+  (AB_COHERENT_STAGE_DUMP) for three worlds: 306 values, every f32 byte.
+- **Crafting routes are ported, with printf's `%.6f` reproduced exactly.** `abundance/src/
+  crafting_routes.grl` carries the engine's portable presentation helpers (`UsesFoodProcessor`,
+  `UsesPrecisionBench`, `UsesProductionCell` over their recipe ids) and `NumberText`, whose
+  `display_text::format("%.6f", v)` is ported as integer scaling by 10^6 (m * 15625 * 2^(e+6)) with
+  round-half-to-even, so subnormals, ties and the largest finite value match glibc's printf.
+  `abundance/tests/crafting_routes_test.grl` gates 80 lines against the engine's own module and
+  formatter. Recorded boundary: a sign-set NaN spells "-nan" in glibc but Grail's `f64_from_bits`
+  normalises the sign away, so that value cannot be represented to format it.
+- **The kinematic mover's view queries are ported.** `abundance/src/collision_query.grl` gains the
+  engine's `known_for_box` (every lattice sample a box touches finite), the trilinear `field_at`,
+  the mover's `Env::field` uniform-chunk fallback, `covers` and `coverage` with its reason codes
+  and problem chunk — the view half of `Env` the movement step reads. The gate is two real
+  `ChunkCollisionWorld` chunk sets (flat ground; a sloped ground with a 0.3 m step) whose chunks,
+  triangles and density lattices the reference dumps through the public `field_at`, then samples
+  on a fixed grid and ten boxes: 2 306 lines, byte-identical.
+
+- **The derelict monument layouts are complete: the library, arms depot, factory, orchard and dam
+  templates join the farm, and pieces resolve through the construction catalogue.**
+  `abundance/src/monument_layout.grl` now carries the rest of `monument_layout.cpp` (`panels` and the
+  five templates: the panelled library with its timber upper floor, stairwell and archive; the wired
+  arms depot with its concrete bunker, garage gate and guard tower; the steel factory hall with its
+  machine line, office and broken chimney; the orchard's tree rows and packing shed; the dam's breached
+  wall, crest walkway and control house). Module boxes now come from
+  `abundance/src/construction_catalog.grl`, with the committed ABMN table covering only the fence,
+  wire and farm pieces that catalogue does not carry yet, and `catalog_crosscheck` (asserted by the
+  test) proving the table, the module/material rules and the construction catalogue agree. The parity
+  fixture grows from eight Farm sites to eighteen (two of each other kind): 15 587 lines match. One
+  more draw-order rule found on the way: a draw in a `for` condition is redrawn on every test (the
+  library's garden wall), so the port redraws it there too.
+- **The material registry's block scans are ported and wired to the block decoders end to end.**
+  `abundance/src/material_scan.grl` carries `scan_mean_colour` (the terrain palette's and the world
+  material catalog's linear mean from the coarsest mip) and `leaf_mean_colour` (a foliage texture's
+  alpha-weighted mean over the smallest tail mip of at least 8x8) from
+  `engine/materials/runtime/material_registry.cpp`, decoding with `lib/bc7_decode.grl` and
+  linearizing sRGB with the glibc-exact `math::powf`.
+  `abundance/tests/parity/material_scan.cpp` includes that registry source unmodified — the leaf
+  scan is file-local — and prints both scans and the FNV-1a of every decoded tail mip;
+  `abundance/tests/material_scan_test.grl` runs the same pipeline over the committed abtex
+  fixtures: the container, the scan and all three block decoders, BC7 through
+  `bc7_decode::decode_bc7` (added here as the image-level form of `unpack_bc7`) and BC4/BC5 through
+  `bc_encode::decode_bc4`/`decode_bc5`. Every f32 bit pattern and every mip digest matches.
+
+- **The landform composition plan is ported bit for bit.** `abundance/src/worldgen_landform.grl`
+  carries `landform_plan.cpp`: the family/preset tables, warped-ellipse regions, the ranges' real
+  footprint with its chamfer distance, the priority placer (candidate sites, fit tests, province
+  affinity, valley score, land budget), the gate rasters, lake mask, relief scale, owner and
+  `claim_unreserved`. 552 values over four plans match the worldgen library.
+
+- Added: `f64_bits(x)` is an f64's exact bit pattern, sign and NaN payload included, so a signaling NaN reads
+  as signaling: the f64 twin of `f32_bits`. `bits(x)` is unchanged and still reads every NaN as the canonical
+  quiet NaN, so results agree across targets. Fixed with it: `math_glibc::pow(sNaN, 0)` and `pow(1, sNaN)` are
+  NaN, as in glibc, instead of 1 -- its signaling test went through `bits()` and saw a quiet NaN. Cases
+  `f64-bits-exact-pattern` and `f64-bits-refuses-f32`.
+- **`exchange` with a record field as its new value no longer crashes.** `x := exchange(&mut m.v,
+  n.v)`, where `n.v` is a record held inline whose fields own storage (a `string`, a vector), returned
+  a zeroed record and leaked the real one: the source was given storage of its own only after the
+  swap, which copied the old value out from under the returned slot and cleared the field it still
+  pointed at. The source now gets its own storage first, so the old value comes back whole and every
+  string is dropped exactly once (corpus case `exchange-record-field-source`).
+- **The collision model's query half is a shared module.** The chunk view, `query_box`,
+  `gather_triangles`, `world_segment_hit`, the Ericson narrow phase, `sweep_capsule` and `raycast`
+  move verbatim out of `abundance/src/combat_trace.grl` into `abundance/src/collision_query.grl`, so
+  the kinematic mover builds on the same queries combat uses instead of re-porting them. No
+  behaviour change: the combat parity cases are byte-identical (combat_core 1 548 lines,
+  combat_world 374 lines).
+
+- **The World hub's map view is ported.** `abundance/src/map_view.grl` carries `ab::ui::map_view` of
+  `cmake/tx/settings_screen.cmake`: the whole-window view, clamping (zoom 1x-48x, the picture kept
+  inside the window, std::clamp's NaN pass-through), the shown rectangle, cursor-anchored zoom,
+  pan, centre-on, the north-up texture window, the 1-2-5 scale bar and its "%.0f km"/"%.1f km"/
+  "%.0f m" label. `abundance/tests/parity/map_view.cpp` prints 1542 values over five windows and
+  seven states; `abundance/tests/map_view_test.grl` reproduces them.
+- **Abundance: the feature composition contract is ported and gated.** `src/feature_composition.grl`
+  carries `apply_feature_heights` (bounded add, then carve toward a target, then raise toward a
+  target, then the world's elevation clamp) and `compose_feature_layers` (the higher weight wins and
+  a tie goes to the later pass, vegetation takes the minimum, structure flags are OR-ed, erosion
+  resistance takes the maximum, records append in pass order), plus the pass and record records those
+  layers carry. Gated against Abundance's own `feature_composition.cpp` over two passes composed in
+  order: the second pass ties the first on feature and material weight, adds three times the
+  contracted height, carves against the first pass's valley and adds a record — heights and every
+  channel digest equal, 10 of 10 lines. The README's "written but ungated" note is gone; every ported
+  pass can now funnel through this contract.
+
+- **The character's look, fall, survival and hand-tool rules are ported (group 2a).** The Unreal
+  angle helpers (FMath::ClampAxis/NormalizeAxis/ClampAngle and FMath::Fmod in float), the camera
+  deltas and look scale, jump and hand-tool press routing, landing feel, the critically damped fall
+  spring, injury movement gates, the downed hold (local and authority), the death camera, presented
+  life and the R key, queued maintenance, the wind-up gauge, powered-tool hold, weapon presentation
+  serials/clocks and the equipment request gates: 321 values match the pin's headers.
+- **The player's map waypoint is ported.** `abundance/src/map_waypoint.grl` carries `ab::map_waypoint`
+  of `cmake/tx/settings_screen.cmake`: ground distance, compass and view-relative bearings, the
+  north-up map picture (usable test, world-to-screen, contains, screen-to-world, metres per pixel),
+  the click / pick-up / clear / arrive state, the reading the HUD and the map share, and the
+  distance and compass-point text. `abundance/tests/parity/map_waypoint.cpp` prints 225 values;
+  `abundance/tests/map_waypoint_test.grl` reproduces them.
+- `abundance/src/exact_trig.grl` gives the presentation code correctly rounded double `sin`, `cos`
+  and `atan2` (double-double Taylor series, and one Newton step on lib/math's `atan2`), because
+  glibc's are correctly rounded and lib/math's fdlibm versions land one ulp off on some arguments
+  (three of the waypoint's bearings; the compass wind flow). `hud_compass.grl` now uses it in place
+  of its own local sine/cosine.
+- **The voice cap and the pool steal are ported and gated against the engine's own claims.**
+  `platform_audio.grl` carries `ab::audio::VoiceSlot` and `claim_cue_cap`/`claim_pool_steal` (a cue's
+  own `max_voices` cap first, then the pool's kind-matched steal for a strictly higher priority) -
+  the last pure decision audio.cpp's `start()` makes before it takes a voice. The parity grows to
+  113/113 lines over six slots and fourteen cases against `audio_cue_presentation.cpp`'s own
+  functions. Two Grail traps recorded in the file: `&`/`|` do not short-circuit, so a `u64(weakest)`
+  of -1 aborted under checked conversion; the conditions are nested instead.
+
+
+- **Abundance: the mesa coupling and marks are ported and bit-exact.** `src/coherent_mesa.grl` gains
+  `mesa_stepped_sites` (the handover to the stepped-hills pass: one Mesa-style site per built region,
+  carrying the caprock, the seed and the `masked` bit that says the Mesa mask already holds the
+  warped edge), `finish_mesa_marks` (flat caprock tops become `MesaTop` at weight 153) and
+  `apply_mesa_biomes` (mesa country drying into Badlands in two-label stages, so the authority's
+  mixture is never replaced by an invented third label and water keeps its own). Gated on the same
+  world: 1 site, 27 marked cells, 1257 biome cells changed (188 Badlands, 362 Desert), all three
+  array digests equal — 48 of 48 lines. The port compares the river cut-off in f32, as the engine's
+  discharge channel does; comparing it in f64 changed 89 cells, which is how the difference was
+  found.
+
+- **Abundance: the mesa planner's ranked keep-apart selection is now gated on a multi-region
+  world.** The mesa fixture is a 12 km plain of bedded rock with four separated basins and one
+  mediocre corner basin. `mesa.multi` keeps four regions while rejecting candidates for separation
+  and stopping the ranked loop on a score below the second-region threshold (0.6193); the two runs
+  beside it show each rule biting on its own — with the threshold off the same world yields seven
+  regions, and forced selection at the same footprint yields six — so the ranking and the separation
+  rule can no longer silently differ. The builder is gated twice: as the engine runs it (the washes
+  carve the landform, no cell reaches the cap) and with the wash thresholds out of reach (the tops
+  reach the caprock, 74 cap cells), which exercises the cap branch too. 36 of 36 lines.
+- **The room reverb node and the spatial voices' send bus land over the audio shim.** audio.cpp's
+  `RoomNode` (the `ab::audio::RoomReverb` behind a generation/decay pair of atomics, continuous
+  processing) is hosted by the shim, attached to the hearing path with its bus at zero the way
+  `Impl()` builds it; every spatial voice's second splitter bus feeds it (`Impl::start`'s
+  `room_ready && channels == 2` rule), and `platform_audio.grl` exposes `room_attach`/`room_set`/
+  `room_volume`. The parity grows to 99/99 lines: a voice's send rings the room for four blocks,
+  then a decay change and a generation bump clear it for two more.
+
+- **The coherent profile's macro composition is ported bit for bit.** `abundance/src/
+  worldgen_macro_world.grl` carries `macro_composition.cpp`: the six-archetype recipe, the layout
+  primitives (capsules, half-planes, islets, the contained rounded-square clip), the land-fraction
+  bisection on a 112x112 grid, the islet placement, the Catmull-Rom land raster and `land_at`, the
+  ranges' rigid placement onto the composed land (420 scored candidates, then the edge guard), and
+  the bay/valley walk to the ranges. 281 values over four compositions and one whole plan match the
+  worldgen library.
+
+- **The soundscape bed and the ambient-emitter synth run through the audio shim.** `platform_audio.grl`
+  gains `bed_attach`/`ambience` (audio.cpp's 15-slot input packing) and `emitter_start`/`emitter_set`/
+  `emitter_render`; the shim hosts audio.cpp's `SoundscapeNode` (a continuous node on the hearing
+  path, atomics to the callback) and pulls `ab::audio::emitters::Synth` directly. The DSP is the
+  engine's own code, compiled into the shim from the reference checkout by `build-audio.mjs` until the
+  stage-6 port restages it - the design note's named bridge. The parity grows to 85/85 lines: the bed's
+  six 1024-frame mixes (inputs set, then changed mid-run) and the emitter's two parameter sets, all
+  matching the reference's own node and pull.
+
+- **A Grail `&[u8]` argument crosses as the view's byte length, and the audio shim now honours that.**
+  `gr_audio_voice_start` read its length as a float count, so a 2 048-sample block claimed 8 192
+  samples (the stop time masked it in the mix, so the parity still matched); `gr_audio_bed_inputs`
+  and the emitter's loop PCM had the same reading. All three divide by the sample size now, and the
+  redundant Grail-side count arguments are gone.
+
+
+- Diagnostics: `[Record{..}; N]` says why it is refused. Both repeat forms (`[x; N]` for an array,
+  `T[x; N]` for a vector) now explain that a repeat writes N byte copies of one value, so an element
+  that holds storage - a record is a frame of its own - would be shared by every element and dropped
+  once per element, and name the alternative (give the elements, or push each one in a loop). Cases
+  `array-repeat-record-rejected` and `vector-repeat-record-rejected`.
+- Added: `core::trunc_u32(x)` (`lib/core.grl`), C's `(u32)x` for a signed value - the low 32 bits, no
+  check, so `-1` is `4294967295`. A port of `static_cast<u32>(i64_value)` no longer has to reach for
+  `x & 0xffffffff`; `u32(x)` itself is still the checked conversion and still traps on a negative
+  value ("negative value converted to an unsigned type"), so a truncation is always written down.
+  Cases `core-trunc-u32` and `u32-of-negative-i64-still-traps`.
+- **Automatic doors (the pure half) are ported.** `abundance/src/automatic_doors.grl` carries
+  `actions/territory/automatic_doors.hpp` and the pure half of `territory_automatic_doors.cpp`
+  from `cmake/tx/territory.cmake`, with the two constexpr rules it reads from
+  `compound_wall_content.hpp`: `automatable_kind`, `operable_module`, `physical_kind`,
+  `automatable_module`, `tier_row`, `display_name`, `leaf_count`, `rated_w`, `kit_cost` (steel,
+  copper wire and electronic parts per leaf) and the approach sensor's `open_distance_m` and
+  `should_open` (the standing zone, the approach cone and the runway, clamped to the sensor's
+  range). `abundance/tests/automatic_doors_test.grl` prints 995 lines that match a reference
+  linking the engine's own `territory_automatic_doors.cpp`: every id in the kit's module space,
+  the five tiers, the constants and the sensor's edge cases. `project_loads`, `fit_automatic_kit`
+  and the action that moves the leaf need the ConstructionGrid, the access registry and the power
+  grid, and are a later increment.
+
+- **glibc-exact double `pow`**: `lib/math_glibc` gains `pow`, `e_pow.c`'s log/exp pair over
+  `__pow_log_data` and `__exp_data`. Which multiply-adds fuse cannot be read off the source (GCC contracts by
+  register pressure, so the same expression fuses in one instantiation and not in another): the sites were read
+  from this build's own assembly, and the ones that decide the last bit are glibc's `k > 0` saturation, which
+  fuses, against the subnormal reconstruction, which does not and whose zero-sign fix-up reads the `sbits` the
+  branch itself mutated. Gated against the host libm on 21,120,542 pairs -- every special value with its
+  neighbours, the subnormal and overflow boundaries, and a signed threshold apiece -- with no mismatch, and
+  pinned by `math-glibc-pow`. `math::pow` keeps its own formulation: switching it to delegate is a decision for
+  the lanes whose parities were taken against it.
+- **The procedural placeholder pieces are ported, bit for bit.** `abundance/src/procgen_placeholder.grl`
+  carries the kit's own Soup (convex polygons with one face normal and caller-axis UVs, boxes as six
+  faces, prisms and cylinders from 2D profiles, n-gon pyramids) and all 21 shapes the dispatcher
+  knows. `kit_test.grl` matches `parity/kit.txt`: 1968 values over three size sets and both windings.
+
+- **The developer console is ported.** `abundance/src/dev_console.grl` carries `ab::ui::dev_console`
+  of `cmake/tx/dev_console.cmake`: the eleven-verb catalogue with its authorities, dev gating and
+  aliases, `find`/`matching`, the line parser (whitespace, `"..."` grouping, `key=value`, the
+  unclosed-quote and control-character refusals), the editing operations on UTF-8 with the 511-byte
+  bound, history (deduplicated, capped at 100, walking off the newest keeps the typed line), the
+  bounded 200-line log, Tab completion of verbs and of an argument through the host's token source,
+  and the overlay's layout (the sheet, header, rule, scrolled output, prompt with its caret and the
+  footer). `abundance/tests/parity/dev_console.cpp` compiles the engine's file and prints 511
+  values; `abundance/tests/dev_console_test.grl` reproduces every one.
+- **The HUD's interaction-card copy is ported.** `abundance/src/hud_prompt.grl` carries
+  `ab::hud_prompt` of `cmake/tx/hud.cmake`'s ABHUDPromptText.cpp: the aimed factory machine's prompt
+  (held input, electrical pole and generator verbs, the panel title, the Alt-E tool turn or held
+  output), the wire tool's prompt at a pole (observed reason, or the request verb), and the natural
+  harvest target's status line with rubber tapping's resting, early-cut, tapped and fresh states and
+  the latex-at-the-cup suffix; its `%.0f` numbers go through the exact fixed-decimal formatter.
+  `abundance/tests/parity/hud_prompt.cpp` compiles the engine's file and prints 34 byte-exact
+  strings; `abundance/tests/hud_prompt_test.grl` reproduces them.
+- **The save now carries the host's own engine section.** `scarab`'s checkpoint gains the 'ABTX'
+  half of `ab::tx::store_host_sections`: the committed clock and next engine id from the session,
+  encoded by `abundance_tx_sections::encode_engine` at `host_section_schema` 3, and written on the
+  reference side by a real `ab::tx::World`. Both halves produce the same 44-byte section (id
+  1481916993) and the same checkpoint bytes after the encoder's id sort — 1208 lines. The 'ABTW'
+  table envelope is the other half of `store_host_sections` and needs every registered table's
+  payload codec (abn_mesh's `tx_tables.grl`, 9 of 65 tables so far), so it is not written yet.
+- **BC7 and BC6H encode through the engine's ISPC encoders from Grail.** `abundance/src/bc_ispc.grl`
+  binds a two-function C shim (`abundance/tools/bc_ispc_shim.cpp`, built by
+  `abundance/tools/build-bc-ispc.mjs`) over `abe::materials::encode_bc7`/`encode_bc6h` and the
+  same bc7e/ISPC-texcomp kernels the importer links, instead of porting their mode searches.
+  `abundance/tests/bc_ispc_test.grl` encodes the shared fixtures through it and compares every
+  block byte with the engine's committed BC7, BC7-sRGB and BC6H blocks (48 reference lines); it is
+  skipped by name on a host without Abundance's materials build tree.
+
 - **Methods on every built-in type, and integers have Rust's everyday ones.** Every program now gets
   `lib/scalar.grl` beside `core`: each integer type has `min`, `max`, `clamp`, `pow`, `abs`/`signum`
   (signed), `checked_add`/`_sub`/`_mul`/`_div` (`None` on overflow), `saturating_add`/`_sub`,
@@ -112,7 +502,27 @@
   `host::alive(pid)` answers exists / gone / exists-but-unsignallable; `fs` wraps both as
   `File::lock`/`unlock` and `fs::alive`. The abundance suite exercises them deterministically
   (`fs_primitives_test.grl`).
+- **Abundance: the mesa planner's ranked keep-apart selection is now gated on a multi-region
+  world.** The mesa fixture is a 12 km plain of bedded rock with four separated basins and one
+  mediocre corner basin. `mesa.multi` keeps four regions while rejecting candidates for separation
+  and stopping the ranked loop on a score below the second-region threshold (0.6193); the two runs
+  beside it show each rule biting on its own — with the threshold off the same world yields seven
+  regions, and forced selection at the same footprint yields six — so the ranking and the separation
+  rule can no longer silently differ. The builder is gated twice: as the engine runs it (the washes
+  carve the landform, no cell reaches the cap) and with the wash thresholds out of reach (the tops
+  reach the caprock, 74 cap cells), which exercises the cap branch too. 36 of 36 lines.
 
+- **The terrain page pool's bounds and cache-invalidation rules are ported.** `abundance/src/
+  render_policy_page_bounds.grl` carries `terrain_gpu/page_policy.hpp`: per-quadrant page bounds and
+  their range over a quadrant mask, the world envelope a page publishes until its generation pass
+  measures it (with the overshoot that says the envelope is wrong), the 8 m outward quantisation that
+  keeps culling stable, a drawn node's culling range (morph parent, the measured max |own - parent|,
+  edge-snap targets and fade sources, the skirt and the canopy lift), the shadow invalidation
+  threshold with its morph height-error model and the state that decides it, and the quantised
+  ray-tracing camera a level's BLAS refits follow. With the helpers it reads from `tile_key.hpp` and
+  `node_binding.hpp` (tile/cell size, parent, morph band, skirt). 206 reference lines. Also records
+  the terrain server boundary in the README: its demand order is not gated, because it is not
+  observable without a client-stream test hook, and its key math is private/static.
 - Added: `^=` is a compound assignment, like `+=` and the rest: `x ^= 3` in a local, a record field
   (`a.n ^= 15`) and an indexed element (`v[i] ^= 3`), at the target's own integer width. It was
   "expected `=`" - the lexer's multibyte table had no `^=` token (kind 275) - and it is still refused
@@ -174,6 +584,61 @@
   no segment this frame (`device_check().dropped_waits` counts them). The parity reference captures
   vkCmdBindPipeline before each vkCmdDispatch and resolves create names back to resource indices, so
   all four are gated: 3004 lines match.
+- **BC4/BC5 decode joins the ported encoder.** `lib/bc_encode.grl` gains `decode_bc4`/`decode_bc5`
+  (rgbcx unpack: the block value table plus 3-bit selectors, texels outside the extent zero, BC4
+  replicated into r/g/b, BC5 keeping b zero). `abundance/tests/bc_encode_test.grl` decodes the
+  engine's own committed block bytes and compares the RGBA8 texels with
+  `abe::materials::decode_bc4`/`decode_bc5` on the same blocks — 64 reference lines in all, both
+  directions gated on the same eight fixtures.
+
+- **The field HUD's compass is ported, byte for byte against the engine.** `abundance/src/hud_compass.grl`
+  carries `ab::hud_compass` of `cmake/tx/hud.cmake` (Public/abundance/hud/hud_compass.hpp and
+  Private/hud_compass.cpp): `build_view` (the lettered heading strip with its five-degree ticks and
+  end fade, the heading readout, the wind marker and its text, downed-player flare markers and the
+  security cameras' intruder marks, each distance string translated), the shared marker geometry
+  from `downed_flare.cpp`, and `layout` (the faded backdrop, letters, marker pills, tick strokes,
+  rule, caret, diamonds and squares, wind arrow and the info line, all as one mesh plus the text
+  boxes the engine draws). The engine's process-wide locale and catalog are host glue, so the text
+  helpers take the catalog and the language; a missing id falls back to its English pattern. Two
+  details are noted in the module: the C++'s `m.tri(m.add(a), m.add(b), m.add(c))` calls GCC
+  evaluates right to left, so the vertices enter the stream as c, b, a; and lib/math's double `sin`
+  is 1 ulp below glibc's on some arguments (reported - glibc's is correctly rounded), so the flow
+  direction is computed with a double-double Taylor sine/cosine of the same accuracy.
+  `abundance/tests/parity/hud_compass.cpp` compiles the engine's hud_compass.cpp (with
+  downed_flare.cpp and localization.cpp) and prints 2559 values over eight view fixtures and five
+  layout styles; `abundance/tests/hud_compass_test.grl` reproduces every one.
+- **Content QA runs in Grail over a material package.** `abundance/src/content_qa.grl` ports
+  `engine/materials/content_qa/content_check.cpp`'s texture side: the classification and its albedo/roughness
+  envelopes, the `.abmat` reader, the texture statistics (the resident tail mip's colour, luminance percentiles, HSV,
+  opacity coverage, a normal map's spread and integrability, ORM means) and the findings with the engine's wording and
+  impact weights - `asset.unreadable`, `material.fallback`, `texture.semantic`, `normal.flat`, `normal.bias`,
+  `normal.inverted_green`, `roughness.range`, `roughness.flat`, `metal.natural`, `licence.missing`, `albedo.range`,
+  `albedo.highlights`, `albedo.neon` and `albedo.hue`. `abundance/src/bc_decode.grl` decodes BC4 and BC5 for it.
+  `abundance/tests/qa_test.grl` matches all 44 lines the engine's own checker prints over nine packages written by
+  `abundance/tests/parity/qa.cpp`. BC7/BC6H maps report `no CPU decoder`, and the mesh, material-set and licence-scan
+  checks remain in the C++ checker.
+- **The multiplayer abuse gate is ported** (`abundance/src/multiplayer_abuse.grl`): the
+  transport-neutral check every client intent passes before its owning authority sees it - the
+  server-owned session frame, the rate window that charges every attempt, the command-sequence and
+  16-entry nonce replay windows that only a downstream commit consumes, every limit with its hard
+  maximum, the outright refusal of any client claim of authority over an outcome, the lifecycle
+  (disconnect, death, session rotation, rebirth) that makes a pending ticket stale, and the client
+  projection that has no member for secret state. Gated by `tests/parity/multiplayer_abuse.cpp`
+  compiling the engine's own `multiplayer_abuse_validation.cpp`: 115 reference lines, all matched
+  by `abundance/tests/multiplayer_abuse_test.grl`.
+
+- **The terrain chunk wire format's brick body and frame are ported**
+  (`abundance/src/world_chunk_wire.grl`): the PackBits coder, the varint palette count, one- and
+  two-byte cell indices, the int8 densities with their reserved `-128`, the `WorldBrick::from_cells`
+  format rules (density clamped to the air floor, saturated-air substitution, air never solid, the
+  uniform rule), and the chunk frame around them - version/flags, zigzag key, base identity,
+  revision, brick records with their repeat runs, and the placed-cell list. Gated by
+  `tests/parity/world_chunk_codec.cpp`, which compiles the engine's own `world_chunk_codec.cpp`
+  and `world_chunk.cpp` and builds every fixture through `WorldBrick::from_cells`: 119 reference
+  lines (eight brick fixtures with byte hashes and cell digests, five brick refusals, four chunk
+  frames with re-encode identity, three frame refusals), matched by
+  `abundance/tests/world_chunk_codec_test.grl`. The canonical-shape section, the server layers and
+  `voxel/world_voxel_save` are the next increment.
 
 - **`v.iter()` is every vector's, view's and slice's own method, with no `use` line.** It borrows
   `v` and yields `&T`, as Rust's `iter()` does, so `v` is still usable afterwards and stays borrowed
@@ -417,6 +882,18 @@
   `~/.cache/grail-builds/<stamp>/<name>`), so twenty worktrees with identical inputs keep one copy of each
   artefact instead of twenty; `/home` filled to 100 % twice under the swarm's disk load. A build that
   cannot copy into the store still succeeds.
+- **The world model's save/restore is ported on top of the section layer.** `save_sections` in
+  `abundance/src/world_model.grl` builds the engine's `EngineState` from the world (canonical clock
+  and registry rows) and stores it as `'ABTX'` plus `'ABTW'` with the same rows under
+  `engine.entities`, through `abundance_tx_sections` (the 'ABTX'/'ABTW' section layer another lane
+  already ported — not re-ported). `restore` mirrors `Session::restore`: only an empty candidate
+  restores, the epoch bumps, the clock and rows come back, and the pawn components are rebuilt
+  from their persisted rows (kind from the type id's fnv name, latched input from the version-2
+  wire payload); `load_sections` being all-or-nothing means a wrong schema or an undecodable
+  payload refuses and leaves the world untouched. `save_refusal` is `request_save`'s admission.
+  The replay gates the two sections' bytes and FNVs against the engine's own `ab::tx::encode`
+  of `EngineState` and the envelope (1 534 reference lines).
+
 - **The Jolt surface closes with the overlap query.** `gr_jolt_overlap_capsule` is one `CollideShape`
   of the same capsule the cast sweeps, stopped at the first hit: `abundance/src/jolt.grl` now answers
   the core's `overlap` contract (a boolean, with `invalid_request` for a capsule shorter than its own
@@ -558,6 +1035,16 @@
   to binary32 and widened back. Only an `f32` context rounds a literal from its text now, so the
   compound forms (`*=`, `+=`, ...) agree bit for bit with `y = y * lit`; an `f32` target is unchanged.
   Case `compound-f64-literal-keeps-its-bits`.
+- **Abundance port: compute passes, depth attachments and transient buffers execute through the
+  render graph.** `rhi_engine_graph` now binds transient buffers at their placements, renders up to
+  four colour attachments plus an optional depth attachment from the plan's per-pass state, and
+  records a dispatch body against a caller-named compute pipeline and its 128-byte push block (the
+  bindless sets are bound at the compute bind point first). A dispatch with no named pipeline is
+  refused; the plan's own `Dispatch.pipeline` id replaces the caller table when it lands.
+  `rhi_graph_probe` adds a transient buffer (filled from an image, copied back and compared), a depth
+  clear pass and a real `cs_6_6` dispatch writing per-thread ids through the bindless table, read
+  back exactly and validation-clean. The imgui frame probe destroys its framebuffers and semaphores
+  before the device (VUID-vkDestroyDevice-device-05137).
 - **The dedicated server's datagram reliability layer is ported** (`abundance/src/net_datagram.grl`):
   `ab::server::DatagramConnection` - which the engine's own header documents as pure logic with no
   sockets - with packet sequence numbers and the wrap-safe newer-than compare plus a 32-bit ack
@@ -598,15 +1085,18 @@
   `vector<u8>`), `gathering.tree_regrowth` (a vector of u64 seed + f64 remainder, then f64
   last-advanced), `inventory.hotbar_selection` (u64 character, u32 slot, u64 sequence, bool),
   `power.portable_charge` (an `optional` of seven u64s: one tag byte, refused above 1) and
-  `world.block_damage` (WorldCell's three i32, u16 damage, u8 face). Record tables are a u32 record
-  count then the records' fields in AB_TX_FIELDS order. Decoding is the field codec's: an object count at most 2^22 and at most one per remaining
+  `world.block_damage` (WorldCell's three i32, u16 damage, u8 face), `gathering.hand_mining` (u64
+  character, f64 last strike), `construction.furnishing` (u64 stable id, container, owner, rain lot,
+  f64 rain sampled), `construction.cell_tint` (ConstructionCellCoord's three i32, u64 instance,
+  u32 rgb), `gathering.wild_crop` (a vector of u64 plant ids) and `gathering.rubber_tap` (u64 tree,
+  u32 cuts, nine f64). Record tables are a u32 record count then the records' fields in AB_TX_FIELDS order. Decoding is the field codec's: an object count at most 2^22 and at most one per remaining
   byte, a string a u32 length at most 65536, a `vector<u8>` bounded only by what remains (the
   harvesting book is deliberately not string-capped), exact consumption, and no key-order check
   (only put() sorts). The reference builds the tables through their own put(), saves them with the
   engine's World::encode_tables, prints every field with floats as bits and signed integers in two's
   complement, and replays sixteen mutated payloads through the engine's decode_tables, whose
   "payload does not load (table N name)" wording the port reproduces verbatim;
-  `abundance/tests/tx_tables_test.grl` matches all 59 lines and re-encodes each blob byte for byte.
+  `abundance/tests/tx_tables_test.grl` matches all 85 lines and re-encodes each blob byte for byte.
 
   checkpoint envelope with the survival record tables - `survival.life` (u64 character id, u64
   respawn container), `survival.join` (string digest, u64 account, u64 character) and
