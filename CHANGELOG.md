@@ -72,6 +72,22 @@
   two stand-ins with the page-ready rule they share. 262 reference lines. The page pool's own
   bookkeeping (`page_book.hpp`, `node_set.hpp`) and the residency manager's selection are their own
   increments.
+- **The field HUD's compass is ported, byte for byte against the engine.** `abundance/src/hud_compass.grl`
+  carries `ab::hud_compass` of `cmake/tx/hud.cmake` (Public/abundance/hud/hud_compass.hpp and
+  Private/hud_compass.cpp): `build_view` (the lettered heading strip with its five-degree ticks and
+  end fade, the heading readout, the wind marker and its text, downed-player flare markers and the
+  security cameras' intruder marks, each distance string translated), the shared marker geometry
+  from `downed_flare.cpp`, and `layout` (the faded backdrop, letters, marker pills, tick strokes,
+  rule, caret, diamonds and squares, wind arrow and the info line, all as one mesh plus the text
+  boxes the engine draws). The engine's process-wide locale and catalog are host glue, so the text
+  helpers take the catalog and the language; a missing id falls back to its English pattern. Two
+  details are noted in the module: the C++'s `m.tri(m.add(a), m.add(b), m.add(c))` calls GCC
+  evaluates right to left, so the vertices enter the stream as c, b, a; and lib/math's double `sin`
+  is 1 ulp below glibc's on some arguments (reported - glibc's is correctly rounded), so the flow
+  direction is computed with a double-double Taylor sine/cosine of the same accuracy.
+  `abundance/tests/parity/hud_compass.cpp` compiles the engine's hud_compass.cpp (with
+  downed_flare.cpp and localization.cpp) and prints 2559 values over eight view fixtures and five
+  layout styles; `abundance/tests/hud_compass_test.grl` reproduces every one.
 - **The book's sidebar drops its "Find a topic" subtitle;** the search box (labelled for screen readers) sits under the title.
 - **The languages overview chart reads plainly.** Its bars start at 1× (the fastest language's time)
   on one logarithmic scale shared by the release and development groups, each group lists the
