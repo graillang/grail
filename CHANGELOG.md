@@ -1,5 +1,11 @@
 ## Unreleased
 
+- **The construction-kit accumulator is ported, bit for bit.** `abundance/src/procgen_kit_acc.grl`
+  carries `kit_acc.hpp`: per-slot surfaces, the Basis/Xform and its quaternion/arc/axis-angle
+  constructors, the round-side quality floor, and `grid`/`grid_out`/`fan`/`lathe`/`tube` (welded
+  smooth normals, metre UVs, seam duplication, parallel transport). `kitacc_test.grl` matches
+  `parity/kitacc.txt`: 166 values, the reference driving the header directly.
+
 - **The derelict monument layouts are complete: the library, arms depot, factory, orchard and dam
   templates join the farm, and pieces resolve through the construction catalogue.**
   `abundance/src/monument_layout.grl` now carries the rest of `monument_layout.cpp` (`panels` and the
