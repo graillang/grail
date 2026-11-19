@@ -50,6 +50,12 @@
   behaviour change: the combat parity cases are byte-identical (combat_core 1 548 lines,
   combat_world 374 lines).
 
+- **The World hub's map view is ported.** `abundance/src/map_view.grl` carries `ab::ui::map_view` of
+  `cmake/tx/settings_screen.cmake`: the whole-window view, clamping (zoom 1x-48x, the picture kept
+  inside the window, std::clamp's NaN pass-through), the shown rectangle, cursor-anchored zoom,
+  pan, centre-on, the north-up texture window, the 1-2-5 scale bar and its "%.0f km"/"%.1f km"/
+  "%.0f m" label. `abundance/tests/parity/map_view.cpp` prints 1542 values over five windows and
+  seven states; `abundance/tests/map_view_test.grl` reproduces them.
 - **Abundance: the feature composition contract is ported and gated.** `src/feature_composition.grl`
   carries `apply_feature_heights` (bounded add, then carve toward a target, then raise toward a
   target, then the world's elevation clamp) and `compose_feature_layers` (the higher weight wins and
