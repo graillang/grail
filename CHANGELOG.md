@@ -81,6 +81,12 @@
   no segment this frame (`device_check().dropped_waits` counts them). The parity reference captures
   vkCmdBindPipeline before each vkCmdDispatch and resolves create names back to resource indices, so
   all four are gated: 3004 lines match.
+- **BC4/BC5 decode joins the ported encoder.** `lib/bc_encode.grl` gains `decode_bc4`/`decode_bc5`
+  (rgbcx unpack: the block value table plus 3-bit selectors, texels outside the extent zero, BC4
+  replicated into r/g/b, BC5 keeping b zero). `abundance/tests/bc_encode_test.grl` decodes the
+  engine's own committed block bytes and compares the RGBA8 texels with
+  `abe::materials::decode_bc4`/`decode_bc5` on the same blocks — 64 reference lines in all, both
+  directions gated on the same eight fixtures.
 
 - **The book's sidebar drops its "Find a topic" subtitle;** the search box (labelled for screen readers) sits under the title.
 - **The languages overview chart reads plainly.** Its bars start at 1× (the fastest language's time)

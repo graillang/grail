@@ -236,3 +236,85 @@ pub fn encode_bc5<a>(rgba8: &a [u8], width: u64, height: u64) -> u8[] {
     }
     return out;
 }
+
+// ---- decode --------------------------------------------------------------------------------
+// rgbcx::unpack_bc4/unpack_bc5 as the engine's decoders wrap them
+// (engine/materials/src/bc_encode.cpp:120-166: texels outside the extent are left zero, BC4 writes
+// its channel to r/g/b and BC5 keeps b zero, and both set a).
+
+// The 16 selector indices of one block (3 bits each, little-endian over 6 bytes).
+fn selectors(block: &[u8]) -> u64[] {
+    mut bits: u64 = 0;
+    for k in 6 {
+        bits = bits | (block[2 + k] << (k * 8));
+    }
+    mut out = u64[];
+    for i in 16 {
+        out.push((bits >> (i * 3)) & 7);
+    }
+    return out;
+}
+
+// RGBA8 decode of BC4 blocks (8 bytes each), width x height texels.
+pub fn decode_bc4<a>(blocks: &a [u8], width: u64, height: u64) -> u8[] {
+    bw := (width + 3) / 4;
+    bh := (height + 3) / 4;
+    mut out = u8[];
+    for i in width * height * 4 {
+        out.push(0);
+    }
+    for by in bh {
+        for bx in bw {
+            at := (by * bw + bx) * 8;
+            vals := block_values(blocks[at], blocks[at + 1]);
+            sels := selectors(&blocks[at : at + 8]);
+            for y in 4 {
+                for x in 4 {
+                    tx := bx * 4 + x;
+                    ty := by * 4 + y;
+                    if tx < width && ty < height {
+                        v := vals[sels[y * 4 + x]];
+                        o := (ty * width + tx) * 4;
+                        out[o] = v;
+                        out[o + 1] = v;
+                        out[o + 2] = v;
+                        out[o + 3] = 255;
+                    }
+                }
+            }
+        }
+    }
+    return out;
+}
+
+// RGBA8 decode of BC5 blocks (16 bytes each): channel 0 in r, channel 1 in g, b zero.
+pub fn decode_bc5<a>(blocks: &a [u8], width: u64, height: u64) -> u8[] {
+    bw := (width + 3) / 4;
+    bh := (height + 3) / 4;
+    mut out = u8[];
+    for i in width * height * 4 {
+        out.push(0);
+    }
+    for by in bh {
+        for bx in bw {
+            at := (by * bw + bx) * 16;
+            v0 := block_values(blocks[at], blocks[at + 1]);
+            s0 := selectors(&blocks[at : at + 8]);
+            v1 := block_values(blocks[at + 8], blocks[at + 9]);
+            s1 := selectors(&blocks[at + 8 : at + 16]);
+            for y in 4 {
+                for x in 4 {
+                    tx := bx * 4 + x;
+                    ty := by * 4 + y;
+                    if tx < width && ty < height {
+                        o := (ty * width + tx) * 4;
+                        out[o] = v0[s0[y * 4 + x]];
+                        out[o + 1] = v1[s1[y * 4 + x]];
+                        out[o + 3] = 255;
+                    }
+                }
+            }
+        }
+    }
+    return out;
+}
