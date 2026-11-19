@@ -168,6 +168,14 @@
   1481916993) and the same checkpoint bytes after the encoder's id sort — 1208 lines. The 'ABTW'
   table envelope is the other half of `store_host_sections` and needs every registered table's
   payload codec (abn_mesh's `tx_tables.grl`, 9 of 65 tables so far), so it is not written yet.
+- **BC7 and BC6H encode through the engine's ISPC encoders from Grail.** `abundance/src/bc_ispc.grl`
+  binds a two-function C shim (`abundance/tools/bc_ispc_shim.cpp`, built by
+  `abundance/tools/build-bc-ispc.mjs`) over `abe::materials::encode_bc7`/`encode_bc6h` and the
+  same bc7e/ISPC-texcomp kernels the importer links, instead of porting their mode searches.
+  `abundance/tests/bc_ispc_test.grl` encodes the shared fixtures through it and compares every
+  block byte with the engine's committed BC7, BC7-sRGB and BC6H blocks (48 reference lines); it is
+  skipped by name on a host without Abundance's materials build tree.
+
 - **A loot site's life is ported.** `abundance/src/site_life.grl` carries `loot_sites/site_life.hpp`
   and `.cpp` from `cmake/tx/loot_sites.cmake`: the tuning with its per-field ranges and the
   cross-field consistency rules, the file's own draw (`mix`, the seeded `unit`, `exponential` and
