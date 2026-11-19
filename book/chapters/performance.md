@@ -13,8 +13,8 @@ charted:
 - **Development builds:** Go's is ahead (1.15x against Grail's 1.32x; Grail is faster than Go on 7
   of the 19 programs). Grail's is faster than Rust's dev profile on all 19 and than Zig Debug on 17.
 - **Compile speed:** Grail executes the fewest instructions on every one of the 40 measurements.
-  Two caveats weigh on that: Grail's development build does not yet emit debug information, which
-  every other toolchain's does, and C and C++ are not yet in the committed measurement.
+  Two caveats weigh on that: the measured Grail build wrote no debug information, where every
+  other toolchain's writes it in full, and C and C++ are not yet in the committed measurement.
 - **Scheduler:** oneTBB is ahead (1.20x against Grail's 1.55x and rayon's 2.63x). Grail has the
   best frame-time tail; its fork-join and spawn costs are behind oneTBB's.
 
@@ -269,18 +269,19 @@ Each is measured four ways: a check and a build, each cold and after a one-funct
 with nothing changed is not measured: on a one-file project every tool answers it within
 milliseconds, so it would time process start-up, not the language. Go has no check command; `go vet` type-checks and then
 runs its analyses, and it is what Go's column shows. A build whose output is thrown away is in a
-table of its own further down. Every build here writes debug information, as each toolchain's
-development build does by default: Go's and Zig Debug's DWARF, cargo's dev profile's, and Grail's
-line tables and function ranges (on by default since the development build is optimised; they cost
-about 6% of an edit's rebuild and none measurable cold on the 26,000-line program, and make its
-binary 8% larger without changing an instruction).
+table of its own further down. The rivals' development builds write full debug information (line
+tables, variables and types). Grail's writes line tables and function ranges but not yet variables
+or types; the line tables cost about 6% of an edit's rebuild and nothing measurable cold on the
+26,000-line program, make the binary 8% larger, and change no instruction. The compile chart below
+was measured before Grail's line tables existed, so its Grail column is a build without any debug
+information.
 
 C and C++ are built the way a C project's edit loop builds: each program is one translation unit
 with a one-target Makefile, and `make` builds it. A check is `clang -fsyntax-only` (`clang++
 -std=c++20 -fsyntax-only`), which parses and type-checks without generating code, as `grail check`,
 `cargo check` and Zig's `-fno-emit-bin` do. A build is `-O0 -g`, linked with lld (`-fuse-ld=lld`):
 no optimisation and full debug information, which is what Zig Debug, Rust's dev profile and
-`go build` do too (Grail's development build does not yet emit debug information), and a fast modern linker, as
+`go build` do too (Grail's writes line tables, not yet variables or types), and a fast modern linker, as
 the others have (Go's and Zig's own, rustc's rust-lld, Grail's ld.lld), so neither the debug
 information nor the linker sets C apart. After a one-function edit, make recompiles the one
 translation unit and links it again. Zig is built with `zig build-exe`, the cheapest way to build a one-file Zig program: `zig build`
@@ -305,9 +306,9 @@ every row: hello world, the engine programs, every check and build after an edit
 check and cold build of both generated programs. The closest row is the cold check of the
 104,000-line program, 0.93x Zig's (3.05 against 3.28 billion instructions, 0.31 against 0.33
 seconds). In wall time with four jobs, Go's cold build of the 26,000-line program is level with
-Grail's (0.47 and 0.48 seconds). Two caveats: Grail's development build does not yet emit debug
-information, which every other column's does, so its build rows do less work than theirs; and the
-C and C++ columns are not yet in the committed measurement. Both programs call every
+Grail's (0.47 and 0.48 seconds). Two caveats: the measured Grail build wrote no debug information,
+which every other column's writes in full, so its build rows do less work than theirs; and the C
+and C++ columns are not yet in the committed measurement. Both programs call every
 function they declare, so Zig's lazy analysis skips nothing. The profiles that got the check there
 are in `docs/design/compile-speed.md`: allocator fast paths, one cache file per module, no drop calls
 on literal string views, and a frame cleared only where a slot is read before it is written.
