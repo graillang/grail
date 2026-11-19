@@ -9369,10 +9369,13 @@ fn target_triple(target: u64) -> u8[] {
     return copy(view("x86_64-unknown-linux-gnu"));
 }
 // On AArch64 and RISC-V the word machine returns rax:rdx in x9:x2 (t0:a2), while LLVM's C
-// convention returns in x0:x1 (a0:a1); arguments already agree (x0..x5 / a0..a5). IR functions
-// are therefore defined as NAME.ll, native code reaches them through a thunk named NAME, and IR
-// reaches native functions through NAME.c.
-fn thunk_into_ir<a>(out: (&a mut u8[]), name: &a [u8], target: u64, weak: bool) -> unit {
+// convention returns in x0:x1 (a0:a1). IR functions are therefore defined as NAME.ll, native code
+// reaches them through a thunk named NAME, and IR reaches native functions through NAME.c.
+// Arguments agree only up to the sixth word (x0..x5 / a0..a5): the word machine passes word 6 + k
+// at 8k(sp) at the call (x86's 16+8k(%rbp) in the callee, native.grl `stack_params`), while LLVM
+// lowers a signature of more than six words with words 6 and 7 in x6/x7 (a6/a7) and word 8 + k at
+// 8k(sp). The thunks move words 6 and later between the two (`words`, the body's parameter count).
+fn thunk_into_ir<a>(out: (&a mut u8[]), name: &a [u8], target: u64, weak: bool, words: u64) -> unit {
     // A name the stream declared `.weak` keeps that binding: a second `.globl` is an assembler
     // error (`changed binding to STB_GLOBAL`).
     if weak {
@@ -9386,18 +9389,71 @@ fn thunk_into_ir<a>(out: (&a mut u8[]), name: &a [u8], target: u64, weak: bool) 
     out.push(10);
     put(&mut out, name);
     put(&mut out, view(":\n"));
+    // The words LLVM takes on the stack (8 and later), in a 16-byte aligned area.
+    mut spill: u64 = 0;
+    if words > 8 {
+        spill = (words - 8 + 1) / 2 * 16;
+    }
     if target == 1 {
-        put(&mut out, view("stp x29,x30,[sp,#-16]!\nmov x29,sp\nbl "));
+        // After the prologue, word 6 + k is at 16 + 8k(x29).
+        put(&mut out, view("stp x29,x30,[sp,#-16]!\nmov x29,sp\n"));
+        if words > 6 {
+            put(&mut out, view("ldr x6,[x29,#16]\n"));
+        }
+        if words > 7 {
+            put(&mut out, view("ldr x7,[x29,#24]\n"));
+        }
+        if spill != 0 {
+            put(&mut out, view("sub sp,sp,#"));
+            num(&mut out, spill);
+            out.push(10);
+            for k in words - 8 {
+                put(&mut out, view("ldr x9,[x29,#"));
+                num(&mut out, 32 + 8 * k);
+                put(&mut out, view("]\nstr x9,[sp,#"));
+                num(&mut out, 8 * k);
+                put(&mut out, view("]\n"));
+            }
+        }
+        put(&mut out, view("bl "));
         put(&mut out, name);
-        put(&mut out, view(".ll\nmov x9,x0\nmov x2,x1\nldp x29,x30,[sp],#16\nret\n"));
+        put(&mut out, view(".ll\n"));
+        if spill != 0 {
+            put(&mut out, view("mov sp,x29\n"));
+        }
+        put(&mut out, view("mov x9,x0\nmov x2,x1\nldp x29,x30,[sp],#16\nret\n"));
     } else {
-        put(&mut out, view("addi sp,sp,-16\nsd ra,8(sp)\nsd s0,0(sp)\naddi s0,sp,16\ncall "));
+        // After the prologue, s0 is the entry sp and word 6 + k is at 8k(s0).
+        put(&mut out, view("addi sp,sp,-16\nsd ra,8(sp)\nsd s0,0(sp)\naddi s0,sp,16\n"));
+        if words > 6 {
+            put(&mut out, view("ld a6,0(s0)\n"));
+        }
+        if words > 7 {
+            put(&mut out, view("ld a7,8(s0)\n"));
+        }
+        if spill != 0 {
+            put(&mut out, view("addi sp,sp,-"));
+            num(&mut out, spill);
+            out.push(10);
+            for k in words - 8 {
+                put(&mut out, view("ld t1,"));
+                num(&mut out, 16 + 8 * k);
+                put(&mut out, view("(s0)\nsd t1,"));
+                num(&mut out, 8 * k);
+                put(&mut out, view("(sp)\n"));
+            }
+        }
+        put(&mut out, view("call "));
         put(&mut out, name);
-        put(&mut out, view(".ll\nmv t0,a0\nmv a2,a1\nld ra,8(sp)\nld s0,0(sp)\naddi sp,sp,16\nret\n"));
+        put(&mut out, view(".ll\n"));
+        if spill != 0 {
+            put(&mut out, view("addi sp,s0,-16\n"));
+        }
+        put(&mut out, view("mv t0,a0\nmv a2,a1\nld ra,8(sp)\nld s0,0(sp)\naddi sp,sp,16\nret\n"));
     }
     return ();
 }
-fn thunk_from_ir<a>(out: (&a mut u8[]), name: &a [u8], target: u64) -> unit {
+fn thunk_from_ir<a>(out: (&a mut u8[]), name: &a [u8], target: u64, words: u64) -> unit {
     // Weak: every unit of a per-module release build that calls the native NAME from IR carries
     // the same thunk, and the link keeps one (`duplicate symbol: rt_abort.c` otherwise).
     put(&mut out, view(".text\n.weak "));
@@ -9407,16 +9463,84 @@ fn thunk_from_ir<a>(out: (&a mut u8[]), name: &a [u8], target: u64) -> unit {
     put(&mut out, view(".c\n"));
     put(&mut out, name);
     put(&mut out, view(".c:\n"));
+    // The word machine's outgoing area (words 6 and later), 16-byte aligned.
+    mut area: u64 = 0;
+    if words > 6 {
+        area = (words - 6 + 1) / 2 * 16;
+    }
     if target == 1 {
-        put(&mut out, view("stp x29,x30,[sp,#-16]!\nmov x29,sp\nbl "));
+        // After the prologue, LLVM's word 8 + k is at 16 + 8k(x29).
+        put(&mut out, view("stp x29,x30,[sp,#-16]!\nmov x29,sp\n"));
+        if area != 0 {
+            put(&mut out, view("sub sp,sp,#"));
+            num(&mut out, area);
+            put(&mut out, view("\nstr x6,[sp,#0]\n"));
+            if words > 7 {
+                put(&mut out, view("str x7,[sp,#8]\n"));
+            }
+            if words > 8 {
+                for k in words - 8 {
+                    put(&mut out, view("ldr x9,[x29,#"));
+                    num(&mut out, 16 + 8 * k);
+                    put(&mut out, view("]\nstr x9,[sp,#"));
+                    num(&mut out, 16 + 8 * k);
+                    put(&mut out, view("]\n"));
+                }
+            }
+        }
+        put(&mut out, view("bl "));
         put(&mut out, name);
-        put(&mut out, view("\nmov x0,x9\nmov x1,x2\nldp x29,x30,[sp],#16\nret\n"));
+        out.push(10);
+        if area != 0 {
+            put(&mut out, view("mov sp,x29\n"));
+        }
+        put(&mut out, view("mov x0,x9\nmov x1,x2\nldp x29,x30,[sp],#16\nret\n"));
     } else {
-        put(&mut out, view("addi sp,sp,-16\nsd ra,8(sp)\nsd s0,0(sp)\naddi s0,sp,16\ncall "));
+        // After the prologue, s0 is the entry sp and LLVM's word 8 + k is at 8k(s0).
+        put(&mut out, view("addi sp,sp,-16\nsd ra,8(sp)\nsd s0,0(sp)\naddi s0,sp,16\n"));
+        if area != 0 {
+            put(&mut out, view("addi sp,sp,-"));
+            num(&mut out, area);
+            put(&mut out, view("\nsd a6,0(sp)\n"));
+            if words > 7 {
+                put(&mut out, view("sd a7,8(sp)\n"));
+            }
+            if words > 8 {
+                for k in words - 8 {
+                    put(&mut out, view("ld t1,"));
+                    num(&mut out, 8 * k);
+                    put(&mut out, view("(s0)\nsd t1,"));
+                    num(&mut out, 16 + 8 * k);
+                    put(&mut out, view("(sp)\n"));
+                }
+            }
+        }
+        put(&mut out, view("call "));
         put(&mut out, name);
-        put(&mut out, view("\nmv a0,t0\nmv a1,a2\nld ra,8(sp)\nld s0,0(sp)\naddi sp,sp,16\nret\n"));
+        out.push(10);
+        if area != 0 {
+            put(&mut out, view("addi sp,s0,-16\n"));
+        }
+        put(&mut out, view("mv a0,t0\nmv a1,a2\nld ra,8(sp)\nld s0,0(sp)\naddi sp,sp,16\nret\n"));
     }
     return ();
+}
+// The argument words of a `define` line: its `i64 %aK` parameters.
+fn define_words<a>(line: &a [u8]) -> u64 {
+    mut n: u64 = 0;
+    mut i: u64 = 0;
+    while i + 6 <= line.len() {
+        if occurs_at_safe(line, i, view("i64 %a")) {
+            n += 1;
+            i += 6;
+            continue;
+        }
+        if line[i] == 41 {
+            break;
+        }
+        i += 1;
+    }
+    return n;
 }
 // `line` with each `@"NAME"(` call or definition renamed to NAME.ll (lifted) or NAME.c (native).
 fn rename_calls<a, b>(line: &a [u8], lifted: (&b Set)) -> u8[] {
@@ -10523,7 +10647,7 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
                 e += 1;
             }
             fname := sub(line, at, e - 3);
-            thunk_into_ir(&mut thunks, view(fname), target, set_has(&weak, view(fname)));
+            thunk_into_ir(&mut thunks, view(fname), target, set_has(&weak, view(fname)), define_words(line));
         }
         if at != 0 {
             // A body the stream declared `.weak` (a generic specialisation, a content-addressed
@@ -10601,7 +10725,12 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
                 marker.push(1);
                 if !set_has(&lifted, view(marker)) {
                     set_add(&mut lifted, view(marker));
-                    thunk_from_ir(&mut thunks, name, target);
+                    code := set_get(&l.sigs, name);
+                    mut words = 6;
+                    if code != 0 {
+                        words = code / 4;
+                    }
+                    thunk_from_ir(&mut thunks, name, target, words);
                 }
             }
         }
