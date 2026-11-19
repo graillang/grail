@@ -235,6 +235,9 @@ function layOutCase(directory, sourcePath, bytes) {
   const name = basename(sourcePath);
   for (const sibling of readdirSync(dirname(sourcePath)).sort()) {
     if (!sibling.endsWith('.grl') || sibling === name) continue;
+    // The other targets' platform modules define the same runtime functions as os-linux.grl: a
+    // project holding all three is refused as it stands, whatever the mutation.
+    if (dirname(sourcePath) === join(root, 'compiler') && OTHER_TARGET_MODULES.has(sibling)) continue;
     try {
       symlinkSync(join(dirname(sourcePath), sibling), join(source, sibling));
     } catch {
