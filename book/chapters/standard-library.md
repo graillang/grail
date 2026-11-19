@@ -28,8 +28,9 @@ fn main() {
     start := text.find(view(" by "))!;                    // Some(index); ! aborts on None
     replaced := text.replace(view("example"), view("code"));
     println(replaced);
-    println(strings::from_u64(start));                    // a constructor, so a free function
-    println(strings::from_i64(-42));
+    println(start.to_string());                           // an integer method
+    minus: i64 = -42;
+    println(minus.to_string());
     match view("18446744073709551615").parse_u64() {
         Some(value) => { println(value); },
         None => { println("not a number"); }
@@ -45,9 +46,8 @@ and `chars` cover the everyday cases - `chars`, `replace`, `repeat`, `starts_wit
 than copies; `split_owned` copies the pieces. `parse_f64` is correctly rounded (Eisel-Lemire with an
 exact fallback, shared with `json`). `parse_u64` accepts decimal
 digits only and rejects empty input, a stray character and overflow; `parse_i64` also accepts a
-leading `-` and checks the signed range. `from_u64` and `from_i64` are their inverse, and they are
-free functions because the receiver would be the number, not the text - `value.text()` is the
-builtin that turns a number into a `string`. Building a line from parts needs no library call:
+leading `-` and checks the signed range. `value.to_string()`, a method every integer has, is their
+inverse. Building a line from parts needs no library call:
 `format("{} of {}", done, total)` is a builtin and returns a `string`, which is what `println` uses. `out.append_format("{} of {}", done, total)` writes the same text onto the end of a
 `string` or byte vector `out` instead, with no string of its own.
 

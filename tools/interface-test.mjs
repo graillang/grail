@@ -1442,7 +1442,7 @@ function proveWrittenInherent() {
   mkdirSync(directory, { recursive: true });
   const ifaces = join(directory, 'ifaces');
   mkdirSync(ifaces, { recursive: true });
-  const lib = join(root, 'tests/interfaces/arithmetic.grl');
+  const lib = join(root, 'tests/std/arithmetic.grl');
   const user = join(root, 'tests/interfaces/written_inherent_user.grl');
   const libFiles = [lib, runtime, platform];
   // The emitting run has no entry: a library module has no `main`.

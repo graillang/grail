@@ -613,10 +613,18 @@ function stage(context) {
   for (const file of readdirSync(join(root, 'lib')).filter(f => f.endsWith('.grl'))) {
     writeFileSync(join(stdSnapshot, file), readFileSync(join(root, 'lib', file)));
   }
+  // tests/std holds standard-library fixtures (inherent impls on built-in types are the standard
+  // library's alone): staged with their marker core.grl beside them, so they stay standard modules.
+  const stdFixture = join(snapshot, 'std-fixture');
+  mkdirSync(stdFixture, { recursive: true });
+  for (const file of readdirSync(join(root, 'tests/std')).filter(f => f.endsWith('.grl'))) {
+    writeFileSync(join(stdFixture, file), readFileSync(join(root, 'tests/std', file)));
+  }
   for (let i = 0; i < context.cases.length; i++) {
     for (const field of ['files', 'modules', 'interfaceFiles']) if (context.cases[i][field]) context.cases[i][field] = context.cases[i][field].map((file, j) => {
       const source = resolve(root, file);
       if (dirname(source) === join(root, 'lib')) return join(stdSnapshot, basename(source));
+      if (dirname(source) === join(root, 'tests/std')) return join(stdFixture, basename(source));
       const path = join(snapshot, `${i}-${field}-${j}-${basename(file)}`);
       writeFileSync(path, readFileSync(source));
       return path;
