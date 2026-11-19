@@ -17,6 +17,17 @@
   spring, injury movement gates, the downed hold (local and authority), the death camera, presented
   life and the R key, queued maintenance, the wind-up gauge, powered-tool hold, weapon presentation
   serials/clocks and the equipment request gates: 321 values match the pin's headers.
+- **The player's map waypoint is ported.** `abundance/src/map_waypoint.grl` carries `ab::map_waypoint`
+  of `cmake/tx/settings_screen.cmake`: ground distance, compass and view-relative bearings, the
+  north-up map picture (usable test, world-to-screen, contains, screen-to-world, metres per pixel),
+  the click / pick-up / clear / arrive state, the reading the HUD and the map share, and the
+  distance and compass-point text. `abundance/tests/parity/map_waypoint.cpp` prints 225 values;
+  `abundance/tests/map_waypoint_test.grl` reproduces them.
+- `abundance/src/exact_trig.grl` gives the presentation code correctly rounded double `sin`, `cos`
+  and `atan2` (double-double Taylor series, and one Newton step on lib/math's `atan2`), because
+  glibc's are correctly rounded and lib/math's fdlibm versions land one ulp off on some arguments
+  (three of the waypoint's bearings; the compass wind flow). `hud_compass.grl` now uses it in place
+  of its own local sine/cosine.
 - **Abundance: the mesa coupling and marks are ported and bit-exact.** `src/coherent_mesa.grl` gains
   `mesa_stepped_sites` (the handover to the stepped-hills pass: one Mesa-style site per built region,
   carrying the caprock, the seed and the `masked` bit that says the Mesa mask already holds the
