@@ -17,6 +17,12 @@
   swap, which copied the old value out from under the returned slot and cleared the field it still
   pointed at. The source now gets its own storage first, so the old value comes back whole and every
   string is dropped exactly once (corpus case `exchange-record-field-source`).
+- **The collision model's query half is a shared module.** The chunk view, `query_box`,
+  `gather_triangles`, `world_segment_hit`, the Ericson narrow phase, `sweep_capsule` and `raycast`
+  move verbatim out of `abundance/src/combat_trace.grl` into `abundance/src/collision_query.grl`, so
+  the kinematic mover builds on the same queries combat uses instead of re-porting them. No
+  behaviour change: the combat parity cases are byte-identical (combat_core 1 548 lines,
+  combat_world 374 lines).
 
 - **Abundance: the feature composition contract is ported and gated.** `src/feature_composition.grl`
   carries `apply_feature_heights` (bounded add, then carve toward a target, then raise toward a
