@@ -476,7 +476,9 @@ function runCase(test, position, context) {
       // table that names a label no body defines. A case some other flag keeps from `--debug` is
       // left to its own flags.
       let debugChecked = 0;
-      if (!(test.flags ?? []).includes('--debug')) {
+      // `--debug` is refused beside `--no-debug-info`: a case that turns debug information off has no
+      // debug build to compare.
+      if (!(test.flags ?? []).includes('--debug') && !(test.flags ?? []).includes('--no-debug-info')) {
         const debugAssembly = join(directory, 'program-debug.s');
         const debug = more => { compileProgram(compiler, files, directory, { target, overflow: test.overflow ?? 'checked', runtime, osRuntime, name: 'program-debug', extra: [...caseRoots, ...(test.flags ?? []), '--debug', ...more] }); return readFileSync(debugAssembly); };
         const plainDebug = debug([]);
