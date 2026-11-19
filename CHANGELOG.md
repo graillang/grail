@@ -89,6 +89,15 @@
   faces, prisms and cylinders from 2D profiles, n-gon pyramids) and all 21 shapes the dispatcher
   knows. `kit_test.grl` matches `parity/kit.txt`: 1968 values over three size sets and both windings.
 
+- **The developer console is ported.** `abundance/src/dev_console.grl` carries `ab::ui::dev_console`
+  of `cmake/tx/dev_console.cmake`: the eleven-verb catalogue with its authorities, dev gating and
+  aliases, `find`/`matching`, the line parser (whitespace, `"..."` grouping, `key=value`, the
+  unclosed-quote and control-character refusals), the editing operations on UTF-8 with the 511-byte
+  bound, history (deduplicated, capped at 100, walking off the newest keeps the typed line), the
+  bounded 200-line log, Tab completion of verbs and of an argument through the host's token source,
+  and the overlay's layout (the sheet, header, rule, scrolled output, prompt with its caret and the
+  footer). `abundance/tests/parity/dev_console.cpp` compiles the engine's file and prints 511
+  values; `abundance/tests/dev_console_test.grl` reproduces every one.
 - **The HUD's interaction-card copy is ported.** `abundance/src/hud_prompt.grl` carries
   `ab::hud_prompt` of `cmake/tx/hud.cmake`'s ABHUDPromptText.cpp: the aimed factory machine's prompt
   (held input, electrical pole and generator verbs, the panel title, the Alt-E tool turn or held
