@@ -1,5 +1,15 @@
 ## Unreleased
 
+- **The window's overlay hook is ported: `poll(hook)` feeds ImGui's SDL3 backend its events.** The
+  SDL platform shim keeps a hook slot and calls it inside its poll, before decoding, because a text
+  event's string is SDL's temporary memory; the imgui platform shim supplies
+  `ImGui_ImplSDL3_ProcessEvent`'s address and reads back what the overlay saw (`input_state`,
+  `key_down`, `text_events`). `platform_window.grl` installs or clears it; `imgui_overlay_probe.grl`
+  gates it headless: with the hook ImGui sees the motion, the button, the key and the character,
+  without it nothing, and the engine's `InputState` is the same either way - a reader, not a filter.
+  The synthetic pushes now carry the window id and the keycode too, which is what ImGui's backend
+  matches events by.
+
 - **Moving an array out of a record field no longer frees its elements twice.** `a := n.a`,
   `m.a = n.a`, `eat(n.a)` and `exchange(&mut m.a, n.a)`, with `n.a: [string; 2]` held inline in a
   record, left the field's words in place, so the record's drop and the new owner's both freed the
