@@ -249,7 +249,12 @@ export function overviewRows(files) {
 
 export function overview(files) {
   const panels = overviewRows(files).filter(p => p.programs.length);
-  const left = 110, width = 420, right = 330, bar = 15, gap = 5, panelGap = 30, top = 58;
+  const left = 110, width = 420, bar = 15, gap = 5, panelGap = 30, top = 58;
+  // Each bar's note on the right, and room for the longest of them (about 5.2 units a character at
+  // the note's size); the chart is at least wide enough for the two heading lines above it.
+  const noteOf = (lang, panel) => `fastest on ${lang.fastest} of ${lang.count}${lang.count < panel.programs.length ? `; no twin of ${lang.missing.join(', ')}` : ''}`.slice(0, 70);
+  const longest = Math.max(0, ...panels.flatMap(p => p.languages.filter(l => Number.isFinite(l.mean)).map(l => noteOf(l, p).length)));
+  const total = Math.max(left + width + Math.max(110, 16 + Math.ceil(longest * 5.2)), 650);
   // Each panel has its own linear scale, from 0 to its slowest language's mean.
   let spread = 1.5;
   const x = r => (r / spread) * (width - 50); // the bar's value label goes after it
@@ -275,7 +280,7 @@ export function overview(files) {
       parts.push(`<text x="${left - 8}" y="${y + bar - 3}" class="perf-label${lang.grail ? ' perf-grail-text' : ''}" text-anchor="end">${escape(lang.label)}</text>`);
       parts.push(`<rect x="${left}" y="${y}" width="${Math.max(2, x(lang.mean)).toFixed(1)}" height="${bar}" fill="${colour}"${lang.grail ? ' class="perf-grail"' : ''}><title>${escape(`${lang.label}: ${lang.mean.toFixed(2)}x the fastest, ${of}; the fastest on ${lang.fastest}`)}</title></rect>`);
       parts.push(`<text x="${(left + x(lang.mean) + 5).toFixed(1)}" y="${y + bar - 3}" class="perf-value${lang.grail ? ' perf-grail-text' : ''}">${lang.mean.toFixed(2)}x</text>`);
-      parts.push(`<text x="${left + width + 8}" y="${y + bar - 3}" class="perf-unit">${escape(`fastest on ${lang.fastest} of ${lang.count}${lang.count < panel.programs.length ? `; no twin of ${lang.missing.join(', ')}` : ''}`.slice(0, 70))}</text>`);
+      parts.push(`<text x="${left + width + 8}" y="${y + bar - 3}" class="perf-unit">${escape(noteOf(lang, panel))}</text>`);
       y += bar + gap;
     }
     y += panelGap;
@@ -283,7 +288,7 @@ export function overview(files) {
   const sources = overviewFiles.filter(f => files[f]).map(f => `${f} ${String(files[f].commit).slice(0, 8)} ${String(files[f].date ?? '').slice(0, 10)}`).join('; ');
   parts.push(`<text x="0" y="${y - 8}" class="perf-axis perf-source">${escape(`From bench/results: ${sources}.`)}</text>`);
   const height = y;
-  const svg = `<figure class="perf-chart" id="chart-overview"><svg viewBox="0 0 ${left + width + right} ${height}" width="100%" role="img" aria-label="The languages at a glance: each one's time as a multiple of the fastest, geometric mean over the programs" xmlns="http://www.w3.org/2000/svg">${parts.join('')}</svg><figcaption>The languages at a glance: per language, the geometric mean over the run-time, engine and parallel programs (the parallel one at its most workers) of its time as a multiple of the fastest language's on that program. Lower is better; 1x is the fastest everywhere.</figcaption></figure>`;
+  const svg = `<figure class="perf-chart" id="chart-overview"><svg viewBox="0 0 ${total} ${height}" width="100%" role="img" aria-label="The languages at a glance: each one's time as a multiple of the fastest, geometric mean over the programs" xmlns="http://www.w3.org/2000/svg">${parts.join('')}</svg><figcaption>The languages at a glance: per language, the geometric mean over the run-time, engine and parallel programs (the parallel one at its most workers) of its time as a multiple of the fastest language's on that program. Lower is better; 1x is the fastest everywhere.</figcaption></figure>`;
   const body = panels.map(panel => panel.languages.filter(l => Number.isFinite(l.mean)).map(l => `<tr><td>${escape(panel.label)}</td><td${l.grail ? ' class="perf-grail-col"' : ''}>${escape(l.label)}</td><td>${l.mean.toFixed(2)}x</td><td>${l.count} of ${panel.programs.length}${l.missing.length ? ` (no twin of ${escape(l.missing.join(', '))})` : ''}</td><td>${l.fastest}</td></tr>`).join('')).join('');
   const table = `<div class="perf-table"><table><caption>Each language's time as a multiple of the fastest on each program, geometric mean; the programs it was measured on and how many it was the fastest on</caption><thead><tr><th>builds</th><th>language</th><th>geometric mean vs the fastest</th><th>programs</th><th>fastest on</th></tr></thead><tbody>${body}</tbody></table></div>`;
   return `<section class="perf-results perf-overview">${svg}${table}</section>`.replace(/\n/g, ' ');

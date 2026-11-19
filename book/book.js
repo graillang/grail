@@ -88,3 +88,30 @@
     }
   });
 })();
+(() => {
+  // Charts: a button in each chart's corner shows that chart full screen; the button (or Esc) leaves.
+  // Where a page cannot go full screen (an iPhone), there is no button.
+  const supported = document.fullscreenEnabled || document.webkitFullscreenEnabled;
+  const charts = document.querySelectorAll('figure.perf-chart');
+  if (!supported || charts.length === 0) return;
+  const current = () => document.fullscreenElement || document.webkitFullscreenElement;
+  const label = (button, on) => {
+    button.textContent = on ? '✕' : '⛶';
+    button.title = on ? 'Leave full screen (Esc)' : 'Full screen';
+    button.setAttribute('aria-label', on ? 'Leave full screen' : 'Show this chart full screen');
+  };
+  charts.forEach(figure => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'perf-fullscreen';
+    label(button, false);
+    button.addEventListener('click', () => {
+      if (current() === figure) (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+      else (figure.requestFullscreen || figure.webkitRequestFullscreen).call(figure);
+    });
+    figure.prepend(button);
+  });
+  const sync = () => charts.forEach(figure => label(figure.querySelector('.perf-fullscreen'), current() === figure));
+  document.addEventListener('fullscreenchange', sync);
+  document.addEventListener('webkitfullscreenchange', sync);
+})();

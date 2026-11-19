@@ -1,5 +1,9 @@
 ## Unreleased
 
+- **The book's charts have a full-screen button.** Every chart in the Performance chapter has a
+  button in its corner that shows that chart alone, scaled to the screen; the button or Esc leaves.
+  Browsers without element full screen (an iPhone) get no button. The languages overview no longer
+  reserves a wide empty margin for notes it does not draw, so it fills the column.
 - **The Jolt surface closes with the overlap query.** `gr_jolt_overlap_capsule` is one `CollideShape`
   of the same capsule the cast sweeps, stopped at the first hit: `abundance/src/jolt.grl` now answers
   the core's `overlap` contract (a boolean, with `invalid_request` for a capsule shorter than its own
