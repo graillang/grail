@@ -728,6 +728,16 @@
   to binary32 and widened back. Only an `f32` context rounds a literal from its text now, so the
   compound forms (`*=`, `+=`, ...) agree bit for bit with `y = y * lit`; an `f32` target is unchanged.
   Case `compound-f64-literal-keeps-its-bits`.
+- **Abundance port: compute passes, depth attachments and transient buffers execute through the
+  render graph.** `rhi_engine_graph` now binds transient buffers at their placements, renders up to
+  four colour attachments plus an optional depth attachment from the plan's per-pass state, and
+  records a dispatch body against a caller-named compute pipeline and its 128-byte push block (the
+  bindless sets are bound at the compute bind point first). A dispatch with no named pipeline is
+  refused; the plan's own `Dispatch.pipeline` id replaces the caller table when it lands.
+  `rhi_graph_probe` adds a transient buffer (filled from an image, copied back and compared), a depth
+  clear pass and a real `cs_6_6` dispatch writing per-thread ids through the bindless table, read
+  back exactly and validation-clean. The imgui frame probe destroys its framebuffers and semaphores
+  before the device (VUID-vkDestroyDevice-device-05137).
 - **The dedicated server's datagram reliability layer is ported** (`abundance/src/net_datagram.grl`):
   `ab::server::DatagramConnection` - which the engine's own header documents as pure logic with no
   sockets - with packet sequence numbers and the wrap-safe newer-than compare plus a 32-bit ack
