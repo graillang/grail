@@ -3,7 +3,7 @@ import { cpus } from 'node:os';
 import { compareMachO, compareObjects } from './asm-oracle.mjs';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, renameSync, rmSync, statSync, accessSync, linkSync, constants as fsConstants } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, renameSync, rmSync, statSync, accessSync, linkSync, copyFileSync, chmodSync, constants as fsConstants } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { constants as zlibConstants, zstdCompressSync, zstdDecompressSync } from 'node:zlib';
@@ -672,6 +672,9 @@ export function compileProgram(compiler, inputs, directory, { target = hostTarge
   }
   const stamp = createHash('sha256').update(stampParts.join('\0')).digest('hex');
   const executable = join(directory, name);
+  // The same stamp also names a shared store, so twenty worktrees with identical inputs keep one copy
+  // of an artefact instead of twenty: /home filled to 100 % twice while the swarm was running.
+  const shared = join(process.env.GRAIL_BUILD_CACHE ?? join(process.env.HOME ?? '/tmp', '.cache/grail-builds'), stamp, name);
   if (process.env.GRAIL_NO_BUILD_CACHE !== '1') {
     try {
       if (readFileSync(stampFile, 'utf8') === stamp && statSync(executable).size > 0) {
@@ -680,6 +683,18 @@ export function compileProgram(compiler, inputs, directory, { target = hostTarge
       }
     } catch {
       // no stamp, or a half-written artifact: build it
+    }
+    try {
+      if (statSync(shared).size > 0) {
+        mkdirSync(dirname(executable), { recursive: true });
+        copyFileSync(shared, executable);
+        if (process.platform !== 'win32') chmodSync(executable, 0o755);
+        writeFileSync(stampFile, stamp);
+        if (output) output.push('');
+        return executable;
+      }
+    } catch {
+      // not in the shared store: build it
     }
   }
   const compiled = command([compiler, ...interfaceFlags, ...(llvm ? ['--backend=llvm'] : []), ...(verifyFacts ? ['--verify-facts'] : []), ...(rangeFacts ? ['--range-facts'] : []), ...extra, '--target', target, `--overflow=${overflow}`, assembly, ...files]);
@@ -697,6 +712,14 @@ export function compileProgram(compiler, inputs, directory, { target = hostTarge
     writeFileSync(stampFile, stamp);
   } catch {
     // a cache that cannot be recorded is no reason to fail the build
+  }
+  try {
+    if (!existsSync(shared)) {
+      mkdirSync(dirname(shared), { recursive: true });
+      copyFileSync(built, shared);
+    }
+  } catch {
+    // a full disk must not fail a good build; the worktree's artefact is the authority
   }
   return built;
 }
