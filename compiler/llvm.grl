@@ -3266,25 +3266,30 @@ fn hex_digit(n: u64) -> u8 {
     }
     return u8(87 + n);
 }
+// --verify-facts: the header this call was handed still holds the `data` and `len` the fact
+// hoisted for slot k. A SEQ-STABLE claim about a descriptor that did change - or a vector fact
+// whose staleness was missed, or a loop region whose header the loop rewrote - aborts here, on the
+// first access after the change.
+fn verify_current(l: (&mut L), k: u64) -> unit {
+    h := def(&mut l, view("inttoptr i64 {} to ptr"), &u8[][copy(view(get_reg(&mut l, view("rdi"))))]);
+    d := header_load(&mut l, view(h), 0);
+    ln := header_load(&mut l, view(h), 8);
+    sd := def(&mut l, view("icmp eq i64 {}, {}"), &u8[][d, copy(view(l.edata[k]))]);
+    sl := def(&mut l, view("icmp eq i64 {}, {}"), &u8[][ln, copy(view(l.elen[k]))]);
+    same := def(&mut l, view("and i1 {}, {}"), &u8[][sd, sl]);
+    good := fresh_block(&mut l);
+    wrong := fresh_block(&mut l);
+    emit(&mut l, view("br i1 {}, label %{}, label %{}"), &u8[][same, copy(view(good)), copy(view(wrong))]);
+    begin_block(&mut l, view(wrong));
+    emit(&mut l, view("call void @\"rt_abort.cold\"() #0"), &u8[][]);
+    emit(&mut l, view("unreachable"), &u8[][]);
+    begin_block(&mut l, view(good));
+    return ();
+}
 fn element_address(l: (&mut L), target: (&[u8]), k: u64, width: u64) -> unit {
     i := get_reg(&mut l, view("rsi"));
     if l.verify != 0 {
-        // --verify-facts: the header this call was handed still holds the `data` and `len` the
-        // fact hoisted. A SEQ-STABLE claim about a descriptor that did change - or a vector fact
-        // whose staleness was missed - aborts here, on the first access after the change.
-        h := def(&mut l, view("inttoptr i64 {} to ptr"), &u8[][copy(view(get_reg(&mut l, view("rdi"))))]);
-        d := header_load(&mut l, view(h), 0);
-        ln := header_load(&mut l, view(h), 8);
-        sd := def(&mut l, view("icmp eq i64 {}, {}"), &u8[][d, copy(view(l.edata[k]))]);
-        sl := def(&mut l, view("icmp eq i64 {}, {}"), &u8[][ln, copy(view(l.elen[k]))]);
-        same := def(&mut l, view("and i1 {}, {}"), &u8[][sd, sl]);
-        good := fresh_block(&mut l);
-        wrong := fresh_block(&mut l);
-        emit(&mut l, view("br i1 {}, label %{}, label %{}"), &u8[][same, copy(view(good)), copy(view(wrong))]);
-        begin_block(&mut l, view(wrong));
-        emit(&mut l, view("call void @\"rt_abort.cold\"() #0"), &u8[][]);
-        emit(&mut l, view("unreachable"), &u8[][]);
-        begin_block(&mut l, view(good));
+        verify_current(&mut l, k);
     }
     if eq(target, view("rt_slot")) || eq(target, view("rt_slot4")) {
         ok := def(&mut l, view("icmp ult i64 {}, {}"), &u8[][copy(view(i)), copy(view(l.elen[k]))]);
@@ -3549,6 +3554,9 @@ fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> uni
             if address_accessor(target) {
                 element_address(&mut l, view(target), k, hf.width);
                 return ();
+            }
+            if l.verify != 0 {
+                verify_current(&mut l, k);
             }
             a0 := get_reg(&mut l, view("rdi"));
             p := def(&mut l, view("inttoptr i64 {} to ptr"), &u8[][a0]);
@@ -6764,11 +6772,14 @@ fn loop_stable_heads<a, b>(facts: (&a Facts), name: &b [u8]) -> u64[] {
 // triples of the header's slot, the line of the head's label and the last line naming it (its last
 // back edge). A region is kept only when the head dominates every line of it: no jump from outside the lines
 // [head, last back edge] names a label inside them, so the only way in is through the head (the
-// line before the region falls into the head itself). Not under --verify-facts or --range-facts,
-// whose accessors stay calls.
+// line before the region falls into the head itself). Not under --range-facts, whose accessors
+// stay calls so the proved ones can be counted. Under --verify-facts the regions are kept: the head
+// checks the header it reads (verify_header) and each fact-carrying access in the region checks
+// that the header still holds the two words read there (element_address, verify_element), so the
+// hoist itself is what that mode verifies.
 fn stable_regions<a, b>(l: (&a L), instrs: (&b u8[][]), heads: (&a u64[])) -> u64[] {
     mut out = u64[];
-    if (heads.len() == 0) || (l.verify != 0) || (l.proof.len() != 0) {
+    if (heads.len() == 0) || (l.proof.len() != 0) {
         return out;
     }
     // One pass over the body: every label's line and number, then the first and last line naming

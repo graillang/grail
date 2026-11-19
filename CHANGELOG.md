@@ -1,5 +1,16 @@
 ## Unreleased
 
+- **`--verify-facts` checks the loop-head hoist of loop-stable vectors.** The lifter now keeps
+  FACT_LOOP_STABLE regions under --verify-facts (still not under --range-facts). The head checks the
+  header it reads, and every fact-carrying access in the region, typed-sibling calls included,
+  checks that the header still holds that `data`/`len`. So a loop that rewrites a header it was
+  claimed stable for aborts in the vf legs, where it used to go unchecked. Fixed with it: two
+  test-facts checks. The F1 element-address check had not fired since stale fields stopped being
+  re-read after calls, because all of `f1_header.grl`'s accesses followed a call; the fixture gains a
+  loop-stable loop. The range check counted only untyped `rt_atb` calls, missing the typed sibling
+  the default build now emits in such loops. Release codegen is unchanged (sort 4.54 G
+  instructions).
+
 - **The landing service removes each leg's build cache when the leg ends.** Every gate leg and retry
   had a fresh `GRAIL_CACHE_DIR` in /tmp that nothing removed - about 17k files each - and /tmp (a
   tmpfs) ran out of inodes after two days of landings.
