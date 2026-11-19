@@ -28,4 +28,6 @@ is checked to agree.
 | `impl Drop for Guard` | `impl Drop for Guard` | |
 | `assert!(b != 0)` at run time | `b: u64 where b != 0` | Proved at the call when it can be, checked otherwise. |
 | `unsafe { *p }` | `unsafe { p.read() }` | Raw pointers are `*T` and `*mut T`. |
+| `cargo build` | `grail build` | Both carry debug information by default. Grail's development build is optimised and carries line tables and function ranges; `grail build --debug` turns the optimiser off and describes variables too, `--no-debug-info` leaves it all out. |
+| `cargo build --release` | `grail build --release` | Neither carries debug information. |
 | `macro_rules!` | `@if`, `@for`, comptime calls | Compile-time code is ordinary Grail. |

@@ -1,8 +1,11 @@
 # Debugging a Grail program
 
-`grail build --debug` compiles with DWARF (Linux x86-64, AArch64, RISC-V 64) or CodeView (Windows
-x86-64), so an ordinary debugger can break on a source line, walk a record, read a string and print
-an enum tag by name. There is no Debug Adapter Protocol server yet
+Every development build (`grail build`, optimised) carries line tables and function ranges - DWARF
+on Linux x86-64, AArch64 and RISC-V 64, CodeView in a PDB on Windows x86-64 - so a debugger can
+break on a source line and step by line; code the optimiser inlined is attributed to the calling
+statement, and `--no-debug-info` leaves the tables out. `grail build --debug` turns the optimiser
+off and describes parameters and locals with their types too, so an ordinary debugger can also walk
+a record, read a string and print an enum tag by name. There is no Debug Adapter Protocol server yet
 ([lsp-debugger-profiler.md](lsp-debugger-profiler.md) says what is missing); this page is the tested
 way to debug a binary today.
 

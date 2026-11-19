@@ -269,7 +269,11 @@ Each is measured four ways: a check and a build, each cold and after a one-funct
 with nothing changed is not measured: on a one-file project every tool answers it within
 milliseconds, so it would time process start-up, not the language. Go has no check command; `go vet` type-checks and then
 runs its analyses, and it is what Go's column shows. A build whose output is thrown away is in a
-table of its own further down.
+table of its own further down. Every build here writes debug information, as each toolchain's
+development build does by default: Go's and Zig Debug's DWARF, cargo's dev profile's, and Grail's
+line tables and function ranges (on by default since the development build is optimised; they cost
+about 6% of an edit's rebuild and none measurable cold on the 26,000-line program, and make its
+binary 8% larger without changing an instruction).
 
 C and C++ are built the way a C project's edit loop builds: each program is one translation unit
 with a one-target Makefile, and `make` builds it. A check is `clang -fsyntax-only` (`clang++

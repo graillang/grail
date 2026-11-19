@@ -290,9 +290,14 @@ system library.
   debugger attach. Vulkan has a verified swapchain/present/draw path including depth and MSAA, and
   the D3D12 backend runs under Wine with vkd3d-proton; COM adds, releases and queries an `IUnknown`
   through the Win32 ABI in an executed case.
-- Linux x86-64 emits DWARF `.debug_line` tables and typed locals (`.debug_info`, read back with
-  `grail debug lines` and `grail debug info`) with `grail build --debug`; breakpoints, attach and
-  DAP are not implemented. `grail profile` samples a Linux x86-64 program's own runtime with
+- A development build (`grail build`, optimised) carries line tables and function ranges by
+  default, as `go build`, Zig Debug and cargo's dev profile do: DWARF on Linux (x86-64, AArch64,
+  RISC-V) and a PDB on Windows x86-64, none on macOS and Windows AArch64. They are read back with
+  `grail debug lines` and `grail debug info`, and `--no-debug-info` leaves them out. Code the
+  optimiser inlined is attributed to the statement that called it, so a row never names a line of
+  another function. `grail build --debug` is the build for stepping through: the optimiser off,
+  and typed parameters and locals described as well. A release build (`--release`) has no debug
+  information. Debugger attach and DAP are not implemented. `grail profile` samples a Linux x86-64 program's own runtime with
   `ITIMER_PROF` and attributes samples to functions without `perf` or a debug section, and the
   language server `tools/lsp/main.grl` gives editors compiler-sourced diagnostics and same-file
   definitions. The `sys_grail` wrappers over the Linux ABI (files, clocks, environment, loopback

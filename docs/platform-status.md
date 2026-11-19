@@ -203,7 +203,8 @@ complete renderer. The null backend validates contracts only.
 Implemented: deterministic native/cross build runner, platform matrix, packaging and checksums,
 signing hooks, install scripts, CI plan/lint; DWARF `.debug_line` tables plus typed parameter and
 local locations for Linux x86-64 and CodeView line tables with typed symbols for Windows x86-64
-(`grail build --debug`, read back with `grail debug lines` and `grail debug info`); the language
+(`grail build --debug`; the default optimised `grail build` carries the line tables and function
+ranges, also on AArch64 and RISC-V; read back with `grail debug lines` and `grail debug info`); the language
 server `tools/lsp/main.grl` (JSON-RPC over stdio, full-text sync, compiler-sourced diagnostics,
 same-file definition) with its stdio test; the sampling profiler `grail profile` for Linux x86-64
 (ITIMER_PROF in the program's own runtime, ELF `.symtab` attribution, no `perf`); `grail build`
