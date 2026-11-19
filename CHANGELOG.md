@@ -1,5 +1,12 @@
 ## Unreleased
 
+- **The save now carries the host's own engine section.** `scarab`'s checkpoint gains the 'ABTX'
+  half of `ab::tx::store_host_sections`: the committed clock and next engine id from the session,
+  encoded by `abundance_tx_sections::encode_engine` at `host_section_schema` 3, and written on the
+  reference side by a real `ab::tx::World`. Both halves produce the same 44-byte section (id
+  1481916993) and the same checkpoint bytes after the encoder's id sort — 1208 lines. The 'ABTW'
+  table envelope is the other half of `store_host_sections` and needs every registered table's
+  payload codec (abn_mesh's `tx_tables.grl`, 9 of 65 tables so far), so it is not written yet.
 - **A loot site's life is ported.** `abundance/src/site_life.grl` carries `loot_sites/site_life.hpp`
   and `.cpp` from `cmake/tx/loot_sites.cmake`: the tuning with its per-field ranges and the
   cross-field consistency rules, the file's own draw (`mix`, the seeded `unit`, `exponential` and
