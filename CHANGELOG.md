@@ -1,5 +1,11 @@
 ## Unreleased
 
+- **The character's look, fall, survival and hand-tool rules are ported (group 2a).** The Unreal
+  angle helpers (FMath::ClampAxis/NormalizeAxis/ClampAngle and FMath::Fmod in float), the camera
+  deltas and look scale, jump and hand-tool press routing, landing feel, the critically damped fall
+  spring, injury movement gates, the downed hold (local and authority), the death camera, presented
+  life and the R key, queued maintenance, the wind-up gauge, powered-tool hold, weapon presentation
+  serials/clocks and the equipment request gates: 321 values match the pin's headers.
 - **Abundance: the mesa coupling and marks are ported and bit-exact.** `src/coherent_mesa.grl` gains
   `mesa_stepped_sites` (the handover to the stepped-hills pass: one Mesa-style site per built region,
   carrying the caprock, the seed and the `masked` bit that says the Mesa mask already holds the
