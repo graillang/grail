@@ -1,5 +1,36 @@
 ## Unreleased
 
+- **Abundance: the feature composition contract is ported and gated.** `src/feature_composition.grl`
+  carries `apply_feature_heights` (bounded add, then carve toward a target, then raise toward a
+  target, then the world's elevation clamp) and `compose_feature_layers` (the higher weight wins and
+  a tie goes to the later pass, vegetation takes the minimum, structure flags are OR-ed, erosion
+  resistance takes the maximum, records append in pass order), plus the pass and record records those
+  layers carry. Gated against Abundance's own `feature_composition.cpp` over two passes composed in
+  order: the second pass ties the first on feature and material weight, adds three times the
+  contracted height, carves against the first pass's valley and adds a record — heights and every
+  channel digest equal, 10 of 10 lines. The README's "written but ungated" note is gone; every ported
+  pass can now funnel through this contract.
+
+- **Abundance: the mesa coupling and marks are ported and bit-exact.** `src/coherent_mesa.grl` gains
+  `mesa_stepped_sites` (the handover to the stepped-hills pass: one Mesa-style site per built region,
+  carrying the caprock, the seed and the `masked` bit that says the Mesa mask already holds the
+  warped edge), `finish_mesa_marks` (flat caprock tops become `MesaTop` at weight 153) and
+  `apply_mesa_biomes` (mesa country drying into Badlands in two-label stages, so the authority's
+  mixture is never replaced by an invented third label and water keeps its own). Gated on the same
+  world: 1 site, 27 marked cells, 1257 biome cells changed (188 Badlands, 362 Desert), all three
+  array digests equal — 48 of 48 lines. The port compares the river cut-off in f32, as the engine's
+  discharge channel does; comparing it in f64 changed 89 cells, which is how the difference was
+  found.
+
+- **Abundance: the mesa planner's ranked keep-apart selection is now gated on a multi-region
+  world.** The mesa fixture is a 12 km plain of bedded rock with four separated basins and one
+  mediocre corner basin. `mesa.multi` keeps four regions while rejecting candidates for separation
+  and stopping the ranked loop on a score below the second-region threshold (0.6193); the two runs
+  beside it show each rule biting on its own — with the threshold off the same world yields seven
+  regions, and forced selection at the same footprint yields six — so the ranking and the separation
+  rule can no longer silently differ. The builder is gated twice: as the engine runs it (the washes
+  carve the landform, no cell reaches the cap) and with the wash thresholds out of reach (the tops
+  reach the caprock, 74 cap cells), which exercises the cap branch too. 36 of 36 lines.
 - **The soundscape bed and the ambient-emitter synth run through the audio shim.** `platform_audio.grl`
   gains `bed_attach`/`ambience` (audio.cpp's 15-slot input packing) and `emitter_start`/`emitter_set`/
   `emitter_render`; the shim hosts audio.cpp's `SoundscapeNode` (a continuous node on the hearing
