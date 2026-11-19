@@ -95,6 +95,20 @@
   its own life is not part of the contract and the two agree; the referent still is. Cases
   `closure-type-in-arc-unifies-across-positions` and
   `closure-reference-parameter-element-still-typed`.
+- **World loot's placement is ported (wild scenes; monument yards are a named boundary).**
+  `abundance/src/world_loot_placement.grl` carries `world_loot_sites_in` from
+  `world_loot_placement.cpp`: the jittered 160 m lattice with its mixed-axis cell hash, the
+  per-biome scene mix and the coastal override, all ten scene builders with their exact draws (the
+  engine's right-to-left argument order kept where two draws share a call), the ground fit (four
+  corners plus the centre, dry, within the step, no hump or hollow, the lean from the corner
+  heights), the footprint radii and overlap test, the 40 m centre clearance, the 24 m query margin
+  and the id-sorted, deduplicated answer, with the ground as the host's callback (a scene meeting
+  missing ground waits). The site's yaw/pitch/roll/distance are narrowed to f32 like the engine's
+  `float` fields. `abundance/tests/world_loot_placement_test.grl` prints 88 lines that match a
+  reference calling the engine's own `world_loot_sites_in` over the same synthetic ground. Monument
+  yards are not ported: they need `ab::infinite::MonumentSite` and `monument_outside()` from the
+  world-model lane, so callers pass no monuments and the module says so.
+
 - **The Jolt surface closes with the overlap query.** `gr_jolt_overlap_capsule` is one `CollideShape`
   of the same capsule the cast sweeps, stopped at the first hit: `abundance/src/jolt.grl` now answers
   the core's `overlap` contract (a boolean, with `invalid_request` for a capsule shorter than its own
