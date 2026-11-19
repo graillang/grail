@@ -1,5 +1,30 @@
 ## Unreleased
 
+- **Abundance: playable core engine and game loop in Grail (`ab-engine-grail`).** Wires the ported
+  Grail subsystems into a single buildable, interactive and headless-testable executable
+  (`just ab-engine` / `bun abundance/tools/build-ab-engine.mjs`):
+  - **RHI & Swapchain:** `rhi_engine_device.grl` gains SDL3 surface-extension instance creation,
+    present-family selection, binary semaphores, `submit_present`, and multi-queue `submit_with_waits`;
+    `rhi_engine_swapchain.grl` adds engine-handle swapchain create/resize/acquire/present;
+    `rhi_engine_memory.grl` adds 3D images, clears, fills, buffer/image copies, `upload_cptr`, and
+    sync2 helpers; `rhi_engine_pipelines.grl` adds viewport/scissor, index-buffer draw, SPIR-V file
+    loading, and fixes `blend_factor_src_alpha`/`blend_factor_one_minus_src_alpha` (6/7 instead of
+    4/5); `rhi_engine_graph.grl` adds `body_draw`, clears/fills, and multi-segment
+    `record_segment`/`submit_segment`/`wait_frame`.
+  - **Core Frame Pipeline:** `core_frame.grl` (exact 816-byte `FrameConstants` matching
+    `shaders/core/frame.hlsli`, `FreeFlyCamera`, reverse-Z infinite projection, Halton jitter,
+    reprojection), `png_encode.grl` (pure-Grail RGBA8 PNG capture writer), and `engine_core.grl`
+    running Abundance's compiled SPIR-V shaders (`debug_world`, `motion_camera`, `taa`,
+    `exposure_histogram`, `taa_sharpen`, `display` AgX Filmic) with 0 Vulkan validation errors.
+  - **Kinematic Movement:** `kinematic_mover.grl` ports `step_mover` and `place_mover_on_ground`
+    over `collision_query`, `mover_state`, and `exact_trig` (walking, sprinting, crouching, prone,
+    jumping, falling, swimming, creative flight, slope slide, step-up, depenetration, rescue).
+  - **Playable World, Sky & ImGui HUD:** `engine_terrain.grl` (coherent seed terrain or `.frw`
+    load, physical sky/terrain/water shaders under `abundance/play_shaders/`, matching
+    `collision_query::WorldView` chunks, live terrain digging/raising), `engine_overlay.grl` (Dear
+    ImGui Vulkan renderer over `shaders/core/imgui.vs/ps.spv`), and `ab_engine.grl` (windowed SDL3
+    play + `--headless`/`--capture`/`--validation`/`--debug-world`/`--world`/`--camera`/`--seed`
+    CLI, F1 player/free-fly, F2 HUD, F3 TAA, F4 sky time-of-day, F5/F9 quick-save/load).
 - **Abundance: the stepped-hills planner is ported and bit-exact.** `src/coherent_stepped_hills.grl`
   carries `plan_stepped_hills`: the ~64 m summary grid (mean height, land share, belt uplift, lakes,
   blocking features, province), the trap/plateau/dry-climate scoring for natural sites and the
