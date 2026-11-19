@@ -71,14 +71,16 @@
   the registry, fills a non-empty value of each type through its own fields, encodes it with the
   engine's Writer, checks it back with the engine's Reader, prints a leaf trace walked from the value
   itself, and refuses 121 truncated, trailing and over-count payloads; `tx_schema_test.grl` matches
-  all 276 lines - the schema registry against the types, every blob byte for byte and every value
+  all 279 lines - the schema registry against the types, every blob byte for byte and every value
   leaf by leaf. The trade `CrossWorldTable` is ported too: its codec lives in a .cpp over a struct
   the headers do not show, so the reference mirrors that struct, encodes the mirror with the engine's
   Writer and requires the engine's own save to produce the same bytes, which pins the grammar
   `{b,s,{f64,f64,f64},f64,[u32],[(u64,u64)],B}`; the engine's 125-byte filled table (ledger bound to
   its world) decodes, traces and re-encodes byte for byte, with truncated and trailing refusals.
-  Three tables remain a named boundary: `construction.facility_site`, `drones.fleet` and one field of
-  `power.power_dispatch`, whose grammars are only visible in .cpp files.
+  `power.power_dispatch` became fully generic too once the reference included the private header
+  that reflects its dispatch result, so 63 of the 65 registered tables are exact and 279 lines match.
+  Two tables remain a named boundary: `construction.facility_site` and `drones.fleet`, whose
+  grammars are only visible in .cpp files.
 
 - **The player field map's model is ported.** `abundance/src/field_map_presentation.grl` carries
   `ab::FieldMapPresentationModel` (Private/field_map_presentation.cpp), the root of the world map
