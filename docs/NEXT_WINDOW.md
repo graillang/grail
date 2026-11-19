@@ -40,7 +40,8 @@ drafts are gone:
 
 - `abn_wg_feat`'s `builder-wip.patch` (959 lines, the whole `Builder` draft, three borrow fixes from
   green) — **lost**, rewrite from the description above.
-- `abn_wg_terrain`'s `coherent_surface.grl.wip` (compiled, unverified) — **lost**, rewrite.
+- `abn_wg_terrain`'s surface draft (compiled, unverified) — **survives**, restored to the worktree
+  root as `SURFACE_WIP.abn-wg-terrain.grl` after the lane noticed it had gone.
 - `abn_tools`' `content_store.grl` + `driver.py` + `content_store_test.grl` (gc hand-verified over six
   scenarios) — **lost**, rewrite; its own `NEXT_STEPS.md` still carries the scenario list and the
   registration plan.
@@ -72,7 +73,8 @@ scope list in its final message is the source.
   the lane's note (`DroneFleetRegistry::encode`: magic, catalog hashes, per-drone configuration blobs).
 - **app** — the `ABTW` section now that 64 of 65 tables are exact, then `step_mover` in the digest.
 - **terrain** — the surface passes (`warp_relief`, `plateau_character`, `relax_talus`,
-  `smooth_erosion_delta`) **from scratch**: the parked draft was lost, see below. Then
+  `smooth_erosion_delta`) from `SURFACE_WIP.abn-wg-terrain.grl` at the worktree root: they compile,
+  no verdict yet; iterate on a single 4096 m world and save the three-world matrix for the final gate. Then
   `erode_stream_power`, then regional relief/crags/dissection, then geology and material masks.
 - **hydro** — the stepped-hills planner, then `apply_stepped_hills` + marks, then oil, then volcanic.
 - **feat** — the `Builder` port **from scratch** (its 959-line draft patch was lost, see below):
