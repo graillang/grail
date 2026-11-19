@@ -1,5 +1,18 @@
 ## Unreleased
 
+- **Item content's vocabulary and starter catalogue are ported.** `abundance/src/item_content.grl`
+  carries `item_content_catalog.hpp`/`item_content_fwd.hpp` and the starter definition from
+  `Private/item_content_catalog.cpp`: the ten ItemContentCategories with their labels (and the
+  `"Item"` default), `item_content_display_name` (the four historical keys — `part.mechanical`,
+  `part.electronic`, `weapon.ak47`, `weapon.ak47_magazine` — the namespace split, capitalisation,
+  underscores and hyphens collapsing to single spaces, and the 28-word acronym list, so `SMG`,
+  `HDPE` and `CO2` read as acronyms), the 49 starter items (id, stable id, category,
+  starter-supplied) and 49 logistics resources (density, form) generated from the engine's own
+  `starter_item_content_definition()`, and the catalogue's lookups by resource id, stable id and
+  resource. `abundance/tests/item_content_test.grl` prints 435 lines that match a reference
+  linking the engine's own catalogue. Recipes and recipe access, machine archetypes,
+  knowledge/resource nodes/salvage sources, construction materials/modules/parts, the full
+  validation report and the append_* content builders are the next item_content increments.
 - **The construction-kit accumulator is ported, bit for bit.** `abundance/src/procgen_kit_acc.grl`
   carries `kit_acc.hpp`: per-slot surfaces, the Basis/Xform and its quaternion/arc/axis-angle
   constructors, the round-side quality floor, and `grid`/`grid_out`/`fan`/`lathe`/`tube` (welded
