@@ -1,5 +1,28 @@
 ## Unreleased
 
+- **Abundance: the stepped-hills planner is ported and bit-exact.** `src/coherent_stepped_hills.grl`
+  carries `plan_stepped_hills`: the ~64 m summary grid (mean height, land share, belt uplift, lakes,
+  blocking features, province), the trap/plateau/dry-climate scoring for natural sites and the
+  bedded-rock scoring for forced ones, the relief/hillside/land/belt/keep-out gates, the seeded
+  jitter, and the ranked keep-apart selection that gives every site its radius, province, style, dip
+  and seed. Gated against Abundance's own `coherent_stepped_hills.cpp` over a synthetic 12 km
+  plateau country in three configurations (natural, forced to three sites, forced limestone): 6 of 6
+  lines. The natural configuration selects no site on this world, in the engine and in the port
+  alike, so its scoring runs but ends below the threshold. The strata column, the site reshaping and
+  the marks are the next increment.
+- Fixed: the BC7/BC6H encoder gate no longer skips against a pin. The ISPC kernels are products of the
+  engine build, which a pin built with `AB_BUILD_ENGINE=OFF` does not have, so the shim looked in one
+  place and gave up; it now takes `ABUNDANCE_ENGINE_BUILD`, then the reference root's build, then the
+  checkout's. `--only=bc_ispc` runs and matches against the pinned reference instead of reporting
+  "skipped", so the encode path is gated rather than assumed.
+- Fixed: a shim whose stamp is stale is removed before its builder runs, so the builder's own
+  mtime-based check cannot decide "up to date" and stamp an out-of-date library as fresh — which was
+  the failure the stamping exists to catch. Readiness is now computed after that removal.
+- Fixed: the BC7/BC6H encoder gate no longer skips against a pin. The ISPC kernels are products of the
+  engine build, which a pin built with `AB_BUILD_ENGINE=OFF` does not have, so the shim looked in one
+  place and gave up; it now takes `ABUNDANCE_ENGINE_BUILD`, then the reference root's build, then the
+  checkout's. `--only=bc_ispc` runs and matches against the pinned reference instead of reporting
+  "skipped", so the encode path is gated rather than assumed.
 - Fixed: LLVM builds for AArch64 and RISC-V passed the wrong values to functions of more than six
   argument words when the call crossed between a lifted body and a native one, including functions
   whose big result adds a hidden destination word. The thunks between the two conventions assumed
@@ -198,6 +221,18 @@
   triangles and density lattices the reference dumps through the public `field_at`, then samples
   on a fixed grid and ten boxes: 2 306 lines, byte-identical.
 
+- **The terrain page pool's bookkeeping is ported, slice / lifetime / job-order half.**
+  `abundance/src/render_policy_page_book.grl` carries `terrain_gpu/page_book.cpp`: the slice atlas
+  with its per-key cap and the GPU fence (a freed slice is reusable only after its serial completed),
+  the page lifetime from request through generated, evicted and freed once unheld, the stable
+  need-ordered job queue with the near lane's tier cut and the same-batch parent rule, the world
+  envelope until a page's measurement arrives (stale stamps and non-finite bounds ignored, changes
+  inside the 8 m quantum silent), lost and lost-inputs, decision passes, revival of a held evicted
+  page, the PageEvents, the counters, and the NodePages queries (mapped with the drawn page and the
+  real-over-foundation rule, find with the edit-delta widening, hold, release, set_drawn). 141
+  reference lines from one scripted session against the engine's own `page_book.cpp`. The page hash
+  table and the GPU page records (`take_upload`) are the next increment; `reset()` is not ported
+  because it fences slices in an unordered_map's iteration order.
 - **The derelict monument layouts are complete: the library, arms depot, factory, orchard and dam
   templates join the farm, and pieces resolve through the construction catalogue.**
   `abundance/src/monument_layout.grl` now carries the rest of `monument_layout.cpp` (`panels` and the
