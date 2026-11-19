@@ -1,5 +1,10 @@
 ## Unreleased
 
+- Added: `^=` is a compound assignment, like `+=` and the rest: `x ^= 3` in a local, a record field
+  (`a.n ^= 15`) and an indexed element (`v[i] ^= 3`), at the target's own integer width. It was
+  "expected `=`" - the lexer's multibyte table had no `^=` token (kind 275) - and it is still refused
+  on floats ("operator not defined for floats"), as the other compound forms are. Cases
+  `compound-xor-assignment` and `compound-xor-assignment-on-f64-rejected`.
 - **The book's sidebar drops its "Find a topic" subtitle;** the search box (labelled for screen readers) sits under the title.
 - **The languages overview chart reads plainly.** Its bars start at 1× (the fastest language's time)
   on one logarithmic scale shared by the release and development groups, each group lists the
