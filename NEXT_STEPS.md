@@ -8,14 +8,16 @@ State at the 2026-11-19 budget wind-down (OpenCode weekly window ~11%, resets 20
   character group 2b traversal (407).
 
 ## Unfinished, in order
-1. **Character group 2c: weapon view + held equipment.** The port of
-   `character/{weapon_view_rules,held_equipment_rules}.hpp` plus the firearm-profile presentation half
-   (ids/mounts/body keys) is written but NOT green. Its diff is saved as
-   `.work/scratch/character-2c.patch` (untracked; apply with `git apply`). Remaining failure: the
-   parity test aborts at one type mismatch around `abundance/tests/character_rules_test.grl:921`
-   (the `held.remote_cart` case); everything before it compiles. Reference output already regenerated
-   (636 lines) - re-check with `bun tools/abundance-test.mjs --only=character_rules` after applying
-   the patch.
+1. **Character group 2c: weapon view + held equipment.** It was written but not green and was
+   reverted for the wind-down (the scratch copy was removed when the harness cleared `.work`; rewrite
+   it from `character/{weapon_view_rules,held_equipment_rules}.hpp` and the presentation half of
+   `firearm_profile.hpp`). State before reverting: the module compiled and the 636-line reference
+   generated; the test failed at one type mismatch near the `held.remote_cart` case
+   (`HeldFacts`/`select_held_presentation` call sites), then would have needed the usual parity
+   pass. Ids already checked against the headers: weapons 90010 / 1802 / 1803 / 1502 / 82701 /
+   87001 / 87009 / 87003 / 87005 / 87006 / 86006; attachment modules are the ASCII constants
+   (MODSUPPR etc.); tools surveyor 2319, tapping knife 24402, crowbar 87500, paint rollers
+   24960-24967, spray cans 24970-24977, wrench set 84126; munitions 86004/86005/86017/86018/86800.
 2. **Character group 2d:** `firearm_profile.hpp`'s carry maths (`aim_solution`, `hip_pose`,
    `optic_line_height_cm`, `is_profiled_firearm`, `fires_over_session`, `is_automatic`), and
    `held_item_hold.hpp` if that header is also in `cmake/tx/character.cmake`.
