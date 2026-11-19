@@ -39,6 +39,15 @@
   and the action that moves the leaf need the ConstructionGrid, the access registry and the power
   grid, and are a later increment.
 
+- **glibc-exact double `pow`**: `lib/math_glibc` gains `pow`, `e_pow.c`'s log/exp pair over
+  `__pow_log_data` and `__exp_data`. Which multiply-adds fuse cannot be read off the source (GCC contracts by
+  register pressure, so the same expression fuses in one instantiation and not in another): the sites were read
+  from this build's own assembly, and the ones that decide the last bit are glibc's `k > 0` saturation, which
+  fuses, against the subnormal reconstruction, which does not and whose zero-sign fix-up reads the `sbits` the
+  branch itself mutated. Gated against the host libm on 21,120,542 pairs -- every special value with its
+  neighbours, the subnormal and overflow boundaries, and a signed threshold apiece -- with no mismatch, and
+  pinned by `math-glibc-pow`. `math::pow` keeps its own formulation: switching it to delegate is a decision for
+  the lanes whose parities were taken against it.
 - **A loot site's life is ported.** `abundance/src/site_life.grl` carries `loot_sites/site_life.hpp`
   and `.cpp` from `cmake/tx/loot_sites.cmake`: the tuning with its per-field ranges and the
   cross-field consistency rules, the file's own draw (`mix`, the seeded `unit`, `exponential` and

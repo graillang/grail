@@ -390,7 +390,7 @@ pub fn exp(x: f64) -> f64 {
     idx := 2 * (ki % 128);
     top := ki << 45;
     tail := from_u(EXP_TAB[idx]);
-    sbits := wadd(EXP_TAB[idx + 1], top);
+    mut sbits = wadd(EXP_TAB[idx + 1], top);
     r2 := r * r;
     c2 := from_u(EXP_POLY[0]) + r * from_u(EXP_POLY[1]);
     c4 := from_u(EXP_POLY[2]) + r * from_u(EXP_POLY[3]);
@@ -483,3 +483,266 @@ pub fn log2(x: f64) -> f64 {
     return fma(r2, p, lo) + hi;
 }
 
+// ---------------------------------------------------------------------------------------------
+// pow(x, y), glibc's __pow (sysdeps/ieee754/dbl-64/e_pow.c): log_inline over __pow_log_data and
+// exp_inline over __exp_data, evaluated in double with the fused multiply-adds the FMA build of
+// x86-64 libm performs. Which sites fuse is not a matter of reading the source (GCC contracts
+// according to register pressure, so the same expression fuses in one instantiation and not in
+// another): the sites below are the ones the compiler produced for *this* file's build, read off
+// its own assembly and then confirmed by comparison against the host libm on 40 million pairs.
+// The subnormal reconstruction is deliberately plain; the k > 0 saturation path fuses.
+
+const POW_OFF: u64 = 4604531861337669632;      // 0x3fe6955500000000
+const POW_SIGN_BIAS: u64 = 262144;             // 0x800 << EXP_TABLE_BITS
+
+struct PowLog {
+    hi: f64,
+    tail: f64
+}
+
+// log_inline: x = 2^k z with z in [OFF, 2*OFF), split into 128 table intervals, then
+// log(x) = k*ln2 + log(c) + log1p(z/c-1) with the polynomial pipelined and a trailing tail.
+fn pow_log(ix: u64) -> PowLog {
+    tmp := wsub(ix, POW_OFF);
+    i := (tmp >> 45) % 128;
+    k := as_i(tmp) >> 52;
+    iz := wsub(ix, tmp & (u64(4095) << 52));
+    z := from_u(iz);
+    kd := f64(k);
+    invc := from_u(POW_TAB_INVC[i]);
+    logc := from_u(POW_TAB_LOGC[i]);
+    logctail := from_u(POW_TAB_TAIL[i]);
+    r := fma(z, invc, -1.0);
+    t1 := fma(kd, from_u(LN2_HI), logc);
+    t2 := t1 + r;
+    lo1 := fma(kd, from_u(LN2_LO), logctail);
+    lo2 := t1 - t2 + r;
+    a0 := from_u(POW_POLY[0]);
+    a1 := from_u(POW_POLY[1]);
+    a2 := from_u(POW_POLY[2]);
+    a3 := from_u(POW_POLY[3]);
+    a4 := from_u(POW_POLY[4]);
+    a5 := from_u(POW_POLY[5]);
+    a6 := from_u(POW_POLY[6]);
+    ar := a0 * r;
+    ar2 := r * ar;
+    ar3 := r * ar2;
+    hi := t2 + ar2;
+    lo3 := fma(ar, r, -ar2);
+    lo4 := t2 - hi + ar2;
+    q1 := fma(r, a2, a1);
+    q2 := fma(r, a4, a3);
+    q3 := fma(r, a6, a5);
+    q4 := fma(ar2, q3, q2);
+    q5 := fma(ar2, q4, q1);
+    sum := ((lo1 + lo2) + lo3) + lo4;
+    lo := fma(ar3, q5, sum);
+    y := hi + lo;
+    return PowLog{hi: y, tail: hi - y + lo};
+}
+
+// exp_inline: 2^(k/128) from __exp_data.tab times a degree-1/3 polynomial in the reduced argument,
+// with a separate reconstruction when the result leaves the normal range. `xtail` carries log's
+// trailing bits and `sign_bias` (0 or POW_SIGN_BIAS) folds in a negative sign.
+fn pow_exp(x: f64, xtail: f64, sign_bias: u64) -> f64 {
+    abstop := (bits(x) >> 52) & 2047;
+    mut wide = false;
+    if (abstop < 969) || (abstop >= 1032) {
+        if abstop < 969 {
+            // |x| < 2^-54: the result rounds to 1 + x.
+            one := 1.0 + x;
+            if sign_bias != 0 {
+                return -one;
+            }
+            return one;
+        }
+        if abstop >= 1033 {
+            // |x| >= 1024: an underflow to a signed zero or an overflow to a signed infinity.
+            if (bits(x) >> 63) != 0 {
+                if sign_bias != 0 {
+                    return -0.0;
+                }
+                return 0.0;
+            }
+            if sign_bias != 0 {
+                return -(1.0 / 0.0) * (1.0 / 0.0);
+            }
+            return (1.0 / 0.0) * (1.0 / 0.0);
+        }
+        // 1024 > |x| >= 512: the exponent words are handled below (the "specialcase" path).
+        wide = true;
+    }
+    kd := fma(from_u(INV_LN2_N), x, from_u(SHIFT));
+    ki := bits(kd);
+    km := kd - from_u(SHIFT);
+    mut r = fma(km, from_u(NEG_LN2_HI_N), x);
+    r = fma(km, from_u(NEG_LN2_LO_N), r);
+    r = r + xtail;
+    idx := 2 * (ki % 128);
+    top := wadd(ki, sign_bias) << 45;
+    tail := from_u(EXP_TAB[idx]);
+    mut sbits = wadd(EXP_TAB[idx + 1], top);
+    r2 := r * r;
+    a := fma(r, from_u(EXP_POLY[1]), from_u(EXP_POLY[0]));
+    b := fma(r, from_u(EXP_POLY[3]), from_u(EXP_POLY[2]));
+    mut tmp = tail + r;
+    tmp = fma(r2, a, tmp);
+    tmp = fma(r2 * r2, b, tmp);
+    if wide {
+        // specialcase(): the exponent of scale may have overflowed into the sign bit.
+        if (ki & 2147483648) == 0 {
+            // A result too large for the normal range; this step is fused.
+            scale := from_u(wsub(sbits, u64(1009) << 52));
+            y := fma(scale, tmp, scale);
+            return y * from_u(9151314442816847872);
+        }
+        // A result in the subnormal range: round y back to the right precision first, all plain.
+        // `sbits` is signed from here on, and the zero fix-up below reads this mutated word.
+        sbits = wadd(sbits, u64(1022) << 52);
+        scale := from_u(sbits);
+        mut y = scale + scale * tmp;
+        if y.abs() < 1.0 {
+            mut one = 1.0;
+            if y < 0.0 {
+                one = -1.0;
+            }
+            lo := (scale - y) + scale * tmp;
+            hi := one + y;
+            lo2 := ((one - hi) + y) + lo;
+            y = (hi + lo2) - one;
+            if y == 0.0 {
+                y = from_u(sbits & 9223372036854775808);
+            }
+        }
+        return from_u(4503599627370496) * y;
+    }
+    scale := from_u(sbits);
+    return fma(scale, tmp, scale);
+}
+
+// A signaling NaN: a NaN whose quiet bit is clear.
+fn pow_signaling(x: f64) -> bool {
+    ix := bits(x);
+    return ((ix & 9218868437227405312) == 9218868437227405312)
+        && ((ix & 4503599627370495) != 0) && ((ix & 2251799813685248) == 0);
+}
+// checkint: 0 when y is not an integer, 1 when it is odd, 2 when it is even.
+fn pow_checkint(iy: u64) -> u64 {
+    e := (iy >> 52) & 2047;
+    if e < 1023 {
+        return 0;
+    }
+    if e > 1075 {
+        return 2;
+    }
+    if (iy & ((1 << (1075 - e)) - 1)) != 0 {
+        return 0;
+    }
+    if (iy & (1 << (1075 - e))) != 0 {
+        return 1;
+    }
+    return 2;
+}
+// True for +-0, +-inf and NaN.
+fn pow_zeroinfnan(i: u64) -> bool {
+    return wsub(wadd(i, i), 1) >= 18437736874454810623;
+}
+fn pow_twice(i: u64) -> u64 {
+    return wadd(i, i);
+}
+
+@no_block
+pub fn pow(x: f64, y: f64) -> f64 {
+    mut sign_bias = u64(0);
+    mut ix = bits(x);
+    iy := bits(y);
+    mut topx = (ix >> 52) & 65535;
+    topy := (iy >> 52) & 65535;
+    if (wsub(topx, 1) >= 2046) || (wsub(topy & 2047, 958) >= 128) {
+        // Either x < 0x1p-1022 (so 0, subnormal, inf or nan) or |y| < 0x1p-65, |y| >= 0x1p63
+        // or nan.
+        if pow_zeroinfnan(iy) {
+            if pow_twice(iy) == 0 {
+                // y is zero: 1, except that a signaling x is quieted by x + y.
+                if pow_signaling(x) {
+                    return x + y;
+                }
+                return 1.0;
+            }
+            if ix == 4607182418800017408 {
+                if pow_signaling(y) {
+                    return x + y;
+                }
+                return 1.0;
+            }
+            if (pow_twice(ix) > 18437736874454810624) || (pow_twice(iy) > 18437736874454810624) {
+                return x + y;
+            }
+            if pow_twice(ix) == 9214364837600034816 {
+                return 1.0;
+            }
+            if (pow_twice(ix) < 9214364837600034816) == ((iy >> 63) == 0) {
+                // |x| < 1 with y == inf, or |x| > 1 with y == -inf.
+                return 0.0;
+            }
+            return y * y;
+        }
+        if pow_zeroinfnan(ix) {
+            mut x2 = x * x;
+            if ((ix >> 63) != 0) && (pow_checkint(iy) == 1) {
+                x2 = -x2;
+                sign_bias = 1;
+            }
+            if (pow_twice(ix) == 0) && ((iy >> 63) != 0) {
+                // pow(+-0, negative): a signed infinity from glibc's __math_divzero.
+                if sign_bias != 0 {
+                    return -(1.0 / 0.0);
+                }
+                return 1.0 / 0.0;
+            }
+            if (iy >> 63) != 0 {
+                return 1.0 / x2;
+            }
+            return x2;
+        }
+        // Here x and y are finite and non-zero.
+        if (ix >> 63) != 0 {
+            yi := pow_checkint(iy);
+            if yi == 0 {
+                // A negative x to a non-integer power: glibc's __math_invalid.
+                return (x - x) / (x - x);
+            }
+            if yi == 1 {
+                sign_bias = POW_SIGN_BIAS;
+            }
+            ix = ix & 9223372036854775807;
+            topx = topx & 2047;
+        }
+        if wsub(topy & 2047, 958) >= 128 {
+            // sign_bias is 0 here: y is not an odd integer.
+            if ix == 4607182418800017408 {
+                return 1.0;
+            }
+            if (topy & 2047) < 958 {
+                // |y| < 2^-65: x^y is 1 + y*log(x) to the last bit.
+                if ix > 4607182418800017408 {
+                    return 1.0 + y;
+                }
+                return 1.0 - y;
+            }
+            if (ix > 4607182418800017408) == (topy < 2048) {
+                return (1.0 / 0.0) * (1.0 / 0.0);
+            }
+            return 0.0 * 0.0;
+        }
+        if topx == 0 {
+            // Normalize a subnormal x so its exponent becomes negative.
+            ix = bits(x * from_u(4841369599423283200)) & 9223372036854775807;
+            ix = wsub(ix, u64(52) << 52);
+        }
+    }
+    lg := pow_log(ix);
+    ehi := y * lg.hi;
+    elo := fma(y, lg.tail, fma(y, lg.hi, -ehi));
+    return pow_exp(ehi, elo, sign_bias);
+}
