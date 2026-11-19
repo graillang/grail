@@ -39739,6 +39739,11 @@ fn exchange_into<a>(c: (&a mut C), a: Val, b: Val) -> Val {
     require_write(&mut c, a.t);
     destination := target_of(&mut c, a.t);
     seed_storage(&mut c, destination, ty);
+    // A source still at an interior address (a record field held inline, `exchange(&mut m.v, n.v)`)
+    // gets storage of its own before its words are swapped or read: `move_out` below would do it
+    // after the swap, copying the old value out from under the returned slot and zeroing the field
+    // it still points at.
+    materialise(&mut c, b.t, b.ty);
     if subword(&mut c, ty) {
         // A plain sub-word value, possibly in tagged narrow storage: read the old value, write the new.
         old := ref_load(&mut c, a.t, ty);

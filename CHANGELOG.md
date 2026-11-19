@@ -11,6 +11,13 @@
   quiet NaN, so results agree across targets. Fixed with it: `math_glibc::pow(sNaN, 0)` and `pow(1, sNaN)` are
   NaN, as in glibc, instead of 1 -- its signaling test went through `bits()` and saw a quiet NaN. Cases
   `f64-bits-exact-pattern` and `f64-bits-refuses-f32`.
+- **`exchange` with a record field as its new value no longer crashes.** `x := exchange(&mut m.v,
+  n.v)`, where `n.v` is a record held inline whose fields own storage (a `string`, a vector), returned
+  a zeroed record and leaked the real one: the source was given storage of its own only after the
+  swap, which copied the old value out from under the returned slot and cleared the field it still
+  pointed at. The source now gets its own storage first, so the old value comes back whole and every
+  string is dropped exactly once (corpus case `exchange-record-field-source`).
+
 - **Abundance: the feature composition contract is ported and gated.** `src/feature_composition.grl`
   carries `apply_feature_heights` (bounded add, then carve toward a target, then raise toward a
   target, then the world's elevation clamp) and `compose_feature_layers` (the higher weight wins and
