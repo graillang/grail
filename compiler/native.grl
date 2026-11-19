@@ -52129,9 +52129,97 @@ fn chain_walk_mode<a>(c: (&a mut C), base: Val, stop: u64, write: u64) -> Val {
     }
     return v;
 }
+// The type the field at the end of an assignment target `name([..] | .f)*` will have, read from the
+// head binding's type without taking a borrow of it. NO_TYPE when the walk cannot follow the chain
+// (a method-call head, a map, a type it does not know).
+fn chain_field_type<a>(c: (&a mut C), start: u64, op: u64) -> u64 {
+    l := find_local(&mut c, view(tok_text(&mut c, start)));
+    if l == 0 {
+        return NO_TYPE;
+    }
+    mut ty = local_ty(&mut c, l - 1);
+    mut p = start + 1;
+    while p < op {
+        while ty_kind(&mut c, ty) == 7 {
+            ty = ty_arg(&mut c, ty);
+        }
+        if kind_at(&mut c, p) == 46 {
+            if ty_kind(&mut c, ty) != 8 {
+                return NO_TYPE;
+            }
+            d := ty_arg(&mut c, ty);
+            field := field_index(&mut c, d, view(tok_text(&mut c, p + 1)));
+            if field == 0 {
+                return NO_TYPE;
+            }
+            ty = field_type(&mut c, ty, field - 1);
+            p += 2;
+            continue;
+        }
+        if kind_at(&mut c, p) != 91 {
+            return NO_TYPE;
+        }
+        if is_array(&mut c, ty) {
+            ty = array_elem(&mut c, ty);
+        } else if (ty_kind(&mut c, ty) == 6) || (ty_kind(&mut c, ty) == 27) {
+            ty = ty_arg(&mut c, ty);
+        } else {
+            return NO_TYPE;
+        }
+        mut depth = 0;
+        while p < op {
+            kk := kind_at(&mut c, p);
+            if kk == 91 {
+                depth += 1;
+            }
+            if kk == 93 {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            p += 1;
+        }
+        p += 1;
+    }
+    while ty_kind(&mut c, ty) == 7 {
+        ty = ty_arg(&mut c, ty);
+    }
+    return ty;
+}
+// Whether the right side of the statement at the operator `op` names the target's head binding:
+// `v[i].f = v[i].f * 2` reads what it overwrites.
+fn chain_head_mentioned<a>(c: (&a mut C), start: u64, op: u64) -> bool {
+    name := tok_text(&mut c, start);
+    mut p = op + 1;
+    mut depth = 0;
+    while true {
+        k := kind_at(&mut c, p);
+        if k == 0 {
+            return false;
+        }
+        if (k == 59) & (depth == 0) {
+            return false;
+        }
+        // Any mention counts, including one inside a call's arguments (`format("{}", v[i].f)`):
+        // that is a read of the head while the write target's loan would be live.
+        if (k == 1) & same(view(tok_text(&mut c, p)), view(name)) {
+            return true;
+        }
+        if (k == 40) || (k == 91) || (k == 123) {
+            depth += 1;
+        }
+        if (k == 41) || (k == 93) || (k == 125) {
+            depth -= 1;
+        }
+        p += 1;
+    }
+    return false;
+}
 // `v[i].f = x` / `v[i][j].f.g += x`: the indexed prefix is borrowed mutably, then the final field
 // run is assigned exactly like `binding.f = x`.
 fn chained_field_assignment<a>(c: (&a mut C)) -> unit {
+    chain_start := c.pos;
     chain := assign_chain(&mut c);
     oppos := chain[0];
     // The final field run starts at the first `.` after the last bracket group.
@@ -52158,6 +52246,31 @@ fn chained_field_assignment<a>(c: (&a mut C)) -> unit {
             continue;
         }
         q = q + 2;
+    }
+    // The right side is evaluated before the target's mutable loan is taken, as `xs[i] = v` does:
+    // `v[i].f = v[i].f * 2` reads the field it is about to overwrite, and the element loan a write
+    // target takes would make that read a conflict on `v`. Only a plain store whose right side names
+    // the head is reordered; every other target keeps the order it had.
+    mut preparse = 0;
+    mut rhs = val(0, 0);
+    mut rhs_start = 0;
+    mut rhs_end = 0;
+    if (kind_at(&mut c, oppos) == 61) && chain_head_mentioned(&mut c, chain_start, oppos) {
+        want := chain_field_type(&mut c, chain_start, oppos);
+        if want != NO_TYPE {
+            exchange(&mut c.pos, oppos + 1);
+            rhs_start = c.pos;
+            rhs_mark := c.resources.len();
+            rhs = expr_expected(&mut c, 0, want);
+            rhs_end = c.pos;
+            if c.raw == 0 && !contains_borrow(&mut c, rhs.ty, 0) {
+                release_temporaries(&mut c, rhs_mark, rhs.t);
+                close_loans(&mut c);
+            }
+            expect(&mut c, view(";"));
+            exchange(&mut c.pos, chain_start);
+            preparse = 1;
+        }
     }
     head := place(&mut c, 1, 0);
     base := chain_walk(&mut c, head, final_run);
@@ -52192,7 +52305,7 @@ fn chained_field_assignment<a>(c: (&a mut C)) -> unit {
     a := assign_field_path(&mut c, base.t, base.ty);
     target := a.t;
     fieldty := ty_arg(&mut c, a.ty);
-    assignment_tail(&mut c, 0, base.t, base.ty, target, u64[1, fieldty, c.ref_assign_d, c.ref_assign_k, c.ref_assign_base, c.ref_assign_rty], view(fname), record_ty);
+    assignment_tail(&mut c, 0, base.t, base.ty, target, u64[1, fieldty, c.ref_assign_d, c.ref_assign_k, c.ref_assign_base, c.ref_assign_rty], view(fname), record_ty, preparse, rhs.t, rhs.ty, rhs_start, rhs_end);
     return ();
 }
 // Writing or mutably borrowing a string's bytes. A string literal is a `string` (read-only,
@@ -54741,7 +54854,7 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
                     target := a.t;
                     fieldty := ty_arg(&mut c, a.ty);
                     mut none = u8[];
-                    assignment_tail(&mut c, 0, head.t, head.ty, target, u64[1, fieldty, c.ref_assign_d, c.ref_assign_k, c.ref_assign_base, c.ref_assign_rty], view(none), 0);
+                    assignment_tail(&mut c, 0, head.t, head.ty, target, u64[1, fieldty, c.ref_assign_d, c.ref_assign_k, c.ref_assign_base, c.ref_assign_rty], view(none), 0, 0, 0, 0, 0, 0);
                     return ();
                 }
                 capture_assignment(&mut c, view(name));
@@ -54807,7 +54920,7 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
             record_ty = shape;
         }
         op_at := c.pos;
-        assignment_tail(&mut c, l, id, ty, target, u64[through, fieldty, assigned_d, assigned_k, assigned_base, assigned_rty], view(field_name), record_ty);
+        assignment_tail(&mut c, l, id, ty, target, u64[through, fieldty, assigned_d, assigned_k, assigned_base, assigned_rty], view(field_name), record_ty, 0, 0, 0, 0, 0);
         // `x = e` writes the binding; `x.f = e` writes a field of what `x` owns, which is not a fact
         // about `x`'s own value.
         if through != 0 {
@@ -54873,7 +54986,7 @@ fn discard_value<a>(c: (&a mut C), v: Val) -> unit {
 }
 // The rest of an assignment once its target is known: `target` is the binding slot (through =
 // 0, `l` its local) or a field reference (through = 1, `fieldty` the field type).
-fn assignment_tail<a, b>(c: (&a mut C), l: u64, id: u64, ty: u64, target: u64, through_fieldty: u64[], fname: &b [u8], rtype: u64) -> unit {
+fn assignment_tail<a, b>(c: (&a mut C), l: u64, id: u64, ty: u64, target: u64, through_fieldty: u64[], fname: &b [u8], rtype: u64, preparsed: u64, rhs_t: u64, rhs_ty: u64, rhs_start: u64, rhs_end: u64) -> unit {
     through := through_fieldty[0];
     fieldty := through_fieldty[1];
     // The field the path ends at, when the target was read by `assign_field_path`.
@@ -54940,9 +55053,21 @@ fn assignment_tail<a, b>(c: (&a mut C), l: u64, id: u64, ty: u64, target: u64, t
     if operator != 61 {
         reservation = reserve_compound(&mut c, target, through);
     }
-    vstart := c.pos;
-    mut v = expr_expected(&mut c, 0, expected);
-    vend := c.pos;
+    mut vstart = c.pos;
+    mut v = val(0, 0);
+    mut vend = c.pos;
+    if preparsed != 0 {
+        // The right side was evaluated before this target borrowed its storage (see
+        // chained_field_assignment): its value and span come from there, and the statement resumes
+        // at the `;` that follows them.
+        v = val(rhs_t, rhs_ty);
+        vstart = rhs_start;
+        vend = rhs_end;
+        exchange(&mut c.pos, rhs_end);
+    } else {
+        v = expr_expected(&mut c, 0, expected);
+        vend = c.pos;
+    }
     expect(&mut c, view(";"));
     if (through == 0) & (c.raw == 0) {
         expected = settle_flex(&mut c, l - 1, v.ty);
