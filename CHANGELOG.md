@@ -48,6 +48,11 @@
   neighbours, the subnormal and overflow boundaries, and a signed threshold apiece -- with no mismatch, and
   pinned by `math-glibc-pow`. `math::pow` keeps its own formulation: switching it to delegate is a decision for
   the lanes whose parities were taken against it.
+- **The procedural placeholder pieces are ported, bit for bit.** `abundance/src/procgen_placeholder.grl`
+  carries the kit's own Soup (convex polygons with one face normal and caller-axis UVs, boxes as six
+  faces, prisms and cylinders from 2D profiles, n-gon pyramids) and all 21 shapes the dispatcher
+  knows. `kit_test.grl` matches `parity/kit.txt`: 1968 values over three size sets and both windings.
+
 - **A loot site's life is ported.** `abundance/src/site_life.grl` carries `loot_sites/site_life.hpp`
   and `.cpp` from `cmake/tx/loot_sites.cmake`: the tuning with its per-field ranges and the
   cross-field consistency rules, the file's own draw (`mix`, the seeded `unit`, `exponential` and
