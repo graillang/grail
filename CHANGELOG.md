@@ -97,6 +97,14 @@
   relief, the massif dome, the legacy/macro coastline blend, divide uplift and the valley pull). The
   `initial` suite compares `s00_initial` and the five fields the real `generate_world` dumps beside it
   (AB_COHERENT_STAGE_DUMP) for three worlds: 306 values, every f32 byte.
+- **Crafting routes are ported, with printf's `%.6f` reproduced exactly.** `abundance/src/
+  crafting_routes.grl` carries the engine's portable presentation helpers (`UsesFoodProcessor`,
+  `UsesPrecisionBench`, `UsesProductionCell` over their recipe ids) and `NumberText`, whose
+  `display_text::format("%.6f", v)` is ported as integer scaling by 10^6 (m * 15625 * 2^(e+6)) with
+  round-half-to-even, so subnormals, ties and the largest finite value match glibc's printf.
+  `abundance/tests/crafting_routes_test.grl` gates 80 lines against the engine's own module and
+  formatter. Recorded boundary: a sign-set NaN spells "-nan" in glibc but Grail's `f64_from_bits`
+  normalises the sign away, so that value cannot be represented to format it.
 
 - **The derelict monument layouts are complete: the library, arms depot, factory, orchard and dam
   templates join the farm, and pieces resolve through the construction catalogue.**
