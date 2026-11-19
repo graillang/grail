@@ -7555,6 +7555,90 @@
     "diagnostic": "write needs a *mut T"
   },
   {
+    "name": "raw-deref-read-write",
+    "source": "struct H {\n    p: *mut u64\n}\nfn main() -> u64 {\n    mut x: u64 = 41;\n    mut y: u8 = 250;\n    unsafe {\n        p := ptr_of(&mut x);\n        *p = *p + 1;\n        println(*p);\n        *p += 10;\n        *p -= 2;\n        *p *= 2;\n        *p /= 5;\n        *p %= 7;\n        println(*p == p.read());\n        h := H { p: p };\n        *h.p += 1;\n        println(*h.p);\n        q := alloc(u64, 3);\n        *q.add(1) = 9;\n        *q.add(2) = *q.add(1) * 2;\n        println(*q.add(2) + q.add(1).read() + *q);\n        free(q);\n        b := ptr_of(&mut y);\n        *b += 5;\n        println(*b);\n        *b = 7;\n        println(*b.cast(u8) + 1);\n        s := ptr_of(&x);\n        println(*s);\n    }\n    println(x);\n    return 0;\n}\n",
+    "stdout": "42\ntrue\n7\n27\n255\n8\n7\n7\n",
+    "note": "`*p` is `p.read()` and `*p = v` is `p.write(v)` on a raw pointer, at the pointee's width; `*p op= v` reads, combines and writes; `*p.add(1)` is `*(p.add(1))`"
+  },
+  {
+    "name": "raw-deref-pointer-to-pointer",
+    "source": "struct H {\n    p: *mut u64\n}\nfn through(r: &*mut u64) -> u64 {\n    return unsafe { **r };\n}\nfn twice(pp: *mut *mut u64) -> u64 {\n    unsafe {\n        **pp = 1;\n        *(*pp) += 3;\n        **pp *= 10;\n        return **pp;\n    }\n}\nfn main() -> u64 {\n    mut x: u64 = 3;\n    p := unsafe { ptr_of(&mut x) };\n    h := H { p: p };\n    println(through(&h.p));\n    unsafe {\n        pp := alloc(*mut u64, 1);\n        *pp = p;\n        println(twice(pp));\n        free(pp);\n    }\n    println(x);\n    return 0;\n}\n",
+    "stdout": "3\n40\n40\n",
+    "note": "`**pp` and `**pp = v` go through a pointer to a raw pointer; `**r` reads through a reference to one"
+  },
+  {
+    "name": "raw-deref-ownership-contract",
+    "source": "struct Tag {\n    name: string\n}\nimpl Drop for Tag {\n    fn drop(self: &mut Tag) {\n        println(\"drop {}\", self.name);\n    }\n}\nfn main() -> u64 {\n    unsafe {\n        p := alloc(Tag, 1);\n        *p = Tag { name: \"a\" };\n        a := *p;\n        *p = Tag { name: \"b\" };\n        println(\"wrote over {}\", a.name);\n        b := *p;\n        u := Tag { name: \"c\" };\n        *p = u;\n        c := *p;\n        println(\"read {} {}\", b.name, c.name);\n        free(p);\n    }\n    println(\"end\");\n    return 0;\n}\n",
+    "stdout": "wrote over a\nread b c\ndrop c\ndrop b\ndrop a\nend\n",
+    "note": "`*p = v` moves `v` in and does not drop what was there (`ptr::write`); `*p` hands out an owner (`ptr::read`): each value is dropped once, by whoever read it out"
+  },
+  {
+    "name": "reject-raw-deref-outside-unsafe",
+    "source": "fn main() -> u64 {\n    mut x: u64 = 1;\n    p := unsafe { ptr_of(&mut x) };\n    println(*p);\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "a raw pointer operation needs an unsafe block: read"
+  },
+  {
+    "name": "reject-raw-deref-write-outside-unsafe",
+    "source": "fn main() -> u64 {\n    mut x: u64 = 1;\n    p := unsafe { ptr_of(&mut x) };\n    *p = 2;\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "a raw pointer operation needs an unsafe block: write"
+  },
+  {
+    "name": "reject-raw-deref-compound-outside-unsafe",
+    "source": "fn main() -> u64 {\n    mut x: u64 = 1;\n    p := unsafe { ptr_of(&mut x) };\n    *p += 2;\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "a raw pointer operation needs an unsafe block: write"
+  },
+  {
+    "name": "reject-raw-deref-in-safe-fn",
+    "source": "fn peek(p: *u64) -> u64 {\n    return *p;\n}\nfn main() -> u64 {\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "a raw pointer operation needs an unsafe block: read"
+  },
+  {
+    "name": "reject-raw-deref-pointer-to-pointer-outside-unsafe",
+    "source": "fn peek(pp: **u64) -> u64 {\n    return **pp;\n}\nfn main() -> u64 {\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "a raw pointer operation needs an unsafe block: read"
+  },
+  {
+    "name": "reject-raw-deref-write-through-shared",
+    "source": "fn main() -> u64 {\n    mut x: u64 = 1;\n    unsafe {\n        s := ptr_of(&x);\n        *s = 2;\n    }\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "write needs a *mut T; a *T only reads"
+  },
+  {
+    "name": "reject-raw-deref-compound-through-shared",
+    "source": "fn main() -> u64 {\n    mut x: u64 = 1;\n    unsafe {\n        s := ptr_of(&x);\n        *s += 2;\n    }\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "write needs a *mut T; a *T only reads"
+  },
+  {
+    "name": "reject-raw-deref-write-type-mismatch",
+    "source": "fn main() -> u64 {\n    unsafe {\n        q := alloc(u64, 1);\n        *q = \"x\".copy();\n        free(q);\n    }\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "type mismatch"
+  },
+  {
+    "name": "reject-raw-deref-write-moves-operand",
+    "source": "fn main() -> u64 {\n    unsafe {\n        s := alloc(u8[], 1);\n        a := \"one\".copy();\n        *s = a;\n        println(a);\n        free(s);\n    }\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "was moved"
+  },
+  {
+    "name": "reject-raw-deref-bare-statement",
+    "source": "fn main() -> u64 {\n    mut x: u64 = 1;\n    unsafe {\n        s := ptr_of(&mut x);\n        *s;\n    }\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "expected = after *pointer"
+  },
+  {
+    "name": "reject-raw-deref-assign-pointer-to-value",
+    "source": "fn main() -> u64 {\n    unsafe {\n        q := alloc(u64, 1);\n        **q = 2;\n        free(q);\n    }\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "**p = v writes through a pointer to a raw pointer"
+  },
+  {
     "name": "drop-hook-order",
     "source": "struct Tag {\n    name: string\n}\nimpl Drop for Tag {\n    fn drop(self: &mut Tag) {\n        println(\"tag {}\", self.name);\n    }\n}\nstruct Pair {\n    head: Tag,\n    tail: Tag\n}\nimpl Drop for Pair {\n    fn drop(self: &mut Pair) {\n        println(\"pair\");\n    }\n}\nstruct Holder<T> {\n    v: T\n}\nimpl<T> Drop for Holder<T> {\n    fn drop(self: &mut Holder<T>) {\n        println(\"holder\");\n    }\n}\nfn main() -> u64 {\n    a := Tag { name: \"a\" };\n    b := Tag { name: \"b\" };\n    println(\"body\");\n    p := Pair { head: Tag { name: \"h\" }, tail: Tag { name: \"t\" } };\n    h := Holder { v: Tag { name: \"g\" } };\n    return 0;\n}\n",
     "stdout": "body\nholder\ntag g\npair\ntag h\ntag t\ntag b\ntag a\n"

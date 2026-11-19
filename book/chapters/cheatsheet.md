@@ -27,5 +27,5 @@ is checked to agree.
 | `Rc::new(v)`, `Rc::clone(&r)` | `rc::new(v)`, `r.clone()` | `Arc` is the same shape. |
 | `impl Drop for Guard` | `impl Drop for Guard` | |
 | `assert!(b != 0)` at run time | `b: u64 where b != 0` | Proved at the call when it can be, checked otherwise. |
-| `unsafe { *p }` | `unsafe { p.read() }` | Raw pointers are `*T` and `*mut T`. |
+| `unsafe { *p }` | `unsafe { *p }` | Raw pointers are `*T` and `*mut T`; `*p = v` writes through a `*mut T`. |
 | `macro_rules!` | `@if`, `@for`, comptime calls | Compile-time code is ordinary Grail. |

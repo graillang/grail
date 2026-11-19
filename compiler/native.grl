@@ -40759,6 +40759,56 @@ fn builtin<a>(c: (&a mut C), id: u64) -> Val {
 }
 // `*r` (and the `load` builtin): copies the referent of a typed reference. Only values that need no
 // drop can be copied; a shared view referent is reborrowed.
+// Whether the statement at the cursor assigns (`=`, `+=` ... `%=` outside any bracket before its `;`).
+fn deref_assignment_ahead<a>(c: (&a mut C)) -> bool {
+    mut depth = 0;
+    mut i = c.pos;
+    while i < c.toks.len() {
+        k := kind_at(&mut c, i);
+        if (k == 40) || (k == 91) || (k == 123) {
+            depth += 1;
+        } else if (k == 41) || (k == 93) || (k == 125) {
+            if depth == 0 {
+                return false;
+            }
+            depth -= 1;
+        } else if depth == 0 {
+            if k == 59 {
+                return false;
+            }
+            if (k == 61) || ((261 < k) & (k < 267)) {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    return false;
+}
+// `*p = v` and `*p op= v` through a raw `*mut T`: `p.write(v)`, and `p.write(p.read() op v)` - the
+// old value is not dropped, as `ptr::write` does not drop it. `op` is the token after `*p`.
+fn pointer_assignment<a>(c: (&a mut C), p: Val, op: u64) -> unit {
+    raw_pointer_gate(&mut c, view("write"));
+    pointer_writable(&mut c, ty_mode(&mut c, p.ty));
+    pointee := ty_arg(&mut c, p.ty);
+    mut v = val(0, 0);
+    if op == 61 {
+        advance(&mut c);
+        v = pointer_operand(&mut c, pointee);
+    } else if (261 < op) & (op < 267) {
+        advance(&mut c);
+        current := pointer_read(&mut c, p.t, pointee);
+        start := c.pos;
+        mut rhs = expr(&mut c, 0);
+        rhs = adopt_value(&mut c, rhs, start, c.pos, pointee);
+        v = compound_value(&mut c, compound_operator(op), current.t, rhs, pointee);
+    } else {
+        fail(&mut c, view("expected = after *pointer"));
+    }
+    expect(&mut c, view(";"));
+    pointer_store(&mut c, p.t, v, pointee);
+    release_temporary(&mut c, p.t);
+    return ();
+}
 fn deref_value<a>(c: (&a mut C), a: Val) -> Val {
     observe(&mut c, a.t);
     if c.raw == 0 {
@@ -46306,24 +46356,15 @@ fn pointer_method<a, d>(c: (&a mut C), value: Val, pty: u64, name: &d [u8]) -> V
     }
     if same(view(name), view("read")) {
         expect(&mut c, view(")"));
-        slot := ptr_load(&mut c, address, pointee);
-        // The value read out is the reader's: `ptr::read` duplicates ownership, so the result is an
-        // owner with a drop flag of its own, which is what lets it be dropped or moved with the
-        // ordinary rules (the reader owes the source a value it will not use twice).
-        own(&mut c, slot, pointee);
+        v := pointer_read(&mut c, address, pointee);
         release_temporary(&mut c, word);
-        return val(slot, pointee);
+        return v;
     }
     if same(view(name), view("write")) {
-        if mode == 0 {
-            fail(&mut c, view("write needs a *mut T; a *T only reads"));
-        }
+        pointer_writable(&mut c, mode);
         v := expr(&mut c, 0);
         expect(&mut c, view(")"));
-        ptr_store(&mut c, address, v.t, pointee);
-        // And `ptr::write` hands it over: the operand is moved into the destination, so an owned
-        // local argument is consumed and not also dropped where it came from.
-        move_out(&mut c, val(v.t, v.ty));
+        pointer_store(&mut c, address, v, pointee);
         release_temporary(&mut c, word);
         return val(imm(&mut c, 0), intern(&mut c, 2, 0));
     }
@@ -46397,6 +46438,47 @@ fn pointer_method<a, d>(c: (&a mut C), value: Val, pty: u64, name: &d [u8]) -> V
     push_bytes(&mut msg, view(name));
     fail(&mut c, view(msg));
     return val(0, 0);
+}
+// `p.read()` and `*p`: the value read out is the reader's. `ptr::read` duplicates ownership, so the
+// result is an owner with a drop flag of its own, which is what lets it be dropped or moved with the
+// ordinary rules (the reader owes the source a value it will not use twice).
+fn pointer_read<a>(c: (&a mut C), address: u64, pointee: u64) -> Val {
+    slot := ptr_load(&mut c, address, pointee);
+    own(&mut c, slot, pointee);
+    return val(slot, pointee);
+}
+fn pointer_writable<a>(c: (&a mut C), mode: u64) -> unit {
+    if mode == 0 {
+        fail(&mut c, view("write needs a *mut T; a *T only reads"));
+    }
+    return ();
+}
+// The value `*p = v` stores: an expression of the pointee's type (a bare literal takes it), exactly
+// as `*r = v` reads its right side. (`p.write(v)` stores its operand as it is.)
+fn pointer_operand<a>(c: (&a mut C), pointee: u64) -> Val {
+    start := c.pos;
+    mut v = expr_expected(&mut c, 0, pointee);
+    v = adopt_value(&mut c, v, start, c.pos, pointee);
+    if c.raw == 0 {
+        require_type(&mut c, v.ty, pointee);
+    }
+    return v;
+}
+// `p.write(v)` and `*p = v`: `ptr::write` hands the value over. The operand is moved into the
+// destination, so an owned local is consumed and not also dropped where it came from - and what was
+// there before is not dropped either.
+fn pointer_store<a>(c: (&a mut C), address: u64, v: Val, pointee: u64) -> unit {
+    ptr_store(&mut c, address, v.t, pointee);
+    move_out(&mut c, val(v.t, v.ty));
+    return ();
+}
+// `*p`, `**p` and `*p = v` on a raw pointer `p`: the operator spellings of `p.read()` and
+// `p.write(v)`, with the same unsafe gate.
+fn pointer_deref<a>(c: (&a mut C), p: Val) -> Val {
+    raw_pointer_gate(&mut c, view("read"));
+    v := pointer_read(&mut c, p.t, ty_arg(&mut c, p.ty));
+    release_temporary(&mut c, p.t);
+    return v;
 }
 // `p.read()`: the pointee loaded at its natural width, the same instruction raw_load and friends
 // emit for the intrinsic of that width. A float pointee is refused rather than reinterpreted.
@@ -48783,6 +48865,18 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
         // reference is only passed through, never kept, so it needs no loan of its own.
         advance(&mut c);
         r := expr(&mut c, 10);
+        // A raw pointer at either level is read through (`**pp` for `pp: *mut *mut T`, or `**r` for
+        // `r: &*T`): each `*` is the one it would be alone.
+        if ty_kind(&mut c, r.ty) == 34 {
+            inner := pointer_deref(&mut c, r);
+            if ty_kind(&mut c, inner.ty) == 34 {
+                return pointer_deref(&mut c, inner);
+            }
+            return deref_value(&mut c, inner);
+        }
+        if (ty_kind(&mut c, r.ty) == 7) && (ty_kind(&mut c, ty_arg(&mut c, r.ty)) == 34) {
+            return pointer_deref(&mut c, deref_value(&mut c, r));
+        }
         observe(&mut c, r.t);
         if ty_kind(&mut c, r.ty) != 7 {
             fail(&mut c, view("* requires a typed reference"));
@@ -48808,6 +48902,9 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
         // `*r`: dereference; postfix accessors bind tighter (`*r.f` is `*(r.f)`).
         advance(&mut c);
         r := expr(&mut c, 10);
+        if ty_kind(&mut c, r.ty) == 34 {
+            return pointer_deref(&mut c, r);
+        }
         return deref_value(&mut c, r);
     }
     if k == 38 {
@@ -54686,6 +54783,26 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
         chained_field_assignment(&mut c);
         return ();
     }
+    if (kind(&mut c) == 267) && deref_assignment_ahead(&mut c) {
+        // `**pp = v`: `*(*pp) = v` - the outer level is read (a raw pointer, or a reference to one)
+        // and the pointer it holds is written through.
+        advance(&mut c);
+        r := expr(&mut c, 10);
+        op := kind(&mut c);
+        if ty_kind(&mut c, r.ty) == 34 {
+            inner := pointer_deref(&mut c, r);
+            if ty_kind(&mut c, inner.ty) != 34 {
+                fail(&mut c, view("**p = v writes through a pointer to a raw pointer"));
+            }
+            pointer_assignment(&mut c, inner, op);
+            return ();
+        }
+        if (ty_kind(&mut c, r.ty) == 7) && (ty_kind(&mut c, ty_arg(&mut c, r.ty)) == 34) {
+            pointer_assignment(&mut c, deref_value(&mut c, r), op);
+            return ();
+        }
+        fail(&mut c, view("**p = v writes through a pointer to a raw pointer"));
+    }
     if kind(&mut c) == 42 {
         // `*r = v`: store through a mutable reference; the old value is dropped. `*r op= v`
         // combines with the current (copyable) value first.
@@ -54694,6 +54811,10 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
         rt := r.t;
         rty := r.ty;
         op := kind(&mut c);
+        if ty_kind(&mut c, rty) == 34 {
+            pointer_assignment(&mut c, r, op);
+            return ();
+        }
         if ty_kind(&mut c, rty) != 7 {
             fail(&mut c, view("* requires a typed reference"));
         }
