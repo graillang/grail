@@ -9,6 +9,13 @@
   without it nothing, and the engine's `InputState` is the same either way - a reader, not a filter.
   The synthetic pushes now carry the window id and the keycode too, which is what ImGui's backend
   matches events by.
+- **PNG sources load in Grail.** `abundance/src/image_io.grl` ports `image_io.cpp`'s `decode_png`: the chunk walk,
+  zlib inflate through `lib/zlib.grl`, the five row filters, 8- and 16-bit samples and the engine's grey/RGB expansion
+  and 1/255 or 1/65535 scaling. `abundance/tests/png_test.grl` matches all 754 lines the engine's own loader prints
+  over six fixtures (8-bit grey, grey+alpha, RGB, RGBA; 16-bit RGB and RGBA), every pixel's float bits; palette and
+  interlaced PNGs are refused with the reason. EXR, JPEG and TIFF remain with the C++ importer. Content QA's sRGB
+  transfer now uses `lib/math_glibc.grl`'s glibc-exact double `pow`, replacing the 256-entry table, and still matches
+  its 44 lines.
 
 - **Moving an array out of a record field no longer frees its elements twice.** `a := n.a`,
   `m.a = n.a`, `eat(n.a)` and `exchange(&mut m.a, n.a)`, with `n.a: [string; 2]` held inline in a
