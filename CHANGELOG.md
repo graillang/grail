@@ -1,5 +1,18 @@
 ## Unreleased
 
+- **A loot site's life is ported.** `abundance/src/site_life.grl` carries `loot_sites/site_life.hpp`
+  and `.cpp` from `cmake/tx/loot_sites.cmake`: the tuning with its per-field ranges and the
+  cross-field consistency rules, the file's own draw (`mix`, the seeded `unit`, `exponential` and
+  the per-decision `key`), `contest` (distinct players in the window, nearby owners, capped combat,
+  `1 - exp(-raw/scale)`), `restock_interval_s`, `farm_locked`, the visit/combat records with their
+  coalescing and pruning, the solo-looter streak, `plan_refill` (share and fill draws per kind, the
+  partial Fisher-Yates over the slots, sorted picks, the streak's fill factor and tier drop),
+  `next_event`/`apply_event` (resupply, retake or move-in after a clearing, the abandoned party's
+  move-in/stash/pass-by, derelict salvage), `note_cleared`, `crew_start`, `unwatched` and
+  `occupancy_decay`. `abundance/tests/site_life_test.grl` prints 334 lines that match a reference
+  linking the engine's own `site_life.cpp` — the 31 tuning fields are driven through the engine's
+  JSON parser, so its ranges, consistency rules and wording are the oracle.
+
 - **The file-system primitives Abundance's content gc/heal need exist in the os layer.** `stat` now
   reports the link count (`fs::Metadata::nlink`), `host::flock(fd, operation)` is the advisory lock
   (LOCK_SH/LOCK_EX/LOCK_NB/LOCK_UN; 73 on x86-64 and 32 on the generic table), and
