@@ -19,6 +19,15 @@
   `host::alive(pid)` answers exists / gone / exists-but-unsignallable; `fs` wraps both as
   `File::lock`/`unlock` and `fs::alive`. The abundance suite exercises them deterministically
   (`fs_primitives_test.grl`).
+- **Abundance: the mesa planner's ranked keep-apart selection is now gated on a multi-region
+  world.** The mesa fixture is a 12 km plain of bedded rock with four separated basins and one
+  mediocre corner basin. `mesa.multi` keeps four regions while rejecting candidates for separation
+  and stopping the ranked loop on a score below the second-region threshold (0.6193); the two runs
+  beside it show each rule biting on its own — with the threshold off the same world yields seven
+  regions, and forced selection at the same footprint yields six — so the ranking and the separation
+  rule can no longer silently differ. The builder is gated twice: as the engine runs it (the washes
+  carve the landform, no cell reaches the cap) and with the wash thresholds out of reach (the tops
+  reach the caprock, 74 cap cells), which exercises the cap branch too. 36 of 36 lines.
 
 - Added: `^=` is a compound assignment, like `+=` and the rest: `x ^= 3` in a local, a record field
   (`a.n ^= 15`) and an indexed element (`v[i] ^= 3`), at the target's own integer width. It was
