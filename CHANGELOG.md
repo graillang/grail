@@ -46,6 +46,15 @@
   glibc's are correctly rounded and lib/math's fdlibm versions land one ulp off on some arguments
   (three of the waypoint's bearings; the compass wind flow). `hud_compass.grl` now uses it in place
   of its own local sine/cosine.
+- **The voice cap and the pool steal are ported and gated against the engine's own claims.**
+  `platform_audio.grl` carries `ab::audio::VoiceSlot` and `claim_cue_cap`/`claim_pool_steal` (a cue's
+  own `max_voices` cap first, then the pool's kind-matched steal for a strictly higher priority) -
+  the last pure decision audio.cpp's `start()` makes before it takes a voice. The parity grows to
+  113/113 lines over six slots and fourteen cases against `audio_cue_presentation.cpp`'s own
+  functions. Two Grail traps recorded in the file: `&`/`|` do not short-circuit, so a `u64(weakest)`
+  of -1 aborted under checked conversion; the conditions are nested instead.
+
+
 - **Abundance: the mesa coupling and marks are ported and bit-exact.** `src/coherent_mesa.grl` gains
   `mesa_stepped_sites` (the handover to the stepped-hills pass: one Mesa-style site per built region,
   carrying the caprock, the seed and the `masked` bit that says the Mesa mask already holds the
