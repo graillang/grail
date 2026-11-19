@@ -1,5 +1,18 @@
 ## Unreleased
 
+- **Automatic doors (the pure half) are ported.** `abundance/src/automatic_doors.grl` carries
+  `actions/territory/automatic_doors.hpp` and the pure half of `territory_automatic_doors.cpp`
+  from `cmake/tx/territory.cmake`, with the two constexpr rules it reads from
+  `compound_wall_content.hpp`: `automatable_kind`, `operable_module`, `physical_kind`,
+  `automatable_module`, `tier_row`, `display_name`, `leaf_count`, `rated_w`, `kit_cost` (steel,
+  copper wire and electronic parts per leaf) and the approach sensor's `open_distance_m` and
+  `should_open` (the standing zone, the approach cone and the runway, clamped to the sensor's
+  range). `abundance/tests/automatic_doors_test.grl` prints 995 lines that match a reference
+  linking the engine's own `territory_automatic_doors.cpp`: every id in the kit's module space,
+  the five tiers, the constants and the sensor's edge cases. `project_loads`, `fit_automatic_kit`
+  and the action that moves the leaf need the ConstructionGrid, the access registry and the power
+  grid, and are a later increment.
+
 - **A loot site's life is ported.** `abundance/src/site_life.grl` carries `loot_sites/site_life.hpp`
   and `.cpp` from `cmake/tx/loot_sites.cmake`: the tuning with its per-field ranges and the
   cross-field consistency rules, the file's own draw (`mix`, the seeded `unit`, `exponential` and
