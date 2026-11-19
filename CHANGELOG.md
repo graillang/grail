@@ -372,6 +372,18 @@
   `~/.cache/grail-builds/<stamp>/<name>`), so twenty worktrees with identical inputs keep one copy of each
   artefact instead of twenty; `/home` filled to 100 % twice under the swarm's disk load. A build that
   cannot copy into the store still succeeds.
+- **The world model's save/restore is ported on top of the section layer.** `save_sections` in
+  `abundance/src/world_model.grl` builds the engine's `EngineState` from the world (canonical clock
+  and registry rows) and stores it as `'ABTX'` plus `'ABTW'` with the same rows under
+  `engine.entities`, through `abundance_tx_sections` (the 'ABTX'/'ABTW' section layer another lane
+  already ported — not re-ported). `restore` mirrors `Session::restore`: only an empty candidate
+  restores, the epoch bumps, the clock and rows come back, and the pawn components are rebuilt
+  from their persisted rows (kind from the type id's fnv name, latched input from the version-2
+  wire payload); `load_sections` being all-or-nothing means a wrong schema or an undecodable
+  payload refuses and leaves the world untouched. `save_refusal` is `request_save`'s admission.
+  The replay gates the two sections' bytes and FNVs against the engine's own `ab::tx::encode`
+  of `EngineState` and the envelope (1 534 reference lines).
+
 - **The Jolt surface closes with the overlap query.** `gr_jolt_overlap_capsule` is one `CollideShape`
   of the same capsule the cast sweeps, stopped at the first hit: `abundance/src/jolt.grl` now answers
   the core's `overlap` contract (a boolean, with `invalid_request` for a capsule shorter than its own
