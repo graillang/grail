@@ -1,5 +1,10 @@
 ## Unreleased
 
+- Added: `core::trunc_u32(x)` (`lib/core.grl`), C's `(u32)x` for a signed value - the low 32 bits, no
+  check, so `-1` is `4294967295`. A port of `static_cast<u32>(i64_value)` no longer has to reach for
+  `x & 0xffffffff`; `u32(x)` itself is still the checked conversion and still traps on a negative
+  value ("negative value converted to an unsigned type"), so a truncation is always written down.
+  Cases `core-trunc-u32` and `u32-of-negative-i64-still-traps`.
 - **A loot site's life is ported.** `abundance/src/site_life.grl` carries `loot_sites/site_life.hpp`
   and `.cpp` from `cmake/tx/loot_sites.cmake`: the tuning with its per-field ranges and the
   cross-field consistency rules, the file's own draw (`mix`, the seeded `unit`, `exponential` and
