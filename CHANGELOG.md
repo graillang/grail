@@ -48,6 +48,12 @@
   `tests/coherent_mesa_test.grl` now also matches Abundance's own `build_mesa_landforms`
   (`-ffp-contract=off`) over the same synthetic world: heights, mask and counts, 21 of 21 lines.
   Not ported yet: the Mesa-style stepped-hills site list and the Mesa mark/biome hooks.
+- **The coherent generator's mountain ranges are ported bit for bit.** `abundance/src/
+  worldgen_mountains.grl` carries `plan_mountain_ranges` (96-candidate placement scored on edge
+  clearance, range separation, keep-out discs and the area budget), `mountain_range_along_strength`,
+  `coherent_add_mountain_passes` (one pass per ~2.2 km of crest at the lowest along-strike strength)
+  and the Saturday2d82 `rasterize_mountain_plan`; 654 values over four plans match the worldgen
+  library, including all six field rasters.
 
 - **The Jolt surface closes with the overlap query.** `gr_jolt_overlap_capsule` is one `CollideShape`
   of the same capsule the cast sweeps, stopped at the first hit: `abundance/src/jolt.grl` now answers
