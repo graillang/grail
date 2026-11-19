@@ -1,5 +1,18 @@
 ## Unreleased
 
+- **Abundance: the coherent-profile coasts are ported and bit-exact.** `src/coherent_coasts.grl`
+  carries `shape_coasts`: the ocean flood and shoreline frame, the exact squared distance transform
+  with its nearest shore cell, the rock-resistance field (province, patch noise, hinterland relief),
+  the shoreline warp with its invertibility damping, the flow to the sea and the drowned-valley
+  inlets (stem tracing, thalweg and confinement measurement, trough sections, the bank rounding),
+  sheer faces on resistant headlands, skerries and islets, spits, the repair that turns water cut off
+  from the sea into wet land, and the final elevation clamp. Gated against Abundance's own
+  `coherent_coasts.cpp` over a synthetic 5 km plateau island in two configurations (everything on;
+  the warp off with a protection disc over part of the coast): 38 of 38 lines, both the heights and
+  the whole report. The engine's parallel loops are reproduced serially; each writes only its own
+  cell and the one shared reduction is a Boolean OR. Not exercised by this fixture: the ria and fjord
+  trough profiles and the spits (that island carries one estuary and no rias, fjords or spits).
+
 - **The construction-kit accumulator is ported, bit for bit.** `abundance/src/procgen_kit_acc.grl`
   carries `kit_acc.hpp`: per-slot surfaces, the Basis/Xform and its quaternion/arc/axis-angle
   constructors, the round-side quality floor, and `grid`/`grid_out`/`fan`/`lathe`/`tube` (welded
