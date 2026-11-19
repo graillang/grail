@@ -816,7 +816,7 @@ fn compile<a, b, d, e, g, k>(
 }
 // The compiler invocation, spelled out in one place: the build cache keys on this vector, so a flag
 // or an input that the driver passes is in the key by construction and cannot be forgotten there.
-//   grail [--target T] [--debug] [--deny-ambient-host] [--split] [--overflow=...]
+//   grail [--target T] [--debug] [--no-debug-info] [--deny-ambient-host] [--split] [--overflow=...]
 //         [--interface DIR [--verify-interface]] OUT.s ENTRY.grl MODULE.grl... RUNTIME PLATFORM
 fn build_argv<a, b, d, e, g, k>(
     h: (&a Home),
@@ -869,6 +869,9 @@ fn build_argv<a, b, d, e, g, k>(
     }
     if debug != 0 {
         command.push(copy(view("--debug")));
+    }
+    if (flags / 131072) % 2 != 0 {
+        command.push(copy(view("--no-debug-info")));
     }
     if deny != 0 {
         command.push(copy(view("--deny-ambient-host")));
@@ -1332,7 +1335,10 @@ fn compile_mode<a, b, d, e, g, k>(
         }
     }
     if pe != 0 {
-        return windows_link(view(asm), view(output), view(object), view(entry), debug);
+        // A Windows x86-64 development build carries CodeView line tables unless told not to
+        // (`--no-debug-info`), and /debug is what turns them into the PDB beside the image.
+        lines := (release == 0) & ((flags / 131072) % 2 == 0) & eq(view(target), view("windows-x86_64"));
+        return windows_link(view(asm), view(output), view(object), view(entry), debug | u64(lines));
     }
     if macho != 0 {
         mut link = u8[][
@@ -4840,6 +4846,9 @@ struct Options {
     rest: u8[][],
     check: u64,
     debug: u64,
+    // `--no-debug-info`: no line tables in a development build (they are on by default where the
+    // target has them; `--debug` adds variables and turns the optimiser off).
+    no_debug: u64,
     deny: u64,
     split: u64,
     // 0 when the flag is absent, 1 for `--overflow=wrap`, 2 for `--overflow=checked`.
@@ -4935,6 +4944,8 @@ fn flag_bits<a>(o: (&a Options), check_only: bool = false) -> u64 {
         * 16384
         + o.cpu
         * 32768
+        + o.no_debug
+        * 131072
         // A release build wraps by default; `--overflow=` on the command line still decides.
         + u64((o.release != 0) && (o.overflow == 0))
         * 16;
@@ -5048,6 +5059,7 @@ const F_INTERVAL: u64 = 40;
 const F_DEBOUNCE: u64 = 41;
 const F_RELEASE: u64 = 18;
 const F_CPU: u64 = 43;
+const F_NO_DEBUG: u64 = 44;
 // The flag table: every word the driver reads. `--` and a positional path are not rows - the first
 // ends the driver's words and the second is an input - so `options` handles both around the lookup.
 fn flag_table() -> Flag[] {
@@ -5060,6 +5072,7 @@ fn flag_table() -> Flag[] {
         Flag { word: copy(view("--print-inputs")), kind: FLAG_TEXT, field: F_INPUTS },
         Flag { word: copy(view("--check")), kind: FLAG_SWITCH, field: F_CHECK },
         Flag { word: copy(view("--debug")), kind: FLAG_SWITCH, field: F_DEBUG },
+        Flag { word: copy(view("--no-debug-info")), kind: FLAG_SWITCH, field: F_NO_DEBUG },
         Flag { word: copy(view("--release")), kind: FLAG_SWITCH, field: F_RELEASE },
         Flag { word: copy(view("--cpu")), kind: FLAG_TEXT, field: F_CPU },
         Flag { word: copy(view("--deny-ambient-host")), kind: FLAG_SWITCH, field: F_DENY },
@@ -5164,6 +5177,8 @@ fn switch_on<a>(o: (&a mut Options), field: u64) {
         o.check = 1;
     } else if field == F_DEBUG {
         o.debug = 1;
+    } else if field == F_NO_DEBUG {
+        o.no_debug = 1;
     } else if field == F_RELEASE {
         o.release = 1;
     } else if field == F_DENY {
@@ -5254,6 +5269,7 @@ fn options<a>(args: (&a u8[][])) -> Options {
         rest: u8[][],
         check: 0,
         debug: 0,
+        no_debug: 0,
         deny: 0,
         split: 0,
         overflow: 0,
@@ -6281,6 +6297,7 @@ struct TestOptions {
     shard_count: u64,
     target: u8[],
     debug: u64,
+    no_debug: u64,
     deny: u64,
     overflow: u64,
     no_sites: u64,
@@ -6358,6 +6375,7 @@ fn test_options<a>(args: (&a u8[][])) -> TestOptions {
         shard_count: 0,
         target: target_name(host::target()),
         debug: 0,
+        no_debug: 0,
         deny: 0,
         overflow: 0,
         no_sites: 0,
@@ -6402,6 +6420,8 @@ fn test_options<a>(args: (&a u8[][])) -> TestOptions {
             o.target = item(&args, i);
         } else if eq(view(a), view("--debug")) {
             o.debug = 1;
+        } else if eq(view(a), view("--no-debug-info")) {
+            o.no_debug = 1;
         } else if eq(view(a), view("--release")) {
             o.release = 1;
         } else if eq(view(a), view("--deny-ambient-host")) {
@@ -6424,7 +6444,7 @@ fn test_options<a>(args: (&a u8[][])) -> TestOptions {
 // The code-generation bits a test binary is built with: the same flags `grail build` takes, so a
 // test can pin debug-info, overflow or authority behaviour.
 fn test_bits<a>(o: (&a TestOptions)) -> u64 {
-    return o.debug * 2 + o.deny * 4 + o.overflow * 16 + o.no_sites * 256 + o.release * 8192
+    return o.debug * 2 + o.deny * 4 + o.overflow * 16 + o.no_sites * 256 + o.release * 8192 + o.no_debug * 131072
         + u64((o.release != 0) && (o.overflow == 0)) * 16;
 }
 // The flags a `--jobs` child needs to build the same binary its parent would have built.
@@ -6434,6 +6454,9 @@ fn test_build_flags<a>(o: (&a TestOptions)) -> u8[][] {
     flags.push(copy(view(o.target)));
     if o.debug != 0 {
         flags.push(copy(view("--debug")));
+    }
+    if o.no_debug != 0 {
+        flags.push(copy(view("--no-debug-info")));
     }
     if o.release != 0 {
         flags.push(copy(view("--release")));
@@ -7619,7 +7642,7 @@ fn help() {
     say(view("usage:"));
     say(
         view(
-            "  grail build [FILE.grl] [-o OUT] [--target x86_64|aarch64|riscv64|macos-x86_64|macos-aarch64] [--release] [--split] [--cache] [--overflow=wrap|checked] [--interface DIR [--verify]]"
+            "  grail build [FILE.grl] [-o OUT] [--target x86_64|aarch64|riscv64|macos-x86_64|macos-aarch64] [--release] [--debug|--no-debug-info] [--split] [--cache] [--overflow=wrap|checked] [--interface DIR [--verify]]"
         )
     );
     say(view("  grail check [FILE.grl]            type-check without building"));

@@ -20030,5 +20030,116 @@
     ],
     "stdout": "exp -700 58915316498509951 log2 -700 9221120237041090560\nexp -1 4600298746774613816 log2 -1 9221120237041090560\nexp -0.5 4603638362051417610 log2 -0.5 9221120237041090560\nexp 0 4607182418800017408 log2 0 18442240474082181120\nexp 0.5 4610103999673009820 log2 0.5 13830554455654793216\nexp 1 4613303445314885481 log2 1 0\nexp 1.5 4616731951734179137 log2 1.5 4603444093345823441\nexp 2 4620005356000828846 log2 2 4607182418800017408\nexp 10 4671783802770883936 log2 10 4614662735865160561\nexp 512 7933450717786441006 log2 512 4621256167635550208\nexp 700 9155136748776909966 log2 700 4621510176909939396\nlog2(0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001) = 13875349249234471817\nlog2(0.1) = 13838034772719936369\nlog2(0.9) = 13818016545745297549\nlog2(1.0000001) = 4504546375238667447\nlog2(3) = 4609816855700290920\nlog2(1024) = 4621819117588971520\nlog2(1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000) = 4651977212379696009\n",
     "note": "math_glibc: glibc 2.44's table-driven exp and log2, with a software fma at every site glibc fuses; the stdout pins the host libm's exact bits (only the *sign* of a NaN differs: Grail's 0/0 is a positive quiet NaN, x86 glibc's negative)"
+  },
+  {
+    "name": "debug-info-default-line-rows",
+    "source": "fn add(left: i64, right: i64) -> i64 {\n    return left + right;\n}\nfn main() {\n    mut total = add(2, 3);\n    println(total);\n}\n",
+    "stdout": "5\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "asm": [
+      ".loc 1 1 0\nf_main_add:",
+      ".loc 1 2 5\n",
+      ".loc 1 6 5\n",
+      ".section .debug_info",
+      ".long .Ldebug_line\n"
+    ],
+    "note": "a development build is optimised and still carries line tables: a row at each function's declaration line before its prologue, one at the first instruction of each statement, the function ranges in .debug_info and a compile unit naming its own object's line table"
+  },
+  {
+    "name": "debug-info-default-no-variables",
+    "source": "fn add(left: i64, right: i64) -> i64 {\n    return left + right;\n}\nfn main() {\n    mut total = add(2, 3);\n    println(total);\n}\n",
+    "stdout": "5\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "asmAbsent": [
+      ".asciz \"total\"",
+      ".asciz \"left\""
+    ],
+    "note": "the default build's debug information names functions and lines only; variables and their types are `--debug`'s (the optimiser moves values out of their slots)"
+  },
+  {
+    "name": "debug-info-off",
+    "source": "fn add(left: i64, right: i64) -> i64 {\n    return left + right;\n}\nfn main() {\n    mut total = add(2, 3);\n    println(total);\n}\n",
+    "stdout": "5\n",
+    "flags": [
+      "--no-debug-info"
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "asmAbsent": [
+      ".loc ",
+      ".file ",
+      ".debug_info"
+    ],
+    "note": "--no-debug-info: the old development build, no line tables and no .debug_info"
+  },
+  {
+    "name": "debug-info-follows-error-sites",
+    "source": "fn add(left: i64, right: i64) -> i64 {\n    return left + right;\n}\nfn main() {\n    mut total = add(2, 3);\n    println(total);\n}\n",
+    "stdout": "5\n",
+    "flags": [
+      "--no-error-sites"
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "asmAbsent": [
+      ".loc ",
+      ".debug_info"
+    ],
+    "note": "the line rows come from the statement markers the error-site table is built from, so a build without them has no line table either"
+  },
+  {
+    "name": "debug-info-data-label-in-function",
+    "source": "fn main() {\n    s := \"usage: x\";\n    println(s);\n}\n",
+    "stdout": "usage: x\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a function that pushes data with a label of its own (a `.pushsection .rodata` inside the body) keeps one range: the data label neither ends it nor starts another"
+  },
+  {
+    "name": "debug-info-flags-contradict",
+    "source": "fn add(left: i64, right: i64) -> i64 {\n    return left + right;\n}\nfn main() {\n    mut total = add(2, 3);\n    println(total);\n}\n",
+    "reject": true,
+    "flags": [
+      "--debug",
+      "--no-debug-info"
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "diagnostic": "--debug and --no-debug-info contradict each other"
+  },
+  {
+    "name": "debug-info-debug-refused-windows-aarch64",
+    "source": "fn add(left: i64, right: i64) -> i64 {\n    return left + right;\n}\nfn main() {\n    mut total = add(2, 3);\n    println(total);\n}\n",
+    "reject": true,
+    "flags": [
+      "--debug"
+    ],
+    "targets": [
+      "windows-aarch64"
+    ],
+    "diagnostic": "--debug line info is only implemented for Linux (x86_64, aarch64, riscv64) and Windows x86_64"
   }
 ]

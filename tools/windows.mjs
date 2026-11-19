@@ -220,6 +220,9 @@ export function compileProgram(compiler, inputs, directory, {
   osRuntime = join(root, 'compiler/os-windows.grl'),
   shims = [],
   debug = false,
+  // The default build's CodeView line tables become a PDB too when asked (`grail build` links them
+  // with /debug unless --no-debug-info); a plain object is linked without one, as before.
+  pdb: wantPdb = false,
 } = {}) {
   const spec = targets[target];
   if (!spec) throw new Error(`unsupported Windows target ${target}`);
@@ -238,7 +241,7 @@ export function compileProgram(compiler, inputs, directory, {
   });
   const library = writeImportLibrary(join(directory, 'lib'), spec.machine,
     programImports(readFileSync(assembly, 'utf8')));
-  const pdb = debug ? join(directory, `${name}.pdb`) : null;
+  const pdb = debug || wantPdb ? join(directory, `${name}.pdb`) : null;
   link([object, ...shimObjects, library], executable, { machine: spec.linkMachine, pdb });
   return { assembly, object, executable, library, shimObjects, pdb };
 }

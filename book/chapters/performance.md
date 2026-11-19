@@ -234,7 +234,11 @@ languages: hello world, a generated program of N records, constructors and 15-li
 Each is measured five ways: a check cold and after a one-function edit, and a build cold, after
 the edit, and again with nothing changed. Go has no check command; `go vet` type-checks and then
 runs its analyses, and it is what Go's column shows. A build whose output is thrown away is in a
-table of its own further down.
+table of its own further down. Every build here writes debug information, as each toolchain's
+development build does by default: Go's and Zig Debug's DWARF, cargo's dev profile's, and Grail's
+line tables and function ranges (on by default since the development build is optimised; they cost
+about 6% of an edit's rebuild and none measurable cold on the 26,000-line program, and make its
+binary 8% larger without changing an instruction).
 
 The figure is the user-space instructions of the tool and every process it started, with every
 toolchain held to one process (`GRAIL_JOBS=1`, `GOMAXPROCS=1 -p=1`, `cargo -j1`; Zig's build-exe has

@@ -427,14 +427,15 @@ struct DebugFunc {
     module: u8[],
     file: u64,
     line: u64,
-    start: u64,
-    end: u64,
     params: u64,
     vars: DebugVar[],
-    // The label namespace this function's start and end labels were minted in (B1 stage 5): every
-    // label is `.L<unit>_<n>`, where <unit> is `<unit prefix>_<function ordinal>`, so a table that names a label by its number alone would name one the
-    // unit never emitted. Captured where the function is recorded, i.e. inside its own unit.
-    unit: u8[]
+    // The linkage name: the symbol the function is defined under.
+    link: u8[],
+    // The labels at the function's first byte and past its last. A `--debug` body mints them in its
+    // own namespace (B1 stage 5: `.L<unit>_<n>`, dlabel), the line pass of an optimised build
+    // (site_table) as `.Lgn<k>` / `.Lge<k>`.
+    lo: u8[],
+    hi: u8[]
 }
 // One module of the program, as an interface sees it.
 struct IModule {
@@ -508,6 +509,11 @@ struct C {
     plat: u64,
     // Emit .file/.loc DWARF line info (Linux x86-64 native output only).
     debug: u64,
+    // Line tables and function ranges in an optimised build (the default where DWARF or CodeView is
+    // written): the line pass in site_table derives them from the statement markers that went
+    // through the optimiser. `no_debug_info` is `--no-debug-info`.
+    lines: u64,
+    no_debug_info: u64,
     // 1: lower the raw word stream to LLVM IR (compiler/llvm.grl) instead of optimize/machine.
     backend: u64,
     // Typed-IR facts for that lifter (docs/design/typed-ir.md). They travel beside `out`, never in
@@ -2280,6 +2286,14 @@ fn record_debug_func<a, b, d>(c: (&a mut C), name: &b [u8], module: &d [u8], sit
         unit.push(95);
         decimal(&mut unit, c.fscope);
     }
+    mut link = copy_bytes(view("f_"));
+    push_bytes(&mut link, module);
+    link.push(95);
+    push_bytes(&mut link, name);
+    mut lo = u8[];
+    dlabel(&mut lo, view(unit), site.start);
+    mut hi = u8[];
+    dlabel(&mut hi, view(unit), site.end);
     c
         .debug_funcs
         .push(
@@ -2288,11 +2302,11 @@ fn record_debug_func<a, b, d>(c: (&a mut C), name: &b [u8], module: &d [u8], sit
                 module: copy_bytes(view(module)),
                 file: site.file,
                 line: site.line,
-                start: site.start,
-                end: site.end,
                 params: site.params,
                 vars: vars,
-                unit: unit
+                link: link,
+                lo: lo,
+                hi: hi
             }
         );
     return ();
@@ -2512,13 +2526,11 @@ fn codeview_symbols<a>(c: &a C, index: (&u64[])) -> u8[] {
     push_bytes(&mut out, view(".long 241\n.long .Lcvsyms_end-.Lcvsyms\n.Lcvsyms:\n"));
     for i in c.debug_funcs.len() {
         f := &c.debug_funcs[i];
-        fstart := f.start;
-        fend := f.end;
         mut range = u8[];
         push_bytes(&mut range, view(".long "));
-        dlabel(&mut range, view(f.unit), fend);
+        push_bytes(&mut range, view(f.hi));
         range.push(45); // '-'
-        dlabel(&mut range, view(f.unit), fstart);
+        push_bytes(&mut range, view(f.lo));
         range.push(10);
         cv_record_start(&mut out, i, 0, 4368);
         // parent, end, next: lld-link fills the scope links.
@@ -2527,9 +2539,9 @@ fn codeview_symbols<a>(c: &a C, index: (&u64[])) -> u8[] {
         push_bytes(&mut out, view(".long 0\n"));
         push_bytes(&mut out, view(range));
         push_bytes(&mut out, view(".long 0\n.secrel32 "));
-        dlabel(&mut out, view(f.unit), fstart);
+        push_bytes(&mut out, view(f.lo));
         push_bytes(&mut out, view("\n.secidx "));
-        dlabel(&mut out, view(f.unit), fstart);
+        push_bytes(&mut out, view(f.lo));
         push_bytes(&mut out, view("\n.byte 0\n.asciz \""));
         if f.module.len() != 0 {
             push_bytes(&mut out, view(f.module));
@@ -2560,11 +2572,10 @@ fn codeview_symbols<a>(c: &a C, index: (&u64[])) -> u8[] {
     push_bytes(&mut out, view(".Lcvsyms_end:\n"));
     return out;
 }
-fn debug_sections<a, b>(c: &a C, entry: &b [u8]) -> u8[] {
+// The DWARF sections of `funcs` (c.debug_funcs for a `--debug` build, the line pass's list for an
+// optimised one), with the types c.debug_types holds.
+fn debug_sections<a, b>(c: &a C, funcs: (&DebugFunc[]), entry: &b [u8]) -> u8[] {
     mut out = u8[];
-    if c.debug == 0 {
-        return out;
-    }
     dput(&mut out, view(".section .debug_abbrev,\"\",@progbits\n"));
     dput(&mut out, view(".Ldebug_abbrev:\n"));
     // 1: compile unit, children.
@@ -2585,7 +2596,7 @@ fn debug_sections<a, b>(c: &a C, entry: &b [u8]) -> u8[] {
     dattr(&mut out, 0x6e, 0x08);
     dattr(&mut out, 0x11, 0x01);
     dattr(&mut out, 0x12, 0x07);
-    dattr(&mut out, 0x3a, 0x0b);
+    dattr(&mut out, 0x3a, 0x0f);
     dattr(&mut out, 0x3b, 0x0f);
     dattr(&mut out, 0x40, 0x18);
     dput(&mut out, view(".byte 0\n.byte 0\n"));
@@ -2659,27 +2670,22 @@ fn debug_sections<a, b>(c: &a C, entry: &b [u8]) -> u8[] {
     dput(&mut out, view(".byte 12\n"));
     dstring(&mut out, entry);
     dstring(&mut out, view("."));
-    mut first_start = 0;
-    mut last_end = 0;
-    mut first_unit = u8[];
-    mut last_unit = u8[];
-    if c.debug_funcs.len() != 0 {
-        first_start = c.debug_funcs[0].start;
-        first_unit = c.debug_funcs[0].unit.copy();
-        last_end = c.debug_funcs[c.debug_funcs.len() - 1].end;
-        last_unit = c.debug_funcs[c.debug_funcs.len() - 1].unit.copy();
-    }
-    if c.debug_funcs.len() == 0 {
-        dput(&mut out, view(".quad 0\n.quad 0\n.long 0\n"));
+    // DW_AT_stmt_list names this object's own line table: a program linked from several objects
+    // (the build store's) has one table per object in .debug_line, so a constant 0 would point every
+    // unit after the first at the first one's table. The label opens the section the assembler
+    // fills from the `.loc` rows.
+    if funcs.len() == 0 {
+        dput(&mut out, view(".quad 0\n.quad 0\n"));
     } else {
         dput(&mut out, view(".quad "));
-        dlabel(&mut out, view(first_unit), first_start);
+        dput(&mut out, view(funcs[0].lo));
         dput(&mut out, view("\n.quad "));
-        dlabel(&mut out, view(last_unit), last_end);
+        dput(&mut out, view(funcs[funcs.len() - 1].hi));
         dput(&mut out, view("-"));
-        dlabel(&mut out, view(first_unit), first_start);
-        dput(&mut out, view("\n.long 0\n"));
+        dput(&mut out, view(funcs[0].lo));
+        dput(&mut out, view("\n"));
     }
+    dput(&mut out, view(".long .Ldebug_line\n"));
     // One DIE per entry of c.debug_types, labelled .Ldebug_type_N; DW_AT_type is the CU-relative
     // offset (from the unit length field, four bytes before .Ldebug_cu_start).
     for i in c.debug_types.len() {
@@ -2738,27 +2744,18 @@ fn debug_sections<a, b>(c: &a C, entry: &b [u8]) -> u8[] {
         }
     }
 
-    for i in c.debug_funcs.len() {
-        f := &c.debug_funcs[i];
+    for i in funcs.len() {
+        f := &funcs[i];
         duleb(&mut out, 2);
         dstring(&mut out, view(f.name));
-        mut link = u8[];
-        dput(&mut link, view("f_"));
-        for k in f.module.len() {
-            link.push(f.module[k]);
-        }
-        link.push(95);
-        for k in f.name.len() {
-            link.push(f.name[k]);
-        }
-        dstring(&mut out, view(link));
+        dstring(&mut out, view(f.link));
         dput(&mut out, view(".quad "));
-        dlabel(&mut out, view(f.unit), f.start);
+        dput(&mut out, view(f.lo));
         dput(&mut out, view("\n.quad "));
-        dlabel(&mut out, view(f.unit), f.end);
+        dput(&mut out, view(f.hi));
         dput(&mut out, view("-"));
-        dlabel(&mut out, view(f.unit), f.start);
-        dput(&mut out, view("\n.byte "));
+        dput(&mut out, view(f.lo));
+        dput(&mut out, view("\n.uleb128 "));
         dnum(&mut out, f.file);
         dput(&mut out, view("\n.uleb128 "));
         dnum(&mut out, f.line);
@@ -2792,6 +2789,7 @@ fn debug_sections<a, b>(c: &a C, entry: &b [u8]) -> u8[] {
         dput(&mut out, view(".byte 0\n"));
     }
     dput(&mut out, view(".byte 0\n.Ldebug_cu_end:\n"));
+    dput(&mut out, view(".section .debug_line,\"\",@progbits\n.Ldebug_line:\n"));
     return out;
 }
 // ---- runtime error locations -------------------------------------------------------------------
@@ -3210,6 +3208,32 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
     mut pending_func = 0;
     mut pending_name = u8[];
     mut report_fn = u8[];
+    // The line pass (c.lines): a `.loc` (`.cv_loc` on Windows) at the first instruction of each of
+    // the function's own statements, a row for its prologue at the line it is declared on, and its
+    // range as `.Lgn<k>`..`.Lge<k>`. A body the optimiser copied in from another function (`.gposa`)
+    // and an inlined runtime body keep the caller's statement, so no row names a line of a function
+    // the code is not in; the caller's statement is restated after the copy (inline_calls).
+    lines := c.lines != 0;
+    cv := c.target == 3;
+    mut by_symbol = LineNames { heads: u64[], next: u64[], syms: u8[][], funcs: u64[] };
+    if lines {
+        by_symbol = line_names(&mut c);
+        c.debug_funcs.clear();
+    }
+    mut loc_pending = false;
+    mut loc_file = 0;
+    mut loc_line = 0;
+    mut loc_col = 0;
+    mut said_file = 0;
+    mut said_line = 0;
+    mut said_col = 0;
+    // The files the rows name, by site index; a file's number in the table is its position plus one.
+    // (Site indices are not dense: a file an interface carried is numbered from 1000000.)
+    mut line_files = u64[];
+    mut fn_open = false;
+    mut fn_label = 0;
+    mut in_text = true;
+    mut text_stack = u64[];
     // Lines are read in place, and what passes through unchanged is copied in runs: `pend` is the
     // first byte not yet copied to `out`. A line that is dropped or replaced, or that gets a label in
     // front of it, flushes the run before it.
@@ -3255,6 +3279,12 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
                         }
                         cur_col = w[2];
                         cur_internal = internal;
+                        if lines && !absolute && fn_open && (w[0] != 0) {
+                            loc_pending = true;
+                            loc_file = line_file_number(&mut line_files, w[0]);
+                            loc_line = cur_line;
+                            loc_col = w[2];
+                        }
                     }
                     // The pending function's first statement names its table entry: the runtime's own
                     // functions have none, so a backtrace never prints `rt_` frames.
@@ -3299,6 +3329,38 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
             }
         }
         directive := (a < e) && (text[a] == 46);
+        if lines && directive && (e - a >= 4) {
+            // A function's range ends at its `.size` (ELF) or where the text stops being its own: a
+            // switch to another section, which a Windows function (no `.size`) ends with.
+            ch := text[a + 1];
+            mut close = false;
+            if (ch == 115) && site_at(text, a, e, view(".size ")) {
+                close = true;
+            } else if (ch == 116) && site_at(text, a, e, view(".text")) {
+                in_text = true;
+            } else if (ch == 100) && site_at(text, a, e, view(".data")) {
+                in_text = false;
+                close = true;
+            } else if (ch == 98) && site_at(text, a, e, view(".bss")) {
+                in_text = false;
+                close = true;
+            } else if (ch == 115) && site_at(text, a, e, view(".section ")) {
+                in_text = site_at(text, a, e, view(".section .text"));
+                close = !in_text;
+            } else if (ch == 112) && site_at(text, a, e, view(".pushsection ")) {
+                text_stack.push(u64(in_text));
+                in_text = site_at(text, a, e, view(".pushsection .text"));
+            } else if (ch == 112) && site_at(text, a, e, view(".popsection")) && (text_stack.len() != 0) {
+                in_text = text_stack.pop()! != 0;
+            }
+            if close && fn_open {
+                out.append(text[pend..a]);
+                pend = a;
+                line_fn_end(&mut out, fn_label);
+                fn_open = false;
+                loc_pending = false;
+            }
+        }
         // A function starts: positions are its own again, and the code up to its first statement -
         // its prologue - names no place.
         if (e - a > 1) && (text[e - 1] == 58) && !directive {
@@ -3321,10 +3383,52 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
                     site_func_entry(&mut funcs, pending_func, 0);
                 }
                 func_count += 1;
+                // A data label (one inside a `.pushsection .rodata`) neither ends nor starts a range.
+                if lines && fn_open && in_text {
+                    line_fn_end(&mut out, fn_label);
+                    fn_open = false;
+                }
                 site_func_label(&mut out, func_count);
                 pending_func = func_count;
                 pending_name = span_copy(text[a..e], 0, e - a - 1);
                 report_fn = pending_name.copy();
+                if lines && in_text {
+                    loc_pending = false;
+                    // The prologue's row: the line the function is declared on (its `.gbase`), in the
+                    // file of its first statement.
+                    fn_open = true;
+                    fn_label = func_count;
+                    mut file = line_first_file(text, next);
+                    mut line = base_line;
+                    if file == 0 {
+                        // No statement of its own (a shim): a row of line 0, which names no place,
+                        // rather than the code before it.
+                        file = 2;
+                        line = 0;
+                    }
+                    fid := c.debug_funcs.len();
+                    if cv {
+                        push_bytes(&mut out, view(".cv_func_id "));
+                        decimal(&mut out, fid);
+                        out.push(10);
+                    }
+                    said_file = line_file_number(&mut line_files, file);
+                    said_line = line;
+                    said_col = 0;
+                    line_loc(&mut out, cv, fid, said_file, line, 0);
+                    c.debug_funcs.push(line_func(&mut c, &by_symbol, view(pending_name), said_file, line, func_count));
+                }
+            }
+        }
+        if loc_pending && !directive {
+            loc_pending = false;
+            if (loc_file != said_file) || (loc_line != said_line) || (loc_col != said_col) {
+                out.append(text[pend..a]);
+                pend = a;
+                said_file = loc_file;
+                said_line = loc_line;
+                said_col = loc_col;
+                line_loc(&mut out, cv, c.debug_funcs.len() - 1, loc_file, loc_line, loc_col);
             }
         }
         if pending_site && !directive {
@@ -3400,6 +3504,13 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
         a = next;
     }
     out.append(text[pend..n]);
+    if fn_open {
+        if (out.len() != 0) && (out[out.len() - 1] != 10) {
+            out.push(10);
+        }
+        line_fn_end(&mut out, fn_label);
+        fn_open = false;
+    }
     // A last function whose body holds no statement (the entry shim, a body of only calls emitted
     // without positions) keeps its range and no name.
     if pending_func != 0 {
@@ -3479,7 +3590,158 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
     }
     push_bytes(&mut out, view(names));
     push_bytes(&mut out, view(".text\n"));
+    if lines {
+        // The file table the rows name, in the order they were first named (CodeView wants every
+        // number declared), ahead of the first row.
+        mut head = u8[];
+        for f in line_files.len() {
+            k := f + 1;
+            if cv {
+                push_bytes(&mut head, view(".cv_file "));
+            } else {
+                push_bytes(&mut head, view(".file "));
+            }
+            decimal(&mut head, k);
+            push_bytes(&mut head, view(" \""));
+            given := site_path(&c, line_files[f]);
+            path := site_relative(view(given), view(cwd));
+            for i in path.len() {
+                ch := path[i];
+                if (ch == 34) || (ch == 92) {
+                    head.push(92);
+                }
+                head.push(ch);
+            }
+            push_bytes(&mut head, view("\"\n"));
+        }
+        head.append(view(out));
+        return head;
+    }
     return out;
+}
+// The functions the line pass names, by symbol: every declared function's symbol as `mangle_name`
+// spells it, hashed, so a function label finds its Grail name and module. A label no declaration
+// spells (a specialisation, a helper the emitter made) keeps the symbol as its name.
+struct LineNames {
+    heads: u64[],
+    next: u64[],
+    syms: u8[][],
+    funcs: u64[]
+}
+fn line_hash<a>(s: &a [u8]) -> u64 {
+    mut h: u64 = 0;
+    for i in s.len() {
+        h = (h * 131 + u64(s[i])) & 0xffffffff;
+    }
+    return h;
+}
+fn line_names<a>(c: (&a mut C)) -> LineNames {
+    mut size: u64 = 64;
+    while size < c.funcs.len() * 2 {
+        size = size * 2;
+    }
+    mut t = LineNames { heads: u64[0; size], next: u64[], syms: u8[][], funcs: u64[] };
+    for i in c.funcs.len() {
+        if c.funcs[i].ext != 0 {
+            continue;
+        }
+        m := c.funcs[i].module.copy();
+        n := c.funcs[i].name.copy();
+        sym := mangle_name(&mut c, view(m), view(n));
+        h := line_hash(view(sym)) & (size - 1);
+        t.next.push(t.heads[h]);
+        t.syms.push(sym);
+        t.funcs.push(i);
+        t.heads[h] = t.syms.len();
+    }
+    return t;
+}
+// The function the line pass opens at the label `symbol` (`.Lgn<k>`), declared at `file`/`line`.
+fn line_func<a, b>(c: (&a mut C), names: (&LineNames), symbol: &b [u8], file: u64, line: u64, k: u64) -> DebugFunc {
+    mut name = symbol.copy();
+    mut module = u8[];
+    if names.heads.len() != 0 {
+        mut at = names.heads[line_hash(symbol) & (names.heads.len() - 1)];
+        while at != 0 {
+            if same(view(names.syms[at - 1]), symbol) {
+                f := &c.funcs[names.funcs[at - 1]];
+                name = f.name.copy();
+                if !same(view(f.module), view("runtime")) && !starts_with(view(f.module), view(".")) {
+                    module = f.module.copy();
+                }
+                break;
+            }
+            at = names.next[at - 1];
+        }
+    }
+    mut lo = copy_bytes(view(".Lgn"));
+    decimal(&mut lo, k);
+    mut hi = copy_bytes(view(".Lge"));
+    decimal(&mut hi, k);
+    return DebugFunc { name: name, module: module, file: file, line: line, params: 0, vars: DebugVar[], link: symbol.copy(), lo: lo, hi: hi };
+}
+// The line-table number of the site file `file`, given one at its first use. The list is short (the
+// files of one run) and a run of rows names one file, so the search starts at the last entry.
+fn line_file_number<a>(files: (&a mut u64[]), file: u64) -> u64 {
+    mut i = files.len();
+    while 0 < i {
+        i -= 1;
+        if files[i] == file {
+            return i + 1;
+        }
+    }
+    files.push(file);
+    return files.len();
+}
+// `.Lge<k>:`, the end of the function the line pass opened as `.Lgn<k>`.
+fn line_fn_end<a>(out: (&a mut u8[]), k: u64) -> unit {
+    push_bytes(&mut out, view(".Lge"));
+    decimal(&mut out, k);
+    push_bytes(&mut out, view(":\n"));
+    return ();
+}
+// A row: `.loc FILE LINE COL`, or `.cv_loc FUNC FILE LINE COL` for CodeView.
+fn line_loc<a>(out: (&a mut u8[]), cv: bool, fid: u64, file: u64, line: u64, col: u64) -> unit {
+    if cv {
+        push_bytes(&mut out, view(".cv_loc "));
+        decimal(&mut out, fid);
+        out.push(32);
+    } else {
+        push_bytes(&mut out, view(".loc "));
+    }
+    decimal(&mut out, file);
+    out.push(32);
+    decimal(&mut out, line);
+    out.push(32);
+    decimal(&mut out, col);
+    out.push(10);
+    return ();
+}
+// The file of the first statement of the function whose label ends at `from`: the site file
+// (input index) of its first own `.gpos`, or 0 when it has none before the next function.
+fn line_first_file<a>(text: &a [u8], from: u64) -> u64 {
+    n := text.len();
+    mut a = from;
+    while a < n {
+        e := bytes::find_byte(view(text), a, 10);
+        if (e - a > 6) && (text[a] == 46) && site_at(text, a, e, view(".gpos ")) {
+            mut v = 0;
+            mut i = a + 6;
+            while (i < e) && (47 < text[i]) && (text[i] < 58) {
+                v = v * 10 + u64(text[i]) - 48;
+                i += 1;
+            }
+            return v;
+        }
+        if (e - a > 5) && (text[a] == 46) && site_at(text, a, e, view(".size ")) {
+            return 0;
+        }
+        if (e > a) && (text[e - 1] == 58) && (text[a] != 46) {
+            return 0;
+        }
+        a = e + 1;
+    }
+    return 0;
 }
 // Source line/column of the current token. The assembler turns .loc into .debug_line.
 fn emit_loc<a>(c: (&a mut C)) -> unit {
@@ -61988,6 +62250,8 @@ pub fn main() -> u64 {
         plat: 0,
         cpu: 0,
         debug: 0,
+        lines: 0,
+        no_debug_info: 0,
         backend: 0,
         facts: llvm::facts_new(),
         facts_fn: u8[],
@@ -62842,6 +63106,9 @@ pub fn main() -> u64 {
                             if same(view(option), view("--debug")) {
                                 exchange(&mut c.debug, 1);
                                 offset += 1;
+                            } else if same(view(option), view("--no-debug-info")) {
+                                exchange(&mut c.no_debug_info, 1);
+                                offset += 1;
                             } else {
                                 if same(view(option), view("--backend=llvm")) {
                                     exchange(&mut c.backend, 1);
@@ -62979,14 +63246,24 @@ pub fn main() -> u64 {
         fail_option(
             &mut c,
             view(
-                "usage: grail [--target ARCH] [--overflow=checked|wrap] [--debug] [--verify-facts] [--emit-ir] [--strict-refinements] [--deny-ambient-host] [--split] OUT.s ENTRY.grl MODULE.grl..."
+                "usage: grail [--target ARCH] [--overflow=checked|wrap] [--debug] [--no-debug-info] [--verify-facts] [--emit-ir] [--strict-refinements] [--deny-ambient-host] [--split] OUT.s ENTRY.grl MODULE.grl..."
             )
         );
     }
     // DWARF on Linux x86-64, AArch64 and RISC-V 64; CodeView line tables (a PDB through lld-link
     // /DEBUG) on Windows x86-64.
     if (c.debug != 0) && (((c.target == 4) || (c.plat != 0))) {
-        fail_option(&mut c, view("--debug line info is only implemented for Linux and Windows x86_64"));
+        fail_option(&mut c, view("--debug line info is only implemented for Linux (x86_64, aarch64, riscv64) and Windows x86_64"));
+    }
+    if (c.debug != 0) && (c.no_debug_info != 0) {
+        fail_option(&mut c, view("--debug and --no-debug-info contradict each other"));
+    }
+    // An optimised build carries line tables and function ranges wherever `--debug` could write
+    // them, unless told not to. They come from the statement markers, so a build without them
+    // (`--no-error-sites`, `--split`, the LLVM backend) has none; elsewhere (macOS, Windows ARM64)
+    // it silently has none.
+    if (c.no_debug_info == 0) && site_table_on(&c) && (c.target != 4) {
+        exchange(&mut c.lines, 1);
     }
     if (c.backend != 0) && (((c.target > 2) || (c.plat != 0) || (c.debug != 0))) {
         fail_option(&mut c, view("--backend=llvm is implemented for Linux x86_64, aarch64 and riscv64 without --debug"));
@@ -63542,8 +63819,10 @@ pub fn main() -> u64 {
         if target == 3 {
             // PE/COFF unwind data must be emitted from the final frame sizes.
             mut image = win_unwind(view(out));
-            if c.debug != 0 {
-                image = debug_locs(view(image));
+            if (c.debug != 0) || (c.debug_funcs.len() != 0) {
+                if c.debug != 0 {
+                    image = debug_locs(view(image));
+                }
                 // CodeView: the symbol records (functions with their typed locals), one line table
                 // per recorded function, then the file checksums and the string table they index;
                 // lld-link /DEBUG builds the PDB from this section.
@@ -63556,12 +63835,9 @@ pub fn main() -> u64 {
                     push_bytes(&mut image, view(".cv_linetable "));
                     decimal(&mut image, i);
                     push_bytes(&mut image, view(", "));
-                    fstart := c.debug_funcs[i].start;
-                    fend := c.debug_funcs[i].end;
-                    funit := c.debug_funcs[i].unit.copy();
-                    dlabel(&mut image, view(funit), fstart);
+                    push_bytes(&mut image, view(c.debug_funcs[i].lo));
                     push_bytes(&mut image, view(", "));
-                    dlabel(&mut image, view(funit), fend);
+                    push_bytes(&mut image, view(c.debug_funcs[i].hi));
                     image.push(10);
                 }
                 push_bytes(&mut image, view(".cv_filechecksums\n.cv_stringtable\n"));
@@ -63571,10 +63847,10 @@ pub fn main() -> u64 {
         }
         if c.debug != 0 {
             out = debug_locs(view(out));
-            sections := debug_sections(&c, view(host::arg(2 + offset)));
-            for i in sections.len() {
-                out.push(sections[i]);
-            }
+        }
+        if (c.debug != 0) || (c.debug_funcs.len() != 0) {
+            sections := debug_sections(&c, &c.debug_funcs, view(host::arg(2 + offset)));
+            out.append(view(sections));
         }
         if c.backend != 0 {
             // LLVM IR for the lifted functions beside the native remainder: PATH.ll and PATH.
@@ -63633,11 +63909,9 @@ pub fn main() -> u64 {
         return write_image(&mut c, view(path), view(image));
     }
     mut native = machine::lower(view(out), target, c.plat);
-    if c.debug != 0 {
-        sections := debug_sections(&c, view(host::arg(2 + offset)));
-        for i in sections.len() {
-            native.push(sections[i]);
-        }
+    if (c.debug != 0) || (c.debug_funcs.len() != 0) {
+        sections := debug_sections(&c, &c.debug_funcs, view(host::arg(2 + offset)));
+        native.append(view(sections));
     }
     if target == 4 {
         image := arm_unwind(view(native));

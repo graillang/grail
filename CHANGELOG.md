@@ -1,5 +1,27 @@
 ## Unreleased
 
+- **A development build carries debug information by default.** `grail build` (and `grail run`,
+  `grail test`) now write line tables and function ranges, as `go build`, Zig Debug and cargo's dev
+  profile do, with the optimiser still on: DWARF (`.debug_line`, a compile unit per object with its
+  subprograms) on Linux x86-64, AArch64 and RISC-V, and CodeView linked into a PDB on Windows
+  x86-64. The rows are derived after optimisation from the statement markers the runtime-error table
+  is built from (`native.grl` site_table), so they follow code the optimiser moved, a function's
+  prologue gets its declaration line, and code the optimiser inlined keeps the caller's statement:
+  no row names a line of a function the code is not in. Because the rows come from the final text,
+  the build store, the per-function cache, parallel body workers and assembler units are untouched
+  and the output is deterministic per unit (pinned by `tools/test-debug-lines.mjs`: a store rebuild
+  and an edit-and-revert give the same image). Each object's compile unit now names its own line
+  table (`DW_AT_stmt_list` against `.debug_line`), which a program linked from several objects
+  needs. Variables are not described yet in this build (`--debug` describes them). The generated
+  code is unchanged; on the 26,000-line compile benchmark program the cost is within noise cold
+  (22.9G against 22.8-23.3G user instructions), +5.6% on an edit's rebuild (5.45G against 5.16G),
+  and the binary grows 8.3% (2.54 to 2.75 MB). `--no-debug-info` gives the old build (it is part of
+  the store's key). `--debug` still means unoptimised, for stepping, with typed variables, and is
+  still refused on macOS and Windows AArch64, where the default build silently has no debug
+  information; `--release` has none, like cargo's release profile. A build without statement
+  markers (`--no-error-sites`, `--split`) has no line tables either. The `--debug` refusal now names
+  the targets it is implemented for (Linux x86-64, AArch64, RISC-V and Windows x86-64).
+
 - **The book's sidebar drops its "Find a topic" subtitle;** the search box (labelled for screen readers) sits under the title.
 - **The languages overview chart reads plainly.** Its bars start at 1× (the fastest language's time)
   on one logarithmic scale shared by the release and development groups, each group lists the

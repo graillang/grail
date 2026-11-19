@@ -122,8 +122,10 @@ per emitted function with `DW_AT_name`, `DW_AT_linkage_name`, `DW_AT_low_pc`,
 `DW_TAG_formal_parameter`/`DW_TAG_variable` DIEs with declaration lines and
 `DW_OP_fbreg` stack locations. Optimisation is skipped in debug builds so slots
 stay live. `tools/test-debug-lines.mjs` verifies line rows, subprogram ranges,
-parameter/local names and locations, the `grail debug info` output, the plain
-build's lack of debug sections, and the AArch64 rejection.
+parameter/local names and locations, the `grail debug info` output, the default
+(optimised) build's line rows - each in the function whose lines it names, through
+the compiler and the build store - the `--no-debug-info` build's lack of debug
+sections, and the Windows AArch64 rejection.
 
 Not implemented yet: type DIEs, inlining/column-accurate expression mapping,
 variable lifetime ranges, gdb/lldb/DAP attach, breakpoints and profiling
