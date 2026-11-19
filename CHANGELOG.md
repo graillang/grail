@@ -37,6 +37,20 @@
   trade `CrossWorldTable` and one field of `power.power_dispatch` are reflected only out of line (a
   `Reflect<T>` in a .cpp), so their grammar is not visible from the headers and `verdict` says so.
 
+- **The player field map's model is ported.** `abundance/src/field_map_presentation.grl` carries
+  `ab::FieldMapPresentationModel` (Private/field_map_presentation.cpp), the root of the world map
+  code: validation and normalisation of a disclosed observation (the revision, bounds, cell, player,
+  per-kind caps, ids, discovery, paths inside the bounds, waterway widths, reading ranges,
+  confidence), the bounded and trimmed text, undiscovered routes/waterways/landmarks dropped and
+  undiscovered tiles blanked, sorting by id and duplicate refusal; the Applied/Duplicate/Conflict/
+  Stale/Invalid verdicts; the query's clamps; and the view - tiles, routes, waterways with their
+  stroke scale and patterns, every feature with its uncertainty and accessible label, filter and
+  search, selection and focus, previous/next/pan/zoom/grid/legend navigation, the legend, the scale
+  and the screen-reader summary. Its `format_number` reproduces the engine exactly, including the
+  trailing-zero strip that also turns whole numbers such as 100 into "1" (an engine bug, reported,
+  not corrected here). `abundance/tests/parity/field_map_presentation.cpp` (generated with the test
+  from one operation list) prints 3399 lines over 70 operations and 17 observations;
+  `abundance/tests/field_map_presentation_test.grl` reproduces them.
 - **The derelict monument layouts are complete: the library, arms depot, factory, orchard and dam
   templates join the farm, and pieces resolve through the construction catalogue.**
   `abundance/src/monument_layout.grl` now carries the rest of `monument_layout.cpp` (`panels` and the
