@@ -40,6 +40,20 @@
   gating, the wall-face and floor probes, landing targets and support samples, climb pace and stage
   timing, body-climb progress, and the hatch-ladder rules (module ids, reach, rotated points, grab
   geometry, hatch shape, rungs, top frame, paces, pull-up and exit readiness); 407 values match.
+- **The shader pipeline reproduces the engine's CMake mirror step, and the inventory is complete.**
+  `abundance/tools/vendor-shaders.mjs` now applies `engine/CMakeLists.txt`'s `abe_mirror_shaders`
+  rewrites to the three mirrored source trees (`AbundanceKernel/`, `AbundanceTerrain/`,
+  `world/terrain_contract/`) and commits the 49 generated files under `abundance/shaders/<prefix>/`, so
+  `-I abundance/shaders` resolves the virtual include paths DXC sees in the engine's build. With that,
+  the 32 entries that were recorded as skipped are vendored and built: the inventory goes from 180 to
+  **211 built entries and 25,695,156 bytes of SPIR-V at pin `ca1f1bc05b`, with 69 shared structs pinned
+  field by field**, covering all 212 entries of the ten areas. The one entry without a module,
+  `geometry/geo_canopy_far.cs`, is excluded on purpose and recorded under `not_built`: `dxc -O3` peaks at
+  about 16 GB on it at this pin and the host's OOM watchdog kills it (the engine cut that to 2.9 GB in
+  `a533814a49`). The generator also waits for headroom and retries a compile the kernel killed, and the
+  whole-inventory recompile moved behind `--check --recompile`, so a suite run on a shared host never
+  rebuilds two hundred shaders.
+
 - **Item content's vocabulary and starter catalogue are ported.** `abundance/src/item_content.grl`
   carries `item_content_catalog.hpp`/`item_content_fwd.hpp` and the starter definition from
   `Private/item_content_catalog.cpp`: the ten ItemContentCategories with their labels (and the
