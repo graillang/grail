@@ -88,7 +88,7 @@ number is the closure's own copy:
 ```grl
 mut compares = 0;
 counter := &mut compares;
-items.sort_by(|a: &u64, b: &u64| -> bool { *counter += 1; return *a < *b; });
+items.sort_by(|a, b| { *counter += 1; return a < b; });
 println(compares);
 ```
 

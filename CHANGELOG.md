@@ -1,5 +1,11 @@
 ## Unreleased
 
+- **Comparisons see through references to plain values.** `==`, `!=`, `<`, `<=`, `>` and `>=` accept
+  an operand that is a reference, at any depth (`&T`, `&&T`, `&mut T`), to an integer, float, bool or
+  char and compare the value behind it, on either side: `iter::of(v).filter(|n| n > 4)`, `4 < n`,
+  `a == b` with two `&u64`. Rust needs `**n` or `|&n|` there. Arithmetic does not read through a
+  reference: `n + 1` stays a type mismatch, now with a help line naming `*n`. Records and vectors
+  still compare as values only.
 - **The book's sidebar drops its "Find a topic" subtitle;** the search box (labelled for screen readers) sits under the title.
 - **The languages overview chart reads plainly.** Its bars start at 1× (the fastest language's time)
   on one logarithmic scale shared by the release and development groups, each group lists the

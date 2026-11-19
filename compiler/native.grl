@@ -42203,6 +42203,23 @@ fn ref_to_text<a>(c: (&a mut C), ty: u64) -> bool {
     inner := ty_arg(&mut c, ty);
     return is_text(&mut c, inner);
 }
+// A reference, at any depth (`&T`, `&&T`), to a plain value: an integer, a float, a bool or a char.
+// A comparison reads the value behind it (`|n| n > 4` with `n: &u64`); arithmetic does not.
+fn ref_to_plain<a>(c: (&a mut C), ty: u64) -> bool {
+    return (ty_kind(&mut c, ty) == 7) && (plain_behind(&mut c, ty) != NO_TYPE);
+}
+// The plain type behind any number of references, or NO_TYPE when what is behind them is not plain.
+fn plain_behind<a>(c: (&a mut C), ty: u64) -> u64 {
+    mut inner = ty;
+    while ty_kind(&mut c, inner) == 7 {
+        inner = ty_arg(&mut c, inner);
+    }
+    k := ty_kind(&mut c, inner);
+    if (inner == 0) || (k == 18) || (k == 19) || (k == 21) || (k == 22) {
+        return inner;
+    }
+    return NO_TYPE;
+}
 fn is_float<a>(c: (&a mut C), ty: u64) -> bool {
     return ty_kind(&mut c, ty) == 21;
 }
@@ -51220,6 +51237,35 @@ fn expr_rest<a>(c: (&a mut C), min: u64, expected: u64, lstart: u64, first: Val)
                                     ty = over.ty;
                                     left_lit = false;
                                     continue;
+                                }
+                            }
+                            // Comparisons see through references to plain values, on either side and
+                            // at any depth: `n > 4`, `4 < n` and `a == b` compare the values behind
+                            // them. Arithmetic does not: `n + 1` stays a mismatch that names `*n`.
+                            if (c.raw == 0)
+                                && (ref_to_plain(&mut c, ty) || ref_to_plain(&mut c, rty)) {
+                                if is_comparison(k) {
+                                    if ref_to_plain(&mut c, ty) {
+                                        x := deref(&mut c, val(t, ty));
+                                        snap = x.t;
+                                        ty = x.ty;
+                                    }
+                                    if ref_to_plain(&mut c, rty) {
+                                        right = deref(&mut c, val(right.t, rty));
+                                        rty = right.ty;
+                                    }
+                                } else {
+                                    if c.tolerant == 0 {
+                                        diag_help(
+                                            &mut c,
+                                            view("only comparisons read through a reference; dereference it for arithmetic: `*n + 1`")
+                                        );
+                                        if ref_to_plain(&mut c, ty) {
+                                            require_type(&mut c, ty, plain_behind(&mut c, ty));
+                                        } else {
+                                            require_type(&mut c, rty, plain_behind(&mut c, rty));
+                                        }
+                                    }
                                 }
                             }
                             if c.raw == 0 {

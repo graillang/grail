@@ -18,7 +18,7 @@ is checked to agree.
 | `Option<u64>`, `Some(x)`, `None` | `u64?`, `Some(x)`, `None` | `x!` insists, `?` propagates. |
 | `match t { Token::Num(n) => ..., }` | `match t { Num(n) => ..., }` | An arm body is an expression or a block. |
 | `(a, b)`, `let (q, r) = ...;` | `(a, b)`, `(q, r) := ...;` | |
-| `\|n\| n > 4` | `\|n: &u64\| -> bool *n > 4` | Written out here; inferred where the call fixes them. |
+| `\|n\| n > 4` | `\|n\| n > 4` | Types are inferred from the call; comparisons see through references. |
 | `F: Fn() -> R + Send + 'static` | `f: FnMut<Send, Owned>() -> R` | Bounds on the closure type: `Send`, `Share` (Rust's `Sync`), `Owned` (no borrows). A bare `Fn(..)` is neither `Send` nor `Share`. |
 | `data.par_chunks_mut(n).for_each(f)` (rayon) | `pool::split_mut(&mut data[0: len], n, f)` | Pieces of at most `n` elements; the split never depends on the number of cores. `pool::split`, `range` and `reduce` are the owned, index and folding forms. |
 | `rayon::join(a, b)` | `pool::join(a, b)` | `a` may run on another worker; `b` runs here. |
