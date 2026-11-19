@@ -619,15 +619,16 @@
   `power.portable_charge` (an `optional` of seven u64s: one tag byte, refused above 1) and
   `world.block_damage` (WorldCell's three i32, u16 damage, u8 face), `gathering.hand_mining` (u64
   character, f64 last strike), `construction.furnishing` (u64 stable id, container, owner, rain lot,
-  f64 rain sampled) and `construction.cell_tint` (ConstructionCellCoord's three i32, u64 instance,
-  u32 rgb). Record tables are a u32 record count then the records' fields in AB_TX_FIELDS order. Decoding is the field codec's: an object count at most 2^22 and at most one per remaining
+  f64 rain sampled), `construction.cell_tint` (ConstructionCellCoord's three i32, u64 instance,
+  u32 rgb), `gathering.wild_crop` (a vector of u64 plant ids) and `gathering.rubber_tap` (u64 tree,
+  u32 cuts, nine f64). Record tables are a u32 record count then the records' fields in AB_TX_FIELDS order. Decoding is the field codec's: an object count at most 2^22 and at most one per remaining
   byte, a string a u32 length at most 65536, a `vector<u8>` bounded only by what remains (the
   harvesting book is deliberately not string-capped), exact consumption, and no key-order check
   (only put() sorts). The reference builds the tables through their own put(), saves them with the
   engine's World::encode_tables, prints every field with floats as bits and signed integers in two's
   complement, and replays sixteen mutated payloads through the engine's decode_tables, whose
   "payload does not load (table N name)" wording the port reproduces verbatim;
-  `abundance/tests/tx_tables_test.grl` matches all 74 lines and re-encodes each blob byte for byte.
+  `abundance/tests/tx_tables_test.grl` matches all 85 lines and re-encodes each blob byte for byte.
 
   checkpoint envelope with the survival record tables - `survival.life` (u64 character id, u64
   respawn container), `survival.join` (string digest, u64 account, u64 character) and
