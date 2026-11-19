@@ -35,8 +35,12 @@
   `coherent_coasts.cpp` over a synthetic 5 km plateau island in two configurations (everything on;
   the warp off with a protection disc over part of the coast): 38 of 38 lines, both the heights and
   the whole report. The engine's parallel loops are reproduced serially; each writes only its own
-  cell and the one shared reduction is a Boolean OR. Not exercised by this fixture: the ria and fjord
-  trough profiles and the spits (that island carries one estuary and no rias, fjords or spits).
+  cell and the one shared reduction is a Boolean OR. A second fixture isolates the paths the island
+  leaves dark: a straight steep-walled valley whose banks stand high within 120 m of the stem and
+  whose catchment drains into it carries a drowned-valley **ria** (3158 cells carved), and a straight
+  soft coast over a shallow shelf carries a **spit**. Both match, 58 of 58 lines. Still unexercised:
+  the fjord trough profile (its stem must stay confined for more than 1200 m; this valley's drowned
+  reach is shorter).
 
 - **The construction-kit accumulator is ported, bit for bit.** `abundance/src/procgen_kit_acc.grl`
   carries `kit_acc.hpp`: per-slot surfaces, the Basis/Xform and its quaternion/arc/axis-angle
