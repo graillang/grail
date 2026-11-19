@@ -5,6 +5,15 @@
   "expected `=`" - the lexer's multibyte table had no `^=` token (kind 275) - and it is still refused
   on floats ("operator not defined for floats"), as the other compound forms are. Cases
   `compound-xor-assignment` and `compound-xor-assignment-on-f64-rejected`.
+- **The terrain streaming layer's demand accounting is ported.** `abundance/src/render_policy_terrain.grl`
+  carries `abundance/terrain_stream`'s budgets (one generator product, samples per field-build turn),
+  `stage_v3.hpp` with its implementation (which drainage level and field-raster resolution a page of
+  a given LOD level reads), `gpu_kernel_schedule.hpp` (the catch-up budget's still-loading
+  predicate: a short complete radius or a near ring short of full depth), `lod_camera_hold.hpp` (the
+  LOD camera's stationary hysteresis, so a still player re-uploads nothing) and `input_coverage.hpp`'s
+  two stand-ins with the page-ready rule they share. 262 reference lines. The page pool's own
+  bookkeeping (`page_book.hpp`, `node_set.hpp`) and the residency manager's selection are their own
+  increments.
 - **The book's sidebar drops its "Find a topic" subtitle;** the search box (labelled for screen readers) sits under the title.
 - **The languages overview chart reads plainly.** Its bars start at 1× (the fastest language's time)
   on one logarithmic scale shared by the release and development groups, each group lists the
