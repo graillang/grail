@@ -26,20 +26,37 @@ them.
 
 ## The languages at a glance
 
-One bar per language. For each program of the run-time, engine and parallel charts below (the
-parallel one at eight workers), every language's time is divided by the fastest language's time on
-that program, so the fastest scores 1x there. A language's bar is the geometric mean of those
-multiples over the programs: 1x would mean it was the fastest on every one, and 1.5x that it
-typically takes half as long again as the fastest. The release panel sets C, C++, Rust, Go, Zig and
-Grail's LLVM build side by side. The development panel sets Grail's native backend against the
-rivals' debug builds (Go has one build, so it appears in both panels). Both panels share one
-logarithmic scale that starts at 1x, so a bar's length is how much longer than the fastest a language
-takes, and each panel lists the fastest first. A language that has no twin of some program is averaged over the programs it has, and
-the table says which ones it lacks. Read a bar with its programs in mind: C's, C++'s and Zig's `chan`
-twins are mutex-and-condition rings that take about fifteen times as long as Grail's and Go's
-channels, and Grail's `ffi_call` is the fastest by more than half, so those two rows weigh on the
-release panel; without them Grail and C are level (1.20x and 1.21x), then Zig (1.23x), C++
-(1.26x), Rust (1.30x) and Go (1.90x).
+One panel per thing this chapter measures, one bar per language in each. Within a panel, every
+language's figure on each row is divided by the fastest language's figure on that row, so the
+fastest scores 1x there. A language's bar is the geometric mean of those multiples over the
+panel's rows: 1x would mean it was the fastest on every one, and 1.5x that it typically takes half
+as long again as the fastest. All four panels share one logarithmic scale that starts at 1x, so a
+bar's length is how far behind the fastest a language is, and each panel lists the fastest first.
+Each panel names the file it reads, its figure and the languages it has no bar for:
+
+- **Release builds - run time** sets C, C++, Rust, Go, Zig and Grail's LLVM build side by side over
+  the programs of the run-time, engine and parallel charts below (the parallel one at eight
+  workers): CPU time, wall time for the parallel ECS.
+- **Development builds - run time** sets Grail's native backend against the rivals' debug builds over
+  the same programs (Go has one build, so it appears in both panels). C and C++ have no development
+  build measured.
+- **Compile speed** reads the compile chart: every program (hello world, the generated programs and
+  the engine twins) in every scenario (check and build, cold, after a one-function edit, and nothing
+  changed) is a row, and the figure is the user-space instructions the toolchain executed. C and
+  C++ are clang and clang++ driven by make, as described in the compile-speed section.
+- **Scheduler** reads the scheduler chart's wall times. Only three languages have a scheduler twin:
+  Grail (its bar is the release build, the LLVM backend), Rust (rayon) and C++ (oneTBB). The importer
+  row counts work done, so more is better there and the multiple is inverted: the most rounds over
+  each language's rounds.
+
+A language with no figure on some row is averaged over the rows it has, and the table under the
+chart says which ones it lacks. Read a bar with its rows in mind: in the release panel, C's, C++'s
+and Zig's `chan` twins are mutex-and-condition rings that take about fifteen times as long as
+Grail's and Go's channels, and Grail's `ffi_call` is the fastest by more than half, so those two
+rows weigh on the panel; without them Grail and C are level (1.20x and 1.21x), then Zig (1.23x),
+C++ (1.26x), Rust (1.30x) and Go (1.90x). In the compile panel, a rebuild with nothing changed
+costs make next to nothing and every other toolchain some work of its own, which weighs on the
+means of the rows it is in.
 
 {{perf:overview}}
 
@@ -228,13 +245,27 @@ every call are now read-only data.
 ## Compile speed
 
 The bar: Grail compiles faster than Go, Zig and rustc, and its development builds are ready sooner
-than Zig Debug's, Rust's dev profile's and Go's. The same programs are written in all four
-languages: hello world, a generated program of N records, constructors and 15-line loop functions
+than Zig Debug's, Rust's dev profile's and Go's; C and C++, compiled by clang and clang++, are
+measured beside them. The same programs are written in all six languages: hello world, a generated program of N records, constructors and 15-line loop functions
 (N = 1000 and 4000, about 26,000 and 104,000 lines), and the seven engine-shaped programs above.
 Each is measured five ways: a check cold and after a one-function edit, and a build cold, after
 the edit, and again with nothing changed. Go has no check command; `go vet` type-checks and then
 runs its analyses, and it is what Go's column shows. A build whose output is thrown away is in a
 table of its own further down.
+
+C and C++ are built the way a C project's edit loop builds: each program is one translation unit
+with a one-target Makefile, and `make` builds it. A check is `clang -fsyntax-only` (`clang++
+-std=c++20 -fsyntax-only`), which parses and type-checks without generating code, as `grail check`,
+`cargo check` and Zig's `-fno-emit-bin` do. A build is `-O0 -g`, linked with lld (`-fuse-ld=lld`):
+no optimisation and full debug information, which is what every other column's development build
+does too (Zig Debug, Rust's dev profile, `go build`, and `grail build`), and a fast modern linker, as
+the others have (Go's and Zig's own, rustc's rust-lld, Grail's ld.lld), so neither the debug
+information nor the linker sets C apart. After a one-function edit, make recompiles the one
+translation unit and links it again; with nothing changed, make finds the program up to date and
+does nothing else. A build system is part of every column - cargo, `go build`'s cache, Zig's cache
+and Grail's store each decide what to rebuild - and make is C's, so its own cost is what C's
+nothing-changed rows count. C has no project cache to empty for a cold build, and its standard
+libraries ship compiled, as the others' are warm.
 
 The figure is the user-space instructions of the tool and every process it started, with every
 toolchain held to one process (`GRAIL_JOBS=1`, `GOMAXPROCS=1 -p=1`, `cargo -j1`; Zig's build-exe has

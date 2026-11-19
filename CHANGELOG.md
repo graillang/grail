@@ -1,5 +1,17 @@
 ## Unreleased
 
+- **The languages overview sums up the whole Performance chapter.** Besides release and development
+  run time, it has a compile-speed panel (every program and scenario of `bench/results/compile.json`,
+  by user-space instructions) and a scheduler panel (`bench/results/sched-rivals.json`'s wall times:
+  Grail's release build against rayon for Rust and oneTBB for C++, the importer's rounds inverted, as
+  more is better there), all four on the same 1×-based logarithmic scale. Each panel names its file,
+  its figure and the languages it has no bar for.
+- **Compile speed measures C and C++.** `tools/compile-rivals.mjs` has `c` and `cpp` columns:
+  hello world, the generated N-record programs and the engine twins (`bench/NAME.c`,
+  `bench/rivals/NAME.cpp`), each one translation unit with a one-target Makefile run by `make`. A check
+  is `clang -fsyntax-only` (`clang++ -std=c++20`), a build `-O0 -g` linked with `-fuse-ld=lld`; an
+  edit recompiles the unit, and a rebuild with nothing changed is make finding it up to date. Grail's
+  ratio in the compile tables is now to the fastest of all five.
 - **The book's sidebar drops its "Find a topic" subtitle;** the search box (labelled for screen readers) sits under the title.
 - **The languages overview chart reads plainly.** Its bars start at 1× (the fastest language's time)
   on one logarithmic scale shared by the release and development groups, each group lists the

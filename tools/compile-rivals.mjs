@@ -1,16 +1,18 @@
-// Compile speed against Go, Zig and rustc (docs/design/compile-speed.md, "Against Go, Zig and rustc";
-// the book's Performance chapter). The same programs in all four languages - hello world, the scaling
-// trio of tools/compile-bench.mjs (N copies of a record, its constructor and a 15-line loop
-// function, and a main calling each) at each --sizes, and the rival twins of bench/ - each measured
-// five ways:
-//   check cold      grail check | go vet (it type-checks, then runs its analyses; go build -o /dev/null
-//                   is measured beside it) | zig build-exe -fno-emit-bin | cargo check
+// Compile speed against C, C++, Go, Zig and rustc (docs/design/compile-speed.md, "Against Go, Zig
+// and rustc"; the book's Performance chapter). The same programs in all six languages - hello world,
+// the scaling trio of tools/compile-bench.mjs (N copies of a record, its constructor and a 15-line
+// loop function, and a main calling each) at each --sizes, and the rival twins of bench/ - each
+// measured five ways:
+//   check cold      grail check | clang -fsyntax-only | clang++ -fsyntax-only | go vet (it
+//                   type-checks, then runs its analyses; go build -o /dev/null is measured beside it)
+//                   | zig build-exe -fno-emit-bin | cargo check
 //   check edited    the same after one function body changed
-//   build cold      grail build (the build store) | go build | zig build-exe -O Debug | cargo build
+//   build cold      grail build (the build store) | make (one translation unit, clang -O0 -g, lld) |
+//                   the same with clang++ | go build | zig build-exe -O Debug | cargo build
 //   build edited    the same after the edit
 //   build no-op     the same again with nothing changed
 // "Cold" is a project's first build on a machine whose toolchain caches are warm: new source text
-// (a seed) and empty project caches - a new target/ for cargo, a Grail store holding only the
+// (a seed) and empty project caches - a new target/ for cargo, nothing built for make, a Grail store holding only the
 // standard library (`grail cache warm`, as the installers run it) - while Go keeps its standard
 // library in GOCACHE and Zig its compiler_rt. The edit
 // changes one constant in one function body of a generated program, and adds one statement to a
@@ -156,12 +158,88 @@ fn work${i}(v: []const u64, k: u64) u64 {
   parts.push('    try std.io.getStdOut().writer().print("{d}\\n", .{t});\n}\n');
   return parts.join('');
 }
+function cProgram(n, seed) {
+  const parts = ['#include <inttypes.h>\n#include <stddef.h>\n#include <stdint.h>\n#include <stdio.h>\n#include <string.h>\n\n'];
+  for (let i = 0; i < n; i++) parts.push(`struct rec${i} {
+    uint64_t a;
+    uint64_t b;
+    const char *name;
+};
+
+static struct rec${i} mk${i}(uint64_t a, uint64_t b) {
+    return (struct rec${i}){ .a = a, .b = b, .name = "r${i}" };
+}
+
+static uint64_t work${i}(const uint64_t *v, size_t len, uint64_t k) {
+    uint64_t total = 0;
+    for (size_t i = 0; i < len; i++) {
+        uint64_t x = v[i];
+        if (x % 2 == 0) {
+            total += x * k % 1000;
+        } else {
+            total += x % 7;
+        }
+    }
+    struct rec${i} r = mk${i}(total, k);
+    uint64_t out = r.a % 100000;
+    while (out > 1000) {
+        out = out / 3;
+    }
+    return out + r.b + strlen(r.name);
+}
+
+`);
+  parts.push(`int main(void) {\n    const uint64_t v[] = { 1, 2, 3, 4 };\n    uint64_t t = ${seed};\n`);
+  for (let i = 0; i < n; i++) parts.push(`    t += work${i}(v, 4, ${i});\n`);
+  parts.push('    printf("%" PRIu64 "\\n", t);\n    return 0;\n}\n');
+  return parts.join('');
+}
+const cHello = seed => `#include <stdio.h>\n\nint main(void) {\n    printf("hello, world ${seed}\\n");\n    return 0;\n}\n`;
+
+function cppProgram(n, seed) {
+  const parts = ['#include <cstdint>\n#include <iostream>\n#include <string>\n#include <vector>\n\n'];
+  for (let i = 0; i < n; i++) parts.push(`struct Rec${i} {
+    std::uint64_t a;
+    std::uint64_t b;
+    std::string name;
+};
+
+static Rec${i} mk${i}(std::uint64_t a, std::uint64_t b) {
+    return Rec${i}{a, b, "r${i}"};
+}
+
+static std::uint64_t work${i}(const std::vector<std::uint64_t>& v, std::uint64_t k) {
+    std::uint64_t total = 0;
+    for (std::size_t i = 0; i < v.size(); i++) {
+        std::uint64_t x = v[i];
+        if (x % 2 == 0) {
+            total += x * k % 1000;
+        } else {
+            total += x % 7;
+        }
+    }
+    Rec${i} r = mk${i}(total, k);
+    std::uint64_t out = r.a % 100000;
+    while (out > 1000) {
+        out = out / 3;
+    }
+    return out + r.b + r.name.size();
+}
+
+`);
+  parts.push(`int main() {\n    const std::vector<std::uint64_t> v{1, 2, 3, 4};\n    std::uint64_t t = ${seed};\n`);
+  for (let i = 0; i < n; i++) parts.push(`    t += work${i}(v, ${i});\n`);
+  parts.push('    std::cout << t << "\\n";\n}\n');
+  return parts.join('');
+}
+const cppHello = seed => `#include <iostream>\n\nint main() {\n    std::cout << "hello, world ${seed}\\n";\n}\n`;
+
 const zigHello = seed => `const std = @import("std");\n\npub fn main() !void {\n    try std.io.getStdOut().writer().print("hello, world ${seed}\\n", .{});\n}\n`;
 
 // The one-body edit: the first `% 1000` in work{N/2} becomes `% 1001`; hello world's string changes.
 function edit(text, n) {
   if (!n) return text.replace('hello, world', 'hello, edited');
-  const at = text.search(new RegExp(`(fn|func) work${n >> 1}\\(`));
+  const at = text.search(new RegExp(`(fn|func|uint64_t) work${n >> 1}\\(`));
   const k = text.indexOf('% 1000', at);
   return text.slice(0, k) + '% 1001' + text.slice(k + 6);
 }
@@ -183,6 +261,7 @@ const passes = {
 // programs of a few hundred lines, beside the generated ones.
 const twins = option('--twins', 'hashmap,bintrees,strings,json,dyncall,iterchain,ecs').split(',').filter(Boolean);
 const twinText = (lang, name) => lang === 'grail' ? readFileSync(join(root, 'bench', `${name}.grl`), 'utf8')
+  : lang === 'c' ? readFileSync(join(root, 'bench', `${name}.c`), 'utf8')
   : lang === 'rust' ? readFileSync(existsSync(join(root, 'bench/rivals', `${name}-rs`)) ? join(root, 'bench/rivals', `${name}-rs/src/main.rs`) : join(root, 'bench/rivals', `${name}.rs`), 'utf8')
   : readFileSync(join(root, 'bench/rivals', `${name}.${lang}`), 'utf8');
 // A twin's one-function edit: a statement added at the top of `main`.
@@ -191,6 +270,8 @@ const twinEdit = {
   rust: t => t.replace(/^fn main\(\)[^{]*\{/m, m => `${m}\n    let _edit_marker = 1;`),
   go: t => t.replace(/^func main\(\) \{/m, m => `${m}\n\t_ = 1`),
   zig: t => t.replace(/^pub fn main\(\) !void \{/m, m => `${m}\n    _ = 1;`),
+  c: t => t.replace(/^int main\(void\) \{/m, m => `${m}\n    (void)1;`),
+  cpp: t => t.replace(/^int main\(\) \{/m, m => `${m}\n    (void)1;`),
 };
 
 // Each language: how to lay out a project, and the commands.
@@ -215,6 +296,23 @@ const languages = {
     env: dir => ({ ZIG_LOCAL_CACHE_DIR: join(dir, 'zig-cache') }),
     check: ['zig', 'build-exe', '-fno-emit-bin', 'main.zig'], build: ['zig', 'build-exe', '-O', 'Debug', 'main.zig'], exe: 'main',
   },
+  // C and C++: one translation unit and a one-target Makefile, built by make - the edit loop of a C
+  // project, where make decides what to rebuild as cargo, go and Grail's store do for theirs. The
+  // development build is -O0 -g (debug information, as every other column's development build has),
+  // linked by lld, as the other columns link with a fast modern linker of their own (Go's and Zig's,
+  // rustc's rust-lld, Grail's ld.lld).
+  c: {
+    file: 'main.c', comment: '//', program: cProgram, hello: cHello,
+    fresh(dir) { writeFileSync(join(dir, 'Makefile'), 'CC = clang\nCFLAGS = -O0 -g\nLDFLAGS = -fuse-ld=lld\n\nmain: main.c\n\t$(CC) $(CFLAGS) $(LDFLAGS) -o main main.c\n'); },
+    env: () => ({}),
+    check: ['clang', '-fsyntax-only', 'main.c'], build: ['make', '-s'], exe: 'main',
+  },
+  cpp: {
+    file: 'main.cpp', comment: '//', program: cppProgram, hello: cppHello,
+    fresh(dir) { writeFileSync(join(dir, 'Makefile'), 'CXX = clang++\nCXXFLAGS = -std=c++20 -O0 -g\nLDFLAGS = -fuse-ld=lld\n\nmain: main.cpp\n\t$(CXX) $(CXXFLAGS) $(LDFLAGS) -o main main.cpp\n'); },
+    env: () => ({}),
+    check: ['clang++', '-std=c++20', '-fsyntax-only', 'main.cpp'], build: ['make', '-s'], exe: 'main',
+  },
   rust: {
     file: 'src/main.rs', comment: '//', program: rustProgram, hello: rustHello,
     fresh(dir, text) {
@@ -228,9 +326,9 @@ const languages = {
 };
 // A language whose toolchain is absent is left out, and toolchains() says so.
 const have = toolchains();
-for (const lang of ['go', 'zig', 'rust']) if (!have[lang]) delete languages[lang];
+for (const lang of ['c', 'cpp', 'go', 'zig', 'rust']) if (!have[lang] || ((lang === 'c' || lang === 'cpp') && spawnSync('make', ['--version']).status !== 0)) delete languages[lang];
 const names = Object.keys(languages);
-const headOf = { grail: 'Grail', go: 'Go', zig: 'Zig', rust: 'Rust', 'go-build': 'Go (build to /dev/null)' };
+const headOf = { grail: 'Grail', c: 'C', cpp: 'C++', go: 'Go', zig: 'Zig', rust: 'Rust', 'go-build': 'Go (build to /dev/null)' };
 let failed = 0;
 
 let serial = 0;
@@ -275,7 +373,7 @@ const programs = [
   ...sizes.map(n => ({ label: `syn${n}`, text: (lang, seed) => languages[lang].program(n, seed), edit: (lang, t) => edit(t, n), check: true })),
   // A twin's text is fixed, so a seed comment makes each cold build new text (Go's cache is keyed by
   // content); its output is checked by bench-rivals, not here.
-  ...twins.map(name => ({ label: name, text: (lang, seed) => `${languages[lang].comment} seed ${seed}\n${twinText(lang, name)}`, edit: (lang, t) => twinEdit[lang](t), check: false })),
+  ...twins.map(name => ({ label: name, text: (lang, seed) => `${languages[lang].comment} seed ${seed}\n${twinText(lang, name)}`, edit: (lang, t) => { const e = twinEdit[lang](t); if (e === t) throw new Error(`the twin edit found no main in ${name} (${lang})`); return e; }, check: false })),
 ];
 const steps = ['check cold', 'check edited', 'build cold', 'build edited', 'build no-op'];
 
@@ -334,7 +432,7 @@ for (const program of programs) {
 const rows = programs.flatMap(p => steps.map(step => [`${p.label} ${step}`, results[`${p.label} ${step}`]]));
 load.push(loadavg());
 const v = versions();
-console.log(`compile-rivals: instructions in one process (G) and wall time at four jobs (s), best of ${runs}; ratio = Grail's instructions over the fewest of Go, Zig and Rust`);
+console.log(`compile-rivals: instructions in one process (G) and wall time at four jobs (s), best of ${runs}; ratio = Grail's instructions over the fewest of the others`);
 console.log(`grail: ${grail}, commit ${measuredGrail.commit}\nload average ${load[0]} at start, ${load[1]} at end; ${Object.values(v).join('; ')}`);
 writeFileSync(join(root, '.work/compile-rivals.json'), JSON.stringify({ runs, sizes, twins, load, versions: v, grail, commit: measuredGrail.commit, results, at: new Date().toISOString() }, null, 2) + '\n');
 if (jsonPath) {
@@ -344,14 +442,15 @@ if (jsonPath) {
     rows: rows.filter(([name]) => keepRow(name)).map(([name, figures]) => ({ name, unit: { cpu: 's CPU', wall: 's wall', instructions: 'G instructions' }[field], values: Object.fromEntries(cols.map(k => [k, figures[k]?.[field]])) })),
   });
   writeResults(jsonPath, {
-    tool: 'compile-rivals', title: 'Compile speed against Go, Zig and rustc', commit: measuredGrail.commit, versions: v, load,
+    tool: 'compile-rivals', title: 'Compile speed against C, C++, Go, Zig and rustc', commit: measuredGrail.commit, versions: v, load,
     commands: [`bun tools/compile-rivals.mjs --runs ${runs} --sizes ${sizes.join(',')} --twins ${twins.join(',')}`,
       `Grail's store before each cold run: ${templateFrom}; Go's GOCACHE holds its standard library, Zig's cache its compiler_rt, and cargo uses the offline registry, so the standard library is warm for every toolchain`,
-      'one process: GRAIL_JOBS=1, GOMAXPROCS=1 GOFLAGS=-p=1, CARGO_BUILD_JOBS=1; four jobs: the same at 4',
+      'one process: GRAIL_JOBS=1, GOMAXPROCS=1 GOFLAGS=-p=1, CARGO_BUILD_JOBS=1 (make builds one translation unit, so one job); four jobs: the same at 4',
       ...names.map(n => `${headOf[n]}: check \`${languages[n].check.join(' ').replace('__grail', 'grail')}\`, build \`${languages[n].build.join(' ').replace('__grail', 'grail')}\``),
+      'C and C++: one translation unit per program and a one-target Makefile (CFLAGS -O0 -g, CXXFLAGS -std=c++20 -O0 -g, LDFLAGS -fuse-ld=lld); nothing changed is make finding the target up to date',
       'edit: the generated programs change one constant in one function body; a twin gets one statement added to main'],
     tables: [
-      table('compile', 'Compile speed: instructions, in one process', 'instructions', true, `User-space instructions of the tool and every process it started, every toolchain in one process, fewest of ${runs}. The bar: the fastest of Go, Zig and rustc.`),
+      table('compile', 'Compile speed: instructions, in one process', 'instructions', true, `User-space instructions of the tool and every process it started, every toolchain in one process, fewest of ${runs}. The bar: the fastest of the others.`),
       table('compile-wall', 'Compile speed: wall time at four jobs', 'wall', true, `Wall time with four jobs for every toolchain (this host's cap), best of ${runs}; the load is beside it.`),
       table('compile-cpu', 'The same builds in one process, CPU time', 'cpu', false, `CPU time, best of ${runs}; inflated by the load.`),
       table('compile-go-check', "Go's two checks: go vet against a build whose output is thrown away", 'instructions', false, 'go vet type-checks and then runs its analyses; go build -o /dev/null is the compiler without the link.', ['grail', 'go', 'go-build'], name => name.includes('check')),

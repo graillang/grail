@@ -155,6 +155,49 @@ test('the languages overview: geometric mean of each language over the fastest p
   expect(html).toContain('no twin of b');
   expect(html).not.toContain('\n');
 });
+test('the languages overview: compile speed and scheduler panels, a language with no figure, a row where more is better', async () => {
+  const { overviewRows, overview } = await import('./perf-charts.mjs');
+  const table = (id, rows, direction = 'lower') => ({ id, direction, rows: rows.map(([name, values, dir]) => ({ name, values, ...(dir ? { direction: dir } : {}) })) });
+  const files = {
+    compile: { commit: 'abc', tables: [table('compile', [['hello check cold', { grail: 1, go: 4, zig: 8, rust: 2 }], ['hello build no-op', { grail: 1, go: 2, zig: 2, rust: 4, 'go-build': 0.5 }]])] },
+    'sched-rivals': { commit: 'abc', tables: [table('scheduler', [
+      ['join', { 'grail-native': 1, 'grail-llvm': 2, rayon: 4, onetbb: 1 }],
+      ['join, on a worker', { rayon: 2, onetbb: 1 }],
+      ['one at a time', { 'grail-native': 1, 'grail-llvm': 2 }],
+      ['importer rounds', { 'grail-llvm': 50, rayon: 100, onetbb: 25 }, 'higher'],
+    ])] },
+  };
+  const panels = overviewRows(files);
+  const compile = panels.find(p => p.id === 'compile'), sched = panels.find(p => p.id === 'scheduler');
+  const lang = (panel, key) => panel.languages.find(l => l.key === key);
+  expect(compile.programs.map(p => p.name)).toEqual(['hello check cold', 'hello build no-op']);
+  expect(lang(compile, 'grail').mean).toBe(1);
+  expect(lang(compile, 'rust').mean).toBeCloseTo(Math.sqrt(2 * 4));
+  expect(compile.languages.map(l => l.key)).not.toContain('go-build'); // Go's other check is not a language
+  expect(lang(compile, 'c').count).toBe(0); // a file without C or C++ columns: not measured, said so
+  expect(compile.unmeasured).toEqual(['C', 'C++']);
+  expect(compile.absent).toEqual([]);
+  // The scheduler: Grail's release build, rayon as Rust, oneTBB as C++; a row with one language is left out.
+  expect(sched.programs.map(p => p.name)).toEqual(['join', 'join, on a worker', 'importer rounds']);
+  expect(sched.absent).toEqual(['C', 'Go', 'Zig']);
+  const rounds = sched.programs.find(p => p.name === 'importer rounds');
+  expect(rounds.higher).toBe(true);
+  expect(rounds.ratios).toEqual({ 'grail-llvm': 2, rayon: 1, onetbb: 4 }); // more is better: the most over each
+  expect(lang(sched, 'grail-llvm').mean).toBeCloseTo(Math.sqrt(2 * 2)); // no figure on a worker: over two rows
+  expect(lang(sched, 'grail-llvm').missing).toEqual(['join, on a worker']);
+  expect(lang(sched, 'onetbb').mean).toBeCloseTo(Math.cbrt(1 * 1 * 4));
+  expect(lang(sched, 'rayon').fastest).toBe(1);
+  const html = overview(files);
+  expect(html).toContain('Compile speed - 2 measurements');
+  expect(html).toContain('bench/results/compile.json; user-space instructions');
+  expect(html).toContain('No C or C++: not measured in this file');
+  expect(html).toContain('bench/results/sched-rivals.json; wall time');
+  expect(html).toContain('Grail is its release (LLVM) build, Rust is rayon, C++ is oneTBB');
+  expect(html).toContain('No C, Go or Zig: they have no scheduler twin');
+  expect(html).toContain('no figure for join, on a worker');
+  expect(html).not.toContain('Release builds'); // a panel without data is left out
+  expect(html).not.toContain('\n');
+});
 test('the Performance chapter renders every committed result file', () => {
   const chapter = book.chapters.find(c => c.slug === 'performance');
   expect(chapter).toBeDefined();

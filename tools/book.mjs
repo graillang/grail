@@ -48,7 +48,8 @@ export function perfBlock(spec, directory = resultsDirectory) {
   const [name, part] = spec.split('#');
   if (!/^[a-z][a-z0-9-]*$/.test(name)) throw new Error(`Invalid results name: ${name}`);
   // `{{perf:summary}}`: every result file at once, one bar per category; `{{perf:overview}}`: one
-  // bar per language over the run-time, engine and parallel files (tools/perf-charts.mjs).
+  // bar per language in a panel per category - release and development run time, compile speed and
+  // the scheduler (tools/perf-charts.mjs).
   if (name === 'summary' || name === 'overview') {
     const files = {};
     for (const f of readdirSync(directory)) if (f.endsWith('.json')) { const d = JSON.parse(readFileSync(join(directory, f), 'utf8')); if (d?.schema === 1) files[f.slice(0, -5)] = d; }
