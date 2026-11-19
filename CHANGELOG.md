@@ -86,6 +86,15 @@
   duplicate through `exchange(&mut slot.value, member.value)`, which leaves a framed value's storage
   live; a plain store drops the replaced value and the duplicate's own key with the member. Case
   `json-duplicate-key-last-wins-no-leak` (both the scan and the map-index paths were checked).
+- Fixed: a closure type nested in `rc::Arc<..>` is the same type wherever it is written. `struct S { b:
+  rc::Arc<Fn<Owned>((&T)) -> u64> }` used as a parameter type elsewhere was refused with "type mismatch:
+  expected `rc::Arc<Fn<Owned>(&T) -> u64>`, found `rc::Arc<Fn<Owned>(&T) -> u64>`": the closure's
+  reference parameter carries the region its spelling was parsed in (a parameter list names one, a
+  generic substitution - `s.b.clone()` - drops it), and the comparison relaxed only the direction the
+  substitution produces. A closure's reference parameter is a fresh input lifetime on every call, so
+  its own life is not part of the contract and the two agree; the referent still is. Cases
+  `closure-type-in-arc-unifies-across-positions` and
+  `closure-reference-parameter-element-still-typed`.
 - **The Jolt surface closes with the overlap query.** `gr_jolt_overlap_capsule` is one `CollideShape`
   of the same capsule the cast sweeps, stopped at the first hit: `abundance/src/jolt.grl` now answers
   the core's `overlap` contract (a boolean, with `invalid_request` for a capsule shorter than its own

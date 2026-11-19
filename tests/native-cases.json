@@ -19854,6 +19854,23 @@
     "note": "a closure type written in a struct field takes a reference parameter: its elided lifetime is a fresh input of each call, as in a function's parameter list (it was \"elided output reference needs one input lifetime\")"
   },
   {
+    "name": "closure-type-in-arc-unifies-across-positions",
+    "source": "use rc;\nstruct T { x: u64 }\nstruct S { b: rc::Arc<Fn<Owned>((&T)) -> u64> }\nfn take(s: (&S)) -> rc::Arc<Fn<Owned>((&T)) -> u64> { return s.b.clone(); }\nfn count(b: rc::Arc<Fn<Owned>((&T)) -> u64>) -> u64 { return b.strong_count(); }\nfn main() {\n    s := S{b: rc::arc_new(|t: &T| -> u64 { return t.x * 2; })};\n    println(count(s.b.clone()));\n    c := take(&s);\n    println(c.strong_count());\n    f := c.get();\n    println(f(&T{x: 21}));\n}\n",
+    "modules": [
+      "lib/rc.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "2\n2\n42\n",
+    "note": "a closure type nested in `rc::Arc<..>` is the same type wherever it is written: a field's `Arc<Fn<Owned>((&T)) -> u64>` and the same text in a parameter list or return type differed only in the region the reference parameter was parsed with (a field names one, a generic substitution drops it), so `s.b.clone()` handed to a parameter of the same text was \"type mismatch: expected `rc::Arc<Fn<Owned>(&T) -> u64>`, found `rc::Arc<Fn<Owned>(&T) -> u64>`\""
+  },
+  {
+    "name": "closure-reference-parameter-element-still-typed",
+    "source": "fn take(f: Fn<Owned>((&[u64])) -> u64) -> u64 { return 1; }\nfn main() {\n    g: Fn<Owned>((&[f64])) -> u64 = |v: &[f64]| -> u64 { return v.len(); };\n    println(take(g));\n}\n",
+    "reject": true,
+    "diagnostic": "type mismatch",
+    "note": "the relaxation for a closure's reference parameter drops the reference's own lifetime, not its referent: `Fn((&[u64])) -> u64` and `Fn((&[f64])) -> u64` are different signatures and still refused"
+  },
+  {
     "name": "closure-shared-method-on-capture-is-fn",
     "source": "struct P { v: u64 }\nimpl P { pub fn get(self: &P) -> u64 { return self.v; } }\nfn call_shared(f: Fn<Share>() -> u64) -> u64 { return f(); }\nfn main() { p := P{v: 3}; println(call_shared(|| -> u64 { return p.get(); })); }\n",
     "stdout": "3\n",
