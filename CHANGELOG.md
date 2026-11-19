@@ -1,5 +1,13 @@
 ## Unreleased
 
+- **The coherent generator's first elevation raster is reproduced byte for byte.** `abundance/src/
+  worldgen_initial.grl` runs the initial pass end to end - provinces, the preset-tilted range config,
+  the macro world, coherent passes, the Saturday2d82 range field, the valley field and the landform
+  plan - and then the per-cell base elevation (province datum and relief, broad and compact-ridge
+  relief, the massif dome, the legacy/macro coastline blend, divide uplift and the valley pull). The
+  `initial` suite compares `s00_initial` and the five fields the real `generate_world` dumps beside it
+  (AB_COHERENT_STAGE_DUMP) for three worlds: 306 values, every f32 byte.
+
 - **The derelict monument layouts are complete: the library, arms depot, factory, orchard and dam
   templates join the farm, and pieces resolve through the construction catalogue.**
   `abundance/src/monument_layout.grl` now carries the rest of `monument_layout.cpp` (`panels` and the
