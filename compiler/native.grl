@@ -235,6 +235,12 @@ struct Closure {
     bindings: u64[],
     // Lifetimes the parameters introduced (`|x: &T|`): regions 2.. of the closure's own namespace.
     regions: u64,
+    // A local named function (`fn walk(n: u64) -> u64 { .. walk(n - 1) .. }`) that calls itself:
+    // its name, bound in the body to a shared reference to the closure the body belongs to.
+    self_name: u8[],
+    // Converted to a thin `fn(..)` pointer (it captures nothing): a `_thin` entry is emitted after
+    // the body that supplies the environment the body expects and calls it.
+    thin: u64,
     // The captures the body writes, one flag per entry of `captures`. Only a written capture is
     // mutable in the body, and a closure with any written capture is `FnMut` (mode 1), not `Fn`.
     written: u64[],
@@ -992,6 +998,10 @@ struct C {
     tail_mode: u64,
     arm_tail: u64,
     tail_now: u64,
+    // `fn name(..)` inside a body: the token of the name while closure_literal reads the function,
+    // and the name itself when the body calls it (a recursive local function).
+    local_fn: u64,
+    local_self: u8[],
     sink: u64,
     sink_hint: u64,
     sink_hint_at: u64,
@@ -36054,7 +36064,7 @@ fn argument_ranges<a>(c: (&a mut C)) -> u64[] {
         if k == 0 {
             return u64[];
         }
-        if (k == 124) || (k == 274) {
+        if (k == 124) || (k == 274) || fn_literal_at(&mut c, at) {
             return u64[];
         }
         if (k == 40) || (k == 91) || (k == 123) {
@@ -36520,7 +36530,7 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
                 }
                 if known != 0 {
                     context = bind_types(&mut c, c.params[template_first + argi], &map);
-                } else if (kind(&mut c) == 124) || (kind(&mut c) == 274) {
+                } else if closure_at(&mut c, c.pos) {
                     // A closure argument of a generic call: the parameter types the call already
                     // fixes type its parameters; its result is inferred from its body. For a
                     // callable-bound parameter the bound is the type that hints it.
@@ -37398,6 +37408,125 @@ fn function_as_closure<a>(c: (&a mut C), v: Val, expected: u64) -> Val {
     own(&mut c, obj, expected);
     return val(obj, expected);
 }
+// The reverse: a closure where a function pointer `fn(..) -> R` is expected. One that captures
+// nothing is a function - its body reads no environment - so it converts, to the address of a thin
+// entry (emit_thin_entry) that calls the body with an empty environment. One that captures does
+// not: the pointer has nowhere to keep what it captured, so the refusal names the captures and the
+// parameter type that takes them, `Fn(..)`. A signature that differs is left to require_type.
+// `Fn(u64) -> u64` (or `FnMut`) for a closure or function type: its parameters and result.
+fn closure_type_spelling<a>(c: (&a mut C), ty: u64) -> u8[] {
+    mut spelled = copy_bytes(view("Fn("));
+    if (ty_kind(&mut c, ty) == 20) && ((ty_mode(&mut c, ty) & CLOSURE_FNMUT) != 0) {
+        spelled = copy_bytes(view("FnMut("));
+    }
+    want := type_args(&mut c, ty);
+    for i in want.len() {
+        if i != 0 {
+            push_bytes(&mut spelled, view(", "));
+        }
+        push_bytes(&mut spelled, view(source_type_name(&mut c, want[i])));
+    }
+    push_bytes(&mut spelled, view(") -> "));
+    push_bytes(&mut spelled, view(source_type_name(&mut c, ty_arg(&mut c, ty))));
+    return spelled;
+}
+fn closure_as_function<a>(c: (&a mut C), v: Val, expected: u64) -> Val {
+    params := type_args(&mut c, v.ty);
+    want := type_args(&mut c, expected);
+    if params.len() != want.len() {
+        return v;
+    }
+    for i in params.len() {
+        if same_type(&mut c, params[i], want[i]) == 0 {
+            return v;
+        }
+    }
+    result := ty_arg(&mut c, v.ty);
+    if same_type(&mut c, result, ty_arg(&mut c, expected)) == 0 {
+        return v;
+    }
+    spelled := closure_type_spelling(&mut c, expected);
+    if (ty_mode(&mut c, v.ty) & CLOSURE_UNBUILT) != 0 {
+        // Template validation: the specialisation builds and converts the real closure.
+        moved := move_value(&mut c, v);
+        move_out(&mut c, moved);
+        return val(imm(&mut c, 0), expected);
+    }
+    env := ty_env(&mut c, v.ty);
+    mut index = 0;
+    if env != 0 {
+        d := ty_arg(&mut c, env);
+        for i in c.closures.len() {
+            if (c.closures[i].decl == d) && (c.closures[i].symbol.len() != 0) {
+                index = i + 1;
+            }
+        }
+    }
+    if index == 0 {
+        mut help = copy_bytes(view("take `"));
+        push_bytes(&mut help, view(spelled));
+        push_bytes(&mut help, view("` where a closure is passed on, or give a named function or a closure literal that captures nothing"));
+        diag_help(&mut c, view(help));
+        fail(&mut c, view("a closure value of type `Fn(..)` may hold captures, so it is not a function pointer `fn(..)`"));
+    }
+    caps := copy_names(&c.closures[index - 1].captures);
+    if caps.len() != 0 {
+        mut said = copy_bytes(view("this closure captures "));
+        for i in caps.len() {
+            if i != 0 {
+                push_bytes(&mut said, view(", "));
+            }
+            said.push(96);
+            push_bytes(&mut said, view(caps[i]));
+            said.push(96);
+        }
+        push_bytes(&mut said, view(", so it is not a function pointer `fn(..)`: a function pointer has no room for what a closure captures"));
+        mut help = copy_bytes(view("take `"));
+        push_bytes(&mut help, view(spelled));
+        push_bytes(&mut help, view("` instead, which accepts closures and named functions"));
+        diag_help(&mut c, view(help));
+        fail(&mut c, view(said));
+    }
+    exchange(&mut c.closures[index - 1].thin, 1);
+    mut thin = c.closures[index - 1].symbol.copy();
+    push_bytes(&mut thin, view("_thin"));
+    // The pointer is the code alone. A temporary object is not needed any more; a named one (a
+    // local function) holds nothing, so it stays usable and is dropped with its binding.
+    if is_local_slot(&mut c, v.t) {
+        observe(&mut c, v.t);
+    } else {
+        moved := move_value(&mut c, v);
+        discard_value(&mut c, moved);
+    }
+    o(&mut c, view("leaq "));
+    mangle(&mut c, view(".closure"), view(thin));
+    o(&mut c, view("(%rip),%rax\n"));
+    return val(save(&mut c), expected);
+}
+// A closure converted to a function pointer (closure_as_function) is called without the hidden
+// environment argument: the entry shifts the arguments up one register, as grail_fn_thunk shifts
+// them down, and hands the body the address of a word holding the address of a word holding the
+// body's own code - the environment of a closure that captures nothing, enough for a recursive local
+// function to call itself through. Fn types take at most five arguments, so the sixth register is
+// free.
+fn emit_thin_entry<a, b>(c: (&a mut C), symbol: &b [u8], weak: u64) -> unit {
+    mut thin = copy_bytes(view(symbol));
+    push_bytes(&mut thin, view("_thin"));
+    mut mark = 0;
+    if weak != 0 {
+        mark = 1;
+    }
+    saved_spec := exchange(&mut c.current_spec, mark);
+    func_directive(&mut c, view(".closure"), view(thin), view(thin), 0);
+    exchange(&mut c.current_spec, saved_spec);
+    mangle(&mut c, view(".closure"), view(thin));
+    o(&mut c, view(":\npushq %rbp\nmovq %rsp,%rbp\nsubq $16,%rsp\n"));
+    o(&mut c, view("movq %r8,%r9\nmovq %rcx,%r8\nmovq %rdx,%rcx\nmovq %rsi,%rdx\nmovq %rdi,%rsi\nleaq "));
+    mangle(&mut c, view(".closure"), view(symbol));
+    o(&mut c, view("(%rip),%rax\nmovq %rax,-16(%rbp)\nleaq -16(%rbp),%rax\nmovq %rax,-8(%rbp)\nleaq -8(%rbp),%rdi\nmovq -16(%rbp),%rax\ncall *%rax\nleave\nret\n"));
+    size_directive(&mut c, view(".closure"), view(thin), view(thin), 0);
+    return ();
+}
 // The record type of a function's closure object: {__code, __drop, target}, created once.
 fn fn_value_decl<a>(c: (&a mut C)) -> u64 {
     for i in c.decls.len() {
@@ -37852,7 +37981,8 @@ fn closure_captures_nothing<a>(c: (&a mut C), ty: u64) -> bool {
     d := ty_arg(&mut c, env);
     for i in c.closures.len() {
         if (c.closures[i].decl == d) && (c.closures[i].symbol.len() != 0) {
-            return c.closures[i].captures.len() == 0;
+            // A recursive local function calls itself through the environment it is handed.
+            return (c.closures[i].captures.len() == 0) && (c.closures[i].self_name.len() == 0);
         }
     }
     return false;
@@ -43047,6 +43177,9 @@ fn adopt_value<a>(c: (&a mut C), v: Val, start: u64, end: u64, expected: u64) ->
         if (ty_kind(&mut c, v.ty) == 12) & (ty_kind(&mut c, expected) == 20) {
             return function_as_closure(&mut c, v, expected);
         }
+        if (ty_kind(&mut c, v.ty) == 20) & (ty_kind(&mut c, expected) == 12) {
+            return closure_as_function(&mut c, v, expected);
+        }
         if (ty_kind(&mut c, v.ty) == 20) & (ty_kind(&mut c, expected) == 20) {
             erased := closure_erase(&mut c, val(v.t, v.ty), expected);
             if erased.ty != NO_TYPE {
@@ -44062,7 +44195,7 @@ fn immediate_call_hint<a>(c: (&a mut C)) -> unit {
     if kind_at(&mut c, open) != 40 {
         return ();
     }
-    if (kind_at(&mut c, open + 1) != 124) & (kind_at(&mut c, open + 1) != 274) {
+    if !closure_at(&mut c, open + 1) {
         return ();
     }
     close := matching_paren(&mut c, open);
@@ -44080,7 +44213,7 @@ fn immediate_call_hint<a>(c: (&a mut C)) -> unit {
     mut at = call + 1;
     mut types = u64[];
     while at < stop {
-        if (kind_at(&mut c, at) == 124) | (kind_at(&mut c, at) == 274) {
+        if closure_at(&mut c, at) {
             return ();
         }
         mut no_names = u8[][];
@@ -44149,6 +44282,26 @@ fn lent_parameter<a>(c: (&a mut C), ty: u64) -> bool {
     }
     return type_regions(&mut c, ty).len() == 0;
 }
+// The end of a closure's parameter list: `|` in the bar form, `)` in the `fn(..)` form.
+fn closure_params_close<a>(c: (&a mut C), fn_form: bool) -> bool {
+    if fn_form {
+        return eat(&mut c, view(")"));
+    }
+    return eat(&mut c, view("|"));
+}
+// Whether a closure literal starts at token `i`: `|..|`, `||`, or the function literal `fn(..)`,
+// which is the same closure spelled as a function without its name. (Where a type is read,
+// `fn(T) -> R` is the function pointer type; this asks only where an expression starts.)
+fn closure_at<a>(c: (&a mut C), i: u64) -> bool {
+    k := kind_at(&mut c, i);
+    if (k == 124) || (k == 274) {
+        return true;
+    }
+    return fn_literal_at(&mut c, i);
+}
+fn fn_literal_at<a>(c: (&a mut C), i: u64) -> bool {
+    return (kind_at(&mut c, i) == 1) && (kind_at(&mut c, i + 1) == 40) && is_at(&mut c, i, view("fn"));
+}
 fn closure_literal<a>(c: (&a mut C)) -> Val {
     // The whole argument of a lent parameter (lent_arg_at), decided again once the literal ends.
     lent_start := exchange(&mut c.lent_arg_at, 0) == c.pos + 1;
@@ -44162,10 +44315,25 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
     mut names = u8[][];
     mut params = u64[];
     mut param_regions = 0;
-    if !eat(&mut c, view("||")) {
-        expect(&mut c, view("|"));
-        exchange(&mut c.no_union, 1);
-        if !eat(&mut c, view("|")) {
+    // `fn(a: u64) -> u64 { a * 2 }` is the same closure as `|a: u64| -> u64 { a * 2 }`: only the
+    // parameter list is spelled differently, and the body is a block, as a named function's is. A
+    // local `fn name(..)` (local_function) comes here at its `fn` with the name still to read.
+    fn_form := fn_literal_at(&mut c, c.pos) || (c.local_fn != 0);
+    mut self_name = u8[];
+    if fn_form {
+        expect(&mut c, view("fn"));
+        if exchange(&mut c.local_fn, 0) != 0 {
+            self_name = exchange(&mut c.local_self, u8[]);
+            advance(&mut c);
+        }
+        expect(&mut c, view("("));
+    }
+    if fn_form || !eat(&mut c, view("||")) {
+        if !fn_form {
+            expect(&mut c, view("|"));
+            exchange(&mut c.no_union, 1);
+        }
+        if !closure_params_close(&mut c, fn_form) {
             // Parameters are typed in the closure's own lifetime namespace (`env` is region 1): each
             // elided reference is a fresh input lifetime, borrowed anew on every call.
             mut closure_names = u8[][];
@@ -44186,9 +44354,15 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
                         // its type, and a later use cannot (a closure's parameters are explicit).
                         mut text = copy_bytes(view("closure parameter `"));
                         push_bytes(&mut text, view(n));
-                        push_bytes(&mut text, view("` needs a type here (nothing fixes it): write |"));
-                        push_bytes(&mut text, view(n));
-                        push_bytes(&mut text, view(": T|"));
+                        if fn_form {
+                            push_bytes(&mut text, view("` needs a type here (nothing fixes it): write fn("));
+                            push_bytes(&mut text, view(n));
+                            push_bytes(&mut text, view(": T)"));
+                        } else {
+                            push_bytes(&mut text, view("` needs a type here (nothing fixes it): write |"));
+                            push_bytes(&mut text, view(n));
+                            push_bytes(&mut text, view(": T|"));
+                        }
                         here := c.pos;
                         exchange(&mut c.pos, here - 1);
                         fail(&mut c, view(text));
@@ -44197,7 +44371,7 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
                 }
                 names.push(n);
                 params.push(ty);
-                if eat(&mut c, view("|")) {
+                if closure_params_close(&mut c, fn_form) {
                     break;
                 }
                 expect(&mut c, view(","));
@@ -44210,8 +44384,16 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
     }
     exchange(&mut c.no_union, 0);
     mut ret = 1;
+    if fn_form && !is(&mut c, view("->")) && !is(&mut c, view("{")) {
+        diag_help(&mut c, view("write it as a named function's: `fn(x: u64) -> u64 { x * 2 }`"));
+        fail(&mut c, view("a function literal's body is a block"));
+    }
     if eat(&mut c, view("->")) {
         ret = parse_type(&mut c);
+        if fn_form && !is(&mut c, view("{")) {
+            diag_help(&mut c, view("write it as a named function's: `fn(x: u64) -> u64 { x * 2 }`"));
+            fail(&mut c, view("a function literal's body is a block"));
+        }
     } else if hinted && (hint_ret != NO_TYPE) {
         ret = hint_ret;
     } else if !is(&mut c, view("{")) {
@@ -44238,7 +44420,7 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
                     break;
                 }
             }
-            if (k == 124) || (k == 274) {
+            if (k == 124) || (k == 274) || fn_literal_at(&mut c, q) || (is_at(&mut c, q, view("fn")) && (kind_at(&mut c, q + 1) == 1)) {
                 nested = true;
             }
             if (k == 1) & (valued == 0) {
@@ -44250,7 +44432,11 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
         }
         if (valued != 0) && !nested {
             exchange(&mut c.pos, valued);
-            diag_help(&mut c, view("write the result type before the block: `|a: u64| -> u64 { return a + 1; }`"));
+            if fn_form {
+                diag_help(&mut c, view("write the result type before the block: `fn(a: u64) -> u64 { return a + 1; }`"));
+            } else {
+                diag_help(&mut c, view("write the result type before the block: `|a: u64| -> u64 { return a + 1; }`"));
+            }
             fail(&mut c, view("this closure's block returns a value, and nothing says what type its result is"));
         }
         // A block that ends in a value (`|x: u64| { y := x * 2; y + 1 }`) has that value's type, found
@@ -44289,6 +44475,10 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
     mut nested_mark = 18446744073709551615;
     mut captures = u8[][];
     mut inner = u8[][];
+    // A recursive local function's own name is its body's reference to itself, not a capture.
+    if self_name.len() != 0 {
+        inner.push(self_name.copy());
+    }
     mut i = start;
     while i < end {
         if kind_at(&mut c, i) == 1 {
@@ -44395,6 +44585,11 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
         if written[j] != 0 {
             mode = 1;
         }
+    }
+    if (mode != 0) && (self_name.len() != 0) {
+        // Each call would write the one environment the calls still running are using.
+        diag_help(&mut c, view("pass what it writes as a parameter instead of capturing it: `fn walk(total: &mut u64, n: u64) -> u64`"));
+        fail_at(&mut c, start, view("a local function that calls itself cannot also write what it captured"));
     }
     // The names this closure writes are the body's to forget after a call: the call names the
     // closure, not what it captured, so the set is kept per body (docs/design/refinements.md).
@@ -44648,6 +44843,8 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
                     tnames: tn,
                     bindings: bn,
                     regions: param_regions,
+                    self_name: self_name.copy(),
+                    thin: 0,
                     written: written,
                     weak: weak,
                     unit: owner_unit,
@@ -45022,6 +45219,22 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
             own(&mut c, slot, ty);
             init_parameter(&mut c, slot, ty);
         }
+        self_name := c.closures[i].self_name.copy();
+        if self_name.len() != 0 {
+            // `walk(n - 1)` in walk's own body: the name is a shared reference to the closure being
+            // called - the hidden first argument, the address of the word that holds the object -
+            // typed as the erased closure, which a call goes through as through any `&Fn(..)`.
+            erased := intern_args(&mut c, 20, ret, 0, u64[], copy_numbers(&params));
+            mut env_region = u64[];
+            env_region.push(1);
+            selfty := intern_full(&mut c, 7, erased, 0, env_region);
+            envslot := c.locals[0].id;
+            get(&mut c, envslot, view("%rax"));
+            me := save(&mut c);
+            bind(&mut c, self_name, selfty, me, 0);
+            own(&mut c, me, selfty);
+            init_parameter(&mut c, me, selfty);
+        }
         if is(&mut c, view("{")) {
             end := block_end(&mut c, start);
             exchange(&mut c.scope_end, end);
@@ -45103,6 +45316,9 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
         on(&mut c, (c.next + 1) / 2 * 16);
         c.out.push(10);
         size_directive(&mut c, view(".closure"), view(symbol), view(symbol), 0);
+        if c.closures[i].thin != 0 {
+            emit_thin_entry(&mut c, view(symbol), weak);
+        }
         scope_end(&mut c);
         exchange(&mut c.closure_env, 0);
         exchange(&mut c.closure_spec, 0);
@@ -49424,7 +49640,7 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
         exchange(&mut c.lit_negative, 0);
         return val(slot, 0);
     }
-    if ((k == 124) || (k == 274)) && (c.raw == 0) {
+    if ((k == 124) || (k == 274) || fn_literal_at(&mut c, c.pos)) && (c.raw == 0) {
         return closure_literal(&mut c);
     }
     if k == 33 {
@@ -51391,7 +51607,7 @@ fn expr<a>(c: (&a mut C), min: u64) -> Val {
 }
 fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
     lstart := c.pos;
-    if (kind(&mut c) == 124) || (kind(&mut c) == 274) {
+    if closure_at(&mut c, c.pos) {
         if expected != NO_TYPE {
             none := u64[];
             closure_hint(&mut c, expected, &none);
@@ -52089,6 +52305,10 @@ fn tail_construct<a>(c: (&a mut C), p: u64) -> u64 {
     if is_at(&mut c, p, view("while")) || is_at(&mut c, p, view("for")) || is_at(&mut c, p, view("loop")) {
         return 5;
     }
+    // A local `fn name(..) { .. }`: an item that ends at its body's `}`, with no value.
+    if is_at(&mut c, p, view("fn")) && (kind_at(&mut c, p + 1) == 1) {
+        return 7;
+    }
     return 0;
 }
 // The last `}` of the construct `what` at `p` (an `if` with its `else` chain), or 0.
@@ -52257,7 +52477,7 @@ fn block_item<a>(c: (&a mut C), mode: u64, end: u64) -> unit {
     }
     what := tail_construct(&mut c, p);
     if what != 0 {
-        if (what == 5) || (what == 6) {
+        if (what == 5) || (what == 6) || (what == 7) {
             stmt(&mut c);
             return ();
         }
@@ -54859,6 +55079,70 @@ fn zero_record_binding<a>(c: (&a mut C), name: u8[], ty: u64, mutable: u64) -> u
 // One statement of a body, with the facts the typed-IR walker keeps: a statement that calls may write
 // through the names it mentions, so what they meant before it is forgotten after it
 // (docs/design/refinements.md, "Facts over the typed IR").
+// `fn name(params) -> R { body }` inside a body: the function literal `fn(params) -> R { body }`
+// bound to `name` - a closure like any other, so it may capture, with the same rules. Its body may
+// call it by name; nothing else could then fix its result type, so a recursive one writes it out.
+fn local_function<a>(c: (&a mut C)) -> unit {
+    at := c.pos;
+    name_at := at + 1;
+    name := tok_text(&mut c, name_at);
+    if kind_at(&mut c, at + 2) == 60 {
+        exchange(&mut c.pos, at + 2);
+        diag_help(&mut c, view("declare it at the top level, or give its parameters concrete types"));
+        fail(&mut c, view("a local function cannot have type or lifetime parameters"));
+    }
+    if kind_at(&mut c, at + 2) != 40 {
+        exchange(&mut c.pos, at + 2);
+        expect(&mut c, view("("));
+    }
+    close := matching_paren(&mut c, at + 2);
+    mut open = 0;
+    if close != 0 {
+        open = tail_open_brace(&mut c, close + 1);
+    }
+    if open == 0 {
+        exchange(&mut c.pos, at + 2);
+        fail(&mut c, view("a local function needs a parameter list and a block body"));
+    }
+    end := block_end(&mut c, open);
+    // A use of the name in the body - not a field, a path segment or a binding of that name.
+    mut recursive = false;
+    mut q = open + 1;
+    while q < end {
+        if (kind_at(&mut c, q) == 1) && same(view(tok_text(&mut c, q)), view(name)) {
+            pk := kind_at(&mut c, q - 1);
+            nk := kind_at(&mut c, q + 1);
+            if (pk != 46) && (pk != 260) && (nk != 58) && (nk != 260) && (nk != 261) {
+                recursive = true;
+            }
+        }
+        q += 1;
+    }
+    if recursive && !is_at(&mut c, close + 1, view("->")) {
+        mut help = copy_bytes(view("write its result type: `fn "));
+        push_bytes(&mut help, view(name));
+        push_bytes(&mut help, view("(..) -> T { .. }`"));
+        diag_help(&mut c, view(help));
+        mut said = copy_bytes(view("local function `"));
+        push_bytes(&mut said, view(name));
+        push_bytes(&mut said, view("` calls itself, so its result type must be written"));
+        fail_at(&mut c, name_at, view(said));
+    }
+    exchange(&mut c.hint_set, 0);
+    exchange(&mut c.lent_arg_at, 0);
+    exchange(&mut c.local_fn, name_at);
+    if recursive {
+        exchange(&mut c.local_self, name.copy());
+    }
+    v := closure_literal(&mut c);
+    // A local function that writes what it captured is `FnMut`, and calling one needs a mutable
+    // binding: its name is that binding.
+    mutable := u64((ty_mode(&mut c, v.ty) & CLOSURE_FNMUT) != 0);
+    vty := v.ty;
+    held := bind_value(&mut c, v, vty);
+    bind(&mut c, name, held.ty, held.t, mutable);
+    return ();
+}
 fn statement<a>(c: (&a mut C)) -> unit {
     lo := c.pos;
     statement_body(&mut c);
@@ -54968,6 +55252,10 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
     if c.tail_now != 0 {
         how := exchange(&mut c.tail_now, 0);
         tail_value(&mut c, how);
+        return ();
+    }
+    if is(&mut c, view("fn")) && (kind_at(&mut c, c.pos + 1) == 1) && (c.raw == 0) {
+        local_function(&mut c);
         return ();
     }
     if is(&mut c, view("static")) && (kind_at(&mut c, c.pos + 1) == 1) {
@@ -56233,6 +56521,18 @@ fn assignment_tail<a, b>(c: (&a mut C), l: u64, id: u64, ty: u64, target: u64, t
         mut expected = fieldty;
         if through == 0 {
             expected = local_ty(&mut c, l - 1);
+        }
+        // A binding that holds a closure as its own type (`mut h = |x: u64| x * 2;`) is that one
+        // closure: its calls go straight to its body. Another closure is another type, which an
+        // erased `Fn(..)` binding holds; without this the new value was stored and the old body
+        // still called.
+        if (ty_kind(&mut c, v.ty) == 20) && (ty_kind(&mut c, expected) == 20) && (ty_env(&mut c, expected) != 0)
+            && (ty_env(&mut c, v.ty) != ty_env(&mut c, expected)) {
+            mut help = copy_bytes(view("declare the binding with a closure type to hold either: `mut h: "));
+            push_bytes(&mut help, view(closure_type_spelling(&mut c, expected)));
+            push_bytes(&mut help, view(" = ..;`"));
+            diag_help(&mut c, view(help));
+            fail(&mut c, view("this binding holds one particular closure, and a different closure is a different type"));
         }
         require_type(&mut c, v.ty, expected);
     }
@@ -63437,6 +63737,8 @@ pub fn main() -> u64 {
         tail_mode: 0,
         arm_tail: 0,
         tail_now: 0,
+        local_fn: 0,
+        local_self: u8[],
         sink: 0,
         sink_hint: NO_TYPE,
         sink_hint_at: 0,

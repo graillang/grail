@@ -20572,5 +20572,105 @@
     "source": "struct Entity { id: u64, hp: u64 }\nfn hp(t: (&Entity)?) -> u64 {\n    if t == None { return 0; }\n    t.hp\n}\nfn pick(t: (&Entity)?) -> u64 {\n    if t != None { t.id } else { 99 }\n}\nfn main() {\n    e := Entity { id: 7, hp: 3 };\n    println(\"{} {} {} {}\", hp(Some(&e)), hp(None), pick(Some(&e)), pick(None));\n}\n",
     "stdout": "3 0 7 99\n",
     "note": "A narrowing `if` that ends a body returns from its arms like any final `if`, and a guard's narrowed name can be the body's tail."
+  },
+  {
+    "name": "fn-literal-argument-binding-return",
+    "source": "fn apply(f: Fn(u64) -> u64, x: u64) -> u64 {\n    f(x)\n}\nfn adder(n: u64) -> Fn(u64) -> u64 {\n    fn(x: u64) -> u64 { x + n }\n}\nfn main() {\n    println(apply(fn(a: u64) -> u64 { a * 2 }, 21));\n    double := fn(a: u64) -> u64 { a * 2 };\n    println(double(4));\n    add3 := adder(3);\n    println(add3(4));\n    println(adder(10)(5));\n    say := fn() { println(\"hi\"); };\n    say();\n    blockish := fn(x: u64) -> u64 {\n        y := x * 2;\n        y + 1\n    };\n    println(blockish(3));\n}\n",
+    "stdout": "42\n8\n7\n15\nhi\n7\n",
+    "note": "`fn(params) -> R { body }` is a closure literal: an argument, a binding, a returned value (here the tail of `adder`), with the body's tail as its result."
+  },
+  {
+    "name": "local-fn-captures",
+    "source": "fn main() {\n    offset := 10;\n    fn shift(x: u64) -> u64 {\n        x + offset\n    }\n    println(shift(5));\n    println(shift(6));\n    words := u8[1, 2, 3];\n    fn size() -> u64 {\n        words.len()\n    }\n    println(size());\n    fn outer(n: u64) -> u64 {\n        fn inner(m: u64) -> u64 {\n            m + 1\n        }\n        inner(n) * 2\n    }\n    println(outer(4));\n}\n",
+    "stdout": "15\n16\n3\n10\n",
+    "note": "`fn name(..) { .. }` inside a body binds `name` to the function literal: it captures as a closure does (a number copied, owned text moved in), and local functions nest."
+  },
+  {
+    "name": "local-fn-moves-capture-rejected",
+    "source": "fn main() {\n    words := u8[1, 2, 3];\n    fn size() -> u64 {\n        words.len()\n    }\n    println(size());\n    println(words.len());\n}\n",
+    "reject": true,
+    "diagnostic": "use of moved",
+    "note": "A local function moves an owned capture in, exactly as a closure does."
+  },
+  {
+    "name": "local-fn-recursive",
+    "source": "fn make(k: u64) -> Fn(u64) -> u64 {\n    fn tri(n: u64) -> u64 {\n        if n == 0 { 0 } else { n * k + tri(n - 1) }\n    }\n    tri\n}\nfn main() {\n    fn fact(n: u64) -> u64 {\n        if n == 0 { 1 } else { n * fact(n - 1) }\n    }\n    println(fact(10));\n    base := 100;\n    fn fib(n: u64) -> u64 {\n        if n < 2 {\n            return n + base;\n        }\n        fib(n - 1) + fib(n - 2) - base\n    }\n    println(fib(10));\n    println(make(2)(4));\n}\n",
+    "stdout": "3628800\n155\n20\n",
+    "note": "A local function may call itself by name, capturing or not, also after it was returned as a closure."
+  },
+  {
+    "name": "local-fn-recursive-untyped-rejected",
+    "source": "fn main() {\n    fn fact(n: u64) {\n        if n == 0 { 1 } else { n * fact(n - 1) }\n    }\n    println(fact(3));\n}\n",
+    "reject": true,
+    "diagnostic": "local function `fact` calls itself, so its result type must be written",
+    "note": "Nothing but the stated type could fix the result of a recursive local function; the help line shows where it goes."
+  },
+  {
+    "name": "local-fn-recursive-fnmut-rejected",
+    "source": "fn main() {\n    mut total = 0;\n    t := &mut total;\n    fn sum(n: u64) -> u64 {\n        *t += n;\n        if n == 0 { 0 } else { sum(n - 1) }\n    }\n    println(sum(3));\n}\n",
+    "reject": true,
+    "diagnostic": "a local function that calls itself cannot also write what it captured",
+    "note": "Each recursive call would write the environment the outer calls are still using."
+  },
+  {
+    "name": "local-fn-generic-rejected",
+    "source": "fn main() {\n    fn id<T>(x: T) -> T { x }\n}\n",
+    "reject": true,
+    "diagnostic": "a local function cannot have type or lifetime parameters"
+  },
+  {
+    "name": "fn-literal-bar-equivalence",
+    "source": "fn apply<F: Fn(u64) -> u64>(f: F, x: u64) -> u64 {\n    f(x)\n}\nfn erased(f: Fn(u64) -> u64, x: u64) -> u64 {\n    f(x)\n}\nfn main() {\n    k := 5;\n    println(apply(|x| x + k, 1));\n    println(apply(fn(x) { x + k }, 1));\n    println(erased(|x| x * k, 2));\n    println(erased(fn(x) { x * k }, 2));\n    println((|x| x + 1)(41));\n    println((fn(x) { x + 1 })(41));\n    n: u32 = 20;\n    println((fn(x) { x + 1 })(n));\n    f: Fn(u64, u64) -> u64 = fn(a, b) { a * b };\n    g: Fn(u64, u64) -> u64 = |a, b| a * b;\n    println(f(6, 7) == g(6, 7));\n    mut h: Fn(u64) -> u64 = |x: u64| x * 2;\n    println(h(5));\n    h = fn(x: u64) -> u64 { x * 3 };\n    println(h(5));\n}\n",
+    "stdout": "6\n6\n10\n10\n42\n42\n21\ntrue\n10\n15\n",
+    "note": "`|params| body` abbreviates `fn(params) { body }`: both infer parameter types from the expected type or an immediate call, and have the same type."
+  },
+  {
+    "name": "fn-literal-untyped-unfixed-rejected",
+    "source": "fn main() {\n    f := fn(x) { x + 1 };\n    println(f(3));\n}\n",
+    "reject": true,
+    "diagnostic": "needs a type here (nothing fixes it): write fn(x: T)"
+  },
+  {
+    "name": "fn-literal-needs-block-rejected",
+    "source": "fn main() {\n    f := fn(x: u64) -> u64 x + 1;\n}\n",
+    "reject": true,
+    "diagnostic": "a function literal's body is a block"
+  },
+  {
+    "name": "closure-converts-to-fn-pointer",
+    "source": "struct Op { run: fn(u64) -> u64 }\nfn twice(f: fn(u64) -> u64, x: u64) -> u64 {\n    f(f(x))\n}\nfn pick(up: bool) -> fn(u64) -> u64 {\n    if up { fn(x) { x + 1 } } else { |x| x - 1 }\n}\nfn main() {\n    println(twice(|x: u64| x + 1, 5));\n    println(twice(fn(x) { x * 3 }, 2));\n    p: fn(u64) -> u64 = fn(x) { x + 100 };\n    println(p(1));\n    q := p;\n    println(q(2));\n    ops := Op[Op { run: fn(x) { x + 1 } }, Op { run: |x| x * 2 }];\n    for o in &ops {\n        println((o.run)(10));\n    }\n    fn fib(n: u64) -> u64 {\n        if n < 2 { n } else { fib(n - 1) + fib(n - 2) }\n    }\n    println(twice(fib, 5));\n    println(fib(20));\n    println(pick(true)(5));\n    println(pick(false)(5));\n}\n",
+    "stdout": "7\n18\n101\n102\n11\n20\n5\n6765\n6\n4\n",
+    "note": "A closure or function literal that captures nothing converts to a function pointer `fn(..)`: an argument, a binding, a field, a result; a local function stays usable after it converts, and may still call itself."
+  },
+  {
+    "name": "capturing-closure-to-fn-pointer-rejected",
+    "source": "fn twice(f: fn(u64) -> u64, x: u64) -> u64 {\n    f(f(x))\n}\nfn main() {\n    k := 3;\n    m := 4;\n    println(twice(|x: u64| x + k + m, 1));\n}\n",
+    "reject": true,
+    "diagnostic": "this closure captures `k`, `m`, so it is not a function pointer `fn(..)`",
+    "note": "The refusal names the captures; its help line suggests `Fn(u64) -> u64` as the parameter type."
+  },
+  {
+    "name": "capturing-closure-to-fn-pointer-help",
+    "source": "fn twice(f: fn(u64) -> u64, x: u64) -> u64 {\n    f(f(x))\n}\nfn main() {\n    k := 3;\n    println(twice(fn(x) { x + k }, 1));\n}\n",
+    "reject": true,
+    "diagnostic": "take `Fn(u64) -> u64` instead, which accepts closures and named functions"
+  },
+  {
+    "name": "erased-closure-to-fn-pointer-rejected",
+    "source": "fn twice(f: fn(u64) -> u64, x: u64) -> u64 {\n    f(f(x))\n}\nfn pass(g: Fn(u64) -> u64) -> u64 {\n    twice(g, 1)\n}\nfn main() {\n    println(pass(|x| x));\n}\n",
+    "reject": true,
+    "diagnostic": "a closure value of type `Fn(..)` may hold captures, so it is not a function pointer `fn(..)`"
+  },
+  {
+    "name": "fn-literal-stdlib-callbacks",
+    "source": "use vecs;\nfn main() {\n    mut v = u64[3, 1, 2];\n    v.sort_by(fn(a: &u64, b: &u64) -> bool { *a < *b });\n    println(v.copy().fold(0, fn(acc, x) { acc + x }));\n    w := v.map(fn(x) { x * 10 });\n    println(\"{} {} {}\", w[0], w[1], w[2]);\n}\n",
+    "stdout": "6\n10 20 30\n"
+  },
+  {
+    "name": "closure-binding-reassigned-other-closure-rejected",
+    "source": "fn main() {\n    mut h = |x: u64| x * 2;\n    println(h(5));\n    h = |x: u64| x * 3;\n    println(h(5));\n}\n",
+    "reject": true,
+    "diagnostic": "this binding holds one particular closure, and a different closure is a different type",
+    "note": "The binding's calls go straight to its closure's body; assigning another closure used to store it and still call the old body. `mut h: Fn(u64) -> u64 = ..` holds either."
   }
 ]

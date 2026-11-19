@@ -7,9 +7,28 @@ each value before evaluating the next argument. Recursion uses ordinary native c
 
 This is a deliberately small recursive Fibonacci example, not an efficient implementation.
 It passes a capture-free function value to `apply` and returns the tenth Fibonacci number.
-`fn(u64)->u64` describes the callback contract; named function values can be copied, passed and
+`fn(u64) -> u64` describes the callback contract; named function values can be copied, passed and
 returned. Generic function items need explicit arguments when used as values (`identity<u64>`).
-Closures can copy or move values into themselves and read those captures in their bodies; a closure that writes a capture is `FnMut` and is called exclusively (see [Closures](closures.html)). The Rust example uses a plain function pointer. A function may return an owned buffer or record as well
+`fn(u64) -> u64` is a raw function pointer: a parameter that only calls what it is given usually
+takes `Fn(u64) -> u64` instead, which accepts closures as well as named functions (see
+[Closures](closures.html)). The Rust example uses a plain function pointer.
+
+## One form for named and anonymous functions
+
+A function without its name is a function literal, a value like any other:
+
+```grl
+double := fn(a: u64) -> u64 { a * 2 };
+println(apply(fn(a: u64) -> u64 { a + 1 }, 41));
+```
+
+It is a closure: it copies or moves the values it uses into itself and reads them in its body, and
+one that writes what it captured is `FnMut` and is called exclusively. `|a: u64| a * 2` is its
+abbreviation. Written inside a body with its name, `fn name(..) { .. }` declares a local function,
+which is that literal bound to `name`; it may capture, and it may call itself when its result type
+is written. Going from a literal to a local function to a top-level one adds a name and moves the
+text - [Closures](closures.html) shows the steps. Top-level signatures are always written out: they
+are the module's interface. A function may return an owned buffer or record as well
 as a scalar; moving that result transfers responsibility for cleanup to its caller.
 
 Grail functions have fixed arity and any number of parameters; `extern "C"` declarations are
