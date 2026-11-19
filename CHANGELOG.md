@@ -1,5 +1,13 @@
 ## Unreleased
 
+- **The server-side yield maps and the watershed query are ported, bit for bit.**
+  `abundance/src/worldgen_yields.grl` carries `generate_server_yields` (the secret fingerprint and
+  the four grade/inventory rasters), `sample_yield` (a cell's secret grade times the subsurface
+  probe's indicators) and `simulate_water_diversion` (captured discharge and power, then the walk
+  down the D8 receiver with the pm exp distance decay). `yields_test.grl` matches
+  `parity/yields.txt`: 585 values over three worlds, three secrets, three depths and three
+  diversion fractions. The ABFE fixture moves to version 3, carrying the D8 receiver the walk reads.
+
 - **The book's sidebar drops its "Find a topic" subtitle;** the search box (labelled for screen readers) sits under the title.
 - **The languages overview chart reads plainly.** Its bars start at 1× (the fastest language's time)
   on one logarithmic scale shared by the release and development groups, each group lists the
