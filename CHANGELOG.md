@@ -59,7 +59,7 @@
   `parity/kitacc.txt`: 166 values, the reference driving the header directly.
 - Abundance port: `abundance/src/tx_schema.grl` is one schema-driven codec for the 'ABTW' table
   payloads whose wire layout follows from their C++ type alone - 47 of the 51 tables the
-  hand-written codecs do not cover, so with `tx_tables.grl` 61 of the 65 registered tables now
+  hand-written codecs do not cover, so with `tx_tables.grl` 62 of the 65 registered tables now
   decode and re-encode exactly. Each table carries its grammar (bool, sized integers, f32/f64 bits,
   string, byte vector, vector, array, optional, pair, struct) as data; decoding applies the field
   codec's rules exactly (strings at most 65536 and the remaining bytes, byte vectors bounded only by
@@ -71,10 +71,14 @@
   the registry, fills a non-empty value of each type through its own fields, encodes it with the
   engine's Writer, checks it back with the engine's Reader, prints a leaf trace walked from the value
   itself, and refuses 121 truncated, trailing and over-count payloads; `tx_schema_test.grl` matches
-  all 272 lines - the schema registry against the types, every blob byte for byte and every value
-  leaf by leaf. Four tables are a named boundary: `construction.facility_site`, `drones.fleet`, the
-  trade `CrossWorldTable` and one field of `power.power_dispatch` are reflected only out of line (a
-  `Reflect<T>` in a .cpp), so their grammar is not visible from the headers and `verdict` says so.
+  all 276 lines - the schema registry against the types, every blob byte for byte and every value
+  leaf by leaf. The trade `CrossWorldTable` is ported too: its codec lives in a .cpp over a struct
+  the headers do not show, so the reference mirrors that struct, encodes the mirror with the engine's
+  Writer and requires the engine's own save to produce the same bytes, which pins the grammar
+  `{b,s,{f64,f64,f64},f64,[u32],[(u64,u64)],B}`; the engine's 125-byte filled table (ledger bound to
+  its world) decodes, traces and re-encodes byte for byte, with truncated and trailing refusals.
+  Three tables remain a named boundary: `construction.facility_site`, `drones.fleet` and one field of
+  `power.power_dispatch`, whose grammars are only visible in .cpp files.
 
 - **The player field map's model is ported.** `abundance/src/field_map_presentation.grl` carries
   `ab::FieldMapPresentationModel` (Private/field_map_presentation.cpp), the root of the world map
