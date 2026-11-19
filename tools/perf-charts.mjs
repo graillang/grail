@@ -249,46 +249,49 @@ export function overviewRows(files) {
 
 export function overview(files) {
   const panels = overviewRows(files).filter(p => p.programs.length);
-  const left = 110, width = 420, bar = 15, gap = 5, panelGap = 30, top = 58;
-  // Each bar's note on the right, and room for the longest of them (about 5.2 units a character at
-  // the note's size); the chart is at least wide enough for the two heading lines above it.
+  // Both panels share one logarithmic scale that starts at 1x, the fastest language's time: a bar's
+  // length is how much longer than the fastest a language takes, 2x is the same distance from 1x in
+  // either panel, and nothing is drawn below 1x, where no language can be.
+  const means = panels.flatMap(p => p.languages.map(l => l.mean)).filter(Number.isFinite);
+  const steps = [1, 1.25, 1.5, 2, 3, 4, 6, 8, 12, 16, 24, 32];
+  const end = steps.find(t => t >= Math.max(2, ...means)) ?? Math.max(2, ...means);
+  const ticks = steps.filter(t => t <= end);
+  const left = 120, width = 460, bar = 16, gap = 6, panelGap = 22, value = 46;
+  const x = r => (Math.log(Math.max(1, r)) / Math.log(end)) * width;
+  // Each bar is followed by its value and then how often the language was the fastest.
   const noteOf = (lang, panel) => `fastest on ${lang.fastest} of ${lang.count}${lang.count < panel.programs.length ? `; no twin of ${lang.missing.join(', ')}` : ''}`.slice(0, 70);
-  const longest = Math.max(0, ...panels.flatMap(p => p.languages.filter(l => Number.isFinite(l.mean)).map(l => noteOf(l, p).length)));
-  const total = Math.max(left + width + Math.max(110, 16 + Math.ceil(longest * 5.2)), 650);
-  // Each panel has its own linear scale, from 0 to its slowest language's mean.
-  let spread = 1.5;
-  const x = r => (r / spread) * (width - 50); // the bar's value label goes after it
+  const reach = Math.max(0, ...panels.flatMap(p => p.languages.filter(l => Number.isFinite(l.mean)).map(l => x(l.mean) + value + noteOf(l, p).length * 5.2)));
+  const total = Math.max(left + Math.max(width, reach) + 12, 700);
   const parts = [];
-  parts.push(`<text x="0" y="13" class="perf-axis perf-direction">Lower is better: each language's time as a multiple of the fastest language's, geometric mean over the programs.</text>`);
-  parts.push(`<text x="0" y="27" class="perf-axis">1x would be the fastest on every program. A language without a twin of some program is averaged over the programs it has.</text>`);
-  let y = top;
+  parts.push(`<text x="0" y="14" class="perf-axis perf-direction">How long each language takes, compared with the fastest language on each program. Shorter is better.</text>`);
+  parts.push(`<text x="0" y="30" class="perf-axis">1× is as fast as the fastest; 2× takes twice as long. Each bar is the geometric mean over the programs; both groups share one scale.</text>`);
+  let y = 56;
   for (const panel of panels) {
-    spread = Math.max(1.5, ...panel.languages.map(l => l.mean).filter(Number.isFinite));
-    const ticks = [1, 1.5, 2, 3, 4, 6, 8, 12, 16].filter(t => t <= spread);
-    // The panel's heading, its axis labels under it, then its bars with the grid behind them.
-    parts.push(`<text x="0" y="${y}" class="perf-label">${escape(`${panel.label} (${panel.programs.length} programs)`)}</text>`);
-    const gridTop = y + 16, bars = panel.languages.length;
+    const languages = [...panel.languages].sort((a, b) => (Number.isFinite(a.mean) ? a.mean : Infinity) - (Number.isFinite(b.mean) ? b.mean : Infinity));
+    parts.push(`<text x="0" y="${y}" class="perf-label">${escape(`${panel.label} - ${panel.programs.length} programs`)}</text>`);
+    const gridTop = y + 24, rows = languages.length;
     for (const t of ticks) {
       const px = left + x(t);
-      parts.push(`<line x1="${px.toFixed(1)}" x2="${px.toFixed(1)}" y1="${gridTop - 3}" y2="${gridTop + 4 + bars * (bar + gap)}" class="perf-grid"${t === 1 ? ' stroke-width="2"' : ''}/><text x="${px.toFixed(1)}" y="${gridTop - 5}" class="perf-tick" text-anchor="middle">${t}x</text>`);
+      parts.push(`<line x1="${px.toFixed(1)}" x2="${px.toFixed(1)}" y1="${gridTop - 3}" y2="${gridTop + 4 + rows * (bar + gap)}" class="perf-grid"${t === 1 ? ' stroke-width="2"' : ''}/><text x="${px.toFixed(1)}" y="${gridTop - 5}" class="perf-tick" text-anchor="middle">${t}×</text>`);
     }
     y = gridTop + 2;
-    for (const lang of panel.languages) {
+    for (const lang of languages) {
       if (!Number.isFinite(lang.mean)) { parts.push(`<text x="${left - 8}" y="${y + bar - 3}" class="perf-label" text-anchor="end">${escape(lang.label)}</text><text x="${left + 3}" y="${y + bar - 3}" class="perf-missing">not measured</text>`); y += bar + gap; continue; }
       const colour = colourOf({ key: lang.key, grail: lang.grail }, 0);
       const of = lang.count < panel.programs.length ? `over ${lang.count} of ${panel.programs.length} programs` : `over all ${lang.count}`;
+      const w = Math.max(2, x(lang.mean));
       parts.push(`<text x="${left - 8}" y="${y + bar - 3}" class="perf-label${lang.grail ? ' perf-grail-text' : ''}" text-anchor="end">${escape(lang.label)}</text>`);
-      parts.push(`<rect x="${left}" y="${y}" width="${Math.max(2, x(lang.mean)).toFixed(1)}" height="${bar}" fill="${colour}"${lang.grail ? ' class="perf-grail"' : ''}><title>${escape(`${lang.label}: ${lang.mean.toFixed(2)}x the fastest, ${of}; the fastest on ${lang.fastest}`)}</title></rect>`);
-      parts.push(`<text x="${(left + x(lang.mean) + 5).toFixed(1)}" y="${y + bar - 3}" class="perf-value${lang.grail ? ' perf-grail-text' : ''}">${lang.mean.toFixed(2)}x</text>`);
-      parts.push(`<text x="${left + width + 8}" y="${y + bar - 3}" class="perf-unit">${escape(noteOf(lang, panel))}</text>`);
+      parts.push(`<rect x="${left}" y="${y}" width="${w.toFixed(1)}" height="${bar}" fill="${colour}"${lang.grail ? ' class="perf-grail"' : ''}><title>${escape(`${lang.label}: ${lang.mean.toFixed(2)}× the fastest language's time, ${of}; the fastest on ${lang.fastest}`)}</title></rect>`);
+      parts.push(`<text x="${(left + w + 5).toFixed(1)}" y="${y + bar - 3}" class="perf-value${lang.grail ? ' perf-grail-text' : ''}">${lang.mean.toFixed(2)}×</text>`);
+      parts.push(`<text x="${(left + w + value).toFixed(1)}" y="${y + bar - 3}" class="perf-unit">${escape(noteOf(lang, panel))}</text>`);
       y += bar + gap;
     }
     y += panelGap;
   }
   const sources = overviewFiles.filter(f => files[f]).map(f => `${f} ${String(files[f].commit).slice(0, 8)} ${String(files[f].date ?? '').slice(0, 10)}`).join('; ');
-  parts.push(`<text x="0" y="${y - 8}" class="perf-axis perf-source">${escape(`From bench/results: ${sources}.`)}</text>`);
-  const height = y;
-  const svg = `<figure class="perf-chart" id="chart-overview"><svg viewBox="0 0 ${total} ${height}" width="100%" role="img" aria-label="The languages at a glance: each one's time as a multiple of the fastest, geometric mean over the programs" xmlns="http://www.w3.org/2000/svg">${parts.join('')}</svg><figcaption>The languages at a glance: per language, the geometric mean over the run-time, engine and parallel programs (the parallel one at its most workers) of its time as a multiple of the fastest language's on that program. Lower is better; 1x is the fastest everywhere.</figcaption></figure>`;
+  parts.push(`<text x="0" y="${y - 4}" class="perf-axis perf-source">${escape(`From bench/results: ${sources}.`)}</text>`);
+  const height = y + 4;
+  const svg = `<figure class="perf-chart" id="chart-overview"><svg viewBox="0 0 ${total.toFixed(0)} ${height}" width="100%" role="img" aria-label="The languages at a glance: how long each language takes compared with the fastest on each program, geometric mean over the programs" xmlns="http://www.w3.org/2000/svg">${parts.join('')}</svg><figcaption>The languages at a glance: for each program of the run-time, engine and parallel charts (the parallel one at its most workers), each language's time divided by the fastest language's time on that program, then the geometric mean over the programs. 1× would be the fastest on every program.</figcaption></figure>`;
   const body = panels.map(panel => panel.languages.filter(l => Number.isFinite(l.mean)).map(l => `<tr><td>${escape(panel.label)}</td><td${l.grail ? ' class="perf-grail-col"' : ''}>${escape(l.label)}</td><td>${l.mean.toFixed(2)}x</td><td>${l.count} of ${panel.programs.length}${l.missing.length ? ` (no twin of ${escape(l.missing.join(', '))})` : ''}</td><td>${l.fastest}</td></tr>`).join('')).join('');
   const table = `<div class="perf-table"><table><caption>Each language's time as a multiple of the fastest on each program, geometric mean; the programs it was measured on and how many it was the fastest on</caption><thead><tr><th>builds</th><th>language</th><th>geometric mean vs the fastest</th><th>programs</th><th>fastest on</th></tr></thead><tbody>${body}</tbody></table></div>`;
   return `<section class="perf-results perf-overview">${svg}${table}</section>`.replace(/\n/g, ' ');

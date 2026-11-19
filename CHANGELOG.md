@@ -1,5 +1,10 @@
 ## Unreleased
 
+- **The languages overview chart reads plainly.** Its bars start at 1× (the fastest language's time)
+  on one logarithmic scale shared by the release and development groups, each group lists the
+  fastest first, the values are written as multiples (1.17×) with how often the language was the
+  fastest beside them, and the heading says what is measured: how long each language takes against
+  the fastest on each program, shorter being better.
 - **The book's charts have a full-screen button.** Every chart in the Performance chapter has a
   button in its corner that shows that chart alone, scaled to the screen; the button or Esc leaves.
   Browsers without element full screen (an iPhone) get no button. The languages overview no longer

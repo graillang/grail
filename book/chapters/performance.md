@@ -32,8 +32,9 @@ that program, so the fastest scores 1x there. A language's bar is the geometric 
 multiples over the programs: 1x would mean it was the fastest on every one, and 1.5x that it
 typically takes half as long again as the fastest. The release panel sets C, C++, Rust, Go, Zig and
 Grail's LLVM build side by side. The development panel sets Grail's native backend against the
-rivals' debug builds (Go has one build, so it appears in both panels). Each panel has its own
-linear scale. A language that has no twin of some program is averaged over the programs it has, and
+rivals' debug builds (Go has one build, so it appears in both panels). Both panels share one
+logarithmic scale that starts at 1x, so a bar's length is how much longer than the fastest a language
+takes, and each panel lists the fastest first. A language that has no twin of some program is averaged over the programs it has, and
 the table says which ones it lacks. Read a bar with its programs in mind: C's, C++'s and Zig's `chan`
 twins are mutex-and-condition rings that take about fifteen times as long as Grail's and Go's
 channels, and Grail's `ffi_call` is the fastest by more than half, so those two rows weigh on the
