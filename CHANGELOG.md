@@ -1,5 +1,19 @@
 ## Unreleased
 
+- **The derelict monument layouts are complete: the library, arms depot, factory, orchard and dam
+  templates join the farm, and pieces resolve through the construction catalogue.**
+  `abundance/src/monument_layout.grl` now carries the rest of `monument_layout.cpp` (`panels` and the
+  five templates: the panelled library with its timber upper floor, stairwell and archive; the wired
+  arms depot with its concrete bunker, garage gate and guard tower; the steel factory hall with its
+  machine line, office and broken chimney; the orchard's tree rows and packing shed; the dam's breached
+  wall, crest walkway and control house). Module boxes now come from
+  `abundance/src/construction_catalog.grl`, with the committed ABMN table covering only the fence,
+  wire and farm pieces that catalogue does not carry yet, and `catalog_crosscheck` (asserted by the
+  test) proving the table, the module/material rules and the construction catalogue agree. The parity
+  fixture grows from eight Farm sites to eighteen (two of each other kind): 15 587 lines match. One
+  more draw-order rule found on the way: a draw in a `for` condition is redrawn on every test (the
+  library's garden wall), so the port redraws it there too.
+
 - **The landform composition plan is ported bit for bit.** `abundance/src/worldgen_landform.grl`
   carries `landform_plan.cpp`: the family/preset tables, warped-ellipse regions, the ranges' real
   footprint with its chamfer distance, the priority placer (candidate sites, fit tests, province
