@@ -38,6 +38,11 @@
   `executor_submit` take `Fn<Share, Owned>((&JobScheduler), u64, u64) -> u64`, so a body asks
   `job_cancelled`, `job_preempt_requested` and `job_yield` through the scheduler it is lent. The
   `rc::Arc` handle the bodies took while a struct field's reference parameter was refused is gone.
+- **The player character's decision rules are ported (first group).** `abundance/src/character_rules.grl`
+  carries cmake/tx/character's header-only rules: interaction targeting, hit zones for bone names and
+  capsules, the dig hold's refusal/end/still facts and swing schedule, the hotbar selection intent with
+  the deferred primary press, and the tool-cache offer handshake. 140 values match a reference
+  compiling the five headers at the pin.
 - **The book's sidebar drops its "Find a topic" subtitle;** the search box (labelled for screen readers) sits under the title.
 - **The languages overview chart reads plainly.** Its bars start at 1× (the fastest language's time)
   on one logarithmic scale shared by the release and development groups, each group lists the
