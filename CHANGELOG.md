@@ -1,5 +1,21 @@
 ## Unreleased
 
+- **The soundscape bed and the ambient-emitter synth run through the audio shim.** `platform_audio.grl`
+  gains `bed_attach`/`ambience` (audio.cpp's 15-slot input packing) and `emitter_start`/`emitter_set`/
+  `emitter_render`; the shim hosts audio.cpp's `SoundscapeNode` (a continuous node on the hearing
+  path, atomics to the callback) and pulls `ab::audio::emitters::Synth` directly. The DSP is the
+  engine's own code, compiled into the shim from the reference checkout by `build-audio.mjs` until the
+  stage-6 port restages it - the design note's named bridge. The parity grows to 85/85 lines: the bed's
+  six 1024-frame mixes (inputs set, then changed mid-run) and the emitter's two parameter sets, all
+  matching the reference's own node and pull.
+
+- **A Grail `&[u8]` argument crosses as the view's byte length, and the audio shim now honours that.**
+  `gr_audio_voice_start` read its length as a float count, so a 2 048-sample block claimed 8 192
+  samples (the stop time masked it in the mix, so the parity still matched); `gr_audio_bed_inputs`
+  and the emitter's loop PCM had the same reading. All three divide by the sample size now, and the
+  redundant Grail-side count arguments are gone.
+
+
 - **A loot site's life is ported.** `abundance/src/site_life.grl` carries `loot_sites/site_life.hpp`
   and `.cpp` from `cmake/tx/loot_sites.cmake`: the tuning with its per-field ranges and the
   cross-field consistency rules, the file's own draw (`mix`, the seeded `unit`, `exponential` and
