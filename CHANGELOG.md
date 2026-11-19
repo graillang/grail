@@ -1,5 +1,14 @@
 ## Unreleased
 
+- **The platform window parity covers the gamepad's hotplug edges.** Two cases join
+  `tests/parity/platform_window.cpp` and `tests/platform_window_test.grl`: a `GAMEPAD_REMOVED` for an
+  instance the window does not hold (window.cpp's handler compares the event's id with the pad it
+  has, so the open pad and its held button must survive), and a second virtual pad arriving after the
+  first is detached (the `GAMEPAD_ADDED` reopens it, and the sampling reads the new pad's axis -
+  then it is gone again and the axis reads zero). 100/100 lines match, up from 96. The shim gains
+  `gr_sdl_push_gamepad_removed`, which names the instance a removal event is about.
+
+
 - **The book's sidebar drops its "Find a topic" subtitle;** the search box (labelled for screen readers) sits under the title.
 - **The languages overview chart reads plainly.** Its bars start at 1× (the fastest language's time)
   on one logarithmic scale shared by the release and development groups, each group lists the
