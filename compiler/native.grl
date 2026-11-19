@@ -12520,9 +12520,9 @@ fn file_path<a>(c: (&a mut C), index: u64) -> u8[] {
     return out;
 }
 // A literal the lexer could not finish arrives as a token (kind 998 a character literal, 996 an
-// unclosed string, 995 a string holding a raw control byte) because the lexer has no diagnostic
-// channel; this is where those tokens become errors. Before this, the lexer aborted on them and the
-// reader saw "assertion failed" and a compiler source line.
+// unclosed string, 995 a string holding a raw control byte, 994 an unclosed block comment) because
+// the lexer has no diagnostic channel; this is where those tokens become errors. Before this, the
+// lexer aborted on them and the reader saw "assertion failed" and a compiler source line.
 fn fail_literal<a>(c: (&a mut C), at: u64, kind: u64) -> unit {
     exchange(&mut c.pos, at);
     text := tok_text(&mut c, at);
@@ -12548,6 +12548,10 @@ fn fail_literal<a>(c: (&a mut C), at: u64, kind: u64) -> unit {
     }
     if kind == 996 {
         fail(&mut c, view("unclosed string literal: add the closing `\"`"));
+    }
+    if kind == 994 {
+        diag_help(&mut c, view("block comments nest: every `/*` inside one needs its own `*/`"));
+        fail(&mut c, view("unclosed block comment: add the closing `*/`"));
     }
     // 995: a raw control byte inside a string literal.
     mut seen = 0;
@@ -12660,7 +12664,7 @@ fn load_file<a>(c: (&a mut C), index: u64) -> unit {
     exchange(&mut c.pos, 0);
     for i in c.toks.len() {
         k := c.toks[i].kind;
-        if (k == 999) || (k == 995) || (k == 996) || (k == 997) || (k == 998) {
+        if (k == 999) || (k == 994) || (k == 995) || (k == 996) || (k == 997) || (k == 998) {
             exchange(&mut c.pos, i);
             exchange(&mut c.file, index);
             if k != 999 {

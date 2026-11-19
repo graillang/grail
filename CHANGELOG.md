@@ -1,5 +1,10 @@
 ## Unreleased
 
+- **Block comments, and they nest.** `/* ... */` may span lines or sit inside one, and each `/*`
+  inside a block comment needs its own `*/`, so code that already holds a comment can be commented
+  out whole. An unclosed one is reported at its opening `/*`. `grail fmt` keeps block comments where
+  they were written (inline or on their own lines); `grail doc`, the book's highlighter and the VS
+  Code grammar know them too.
 - **A loot site's life is ported.** `abundance/src/site_life.grl` carries `loot_sites/site_life.hpp`
   and `.cpp` from `cmake/tx/loot_sites.cmake`: the tuning with its per-field ranges and the
   cross-field consistency rules, the file's own draw (`mix`, the seeded `unit`, `exponential` and

@@ -120,7 +120,8 @@ fn pair_kind(c: u64, d: u64) -> u64 {
 // Escape validity and decoded UTF-8 validity belong to the literal parser.
 // Non-ASCII bytes are accepted inside strings/comments, not identifiers.
 // A literal the scanner cannot finish is a token the compiler reports: 998 an ill-formed character
-// literal, 996 an unclosed string, 995 a string holding a raw control byte. Nothing in here aborts
+// literal, 996 an unclosed string, 995 a string holding a raw control byte, 994 a block comment
+// (`/* ... */`, which nests) that is not closed before the end of the file. Nothing in here aborts
 // on user input - an assert on source text is a compiler bug, not a refusal (docs/diagnostics.md).
 pub fn tokenize<a>(source: &a [u8]) -> Token[] {
     mut tokens = Token[];
@@ -152,6 +153,41 @@ pub fn tokenize<a>(source: &a [u8]) -> Token[] {
                         break;
                     }
                     i = i + 1;
+                }
+                continue;
+            }
+            // `/* ... */` nests: each `/*` inside needs its own `*/`, so a block that already
+            // holds a comment can be commented out whole.
+            if (i + 1 < size) && (source[i + 1] == 42) {
+                open := i;
+                mut depth = 0;
+                while i < size {
+                    if (source[i] == 47) && (i + 1 < size) && (source[i + 1] == 42) {
+                        depth = depth + 1;
+                        i = i + 2;
+                    } else if (source[i] == 42) && (i + 1 < size) && (source[i + 1] == 47) {
+                        depth = depth - 1;
+                        i = i + 2;
+                        if depth == 0 {
+                            break;
+                        }
+                    } else {
+                        i = i + 1;
+                    }
+                }
+                if depth != 0 {
+                    // Unclosed: one error token at the opening `/*`, reported by the compiler.
+                    while at < open {
+                        if source[at] == 10 {
+                            line = line + 1;
+                            col = 1;
+                        } else {
+                            col = col + 1;
+                        }
+                        at = at + 1;
+                    }
+                    tokens.push(Token { kind: 994, start: open, end: open + 2, line: line, col: col });
+                    i = size;
                 }
                 continue;
             }

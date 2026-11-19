@@ -22,12 +22,12 @@
     const raw = code.textContent;
     const clipboardText = code.classList.contains('language-sh') ? raw.replace(/^\$ /gm, '') : raw;
     if (code.classList.contains('language-grl') || code.classList.contains('language-rust')) {
-      const tokens = /(\/\/[^\n]*|"(?:\\.|[^"\\])*"|\b\d+\b|\b(?:module|use|pub|fn|let|if|else|while|for|in|break|continue|return|struct|enum|match|type|num|unit|bytes|string|read|mut|vec|ref|ref_mut|assert|drop|main|mut|u64|u8|usize|String|Vec|Option|Result|Some|None|Ok|Err|true|false)\b)/g;
+      const tokens = /(\/\/[^\n]*|\/\*[\s\S]*?\*\/|"(?:\\.|[^"\\])*"|\b\d+\b|\b(?:module|use|pub|fn|let|if|else|while|for|in|break|continue|return|struct|enum|match|type|num|unit|bytes|string|read|mut|vec|ref|ref_mut|assert|drop|main|mut|u64|u8|usize|String|Vec|Option|Result|Some|None|Ok|Err|true|false)\b)/g;
       let html = '', end = 0;
       for (const match of raw.matchAll(tokens)) {
         html += escape(raw.slice(end, match.index));
         const value = match[0];
-        const kind = value.startsWith('//') ? 'comment' : value.startsWith('"') ? 'string' : /^\d/.test(value) ? 'number' : 'keyword';
+        const kind = value.startsWith('//') || value.startsWith('/*') ? 'comment' : value.startsWith('"') ? 'string' : /^\d/.test(value) ? 'number' : 'keyword';
         html += value === "let" && code.classList.contains("language-grl") ? escape(value) : `<span class="tok-${kind}">${escape(value)}</span>`;
         end = match.index + value.length;
       }
