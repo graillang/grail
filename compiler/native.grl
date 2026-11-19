@@ -48685,6 +48685,9 @@ fn primary_word<a>(n: &a [u8]) -> u64 {
         if same(n, view("f32_bits")) {
             return 14;
         }
+        if same(n, view("f64_bits")) {
+            return 19;
+        }
         return 0;
     }
     if (k == 10) && (f == 98) {
@@ -49396,6 +49399,22 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
                 require_type(&mut c, value.ty, 0);
                 ty := float_type(&mut c);
                 return val(value.t, ty);
+            }
+        }
+        if (fsp == 19) {
+            // An f64's exact pattern, sign and NaN payload included (a signaling NaN stays
+            // signaling): the f64 twin of `f32_bits`. `bits(x)` reads every NaN as the one
+            // canonical quiet NaN instead, so results agree across targets; this is for code that
+            // must see the operand it was given, such as a libm port's signaling-NaN test.
+            if (find_local(&mut c, view(first)) == 0)
+                & (find_func(&mut c, view(m), view(first)) == 0) {
+                advance(&mut c);
+                value := expr(&mut c, 0);
+                expect(&mut c, view(")"));
+                if !is_float(&mut c, value.ty) || is_f32(&mut c, value.ty) {
+                    fail(&mut c, view("f64_bits needs an f64 (an f32's pattern is f32_bits)"));
+                }
+                return val(value.t, 0);
             }
         }
         mut named = int_name(view(first));

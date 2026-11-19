@@ -6,6 +6,11 @@
   affinity, valley score, land budget), the gate rasters, lake mask, relief scale, owner and
   `claim_unreserved`. 552 values over four plans match the worldgen library.
 
+- Added: `f64_bits(x)` is an f64's exact bit pattern, sign and NaN payload included, so a signaling NaN reads
+  as signaling: the f64 twin of `f32_bits`. `bits(x)` is unchanged and still reads every NaN as the canonical
+  quiet NaN, so results agree across targets. Fixed with it: `math_glibc::pow(sNaN, 0)` and `pow(1, sNaN)` are
+  NaN, as in glibc, instead of 1 -- its signaling test went through `bits()` and saw a quiet NaN. Cases
+  `f64-bits-exact-pattern` and `f64-bits-refuses-f32`.
 - **Abundance: the feature composition contract is ported and gated.** `src/feature_composition.grl`
   carries `apply_feature_heights` (bounded add, then carve toward a target, then raise toward a
   target, then the world's elevation clamp) and `compose_feature_layers` (the higher weight wins and
