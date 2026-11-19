@@ -32,6 +32,25 @@ Read `docs/PORT_STATUS.md` for the coverage numbers and the named boundaries.
 | `abn_monuments` | monuments | `grail-w-abn-monuments/NEXT_STEPS.md` |
 | `abn_exchange` | compiler ownership | `grail-w-exchange/NEXT_STEPS.md` |
 
+## Work my disk cleanup destroyed
+
+While reclaiming space (the host twice hit 100%), I deleted every lane worktree's `.work` directory.
+Most of it was rebuildable caches, but four lanes had shelved un-landed work there and three of those
+drafts are gone:
+
+- `abn_wg_feat`'s `builder-wip.patch` (959 lines, the whole `Builder` draft, three borrow fixes from
+  green) — **lost**, rewrite from the description above.
+- `abn_wg_terrain`'s `coherent_surface.grl.wip` (compiled, unverified) — **lost**, rewrite.
+- `abn_tools`' `content_store.grl` + `driver.py` + `content_store_test.grl` (gc hand-verified over six
+  scenarios) — **lost**, rewrite; its own `NEXT_STEPS.md` still carries the scenario list and the
+  registration plan.
+- `abn_gp_world`'s `.work/scratch/wip` (the `BindingModel` draft) — **survives**.
+
+Recovering from the session journals is possible in principle but needs ~3,000 sessions indexed, so it
+is not worth the cost; the descriptions in each lane's note are the handoff. Deleting a worktree's
+`.work` is safe for build caches and unsafe for drafts: from now on, drafts belong in the lane's note
+or on a pushed branch, not in `.work`.
+
 ## First item per lane
 
 Taken from each lane's own resume note at hand-off. Where a lane has no note, the last reported
@@ -42,8 +61,8 @@ scope list in its final message is the source.
   placement/terrain/wear, manufacturing replay/repair/warehouse, crafting actions, logistics freight.
 - **combat** — character 2c (weapon view + held equipment), then 2d (firearm carry maths), then
   actions/combat on the tx layer, skills, survival, explosives, anticheat, security.
-- **world** — `input::BindingModel` (1522/1540 lines, 18 signed-zero diffs, parked in
-  `.work/scratch/wip`), then `GameShellSettings` in two or three landings, then `settings_screen`;
+- **world** — `input::BindingModel` (1522/1540 lines, 18 signed-zero diffs; the draft survives in
+  `grail-w-abn-gp-world/.work/scratch/wip`), then `GameShellSettings` in two or three landings, then `settings_screen`;
   `map_markers` is blocked on `host_economy`.
 - **runtime** — the chunk codec's canonical-shape section, then server layers, `world_voxel_save`,
   the rest of `protocol.cpp`, then `multiplayer_acceptance`.
@@ -53,11 +72,13 @@ scope list in its final message is the source.
   the lane's note (`DroneFleetRegistry::encode`: magic, catalog hashes, per-drone configuration blobs).
 - **app** — the `ABTW` section now that 64 of 65 tables are exact, then `step_mover` in the digest.
 - **terrain** — the surface passes (`warp_relief`, `plateau_character`, `relax_talus`,
-  `smooth_erosion_delta`, parked at `.work/coherent_surface.grl.wip`), then `erode_stream_power`,
-  then regional relief/crags/dissection, then geology and material masks.
+  `smooth_erosion_delta`) **from scratch**: the parked draft was lost, see below. Then
+  `erode_stream_power`, then regional relief/crags/dissection, then geology and material masks.
 - **hydro** — the stepped-hills planner, then `apply_stepped_hills` + marks, then oil, then volcanic.
-- **feat** — the `Builder` port from `.work/abn-scratch/builder-wip.patch` (959 lines; three borrow
-  fixes left), then `kit_fences`, the tree builder, `horse_tack`/`floor_props`.
+- **feat** — the `Builder` port **from scratch** (its 959-line draft patch was lost, see below):
+  box with chamfers/corner triangles/face mask, panel, cylinder with taper and caps, prism with
+  `inset_poly`, corrugated, the `*Opts` structs and the emit/fan_indices helpers, over `kit_acc`'s
+  surfaces. Then `kit_fences`, the tree builder, `horse_tack`/`floor_props`.
 - **render_policy** — page book part (b) (hash table, records, `take_upload`), then `node_set`.
 - **rhi** — multi-segment submission (`submit_with_waits`), the last item on its list.
 - **shaders** — nothing queued; the CMake mirror step landed (211 entries, 25.7 MB of SPIR-V).
@@ -67,7 +88,9 @@ scope list in its final message is the source.
 - **lang2** — gap 4 ergonomics; the exchange-through-record-field segfault is fixed and gated.
 - **f32lib** — signed constant folding (three parts: the literal-led expression parse, negation of a
   parenthesised/named integer, and the folder's signed channel).
-- **tools** — content gc/heal on the landed fs primitives, then the `execve` report.
+- **tools** — content gc/heal **from scratch** on the landed fs primitives (the hand-verified draft
+  was lost, see below; its six scenarios and the `prepare`-step registration are described in the
+  lane's own note), then the `execve` report.
 - **platform** — nothing queued; the overlay hook landed and the occlusion query needs stage-6
   collision.
 - **monuments** — nothing queued; M1 and M2 are on main.
