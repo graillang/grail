@@ -29,6 +29,11 @@
   non-polygon end) and on a closed polygon with bevel joins. Seven fixtures now pin those and match
   the vendored C++ vertex for vertex; the case is 59.
 
+- Added: `Option` has `unwrap()` (`lib/result.grl`), on the concise `T?` and the named spelling alike:
+  the value, or the same trap `x!` raises on `None` - check kind `unwrap`, so a `--report-checks`
+  build counts it where it stands. Only `unwrap_or` and the free `core.unwrap_option` function existed,
+  so a ported line like `v.get(k).unwrap()` had to be rewritten. Cases `option-unwrap-method` and
+  `option-unwrap-on-none-traps`.
 - **The book's sidebar drops its "Find a topic" subtitle;** the search box (labelled for screen readers) sits under the title.
 - **The languages overview chart reads plainly.** Its bars start at 1× (the fastest language's time)
   on one logarithmic scale shared by the release and development groups, each group lists the
