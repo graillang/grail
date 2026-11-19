@@ -7,7 +7,7 @@
 // Bars are normalised per row - each its distance from the row's best as a multiple, so 1x is the
 // best and longer is worse whichever way the row reads - because rows mix units and span orders of
 // magnitude; past an 8x spread the axis is logarithmic. The chart says which. Each group is labelled with Grail's ratio
-// to the fastest rival, and "met" where that ratio is at or under the table's threshold.
+// to the fastest rival, coloured by whether it is at or under the table's threshold.
 
 const escape = text => String(text).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 // One colour per language, the same in every chart; Grail's builds share the book's accent family.
@@ -89,7 +89,7 @@ export function chart(table, data = undefined, prefix = data?.tool) {
       parts.push(`<text x="${(left + w + 4).toFixed(1)}" y="${y + bar - 2}" class="perf-value${c.grail ? ' perf-grail-text' : ''}">${escape(number(r))}x</text>`);
     });
     const mine = Number.isFinite(row.values[table.primary]);
-    const label = ratio !== undefined ? `Grail ${ratio.toFixed(2)}x the fastest rival${met ? ' · met' : ''}` : mine ? 'no rival figure' : 'no Grail figure';
+    const label = ratio !== undefined ? `Grail ÷ fastest rival: ${ratio.toFixed(2)}x` : mine ? 'no rival figure' : 'no Grail figure';
     parts.push(`<text x="${left + width + right - 4}" y="${y0 + 10}" text-anchor="end" class="${met ? 'perf-met' : ratio === undefined ? 'perf-unit' : 'perf-missed'}">${escape(label)}</text>`);
   });
   // Legend.
@@ -108,7 +108,7 @@ export function numbers(table) {
   const body = table.rows.map(row => {
     const ratio = rowRatio(table, row);
     const met = ratio !== undefined && ratio <= (table.threshold ?? 1);
-    return `<tr><td>${escape(row.name)}${(row.direction ?? table.direction) === 'higher' ? ' ↑' : ''}</td><td>${escape(row.unit ?? '')}</td>${table.columns.map(c => `<td${c.grail ? ' class="perf-grail-col"' : ''}>${escape(number(row.values[c.key]))}</td>`).join('')}<td class="${met ? 'perf-met' : 'perf-missed'}">${ratio === undefined ? '-' : `${ratio.toFixed(2)}x${met ? ' met' : ''}`}</td></tr>`;
+    return `<tr><td>${escape(row.name)}${(row.direction ?? table.direction) === 'higher' ? ' ↑' : ''}</td><td>${escape(row.unit ?? '')}</td>${table.columns.map(c => `<td${c.grail ? ' class="perf-grail-col"' : ''}>${escape(number(row.values[c.key]))}</td>`).join('')}<td class="${met ? 'perf-met' : 'perf-missed'}">${ratio === undefined ? '-' : `${ratio.toFixed(2)}x`}</td></tr>`;
   }).join('');
   return `<div class="perf-table"><table><caption>${escape(table.title)}${table.note ? ` — ${escape(table.note)}` : ''}</caption><thead>${head}</thead><tbody>${body}</tbody></table></div>`;
 }
@@ -139,23 +139,24 @@ export function renderResults(data, prefix = data?.tool) {
 
 // The one-page summary: every result file's headline tables, each row reduced to Grail's ratio to the
 // fastest rival (rowRatio), grouped into categories. A category is one bar, its geometric mean on a
-// logarithmic axis centred on 1x (left: Grail ahead, right: behind), with its best and worst rows
-// marked and named. Nothing is measured here; it reads the same committed files as the charts.
+// logarithmic axis centred on 1x (left: Grail's figure is lower, right: higher), with its best and
+// worst rows marked and named; the axis spans the data, a power of two each way. The words are the
+// ratio and its unit (CPU time unless the category says otherwise), never a verdict. Nothing is
+// measured here; it reads the same committed files as the charts.
 export const summaryCategories = [
-  { file: 'compile', table: 'compile', label: 'Compile: check, cold', match: n => /check cold$/.test(n) },
-  { file: 'compile', table: 'compile', label: 'Compile: check after an edit', match: n => /check edited$/.test(n) },
-  { file: 'compile', table: 'compile', label: 'Compile: build, cold', match: n => /build cold$/.test(n) },
-  { file: 'compile', table: 'compile', label: 'Compile: build after an edit', match: n => /build edited$/.test(n) },
-  { file: 'compile', table: 'compile', label: 'Compile: rebuild, nothing changed', match: n => /build no-op$/.test(n) },
+  { file: 'compile', table: 'compile', label: 'Compile: check, cold', unit: 'instructions', match: n => /check cold$/.test(n) },
+  { file: 'compile', table: 'compile', label: 'Compile: check after an edit', unit: 'instructions', match: n => /check edited$/.test(n) },
+  { file: 'compile', table: 'compile', label: 'Compile: build, cold', unit: 'instructions', match: n => /build cold$/.test(n) },
+  { file: 'compile', table: 'compile', label: 'Compile: build after an edit', unit: 'instructions', match: n => /build edited$/.test(n) },
   { file: 'bench-rivals', table: 'release', label: 'Release run time: kernels' },
   { file: 'engine', table: 'release', label: 'Release run time: engine programs' },
-  { file: 'parallel', table: 'release', label: 'Release run time: parallel ECS' },
-  { file: 'sched-rivals', table: 'scheduler', label: 'Scheduler (release build)' },
-  { file: 'bench-rivals', table: 'instructions', label: 'Release instructions: kernels' },
-  { file: 'engine', table: 'instructions', label: 'Release instructions: engine programs' },
+  { file: 'parallel', table: 'release', label: 'Release run time: parallel ECS', unit: 'wall time' },
+  { file: 'sched-rivals', table: 'scheduler', label: 'Scheduler (release build)', unit: 'wall time' },
+  { file: 'bench-rivals', table: 'instructions', label: 'Release instructions: kernels', unit: 'instructions' },
+  { file: 'engine', table: 'instructions', label: 'Release instructions: engine programs', unit: 'instructions' },
   { file: 'bench-rivals', table: 'dev', label: 'Development build run time: kernels' },
   { file: 'engine', table: 'dev', label: 'Development build run time: engine programs' },
-  { file: 'parallel', table: 'dev', label: 'Development build run time: parallel ECS' },
+  { file: 'parallel', table: 'dev', label: 'Development build run time: parallel ECS', unit: 'wall time' },
 ];
 
 export function summaryRows(files) {
@@ -172,20 +173,27 @@ export function summaryRows(files) {
 
 export function summary(files) {
   const cats = summaryRows(files).filter(c => c.rows.length);
-  // A ratio read as words: below 1 Grail is faster, above 1 slower.
-  const rel = r => r <= 1 ? `${(1 / r).toFixed(r < 0.1 ? 0 : 1)}x faster` : `${r.toFixed(2)}x slower`;
+  // A ratio as written: Grail's figure over the fastest rival's (below 1, Grail's is lower).
+  const rel = r => `${r.toFixed(2)}x`;
+  const unitOf = c => c.unit ?? 'CPU time';
   const left = 300, width = 420, right = 560, rowH = 26, top = 74, bottom = 34;
-  const lo = Math.log(1 / 32), hi = Math.log(32);
+  // The axis: the smallest power of two each way that holds every category's mean, best and worst row.
+  const reach = Math.max(...cats.flatMap(c => [c.mean, c.best?.ratio, c.worst?.ratio]).filter(Number.isFinite).map(r => Math.abs(Math.log2(r))), 1);
+  const bound = 2 ** Math.ceil(reach);
+  const lo = Math.log(1 / bound), hi = Math.log(bound);
   const px = r => left + ((Math.min(Math.max(Math.log(r), lo), hi) - lo) / (hi - lo)) * width;
   const one = px(1);
   const height = top + cats.length * rowH + bottom;
   const parts = [];
-  parts.push(`<text x="0" y="13" class="perf-axis perf-direction">How Grail compares with the fastest rival in each category (the geometric mean of the category's rows).</text>`);
-  parts.push(`<text x="0" y="27" class="perf-axis">A green bar to the left: Grail is faster. A red bar to the right: Grail is slower. ◆ the category's worst row, ○ its best.</text>`);
-  parts.push(`<text x="${(one - 6).toFixed(1)}" y="${top - 26}" class="perf-met" text-anchor="end">◀ Grail faster</text><text x="${(one + 6).toFixed(1)}" y="${top - 26}" class="perf-missed">Grail slower ▶</text>`);
-  for (const t of [1 / 32, 1 / 8, 1 / 2, 1, 2, 8, 32]) {
+  parts.push(`<text x="0" y="13" class="perf-axis perf-direction">Grail's figure divided by the fastest rival's, per category (the geometric mean of the category's rows). Lower is better.</text>`);
+  parts.push(`<text x="0" y="27" class="perf-axis">Left of 1x: Grail's figure is lower than the fastest rival's; right: higher. ◆ the category's worst row, ○ its best.</text>`);
+  parts.push(`<text x="${(one - 6).toFixed(1)}" y="${top - 26}" class="perf-met" text-anchor="end">◀ Grail lower</text><text x="${(one + 6).toFixed(1)}" y="${top - 26}" class="perf-missed">Grail higher ▶</text>`);
+  const tickSet = [];
+  for (let e = -Math.log2(bound); e <= Math.log2(bound); e++) tickSet.push(2 ** e);
+  const every = tickSet.length > 9 ? 2 : 1;
+  for (const t of tickSet.filter((t, i) => t === 1 || (i - Math.log2(bound)) % every === 0)) {
     const x = px(t);
-    const label = t === 1 ? 'same' : t < 1 ? `${Math.round(1 / t)}x` : `${t}x`;
+    const label = t === 1 ? '1x' : t < 1 ? `1/${Math.round(1 / t)}x` : `${t}x`;
     parts.push(`<line x1="${x.toFixed(1)}" x2="${x.toFixed(1)}" y1="${top - 6}" y2="${height - bottom + 4}" class="perf-grid"${t === 1 ? ' stroke-width="2"' : ''}/><text x="${x.toFixed(1)}" y="${top - 10}" class="perf-tick" text-anchor="middle">${label}</text>`);
   }
   cats.forEach((c, i) => {
@@ -193,17 +201,17 @@ export function summary(files) {
     const ahead = c.mean <= 1;
     const x0 = Math.min(one, px(c.mean)), w = Math.max(2, Math.abs(px(c.mean) - one));
     parts.push(`<text x="${left - 8}" y="${y + 15}" class="perf-label" text-anchor="end">${escape(c.label)}</text>`);
-    parts.push(`<rect x="${x0.toFixed(1)}" y="${y + 5}" width="${w.toFixed(1)}" height="14" fill="${ahead ? '#2b8a3e' : '#c92a2a'}" opacity="0.85"><title>${escape(`${c.label}: ${rel(c.mean)} over ${c.rows.length} rows`)}</title></rect>`);
+    parts.push(`<rect x="${x0.toFixed(1)}" y="${y + 5}" width="${w.toFixed(1)}" height="14" fill="${ahead ? '#2b8a3e' : '#c92a2a'}" opacity="0.85"><title>${escape(`${c.label}: Grail ${rel(c.mean)} the fastest rival's ${unitOf(c)}, geometric mean over ${c.rows.length} rows`)}</title></rect>`);
     if (c.best) parts.push(`<circle cx="${px(c.best.ratio).toFixed(1)}" cy="${y + 12}" r="4" fill="none" stroke="#212529"><title>${escape(`best: ${c.best.name}, ${rel(c.best.ratio)}`)}</title></circle>`);
     if (c.worst) parts.push(`<path d="M ${px(c.worst.ratio).toFixed(1)} ${y + 7} l 5 5 l -5 5 l -5 -5 z" fill="#212529"><title>${escape(`worst: ${c.worst.name}, ${rel(c.worst.ratio)}`)}</title></path>`);
-    const note = c.behind ? `${rel(c.mean)} · slower on ${c.behind} of ${c.rows.length}; worst ${c.worst.name}, ${rel(c.worst.ratio)}` : `${rel(c.mean)} · faster on all ${c.rows.length}`;
+    const note = `${rel(c.mean)} the fastest rival's ${unitOf(c)} · higher on ${c.behind} of ${c.rows.length} rows${c.behind ? `; worst ${c.worst.name}, ${rel(c.worst.ratio)}` : ''}`;
     parts.push(`<text x="${left + width + 8}" y="${y + 15}" class="${ahead ? 'perf-met' : 'perf-missed'}">${escape(note.length > 96 ? note.slice(0, 95) + '…' : note)}</text>`);
   });
   const sources = [...new Set(cats.map(c => `${c.file} ${String(c.commit).slice(0, 8)} ${c.date}`))].join('; ');
   parts.push(`<text x="0" y="${height - 8}" class="perf-axis perf-source">${escape(`From bench/results: ${sources}.`)}</text>`);
-  const svg = `<figure class="perf-chart" id="chart-summary"><svg viewBox="0 0 ${left + width + right} ${height}" width="100%" role="img" aria-label="Summary: Grail against the fastest rival in every category" xmlns="http://www.w3.org/2000/svg">${parts.join('')}</svg><figcaption>Every benchmark on one page: per category, how much faster or slower Grail is than the fastest rival (the geometric mean of the category's rows). The charts further down have every row.</figcaption></figure>`;
-  const body = cats.map(c => `<tr><td>${escape(c.label)}</td><td class="${c.mean <= 1 ? 'perf-met' : 'perf-missed'}">${rel(c.mean)}</td><td>${c.behind} of ${c.rows.length}</td><td>${escape(c.best.name)}: ${rel(c.best.ratio)}</td><td>${escape(c.worst.name)}: ${rel(c.worst.ratio)}</td><td><code>${escape(String(c.commit).slice(0, 8))}</code> ${escape(c.date)}</td></tr>`).join('');
-  const table = `<div class="perf-table"><table><caption>Every category: how Grail compares with the fastest rival (geometric mean), the rows where it is slower, and its best and worst rows</caption><thead><tr><th>category</th><th>Grail vs the fastest rival</th><th>rows where Grail is slower</th><th>best row</th><th>worst row</th><th>measured on</th></tr></thead><tbody>${body}</tbody></table></div>`;
+  const svg = `<figure class="perf-chart" id="chart-summary"><svg viewBox="0 0 ${left + width + right} ${height}" width="100%" role="img" aria-label="Summary: Grail against the fastest rival in every category" xmlns="http://www.w3.org/2000/svg">${parts.join('')}</svg><figcaption>Every benchmark on one page: per category, Grail's figure divided by the fastest rival's (the geometric mean of the category's rows; CPU time unless the category names another unit). The charts further down have every row.</figcaption></figure>`;
+  const body = cats.map(c => `<tr><td>${escape(c.label)}</td><td>${escape(unitOf(c))}</td><td class="${c.mean <= 1 ? 'perf-met' : 'perf-missed'}">${rel(c.mean)}</td><td>${c.behind} of ${c.rows.length}</td><td>${escape(c.best.name)}: ${rel(c.best.ratio)}</td><td>${escape(c.worst.name)}: ${rel(c.worst.ratio)}</td><td><code>${escape(String(c.commit).slice(0, 8))}</code> ${escape(c.date)}</td></tr>`).join('');
+  const table = `<div class="perf-table"><table><caption>Every category: Grail's figure over the fastest rival's (geometric mean), the rows where Grail's is higher, and its best and worst rows</caption><thead><tr><th>category</th><th>figure</th><th>Grail ÷ fastest rival</th><th>rows where Grail's is higher</th><th>best row</th><th>worst row</th><th>measured on</th></tr></thead><tbody>${body}</tbody></table></div>`;
   return `<section class="perf-results perf-summary">${svg}${table}</section>`.replace(/\n/g, ' ');
 }
 
@@ -222,7 +230,7 @@ export const overviewPanels = [
     languages: [['c', 'C', 'c'], ['cpp', 'C++', 'cpp'], ['rust-release', 'Rust', 'rust'], ['go', 'Go', 'go'], ['zig-fast', 'Zig', 'zig'], ['grail-llvm', 'Grail', 'grail']] },
   { id: 'dev', label: 'Development builds - run time', files: ['bench-rivals', 'engine', 'parallel'], table: 'dev', figure: 'CPU time (wall time for the parallel ECS)', rows: 'programs', missing: 'no twin of', why: 'their development builds are not measured',
     languages: [['go', 'Go', 'go'], ['rust-dev', 'Rust dev', 'rust'], ['zig-debug', 'Zig Debug', 'zig'], ['grail-native', 'Grail-native', 'grail']] },
-  { id: 'compile', label: 'Compile speed', files: ['compile'], table: 'compile', figure: 'user-space instructions', rows: 'measurements', missing: 'no figure for',
+  { id: 'compile', label: 'Compile speed', files: ['compile'], table: 'compile', skip: /build no-op$/, figure: 'user-space instructions', rows: 'measurements', missing: 'no figure for',
     languages: [['c', 'C', 'c'], ['cpp', 'C++', 'cpp'], ['rust', 'Rust', 'rust'], ['go', 'Go', 'go'], ['zig', 'Zig', 'zig'], ['grail', 'Grail', 'grail']] },
   { id: 'scheduler', label: 'Scheduler', files: ['sched-rivals'], table: 'scheduler', figure: "wall time; importer rounds inverted, as more is better there", rows: 'measurements', missing: 'no figure for', why: 'they have no scheduler twin',
     note: "Grail is its release (LLVM) build, Rust is rayon, C++ is oneTBB",
@@ -244,10 +252,23 @@ export function overviewRows(files) {
         const higher = (row.direction ?? table.direction) === 'higher';
         const values = Object.fromEntries(panel.languages.map(([key]) => [key, row.values[key]]).filter(([, v]) => Number.isFinite(v) && v > 0));
         if (Object.keys(values).length < 2) continue; // nothing to compare against
+        if (panel.skip?.test(row.name)) continue;
         const best = higher ? Math.max(...Object.values(values)) : Math.min(...Object.values(values));
         programs.push({ name: row.name, file, higher, ratios: Object.fromEntries(Object.entries(values).map(([k, v]) => [k, higher ? best / v : v / best])) });
       }
     }
+    // Only the rows every language the panel measures has a figure for: a mean over different rows
+    // would compare languages on different work. The others are named in the panel's source line.
+    const measuredKeys = panel.languages.map(([key]) => key).filter(key => programs.some(p => Number.isFinite(p.ratios[key])));
+    const dropped = programs.filter(p => !measuredKeys.every(key => Number.isFinite(p.ratios[key])));
+    const shared = programs.filter(p => !dropped.includes(p));
+    // Ratios to the fastest among the languages the panel counts, on the shared rows.
+    for (const p of shared) {
+      const low = Math.min(...measuredKeys.map(k => p.ratios[k]));
+      for (const k of measuredKeys) p.ratios[k] = p.ratios[k] / low;
+    }
+    programs.length = 0;
+    programs.push(...shared);
     const languages = panel.languages.map(([key, label, family]) => {
       const ratios = programs.map(p => p.ratios[key]).filter(Number.isFinite);
       const mean = ratios.length ? Math.exp(ratios.reduce((s, r) => s + Math.log(r), 0) / ratios.length) : undefined;
@@ -257,7 +278,7 @@ export function overviewRows(files) {
     // file has no figure of.
     const absent = Object.keys(languageNames).filter(f => !panel.languages.some(l => l[2] === f)).map(f => languageNames[f]);
     const unmeasured = programs.length ? languages.filter(l => !l.count).map(l => l.label) : [];
-    return { ...panel, programs, languages, absent, unmeasured };
+    return { ...panel, programs, languages, absent, unmeasured, dropped: dropped.map(p => p.name) };
   });
 }
 
@@ -267,6 +288,7 @@ export function overviewSource(panel) {
   const lacks = [];
   if (panel.absent.length) lacks.push(`No ${listOf(panel.absent)}: ${panel.why ?? 'not measured'}`);
   if (panel.unmeasured.length) lacks.push(`No ${listOf(panel.unmeasured)}: not measured in this file`);
+  if (panel.dropped?.length) lacks.push(`Not counted, as some language here has no figure: ${panel.dropped.join(', ')}`);
   return [`${panel.files.map(f => `bench/results/${f}.json`).join(', ')}; ${panel.figure}`, panel.note, ...lacks].filter(Boolean).join('. ') + '.';
 }
 
@@ -293,7 +315,7 @@ export function overview(files) {
   const total = Math.max(left + Math.max(width, reach) + 12, sourceReach, 700);
   const parts = [];
   parts.push(`<text x="0" y="14" class="perf-axis perf-direction">How each language compares with the fastest language on each program or measurement. Shorter is better.</text>`);
-  parts.push(`<text x="0" y="30" class="perf-axis">1× is as fast as the fastest; 2× takes twice as long. Each bar is the geometric mean over its panel's rows; all panels share one scale.</text>`);
+  parts.push(`<text x="0" y="30" class="perf-axis">1× is the fastest's figure; 2× is twice it. Each bar is the geometric mean over the rows every language in its panel was measured on; all panels share one scale.</text>`);
   let y = 56;
   for (const panel of panels) {
     const languages = [...panel.languages].sort((a, b) => (Number.isFinite(a.mean) ? a.mean : Infinity) - (Number.isFinite(b.mean) ? b.mean : Infinity));

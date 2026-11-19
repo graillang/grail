@@ -2,15 +2,18 @@
 // and rustc"; the book's Performance chapter). The same programs in all six languages - hello world,
 // the scaling trio of tools/compile-bench.mjs (N copies of a record, its constructor and a 15-line
 // loop function, and a main calling each) at each --sizes, and the rival twins of bench/ - each
-// measured five ways:
+// measured four ways:
 //   check cold      grail check | clang -fsyntax-only | clang++ -fsyntax-only | go vet (it
 //                   type-checks, then runs its analyses; go build -o /dev/null is measured beside it)
 //                   | zig build-exe -fno-emit-bin | cargo check
 //   check edited    the same after one function body changed
 //   build cold      grail build (the build store) | make (one translation unit, clang -O0 -g, lld) |
-//                   the same with clang++ | go build | zig build-exe -O Debug | cargo build
+//                   the same with clang++ | go build | zig build (a build.zig, Debug) | cargo build
 //   build edited    the same after the edit
-//   build no-op     the same again with nothing changed
+// Every build goes through the language's own build tool, which decides what to rebuild: Grail's
+// store, make, go build's cache, zig build's cache, cargo. A rebuild with nothing changed is not
+// measured: on a one-file project every tool answers it in milliseconds, so it times process
+// start-up, not the language.
 // "Cold" is a project's first build on a machine whose toolchain caches are warm: new source text
 // (a seed) and empty project caches - a new target/ for cargo, nothing built for make, a Grail store holding only the
 // standard library (`grail cache warm`, as the installers run it) - while Go keeps its standard
@@ -274,6 +277,14 @@ const twinEdit = {
   cpp: t => t.replace(/^int main\(\) \{/m, m => `${m}\n    (void)1;`),
 };
 
+// A Zig project's build file: one executable from main.zig, at the optimisation `zig build` is given.
+const zigBuildFile = `const std = @import("std");
+pub fn build(b: *std.Build) void {
+    const exe = b.addExecutable(.{ .name = "main", .root_source_file = b.path("main.zig"), .target = b.graph.host, .optimize = b.standardOptimizeOption(.{}) });
+    b.installArtifact(exe);
+}
+`;
+
 // Each language: how to lay out a project, and the commands.
 const languages = {
   grail: {
@@ -292,9 +303,11 @@ const languages = {
   },
   zig: {
     file: 'main.zig', comment: '//', program: zigProgram, hello: zigHello,
-    fresh() {},
     env: dir => ({ ZIG_LOCAL_CACHE_DIR: join(dir, 'zig-cache') }),
-    check: ['zig', 'build-exe', '-fno-emit-bin', 'main.zig'], build: ['zig', 'build-exe', '-O', 'Debug', 'main.zig'], exe: 'main',
+    // Building goes through `zig build`, as a Zig project builds, so Zig's cache decides what to
+    // redo, as every other column's build tool does; `zig build-exe` alone recompiles every time.
+    fresh(dir) { writeFileSync(join(dir, 'build.zig'), zigBuildFile); },
+    check: ['zig', 'build-exe', '-fno-emit-bin', 'main.zig'], build: ['zig', 'build', '-Doptimize=Debug'], exe: 'zig-out/bin/main',
   },
   // C and C++: one translation unit and a one-target Makefile, built by make - the edit loop of a C
   // project, where make decides what to rebuild as cargo, go and Grail's store do for theirs. The
@@ -375,7 +388,7 @@ const programs = [
   // content); its output is checked by bench-rivals, not here.
   ...twins.map(name => ({ label: name, text: (lang, seed) => `${languages[lang].comment} seed ${seed}\n${twinText(lang, name)}`, edit: (lang, t) => { const e = twinEdit[lang](t); if (e === t) throw new Error(`the twin edit found no main in ${name} (${lang})`); return e; }, check: false })),
 ];
-const steps = ['check cold', 'check edited', 'build cold', 'build edited', 'build no-op'];
+const steps = ['check cold', 'check edited', 'build cold', 'build edited'];
 
 const load = [loadavg()];
 const results = {}; // `${label} ${step}` -> column -> { instructions, cpu, wall }
@@ -412,7 +425,6 @@ for (const program of programs) {
         const coldOut = output();
         writeFileSync(join(dir, l.file), program.edit(lang, text));
         keep(program.label, 'build edited', lang, pass, timed(lang, l.build, dir, passEnv));
-        keep(program.label, 'build no-op', lang, pass, timed(lang, l.build, dir, passEnv));
         printed[lang] = [coldOut, output()];
         rmSync(dir, { recursive: true, force: true });
       }

@@ -1,5 +1,19 @@
 ## Unreleased
 
+- **The Performance chapter reports its numbers plainly.** The rebuild with nothing changed is no
+  longer measured or charted: on a one-file project every tool answers it in milliseconds, so it
+  timed process start-up, and its ratio (about 44x) led the summary chart. The charts state a ratio
+  and its unit (Grail's figure over the fastest rival's: CPU time, wall time or instructions) instead
+  of "faster", "slower" or "met"; the summary's axis spans its data. The languages overview averages
+  each panel only over the rows every language in it was measured on, and names the rows it leaves
+  out (the scheduler's join on a worker, which has no Grail figure). The chapter states its four
+  targets as targets, with where each stands on the commit charted - including where Grail is behind
+  (development builds behind Go's, the scheduler behind oneTBB) - and a section on the limits of the
+  numbers: one machine, twins written by the project, no confidence intervals, instructions are not
+  time. Two wrong statements are corrected: the development build does not beat Zig Debug on every
+  program (Zig is ahead on two), and it ranges from 0.67x to 2.87x Go's time, not 1.06x to 1.78x.
+  The compile harness now builds Zig through `zig build`, as every other column goes through its own
+  build system; `zig build-exe` alone recompiles every time.
 - **The languages overview sums up the whole Performance chapter.** Besides release and development
   run time, it has a compile-speed panel (every program and scenario of `bench/results/compile.json`,
   by user-space instructions) and a scheduler panel (`bench/results/sched-rivals.json`'s wall times:
