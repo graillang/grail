@@ -111,6 +111,13 @@
   `abundance/tests/crafting_routes_test.grl` gates 80 lines against the engine's own module and
   formatter. Recorded boundary: a sign-set NaN spells "-nan" in glibc but Grail's `f64_from_bits`
   normalises the sign away, so that value cannot be represented to format it.
+- **The kinematic mover's view queries are ported.** `abundance/src/collision_query.grl` gains the
+  engine's `known_for_box` (every lattice sample a box touches finite), the trilinear `field_at`,
+  the mover's `Env::field` uniform-chunk fallback, `covers` and `coverage` with its reason codes
+  and problem chunk — the view half of `Env` the movement step reads. The gate is two real
+  `ChunkCollisionWorld` chunk sets (flat ground; a sloped ground with a 0.3 m step) whose chunks,
+  triangles and density lattices the reference dumps through the public `field_at`, then samples
+  on a fixed grid and ten boxes: 2 306 lines, byte-identical.
 
 - **The derelict monument layouts are complete: the library, arms depot, factory, orchard and dam
   templates join the farm, and pieces resolve through the construction catalogue.**
