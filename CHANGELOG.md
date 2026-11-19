@@ -11,6 +11,14 @@
   rebuilt from the new commit, all seven reference libraries plus the `blu-mode` library that
   `abundance_gameplay_core` now links. Every parity gate therefore re-checks the port against the
   current reference rather than one a day out of date.
+- **glibc's sin and cos are ported.** `lib/math_glibc.grl` gains the IBM Accurate Mathematical
+  Library's `do_sin`/`do_cos` over `__sincostab` (440 doubles) and `reduce_sincos`, with the FMA
+  sites the x86-64 build fuses (settled against the host's libm the way `exp`/`pow` were). The
+  mover's yaw is quantized to 16 bits, so the whole domain is 65 536 angles: the gate runs every
+  one of them plus a general sweep and six named inputs and matches the host bit for bit
+  (`abundance/tests/libm_trig_test.grl`, 20 reference lines). glibc's `rem_pio2` branch
+  (|x| >= 105414350) is not carried and the port answers NaN there rather than a wrong value.
+
 - **The window's overlay hook is ported: `poll(hook)` feeds ImGui's SDL3 backend its events.** The
   SDL platform shim keeps a hook slot and calls it inside its poll, before decoding, because a text
   event's string is SDL's temporary memory; the imgui platform shim supplies
