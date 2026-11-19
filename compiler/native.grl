@@ -8052,7 +8052,16 @@ fn may_hide_borrow<a>(c: (&a mut C), ty: u64) -> bool {
 fn hide_walk<a, b>(c: (&a mut C), ty: u64, trail: (&b mut u64[])) -> bool {
     k := ty_kind(&mut c, ty);
     arg := ty_arg(&mut c, ty);
-    if (k == 12) || (k == 20) || (k == 25) || (k == 33) {
+    // An `Owned` closure type names what it borrows - its signature's regions - so it holds no
+    // borrow the type cannot show, and a record whose closure field says so holds none either
+    // (the rule `owned_walk` and `capture_hides_loan` already apply). A reference the closure only
+    // takes as a parameter is the parameter, not a capture: `Fn<Share, Owned>((&T), u64) -> u64` in
+    // a field is exactly the shape a job table stores. A call-scoped closure type states nothing
+    // and may have captured a reference, so it is still refused.
+    if k == 20 {
+        return (ty_env(&mut c, ty) != 0) || ((ty_mode(&mut c, ty) & CLOSURE_OWNED) == 0);
+    }
+    if (k == 12) || (k == 25) || (k == 33) {
         return true;
     }
     // A job handle owns the closure it runs, whatever its result type is: `Job<u64>` shows no borrow
