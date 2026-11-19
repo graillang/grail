@@ -53534,7 +53534,10 @@ fn narrowable<a>(c: (&a mut C)) -> bool {
 //   if a != None { a.x } else { .. }    `a` is the value in the first block
 //   if a == None { .. } else { a.x }    and in the `else`
 //   if a == None { return 0; }  a.x     a guard that leaves: the value for the rest of the block
-fn optional_narrow<a>(c: (&a mut C)) -> unit {
+//
+// `mode` is the tail mode the `if` was reached in (a body's final `if` returns from its arms), as
+// for if_let.
+fn optional_narrow<a>(c: (&a mut C), mode: u64, at: u64) -> unit {
     name := ident(&mut c);
     present := eat(&mut c, view("!="));
     if !present {
@@ -53567,6 +53570,7 @@ fn optional_narrow<a>(c: (&a mut C)) -> unit {
     if present {
         narrow_bind(&mut c, name, xt, xty, pty);
     }
+    exchange(&mut c.tail_mode, mode);
     block(&mut c);
     pop_locals(&mut c, mark);
     yes := ownership::snapshot(&c.check);
@@ -53581,12 +53585,15 @@ fn optional_narrow<a>(c: (&a mut C)) -> unit {
         if !present {
             narrow_bind(&mut c, name, xt, xty, pty);
         }
+        exchange(&mut c.tail_mode, mode);
         if is(&mut c, view("if")) {
             statement(&mut c);
         } else {
             block(&mut c);
         }
         pop_locals(&mut c, else_mark);
+    } else {
+        tail_if_needs_else(&mut c, mode, at);
     }
     nt := c.terminated;
     if yt == 0 {
@@ -55692,7 +55699,7 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
             return ();
         }
         if narrowable(&mut c) {
-            optional_narrow(&mut c);
+            optional_narrow(&mut c, mode, if_at);
             return ();
         }
         tests := c.resources.len();
