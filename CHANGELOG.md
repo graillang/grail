@@ -13,6 +13,18 @@
   fixture grows from eight Farm sites to eighteen (two of each other kind): 15 587 lines match. One
   more draw-order rule found on the way: a draw in a `for` condition is redrawn on every test (the
   library's garden wall), so the port redraws it there too.
+- **The material registry's block scans are ported and wired to the block decoders end to end.**
+  `abundance/src/material_scan.grl` carries `scan_mean_colour` (the terrain palette's and the world
+  material catalog's linear mean from the coarsest mip) and `leaf_mean_colour` (a foliage texture's
+  alpha-weighted mean over the smallest tail mip of at least 8x8) from
+  `engine/materials/runtime/material_registry.cpp`, decoding with `lib/bc7_decode.grl` and
+  linearizing sRGB with the glibc-exact `math::powf`.
+  `abundance/tests/parity/material_scan.cpp` includes that registry source unmodified — the leaf
+  scan is file-local — and prints both scans and the FNV-1a of every decoded tail mip;
+  `abundance/tests/material_scan_test.grl` runs the same pipeline over the committed abtex
+  fixtures: the container, the scan and all three block decoders, BC7 through
+  `bc7_decode::decode_bc7` (added here as the image-level form of `unpack_bc7`) and BC4/BC5 through
+  `bc_encode::decode_bc4`/`decode_bc5`. Every f32 bit pattern and every mip digest matches.
 
 - **The landform composition plan is ported bit for bit.** `abundance/src/worldgen_landform.grl`
   carries `landform_plan.cpp`: the family/preset tables, warped-ellipse regions, the ranges' real

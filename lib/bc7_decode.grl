@@ -481,6 +481,58 @@ fn unpack_mode6(low: u64, high: u64) -> u8[] {
     return out;
 }
 
+// A BC7 image to RGBA8, four texels per block row and out-of-image texels dropped: the engine's
+// decode_bc7 (engine/materials/src/bc_encode.cpp), the image-level form of unpack_bc7.
+pub fn decode_bc7<a>(blocks: &a [u8], width: u64, height: u64) -> u8[]? {
+    bw := (width + 3) / 4;
+    bh := (height + 3) / 4;
+    if blocks.len() < bw * bh * 16 {
+        return None;
+    }
+    mut out = u8[0; width * height * 4];
+    for by in bh {
+        for bx in bw {
+            at := (by * bw + bx) * 16;
+            match unpack_bc7(blocks[at: at + 16]) {
+                Some(px) => {
+                    for y in 4 {
+                        for x in 4 {
+                            tx := bx * 4 + x;
+                            ty := by * 4 + y;
+                            if (tx < width) && (ty < height) {
+                                o := (ty * width + tx) * 4;
+                                s := (y * 4 + x) * 4;
+                                out[o] = px[s];
+                                out[o + 1] = px[s + 1];
+                                out[o + 2] = px[s + 2];
+                                out[o + 3] = px[s + 3];
+                            }
+                        }
+                    }
+                },
+                None => {
+                    // The engine's decode_bc7 copies the block's pixels whatever unpack_bc7
+                    // returned; its failure path leaves them zeroed, so these sixteen texels are 0.
+                    for y in 4 {
+                        for x in 4 {
+                            tx := bx * 4 + x;
+                            ty := by * 4 + y;
+                            if (tx < width) && (ty < height) {
+                                o := (ty * width + tx) * 4;
+                                out[o] = 0;
+                                out[o + 1] = 0;
+                                out[o + 2] = 0;
+                                out[o + 3] = 0;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return Some(out);
+}
+
 // One 16-byte BC7 block to its sixteen RGBA8 texels, r,g,b,a; None for a slice shorter than a block
 // or a first byte that names no mode (the engine's unpack_bc7 returns false there and zeroes its
 // buffer).
