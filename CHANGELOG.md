@@ -1,5 +1,10 @@
 ## Unreleased
 
+- **Abundance port: a dispatch takes its pipeline from the render graph plan.** The executor reads
+  each `Dispatch.pipeline` (the id the plan records when a body binds), falling back to the body's id
+  for a plan that carries none, and rebinds the pipeline, its push-constant block and the bindless
+  sets whenever the id changes - so one body can run two pipelines. `rhi_graph_probe` binds through
+  `abundance_render_graph::bind` and checks the plan's id reaches the dispatch.
 - **The window's overlay hook is ported: `poll(hook)` feeds ImGui's SDL3 backend its events.** The
   SDL platform shim keeps a hook slot and calls it inside its poll, before decoding, because a text
   event's string is SDL's temporary memory; the imgui platform shim supplies
