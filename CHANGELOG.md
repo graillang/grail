@@ -5,6 +5,12 @@
   for a plan that carries none, and rebinds the pipeline, its push-constant block and the bindless
   sets whenever the id changes - so one body can run two pipelines. `rhi_graph_probe` binds through
   `abundance_render_graph::bind` and checks the plan's id reaches the dispatch.
+- Reference pin moved from `ca1f1bc05b` to `28a31e5089` (18 commits of the run's own work: held-item
+  grips and first-person carry, chunk collision, edit cost, flora tile placement, terrain render
+  runtime, the render graph, world spawn, cluster geometry, trail terrain). `~/abundance-pin` was
+  rebuilt from the new commit, all seven reference libraries plus the `blu-mode` library that
+  `abundance_gameplay_core` now links. Every parity gate therefore re-checks the port against the
+  current reference rather than one a day out of date.
 - **The window's overlay hook is ported: `poll(hook)` feeds ImGui's SDL3 backend its events.** The
   SDL platform shim keeps a hook slot and calls it inside its poll, before decoding, because a text
   event's string is SDL's temporary memory; the imgui platform shim supplies
