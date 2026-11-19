@@ -1,5 +1,8 @@
 ## Unreleased
 
+- Fixed: a shim whose stamp is stale is removed before its builder runs, so the builder's own
+  mtime-based check cannot decide "up to date" and stamp an out-of-date library as fresh — which was
+  the failure the stamping exists to catch. Readiness is now computed after that removal.
 - **The landing service removes each leg's build cache when the leg ends.** Every gate leg and retry
   had a fresh `GRAIL_CACHE_DIR` in /tmp that nothing removed - about 17k files each - and /tmp (a
   tmpfs) ran out of inodes after two days of landings.
