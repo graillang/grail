@@ -388,11 +388,21 @@ impl<T> Iterator for VecIter<T> {
         return Some(self.rev.pop()!);
     }
 }
-// The elements of a vector by reference, in order (`v.iter()`). Its `fold` is a counted index loop,
-// so a chain of adapters folded over it is one loop the optimiser can unroll and vectorise.
-pub struct SliceIter<a, T> { v: (&a T[]), at: u64 }
-pub fn slice_iter<a, T>(v: (&a T[])) -> SliceIter<a, T> {
-    return SliceIter { v: v, at: 0 };
+// The elements of a vector, a view or a slice by reference, in order: `v.iter()`, a method of every
+// `T[]`, `&T[]` and `&[T]` that needs no `use` line. The vector stays borrowed, and usable, while
+// the iterator or any item it handed out is in use. Its `fold` is a counted index loop, so a chain of
+// adapters folded over it (`collect`, `count`, `fold`) is one loop the optimiser can unroll and
+// vectorise.
+pub struct SliceIter<a, T> { v: (&a [T]), at: u64 }
+impl<T> T[] {
+    pub fn iter<a>(self: (&a T[])) -> SliceIter<a, T> {
+        return SliceIter { v: self[:], at: 0 };
+    }
+}
+impl<T> [T] {
+    pub fn iter<a>(self: (&a [T])) -> SliceIter<a, T> {
+        return SliceIter { v: self, at: 0 };
+    }
 }
 impl<a, T> Iterator for SliceIter<a, T> {
     type Item = (&a T);
@@ -426,11 +436,55 @@ impl<a, T> SliceIter<a, T> {
         }
         return None;
     }
-    pub fn map<U, F: FnMut((&a T)) -> U>(self: Self, f: F) -> Map<SliceIter<a, T>, U, F> {
-        return Map { it: self, f: f };
+    pub fn map<V, G: FnMut((&a T)) -> V>(self: Self, g: G) -> Map<SliceIter<a, T>, V, G> {
+        return Map { it: self, f: g };
     }
-    pub fn filter<F: FnMut((&(&a T))) -> bool>(self: Self, keep: F) -> Filter<SliceIter<a, T>, F> {
+    pub fn filter<G: FnMut((&(&a T))) -> bool>(self: Self, keep: G) -> Filter<SliceIter<a, T>, G> {
         return Filter { it: self, keep: keep };
+    }
+    pub fn take(self: Self, n: u64) -> Take<SliceIter<a, T>> {
+        return Take { it: self, left: n };
+    }
+    pub fn enumerate(self: Self) -> Enumerate<SliceIter<a, T>> {
+        return Enumerate { it: self, at: 0 };
+    }
+    // A counted loop over the slice: no `next` call per item.
+    pub fn collect(self: Self) -> (&a T)[] {
+        v := self.v;
+        mut out: (&a T)[] = [];
+        mut i = self.at;
+        while i < v.len() {
+            out.push(&v[i]);
+            i += 1;
+        }
+        return out;
+    }
+    pub fn count(self: Self) -> u64 {
+        return self.v.len() - self.at;
+    }
+    pub fn any<G: FnMut((&a T)) -> bool>(self: Self, test: G) -> bool {
+        mut src = self;
+        mut t = test;
+        while let Some(x) = src.next() {
+            if t(x) {
+                return true;
+            }
+        }
+        return false;
+    }
+    pub fn all<G: FnMut((&a T)) -> bool>(self: Self, test: G) -> bool {
+        mut src = self;
+        mut t = test;
+        while let Some(x) = src.next() {
+            if !t(x) {
+                return false;
+            }
+        }
+        return true;
+    }
+    pub fn find<G: FnMut((&(&a T))) -> bool>(self: Self, test: G) -> (&a T)? {
+        mut kept = self.filter(test);
+        return kept.next();
     }
 }
 // Each adapter names its item type (`U`, `T`), so the next adapter's callback is typed by it.
@@ -459,9 +513,9 @@ impl<I: Iterator, F: FnMut((&I::Item)) -> bool> Iterator for Filter<I, F> {
     type Item = I::Item;
     fn next(self: &mut Self) -> I::Item? {
         while let Some(x) = self.it.next() {
-            k := &mut self.keep;
-            if k(&x) {
-                return Some(x);
+            (kept, item) := tested(&mut self.keep, x);
+            if kept {
+                return Some(item);
             }
         }
         return None;
@@ -470,12 +524,28 @@ impl<I: Iterator, F: FnMut((&I::Item)) -> bool> Iterator for Filter<I, F> {
         mut h = g;
         mut k = self.keep;
         return self.it.fold(init, |a: A, x: I::Item| -> A {
-            if k(&x) {
-                return h(a, x);
+            (kept, item) := tested(&mut k, x);
+            if kept {
+                return h(a, item);
             }
             return a;
         });
     }
+}
+// A filter's test of one item, from code generic over the item type `T`. The item is a parameter of
+// type `T` here, so `&x` is a `&T` - for `v.iter()`'s items a `&&T`, as the predicate takes - where
+// written on an item the adapter holds as its concrete type it would reborrow the reference to a
+// `&T`. It is handed back with the answer, so an owned item is not consumed.
+fn tested<b, T, K: FnMut((&T)) -> bool>(keep: (&b mut K), x: T) -> (bool, T) {
+    kept := keep(&x);
+    return (kept, x);
+}
+// One step of a filtered fold: the item goes on to `step` when `keep` accepts it.
+fn filter_step<b, d, T, A, K: FnMut((&T)) -> bool, H: FnMut(A, T) -> A>(keep: (&b mut K), step: (&d mut H), acc: A, x: T) -> A {
+    if keep(&x) {
+        return step(acc, x);
+    }
+    return acc;
 }
 // Each adapter's step is written twice - in its `Iterator` impl and in the inherent `next` a `for`
 // loop calls - so neither path forwards through the other: the native optimiser does not inline a
@@ -491,11 +561,64 @@ impl<T> VecIter<T> {
         }
         return Some(self.rev.pop()!);
     }
-    pub fn map<U, F: FnMut(T) -> U>(self: Self, f: F) -> Map<VecIter<T>, U, F> {
-        return Map { it: self, f: f };
+    pub fn map<V, G: FnMut(T) -> V>(self: Self, g: G) -> Map<VecIter<T>, V, G> {
+        return Map { it: self, f: g };
     }
-    pub fn filter<F: FnMut((&T)) -> bool>(self: Self, keep: F) -> Filter<VecIter<T>, F> {
+    pub fn filter<G: FnMut((&T)) -> bool>(self: Self, keep: G) -> Filter<VecIter<T>, G> {
         return Filter { it: self, keep: keep };
+    }
+    pub fn take(self: Self, n: u64) -> Take<VecIter<T>> {
+        return Take { it: self, left: n };
+    }
+    pub fn enumerate(self: Self) -> Enumerate<VecIter<T>> {
+        return Enumerate { it: self, at: 0 };
+    }
+    pub fn collect(self: Self) -> T[] {
+        mut src = self;
+        mut out: T[] = [];
+        while let Some(x) = src.next() {
+            out.push(x);
+        }
+        return out;
+    }
+    pub fn count(self: Self) -> u64 {
+        mut src = self;
+        mut n = 0;
+        while let Some(x) = src.next() {
+            n += 1;
+        }
+        return n;
+    }
+    pub fn any<G: FnMut(T) -> bool>(self: Self, test: G) -> bool {
+        mut src = self;
+        mut t = test;
+        while let Some(x) = src.next() {
+            if t(x) {
+                return true;
+            }
+        }
+        return false;
+    }
+    pub fn all<G: FnMut(T) -> bool>(self: Self, test: G) -> bool {
+        mut src = self;
+        mut t = test;
+        while let Some(x) = src.next() {
+            if !t(x) {
+                return false;
+            }
+        }
+        return true;
+    }
+    pub fn find<G: FnMut((&T)) -> bool>(self: Self, test: G) -> T? {
+        mut src = self;
+        mut t = test;
+        while let Some(x) = src.next() {
+            (hit, item) := tested(&mut t, x);
+            if hit {
+                return Some(item);
+            }
+        }
+        return None;
     }
 }
 // (An inherent block over an adapter states the same parameters and bounds as its Iterator impl.)
@@ -517,13 +640,67 @@ impl<I: Iterator, U, F: FnMut(I::Item) -> U> Map<I, U, F> {
     pub fn filter<G: FnMut((&U)) -> bool>(self: Self, keep: G) -> Filter<Map<I, U, F>, G> {
         return Filter { it: self, keep: keep };
     }
+    pub fn take(self: Self, n: u64) -> Take<Map<I, U, F>> {
+        return Take { it: self, left: n };
+    }
+    pub fn enumerate(self: Self) -> Enumerate<Map<I, U, F>> {
+        return Enumerate { it: self, at: 0 };
+    }
+    // Through the wrapped iterator's `fold`, so the chain stays its one loop.
+    pub fn collect(self: Self) -> U[] {
+        mut m = self.f;
+        mut out: U[] = [];
+        return self.it.fold(out, |acc: U[], x: I::Item| -> U[] {
+            mut o = acc;
+            o.push(m(x));
+            return o;
+        });
+    }
+    pub fn count(self: Self) -> u64 {
+        mut m = self.f;
+        return self.it.fold(0, |n: u64, x: I::Item| -> u64 {
+            y := m(x);
+            return n + 1;
+        });
+    }
+    pub fn any<G: FnMut(U) -> bool>(self: Self, test: G) -> bool {
+        mut src = self;
+        mut t = test;
+        while let Some(x) = src.next() {
+            if t(x) {
+                return true;
+            }
+        }
+        return false;
+    }
+    pub fn all<G: FnMut(U) -> bool>(self: Self, test: G) -> bool {
+        mut src = self;
+        mut t = test;
+        while let Some(x) = src.next() {
+            if !t(x) {
+                return false;
+            }
+        }
+        return true;
+    }
+    pub fn find<G: FnMut((&U)) -> bool>(self: Self, test: G) -> U? {
+        mut src = self;
+        mut t = test;
+        while let Some(x) = src.next() {
+            (hit, item) := tested(&mut t, x);
+            if hit {
+                return Some(item);
+            }
+        }
+        return None;
+    }
 }
 impl<I: Iterator, F: FnMut((&I::Item)) -> bool> Filter<I, F> {
     pub fn next(self: &mut Self) -> I::Item? {
         while let Some(x) = self.it.next() {
-            k := &mut self.keep;
-            if k(&x) {
-                return Some(x);
+            (kept, item) := tested(&mut self.keep, x);
+            if kept {
+                return Some(item);
             }
         }
         return None;
@@ -533,6 +710,237 @@ impl<I: Iterator, F: FnMut((&I::Item)) -> bool> Filter<I, F> {
     }
     pub fn filter<G: FnMut((&I::Item)) -> bool>(self: Self, keep: G) -> Filter<Filter<I, F>, G> {
         return Filter { it: self, keep: keep };
+    }
+    pub fn take(self: Self, n: u64) -> Take<Filter<I, F>> {
+        return Take { it: self, left: n };
+    }
+    pub fn enumerate(self: Self) -> Enumerate<Filter<I, F>> {
+        return Enumerate { it: self, at: 0 };
+    }
+    // A `next` loop: the items kept may be references (`v.iter()`'s), which a fold's callback could
+    // not store past the call it is handed each one for.
+    pub fn collect(self: Self) -> I::Item[] {
+        mut src = self;
+        mut out: I::Item[] = [];
+        while let Some(x) = src.next() {
+            out.push(x);
+        }
+        return out;
+    }
+    pub fn count(self: Self) -> u64 {
+        mut k = self.keep;
+        mut one = |n: u64, x: I::Item| -> u64 n + 1;
+        return self.it.fold(0, |n: u64, x: I::Item| -> u64 filter_step(&mut k, &mut one, n, x));
+    }
+    pub fn any<G: FnMut(I::Item) -> bool>(self: Self, test: G) -> bool {
+        mut src = self;
+        mut t = test;
+        while let Some(x) = src.next() {
+            if t(x) {
+                return true;
+            }
+        }
+        return false;
+    }
+    pub fn all<G: FnMut(I::Item) -> bool>(self: Self, test: G) -> bool {
+        mut src = self;
+        mut t = test;
+        while let Some(x) = src.next() {
+            if !t(x) {
+                return false;
+            }
+        }
+        return true;
+    }
+    pub fn find<G: FnMut((&I::Item)) -> bool>(self: Self, test: G) -> I::Item? {
+        mut src = self;
+        mut t = test;
+        while let Some(x) = src.next() {
+            (hit, item) := tested(&mut t, x);
+            if hit {
+                return Some(item);
+            }
+        }
+        return None;
+    }
+}
+// At most the first `n` items of the iterator it wraps.
+pub struct Take<I> { it: I, left: u64 }
+impl<I: Iterator> Iterator for Take<I> {
+    type Item = I::Item;
+    fn next(self: &mut Self) -> I::Item? {
+        if self.left == 0 {
+            return None;
+        }
+        self.left = self.left - 1;
+        return self.it.next();
+    }
+}
+impl<I: Iterator> Take<I> {
+    pub fn next(self: &mut Self) -> I::Item? {
+        if self.left == 0 {
+            return None;
+        }
+        self.left = self.left - 1;
+        return self.it.next();
+    }
+    pub fn map<V, G: FnMut(I::Item) -> V>(self: Self, g: G) -> Map<Take<I>, V, G> {
+        return Map { it: self, f: g };
+    }
+    pub fn filter<G: FnMut((&I::Item)) -> bool>(self: Self, keep: G) -> Filter<Take<I>, G> {
+        return Filter { it: self, keep: keep };
+    }
+    pub fn take(self: Self, n: u64) -> Take<Take<I>> {
+        return Take { it: self, left: n };
+    }
+    pub fn enumerate(self: Self) -> Enumerate<Take<I>> {
+        return Enumerate { it: self, at: 0 };
+    }
+    pub fn collect(self: Self) -> I::Item[] {
+        mut src = self;
+        mut out: I::Item[] = [];
+        while let Some(x) = src.next() {
+            out.push(x);
+        }
+        return out;
+    }
+    pub fn count(self: Self) -> u64 {
+        mut src = self;
+        mut n = 0;
+        while let Some(x) = src.next() {
+            n += 1;
+        }
+        return n;
+    }
+    pub fn any<G: FnMut(I::Item) -> bool>(self: Self, test: G) -> bool {
+        mut src = self;
+        mut t = test;
+        while let Some(x) = src.next() {
+            if t(x) {
+                return true;
+            }
+        }
+        return false;
+    }
+    pub fn all<G: FnMut(I::Item) -> bool>(self: Self, test: G) -> bool {
+        mut src = self;
+        mut t = test;
+        while let Some(x) = src.next() {
+            if !t(x) {
+                return false;
+            }
+        }
+        return true;
+    }
+    pub fn find<G: FnMut((&I::Item)) -> bool>(self: Self, test: G) -> I::Item? {
+        mut src = self;
+        mut t = test;
+        while let Some(x) = src.next() {
+            (hit, item) := tested(&mut t, x);
+            if hit {
+                return Some(item);
+            }
+        }
+        return None;
+    }
+}
+// Each item with its position, counting from 0.
+pub struct Enumerate<I> { it: I, at: u64 }
+impl<I: Iterator> Iterator for Enumerate<I> {
+    type Item = (u64, I::Item);
+    fn next(self: &mut Self) -> (u64, I::Item)? {
+        match self.it.next() {
+            Some(x) => {
+                i := self.at;
+                self.at = i + 1;
+                return Some((i, x));
+            },
+            None => {
+                return None;
+            }
+        }
+    }
+    fn fold<A, G: FnMut(A, (u64, I::Item)) -> A>(self: Self, init: A, g: G) -> A {
+        mut h = g;
+        mut n = self.at;
+        return self.it.fold(init, |a: A, x: I::Item| -> A {
+            i := n;
+            n = i + 1;
+            return h(a, (i, x));
+        });
+    }
+}
+impl<I: Iterator> Enumerate<I> {
+    pub fn next(self: &mut Self) -> (u64, I::Item)? {
+        match self.it.next() {
+            Some(x) => {
+                i := self.at;
+                self.at = i + 1;
+                return Some((i, x));
+            },
+            None => {
+                return None;
+            }
+        }
+    }
+    pub fn map<V, G: FnMut((u64, I::Item)) -> V>(self: Self, g: G) -> Map<Enumerate<I>, V, G> {
+        return Map { it: self, f: g };
+    }
+    pub fn filter<G: FnMut((&(u64, I::Item))) -> bool>(self: Self, keep: G) -> Filter<Enumerate<I>, G> {
+        return Filter { it: self, keep: keep };
+    }
+    pub fn take(self: Self, n: u64) -> Take<Enumerate<I>> {
+        return Take { it: self, left: n };
+    }
+    pub fn enumerate(self: Self) -> Enumerate<Enumerate<I>> {
+        return Enumerate { it: self, at: 0 };
+    }
+    pub fn collect(self: Self) -> (u64, I::Item)[] {
+        mut src = self;
+        mut out: (u64, I::Item)[] = [];
+        while let Some(x) = src.next() {
+            out.push(x);
+        }
+        return out;
+    }
+    pub fn count(self: Self) -> u64 {
+        mut src = self;
+        mut n = 0;
+        while let Some(x) = src.next() {
+            n += 1;
+        }
+        return n;
+    }
+    pub fn any<G: FnMut((u64, I::Item)) -> bool>(self: Self, test: G) -> bool {
+        mut src = self;
+        mut t = test;
+        while let Some(x) = src.next() {
+            if t(x) {
+                return true;
+            }
+        }
+        return false;
+    }
+    pub fn all<G: FnMut((u64, I::Item)) -> bool>(self: Self, test: G) -> bool {
+        mut src = self;
+        mut t = test;
+        while let Some(x) = src.next() {
+            if !t(x) {
+                return false;
+            }
+        }
+        return true;
+    }
+    pub fn find<G: FnMut((&(u64, I::Item))) -> bool>(self: Self, test: G) -> (u64, I::Item)? {
+        mut src = self;
+        mut t = test;
+        while let Some(x) = src.next() {
+            (hit, item) := tested(&mut t, x);
+            if hit {
+                return Some(item);
+            }
+        }
+        return None;
     }
 }
 // Combine every item of a typed iterator into one value, starting from `init`.

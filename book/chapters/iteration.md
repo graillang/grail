@@ -36,18 +36,29 @@ implement it for your own type and generic code takes `I: iter::Iterator` and na
 Each adapter is also a method, so a chain reads left to right:
 `iter::of(v).filter(|x| x > 1).map(|x| x * 2).collect()`; `count()` and
 `fold(init, f)` consume one.
-The closures passed to adapters are `FnMut`, so they may update their own captures. `refs(&v)`
-yields references into a vector you keep, so a loop or a chain such as `take` can use borrowed items
-without copying them; the vector stays borrowed while the chain or any item from it is in use.
-`filter` over reference items hands its predicate a reference to each item, as Rust does, so it
-takes `&&T` and reads through both with `**x` (or copies the inner reference out, `r := *x`); a
-comparison reads through both by itself, `filter(|x| x > 2)`:
+The closures passed to adapters are `FnMut`, so they may update their own captures.
+
+To iterate a vector you keep, ask it: `v.iter()` is a method of every vector, view (`&T[]`) and
+slice (`&[T]`), with no `use` line, and it yields references into it, as Rust's `iter()` does - `v`
+is only borrowed, so it is still usable afterwards, and it stays borrowed while the chain or any
+item from it is in use (pushing to `v` meanwhile is refused). Its chain is the typed one (`map`,
+`filter`, `take`, `enumerate`, `fold`, `collect`, `count`, `any`, `all`, `find`): each adapter is a
+type of its own, so `v.iter().filter(..).map(..).fold(..)` is one loop over the vector with every
+callback a direct call. `filter` over reference items hands its predicate a reference to each item,
+as Rust does, so it takes `&&T`: a comparison reads through both by itself (`filter(|x| x > 4)`),
+arithmetic needs `**x` (or the inner reference copied out, `r := *x`). `collect` after it is a vector
+of references, and after a `map` to values a vector of values:
 
 ```grl
-for x in iter::refs(&v).filter(|x| **x % 2 == 1) {
+for x in v.iter().filter(|x| **x % 2 == 1) {
     total = total + *x;
 }
+doubled := v.iter().filter(|x| x > 4).map(|x| *x * 2).collect();
 ```
+
+`iter::of(v)` (also `v.into_iter()`) is the consuming form: it moves the elements out, and `v` is
+gone. `refs(&v)` is the same borrowing walk as an erased `Iter<&T>`, for code that keeps an iterator
+in a field or needs `zip`, `skip` or `chain`.
 
 `map` from reference items to owned ones works too: `iter::refs(&v).map(|x: &u64| -> u64 *x * 2)`
 is an `Iter<u64>` that still reads `v`, so `v` stays borrowed until it is done - as in Rust, a

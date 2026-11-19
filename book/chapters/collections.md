@@ -40,12 +40,13 @@ out.
 
 A vector's operations are its own methods, and `vecs` is where the generic ones live: `map`,
 `filter`, `filter_map`, `flat_map`, `fold`, `reduce`, `for_each`, `any`, `all`, `count`, `find`,
-`position`, `get`, `first`, `last`, `iter`, `into_iter`, `sort`, `sort_by`, `sort_by_key`,
+`position`, `get`, `first`, `last`, `into_iter`, `sort`, `sort_by`, `sort_by_key`,
 `is_sorted`, `min`, `max`, `min_by_key`, `max_by_key`, `binary_search`, `insert_sorted`, `dedup`
 and, on a `u64[]`, `sum` - plus the built-in `push`, `pop`, `len`, `insert`, `remove`, `swap`,
 `reverse`, `truncate`, `clear`, `contains` and `is_empty`. Nothing aborts where `None` can answer:
 `get`, `first`, `last`, `min`, `max`, `min_by_key`, `max_by_key`, `find`, `position`, `reduce` and
-`binary_search` all answer `None` on an empty vector or a miss.
+`binary_search` all answer `None` on an empty vector or a miss. `iter` is the vector's own too, like
+`len`, and needs no `use` line: `v.iter()` borrows `v` and yields `&T` (see Iteration).
 
 Three asymmetries are deliberate rather than gaps, because the language's element rules are what
 they are:

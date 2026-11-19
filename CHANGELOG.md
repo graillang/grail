@@ -1,5 +1,17 @@
 ## Unreleased
 
+- **`v.iter()` is every vector's, view's and slice's own method, with no `use` line.** It borrows
+  `v` and yields `&T`, as Rust's `iter()` does, so `v` is still usable afterwards and stays borrowed
+  while the chain or an item from it lives (`iter::of(v)` and `v.into_iter()` remain the consuming
+  form). The chain is the typed one, now with `map`, `filter`, `take`, `enumerate`, `fold`,
+  `collect`, `count`, `any`, `all` and `find`: `v.iter().filter(|n| **n > 4).map(|n| *n * 2).collect()`.
+  The compiler brings in `iter` for a source that calls `.iter(`, and the per-module build orders it
+  first. Fixed on the way: `filter` straight over reference items (its fold and `next` were refused,
+  and an item it handed out had no tracked source), a generic record holding a `&[T]` built in a
+  generic function (a compiler crash), a slice copied out of a record field and looped over (it read
+  as empty: the copy's slot was written before its words), and a closure calling a captured `FnMut`
+  is itself `FnMut`. The cheatsheet shows `fn area(&self)`, `pool::split_mut(&mut data, n, f)` and one
+  `v.iter().filter(..).collect()` row.
 - **Library operations on an obvious receiver are methods.** `rc::downgrade(&r)` is `r.downgrade()`;
   an `arena::Arena<T>` has `a.insert(x)`, `a.get(&k)`, `a.get_mut(&k)`, `a.remove(&k)`, `a.len()` and
   `a.is_empty()`; a `thread::Thread<R>` has `t.join()`, `t.try_join()` and `t.detach()`; a
