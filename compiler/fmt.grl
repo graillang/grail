@@ -601,6 +601,191 @@ fn emit<a>(f: (&a mut F), i: u64, sp: u64) {
     f.lspace.push(sp);
 }
 // Context kinds: 1 block, 2 declaration (one item per line), 3 match, 4 inline literal, 5 paren, 6 bracket.
+// Whether the braces opening at `open` hold a `;` of their own (not one in a nested bracket).
+fn holds_statements<a>(f: (&a F), open: u64) -> bool {
+    n := f.kind.len();
+    mut depth = 0;
+    mut j = open + 1;
+    while j < n {
+        if f.kind[j] == 4 {
+            c := f.code[j];
+            if c == 40 || c == 91 || c == 123 {
+                depth += 1;
+            }
+            if c == 41 || c == 93 || c == 125 {
+                if depth == 0 {
+                    return false;
+                }
+                depth -= 1;
+            }
+            if (c == 59) && (depth == 0) {
+                return true;
+            }
+        }
+        j += 1;
+    }
+    return false;
+}
+// The `{` of a body whose head starts at `from` (a signature's parameters and result, a closure's
+// result type): the first `{` outside brackets, or the token count when a `;` or `}` comes first.
+fn body_open<a>(f: (&a F), from: u64) -> u64 {
+    n := f.kind.len();
+    mut depth = 0;
+    mut j = from;
+    while j < n {
+        if f.kind[j] == 4 {
+            c := f.code[j];
+            if c == 40 || c == 91 {
+                depth += 1;
+            }
+            if (c == 41 || c == 93) && (depth != 0) {
+                depth -= 1;
+            }
+            if depth == 0 {
+                if c == 123 {
+                    return j;
+                }
+                if c == 59 || c == 125 {
+                    return n;
+                }
+            }
+        }
+        j += 1;
+    }
+    return n;
+}
+// The token before `i` that is not a comment, or `i` when there is none.
+fn before_comments<a>(f: (&a F), i: u64) -> u64 {
+    mut j = i;
+    while j > 0 {
+        j -= 1;
+        if f.kind[j] != 5 {
+            return j;
+        }
+    }
+    return i;
+}
+// A body opening at `open` whose last statement is `return x;`: marks the `return` and the `;` in
+// `gone`, so the statement becomes the tail `x`. Left alone: a bare `return;` and `return ();` (a
+// unit body simply ends), and a value that is itself an `if`, `match`, `unsafe { }` or `{ }`, whose
+// tail form would return from each of its arms instead - the same result, compiled differently.
+fn final_return<a, b, d>(f: (&a F), s: &b [u8], open: u64, gone: (&d mut u64[])) {
+    n := f.kind.len();
+    mut depth = 0;
+    mut close = n;
+    mut j = open + 1;
+    mut ret = n;
+    mut semi = n;
+    while j < n {
+        k := f.kind[j];
+        c := f.code[j];
+        if k == 4 {
+            if c == 40 || c == 91 || c == 123 {
+                depth += 1;
+            }
+            if c == 41 || c == 93 || c == 125 {
+                if depth == 0 {
+                    close = j;
+                    break;
+                }
+                depth -= 1;
+            }
+            if (c == 59) && (depth == 0) {
+                if ret != n {
+                    semi = j;
+                }
+            }
+        }
+        if (depth == 0) && is(&f, view(s), j, view("return")) {
+            ret = j;
+            semi = n;
+        }
+        if (depth == 0) && (k == 4) && (c == 59) && (semi == n) {
+            ret = n;
+        }
+        j += 1;
+    }
+    if (close == n) || (ret == n) || (semi == n) {
+        return;
+    }
+    if before_comments(&f, close) != semi {
+        return;
+    }
+    first := ret + 1;
+    if first == semi {
+        return;
+    }
+    if punct(&f, first, 40) && (first + 2 == semi) && punct(&f, first + 1, 41) {
+        return;
+    }
+    if punct(&f, first, 123)
+        || is(&f, view(s), first, view("if"))
+        || is(&f, view(s), first, view("match"))
+        || is(&f, view(s), first, view("unsafe")) {
+        return;
+    }
+    mut g = &mut gone[ret];
+    exchange(g, 1);
+    mut h = &mut gone[semi];
+    exchange(h, 1);
+}
+// A function's or closure's final `return x;` is written as its tail expression `x` (a block's last
+// expression without `;` is its value). Only the body's own last statement: an early `return` stays.
+fn tail_returns<a, b>(f: (&a mut F), s: &b [u8]) {
+    n := f.kind.len();
+    mut gone = u64[];
+    for i in n {
+        gone.push(0);
+    }
+    for i in n {
+        mut open = n;
+        if is(&f, view(s), i, view("fn")) && (i + 1 < n) && (f.kind[i + 1] == 1) {
+            open = body_open(&f, i + 2);
+        } else if (punct(&f, i, 124) && (f.generic[i] == 3)) || (punct(&f, i, 274) && prefix_position(&f, view(s), i)) {
+            if (i + 1 < n) && punct(&f, i + 1, 123) {
+                open = i + 1;
+            } else if (i + 1 < n) && punct(&f, i + 1, 256) {
+                open = body_open(&f, i + 2);
+            }
+        }
+        if open < n {
+            final_return(&f, view(s), open, &mut gone);
+        }
+    }
+    mut kind = u64[];
+    mut start = u64[];
+    mut end = u64[];
+    mut nl = u64[];
+    mut code = u64[];
+    mut generic = u64[];
+    mut carry = 0;
+    for i in n {
+        if gone[i] != 0 {
+            // The line break before a removed `return` belongs to the value that now starts the line.
+            if is(&f, view(s), i, view("return")) {
+                carry = f.nl[i];
+            }
+            continue;
+        }
+        kind.push(f.kind[i]);
+        start.push(f.start[i]);
+        end.push(f.end[i]);
+        if carry != 0 {
+            nl.push(carry);
+            carry = 0;
+        } else {
+            nl.push(f.nl[i]);
+        }
+        code.push(f.code[i]);
+        generic.push(f.generic[i]);
+    }
+    exchange(&mut f.kind, kind);
+    exchange(&mut f.start, start);
+    exchange(&mut f.end, end);
+    exchange(&mut f.nl, nl);
+    exchange(&mut f.code, code);
+    exchange(&mut f.generic, generic);
+}
 fn layout<a, b>(f: (&a mut F), s: &b [u8]) {
     n := f.kind.len();
     mut stack = u64[];
@@ -746,6 +931,11 @@ fn layout<a, b>(f: (&a mut F), s: &b [u8]) {
                         }
                     }
                 }
+            }
+            // A brace that holds statements is a block wherever it is written - a closure's body in an
+            // argument, an arm of an `if` expression, a block expression - so it gets a line each.
+            if (kind == 4) && holds_statements(&f, i) {
+                kind = 1;
             }
             stack.push(kind);
             if kind != 4 {
@@ -1211,6 +1401,7 @@ pub fn format<a>(source: &a [u8]) -> u8[] {
     scan(&mut f, view(source));
     mark_generics(&mut f, view(source));
     mark_pipes(&mut f, view(source));
+    tail_returns(&mut f, view(source));
     layout(&mut f, view(source));
     count := f.lfirst.len();
     for i in count {
