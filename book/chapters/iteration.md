@@ -34,13 +34,14 @@ The `iter` module chains work lazily over an `Iter<T>` - a closure that yields t
 `Iter<T>` is itself an iterator by the protocol above, so any adapter chain can sit in a `for`. `iter::Iterator` is the interface behind them (`type Item; fn next(self: &mut Self) -> Self::Item?`):
 implement it for your own type and generic code takes `I: iter::Iterator` and names `I::Item`.
 Each adapter is also a method, so a chain reads left to right:
-`iter::of(v).filter(|x: &u64| -> bool *x > 1).map(|x: u64| -> u64 x * 2).collect()`; `count()` and
+`iter::of(v).filter(|x| x > 1).map(|x| x * 2).collect()`; `count()` and
 `fold(init, f)` consume one.
 The closures passed to adapters are `FnMut`, so they may update their own captures. `refs(&v)`
 yields references into a vector you keep, so a loop or a chain such as `take` can use borrowed items
 without copying them; the vector stays borrowed while the chain or any item from it is in use.
 `filter` over reference items hands its predicate a reference to each item, as Rust does, so it
-takes `&&T` and reads through both with `**x` (or copies the inner reference out, `r := *x`):
+takes `&&T` and reads through both with `**x` (or copies the inner reference out, `r := *x`); a
+comparison reads through both by itself, `filter(|x| x > 2)`:
 
 ```grl
 for x in iter::refs(&v).filter(|x| **x % 2 == 1) {

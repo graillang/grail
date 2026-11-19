@@ -1,5 +1,11 @@
 ## Unreleased
 
+- **Comparisons see through references to plain values.** `==`, `!=`, `<`, `<=`, `>` and `>=` accept
+  an operand that is a reference, at any depth (`&T`, `&&T`, `&mut T`), to an integer, float, bool or
+  char and compare the value behind it, on either side: `iter::of(v).filter(|n| n > 4)`, `4 < n`,
+  `a == b` with two `&u64`. Rust needs `**n` or `|&n|` there. Arithmetic does not read through a
+  reference: `n + 1` stays a type mismatch, now with a help line naming `*n`. Records and vectors
+  still compare as values only.
 - **The Performance chapter reports its numbers plainly.** The rebuild with nothing changed is no
   longer measured or charted: on a one-file project every tool answers it in milliseconds, so it
   timed process start-up, and its ratio (about 44x) led the summary chart. The charts state a ratio
