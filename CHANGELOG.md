@@ -20,6 +20,15 @@
   rule can no longer silently differ. The builder is gated twice: as the engine runs it (the washes
   carve the landform, no cell reaches the cap) and with the wash thresholds out of reach (the tops
   reach the caprock, 74 cap cells), which exercises the cap branch too. 36 of 36 lines.
+- **The room reverb node and the spatial voices' send bus land over the audio shim.** audio.cpp's
+  `RoomNode` (the `ab::audio::RoomReverb` behind a generation/decay pair of atomics, continuous
+  processing) is hosted by the shim, attached to the hearing path with its bus at zero the way
+  `Impl()` builds it; every spatial voice's second splitter bus feeds it (`Impl::start`'s
+  `room_ready && channels == 2` rule), and `platform_audio.grl` exposes `room_attach`/`room_set`/
+  `room_volume`. The parity grows to 99/99 lines: a voice's send rings the room for four blocks,
+  then a decay change and a generation bump clear it for two more.
+
+
 - **The soundscape bed and the ambient-emitter synth run through the audio shim.** `platform_audio.grl`
   gains `bed_attach`/`ambience` (audio.cpp's 15-slot input packing) and `emitter_start`/`emitter_set`/
   `emitter_render`; the shim hosts audio.cpp's `SoundscapeNode` (a continuous node on the hearing
