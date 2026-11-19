@@ -422,6 +422,17 @@
   `abundance/tests/parity/hud_compass.cpp` compiles the engine's hud_compass.cpp (with
   downed_flare.cpp and localization.cpp) and prints 2559 values over eight view fixtures and five
   layout styles; `abundance/tests/hud_compass_test.grl` reproduces every one.
+- **Content QA runs in Grail over a material package.** `abundance/src/content_qa.grl` ports
+  `engine/materials/content_qa/content_check.cpp`'s texture side: the classification and its albedo/roughness
+  envelopes, the `.abmat` reader, the texture statistics (the resident tail mip's colour, luminance percentiles, HSV,
+  opacity coverage, a normal map's spread and integrability, ORM means) and the findings with the engine's wording and
+  impact weights - `asset.unreadable`, `material.fallback`, `texture.semantic`, `normal.flat`, `normal.bias`,
+  `normal.inverted_green`, `roughness.range`, `roughness.flat`, `metal.natural`, `licence.missing`, `albedo.range`,
+  `albedo.highlights`, `albedo.neon` and `albedo.hue`. `abundance/src/bc_decode.grl` decodes BC4 and BC5 for it.
+  `abundance/tests/qa_test.grl` matches all 44 lines the engine's own checker prints over nine packages written by
+  `abundance/tests/parity/qa.cpp`. BC7/BC6H maps report `no CPU decoder`, and the mesh, material-set and licence-scan
+  checks remain in the C++ checker.
+
 - **The book's sidebar drops its "Find a topic" subtitle;** the search box (labelled for screen readers) sits under the title.
 - **The languages overview chart reads plainly.** Its bars start at 1× (the fastest language's time)
   on one logarithmic scale shared by the release and development groups, each group lists the
