@@ -1,5 +1,11 @@
 ## Unreleased
 
+- **The landform composition plan is ported bit for bit.** `abundance/src/worldgen_landform.grl`
+  carries `landform_plan.cpp`: the family/preset tables, warped-ellipse regions, the ranges' real
+  footprint with its chamfer distance, the priority placer (candidate sites, fit tests, province
+  affinity, valley score, land budget), the gate rasters, lake mask, relief scale, owner and
+  `claim_unreserved`. 552 values over four plans match the worldgen library.
+
 - **Abundance: the feature composition contract is ported and gated.** `src/feature_composition.grl`
   carries `apply_feature_heights` (bounded add, then carve toward a target, then raise toward a
   target, then the world's elevation clamp) and `compose_feature_layers` (the higher weight wins and
