@@ -1,5 +1,11 @@
 ## Unreleased
 
+- **Testing an optional against `None` narrows it.** Where `a != None` (or the `else` of
+  `a == None`, or the rest of a block after `if a == None { return ...; }`) proves it present, `a` is
+  its value, with no unwrapping: `if target == None { return 0; } return target.hp;`. It applies to
+  a binding that is not `mut` holding an optional of a value that owns nothing (numbers, bools,
+  references); the narrowed name carries the optional's borrows, and the optional is left as it was.
+  An owned optional is still taken apart with `if let Some(s) = s`.
 - **Block comments, and they nest.** `/* ... */` may span lines or sit inside one, and each `/*`
   inside a block comment needs its own `*/`, so code that already holds a comment can be commented
   out whole. An unclosed one is reported at its opening `/*`. `grail fmt` keeps block comments where

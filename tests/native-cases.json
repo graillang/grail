@@ -20082,5 +20082,24 @@
     "reject": true,
     "diagnostic": "unclosed block comment",
     "note": "An unclosed block comment is reported at its opening `/*`; the inner `*/` closes only the inner one."
+  },
+  {
+    "name": "optional-narrowing-by-test",
+    "source": "struct Entity { id: u64, hp: u64 }\nfn show(a: (&Entity)?) -> u64 {\n    if a != None {\n        return a.id + a.hp;\n    }\n    return 0;\n}\nfn guard(a: (&Entity)?) -> u64 {\n    if a == None { return 99; }\n    b := a;\n    return a.id + b.hp;\n}\nfn both(a: u64?) -> u64 {\n    if a == None { return 1; } else { return a * 10; }\n}\nfn main() {\n    e := Entity { id: 7, hp: 3 };\n    println(\"{} {}\", show(Some(&e)), show(None));\n    println(\"{} {}\", guard(Some(&e)), guard(None));\n    println(\"{} {}\", both(Some(4)), both(None));\n    x: u64? := Some(5);\n    if x != None { println(\"x is {}\", x); }\n    println(\"still an optional: {}\", x != None);\n}\n",
+    "stdout": "10 0\n10 99\n40 1\nx is 5\nstill an optional: true\n",
+    "note": "An optional of a value that owns nothing, bound without mut, is its value where a test against None proves it present: inside `!=`, in the else of `==`, and after a guard that leaves. The optional itself is untouched."
+  },
+  {
+    "name": "optional-narrowing-keeps-the-borrow",
+    "source": "struct Entity { id: u64, hp: u64 }\nfn main() {\n    mut e = Entity { id: 7, hp: 3 };\n    a := Some(&e);\n    if a != None {\n        e.hp = 1;\n        println(\"{}\", a.id);\n    }\n}\n",
+    "reject": true,
+    "diagnostic": "conflicts with live borrow",
+    "note": "The narrowed name carries the optional's borrow: writing what it borrows while it is still used is refused."
+  },
+  {
+    "name": "optional-narrowing-not-for-owned-or-mut",
+    "source": "fn f(a: string?) -> u64 {\n    if a != None { return a.len(); }\n    return 0;\n}\nfn main() { println(\"{}\", f(Some(\"hi\".copy()))); }\n",
+    "reject": true,
+    "note": "An optional that owns its value is not narrowed (that would copy an owner); `if let Some(a) = a` takes it apart."
   }
 ]

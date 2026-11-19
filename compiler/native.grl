@@ -52668,6 +52668,127 @@ fn write_statement<a>(c: (&a mut C)) -> unit {
     cleanup(&mut c, temps);
     return ();
 }
+// The test optional_narrow takes: `name != None` or `name == None` and then the block, where `name`
+// is a binding that is not `mut` and holds an optional of a value that owns nothing - a number, a
+// bool, a reference. Anything else is an ordinary comparison.
+fn narrowable<a>(c: (&a mut C)) -> bool {
+    p := c.pos;
+    if kind_at(&mut c, p) != 1 {
+        return false;
+    }
+    if !(is_at(&mut c, p + 1, view("!=")) || is_at(&mut c, p + 1, view("=="))) {
+        return false;
+    }
+    if !is_at(&mut c, p + 2, view("None")) || !is_at(&mut c, p + 3, view("{")) {
+        return false;
+    }
+    name := tok_text(&mut c, p);
+    l := find_local(&mut c, view(name));
+    if l == 0 {
+        return false;
+    }
+    mut local = &c.locals[l - 1];
+    if local.mutable != 0 {
+        return false;
+    }
+    ty := local.ty;
+    if !is_option_storage(&mut c, ty) {
+        return false;
+    }
+    d := ty_arg(&mut c, ty);
+    pty := field_type(&mut c, ty, find_field(&mut c, d, view("Some")));
+    return !needs_drop(&mut c, pty);
+}
+// Narrowing an optional by testing it against `None`, without taking it apart: where the test proved
+// it present, its name is its value - a copy, since the value owns nothing (narrowable), carrying the
+// optional's borrows, as `if let Some(name) = name` would bind it, but leaving the optional itself
+// as it was.
+//   if a != None { a.x } else { .. }    `a` is the value in the first block
+//   if a == None { .. } else { a.x }    and in the `else`
+//   if a == None { return 0; }  a.x     a guard that leaves: the value for the rest of the block
+fn optional_narrow<a>(c: (&a mut C)) -> unit {
+    name := ident(&mut c);
+    present := eat(&mut c, view("!="));
+    if !present {
+        expect(&mut c, view("=="));
+    }
+    expect(&mut c, view("None"));
+    l := find_local(&mut c, view(name));
+    xty := local_ty(&mut c, l - 1);
+    xt := local_id(&mut c, l - 1);
+    d := ty_arg(&mut c, xty);
+    k := find_field(&mut c, d, view("Some"));
+    pty := field_type(&mut c, xty, k);
+    tag := rec_load(&mut c, xt, 0, 0);
+    before := ownership::snapshot(&c.check);
+    other := label(&mut c);
+    end := label(&mut c);
+    get(&mut c, tag, view("%rax"));
+    o(&mut c, view("cmpq $"));
+    on(&mut c, k);
+    o(&mut c, view(",%rax\n"));
+    // The first block runs where the test holds: `!=` jumps away when the tag is not Some, `==` when
+    // it is.
+    if present {
+        jump(&mut c, view("jne"), other);
+    } else {
+        jump(&mut c, view("je"), other);
+    }
+    mark := c.locals.len();
+    exchange(&mut c.terminated, 0);
+    if present {
+        narrow_bind(&mut c, name, xt, xty, pty);
+    }
+    block(&mut c);
+    pop_locals(&mut c, mark);
+    yes := ownership::snapshot(&c.check);
+    yt := c.terminated;
+    jump(&mut c, view("jmp"), end);
+    mark(&mut c, other);
+    ownership::restore(&mut c.check, &before);
+    exchange(&mut c.terminated, 0);
+    had_else := eat(&mut c, view("else"));
+    if had_else {
+        else_mark := c.locals.len();
+        if !present {
+            narrow_bind(&mut c, name, xt, xty, pty);
+        }
+        if is(&mut c, view("if")) {
+            statement(&mut c);
+        } else {
+            block(&mut c);
+        }
+        pop_locals(&mut c, else_mark);
+    }
+    nt := c.terminated;
+    if yt == 0 {
+        if nt != 0 {
+            ownership::restore(&mut c.check, &yes);
+        } else {
+            ownership::merge(&mut c.check, &yes);
+        }
+    }
+    exchange(&mut c.terminated, yt & nt);
+    mark(&mut c, end);
+    // `if a == None { <leaves> }` with no `else`: only the present optional reaches here, so the rest
+    // of the enclosing block sees `a` as its value (the binding lasts until that block closes).
+    if !present && !had_else && (yt != 0) {
+        narrow_bind(&mut c, name, xt, xty, pty);
+    }
+    return ();
+}
+// Binds `name` to the payload of the optional `xt`, known to be Some: a copy that carries the
+// optional's borrows (transfer_bonds adds them to the copy and leaves them on the optional).
+fn narrow_bind<a, b>(c: (&a mut C), name: &b [u8], xt: u64, xty: u64, pty: u64) -> unit {
+    payload := payload_load(&mut c, xt, xty, pty);
+    own(&mut c, payload, pty);
+    if contains_borrow(&mut c, pty, 0) {
+        transfer_bonds(&mut c, place_of(&mut c, xt), place_of(&mut c, payload));
+    }
+    stored_source(&mut c, payload, pty);
+    bind(&mut c, copy_bytes(name), pty, payload, 0);
+    return ();
+}
 // if let Variant(binding) = value { ... } else { ... }: consumes value like match; the else
 // branch drops it (so a different variant's payload is cleaned up).
 fn if_let<a>(c: (&a mut C)) -> unit {
@@ -54675,6 +54796,10 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
     if eat(&mut c, view("if")) {
         if eat(&mut c, view("let")) {
             if_let(&mut c);
+            return ();
+        }
+        if narrowable(&mut c) {
+            optional_narrow(&mut c);
             return ();
         }
         tests := c.resources.len();
