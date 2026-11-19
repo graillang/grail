@@ -1,5 +1,14 @@
 ## Unreleased
 
+- **`*p` reads and writes through raw pointers.** Inside `unsafe`, `*p` is `p.read()` and `*p = v` is
+  `p.write(v)` (it needs a `*mut T`); `*p += v` and the other compound assignments read, combine and
+  write, and `**pp` / `**pp = v` go through a pointer to a pointer. The contract is `read`/`write`'s:
+  reading an owned value duplicates ownership, and writing moves `v` in without dropping the old
+  value. Outside `unsafe` both are refused exactly as `p.read()` and `p.write(v)` are, and the method
+  forms stay. `*p = v` types `v` as the pointee, as `*r = v` does (a literal takes the pointee's
+  width, a mismatch is refused); `p.write(v)` keeps storing its operand as it is. `grail fmt` keeps
+  prefix `**` and `&&` and a `*` after `mut` together (`**r`, `&&u64`, `*mut *mut T`) instead of
+  spacing them as binary operators. Book: the cheatsheet row and the raw-pointer section use `*p`.
 - **Implicit returns: a block's last expression, written without `;`, is its value** (Rust's rule).
   `fn f(a: u64) -> u64 { a }` returns `a`, compiled exactly as `return a;` is (the value moves out,
   the body's locals drop). It holds for closure blocks (`|x: u64| { y := x * 2; y + 1 }`, whose

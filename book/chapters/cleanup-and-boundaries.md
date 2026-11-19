@@ -13,10 +13,10 @@ fn main() {
     mut x: u64 = 41;
     unsafe {
         p := ptr_of(&mut x);     // *mut u64: the address a reference already carries
-        p.write(p.read() + 1);
+        *p += 1;
         q := alloc(u64, 4);      // *mut u64 over four zeroed elements
-        q.add(1).write(9);       // steps by the element width
-        println(q.add(1).read());
+        *q.add(1) = 9;           // steps by the element width
+        println(*q.add(1));
         free(q);
     }
     println(x);                  // 42
@@ -29,14 +29,18 @@ fn main() {
 | `alloc(T, n)` | `*mut T` over `n` zeroed elements; `free(p)` releases it |
 | `p.addr()` / `ptr_from_addr(T, a)` | the address as a `u64`, and a `*mut T` at one |
 | `p.add(n)` / `p.sub(n)` | step by the element width: the natural width of a sized integer, f32 and f64, one word for everything else |
-| `p.read()` / `p.write(v)` | load and store at that width; `write` needs `*mut T` |
+| `*p` / `*p = v` | load and store at that width; storing needs `*mut T`, and `*p += v` (any `op=`) is both |
+| `p.read()` / `p.write(v)` | the same load and store, spelled as methods |
 | `p.is_null()` / `p.cast(U)` | the null pointer, and the same address as `*U` |
 
-`p.read()` on an owned value duplicates ownership and `p.write(v)` moves `v` in without dropping
-what was there - the same contract as Rust's `ptr::read` and `ptr::write`. The compiler enforces that
-contract in both directions: the value `read` hands out is an owner (so it can be dropped or moved
-on with the ordinary rules), and the operand of `write` is consumed (so an owned local written into a
-block is not also dropped where it came from). A pointer also pins what
+`*p` is `p.read()` and `*p = v` is `p.write(v)`; `*p.add(1)` is `*(p.add(1))`, as for references, and
+`**pp` reads through a pointer to a pointer. Reading an owned value duplicates ownership and writing
+moves `v` in without dropping what was there - the same contract as Rust's `ptr::read` and
+`ptr::write`, and unlike `*r = v` through a reference, which drops the old value. The compiler
+enforces that contract in both directions: the value `*p` hands out is an owner (so it can be
+dropped or moved on with the ordinary rules), and the operand of `*p = v` is consumed (so an owned
+local written into a block is not also dropped where it came from). `*p += v` reads, combines and
+writes, so it is for plain values. A pointer also pins what
 it names: a pointer made from a reference keeps that reference's loan for the rest of the function,
 so the storage cannot be moved or freed underneath it. A record holding a raw pointer is
 thread-affine, so it cannot cross to another thread.
@@ -65,8 +69,8 @@ down, so it needs no inner `unsafe` block, and every call from safe code must be
 
 ```grl
 unsafe fn bump(p: *mut u64) -> u64 {
-    q := p.read() + 1;      // no inner `unsafe` needed
-    p.write(q);
+    q := *p + 1;            // no inner `unsafe` needed
+    *p = q;
     return q;
 }
 
