@@ -4730,6 +4730,19 @@
     "stdout": "json ok: 99 accepted, 212 rejected, 612 floats, 60 checks, 2000 float round trips\n"
   },
   {
+    "name": "json-duplicate-key-last-wins-no-leak",
+    "source": "use json;\nfn opts() -> json::Options {\n    mut o = json::default_options();\n    o.allow_duplicate_keys = true;\n    return o;\n}\nfn main() {\n    v := json::parse_with(view(\"{\\\"a\\\":\\\"1\\\",\\\"a\\\":{\\\"d\\\":3},\\\"b\\\":[1,{\\\"c\\\":\\\"x\\\"}],\\\"a\\\":[2]}\"), opts())!;\n    println(\"{}\", v.show());\n    println(\"{}\", v.len());\n}\n",
+    "modules": [
+      "lib/json.grl",
+      "lib/collections.grl",
+      "lib/hashmap.grl",
+      "lib/hash.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "{\"a\":[2],\"b\":[1,{\"c\":\"x\"}]}\n2\n",
+    "note": "`allow_duplicate_keys` keeps the first key's position and the last value; the replaced value is dropped by the store (`add_member`) instead of leaked through an `exchange` of a record field, which left a framed value's storage live and aborted the program in `rt_leak_exit` (exit 134). Both the scan and the map index paths call `add_member`"
+  },
+  {
     "name": "json-reject-drop-with-member-view",
     "source": "use json;fn main(){v:=json::parse(\"[1]\")!;x:=v.at(0)!;drop(v);println(x.is_null());}",
     "modules": [

@@ -80,6 +80,12 @@
   so it - and a record holding one - holds no hidden borrow; a call-scoped `Fn(..)` still may, and the
   `closure-hidden-loan-*` refusals are unchanged. Case
   `closure-owned-field-reference-param-through-lock-with`.
+- Fixed: lib/json's duplicate-key path no longer leaks, so a parse with `allow_duplicate_keys` no longer
+  aborts in `rt_leak_exit` (exit 134) - the world lane's localization catalog needs the flag, because
+  the engine accepts repeated keys with the last value winning. `add_member` replaced the value of a
+  duplicate through `exchange(&mut slot.value, member.value)`, which leaves a framed value's storage
+  live; a plain store drops the replaced value and the duplicate's own key with the member. Case
+  `json-duplicate-key-last-wins-no-leak` (both the scan and the map-index paths were checked).
 - **The Jolt surface closes with the overlap query.** `gr_jolt_overlap_capsule` is one `CollideShape`
   of the same capsule the cast sweeps, stopped at the first hit: `abundance/src/jolt.grl` now answers
   the core's `overlap` contract (a boolean, with `invalid_request` for a capsule shorter than its own
