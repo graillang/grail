@@ -305,7 +305,11 @@ function runCase(test, position, context) {
       // `driverFile` names the entry explicitly, which is the shape that resolves `use` through the
       // module roots the command line gives (`--module-root DIR`), rather than through `src/`.
       const entryArgs = test.driverFile ? [test.driverFile] : [];
-      const built = execute(compiler, ['build', '--target', target, ...buildFlags, ...entryArgs, '-o', output], target, { cwd: project, env: { ...process.env, GRAIL_HOME: root } });
+      // A build store of the case's own (GRAIL_CACHE_DIR): with GRAIL_HOME set the store would be the
+      // worktree's, shared by every case and every leg, so a module another build had stored was
+      // replayed instead of compiled - no `.s` - and what the checks below read depended on what ran
+      // before.
+      const built = execute(compiler, ['build', '--target', target, ...buildFlags, ...entryArgs, '-o', output], target, { cwd: project, env: { ...process.env, GRAIL_HOME: root, GRAIL_CACHE_DIR: join(directory, 'store') } });
       assert.equal(built.status, 0, `${test.name}: grail build failed\n${built.stdout}${built.stderr}`);
       assert.equal(built.signal, null, `${test.name}: grail build crashed (${built.signal})`);
       // One run per module, one interface per module: runtime is the trusted base and has none. A

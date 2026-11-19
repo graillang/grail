@@ -675,7 +675,10 @@ export function compileProgram(compiler, inputs, directory, { target = hostTarge
   // The same stamp also names a shared store, so twenty worktrees with identical inputs keep one copy
   // of an artefact instead of twenty: /home filled to 100 % twice while the swarm was running.
   const shared = join(process.env.GRAIL_BUILD_CACHE ?? join(process.env.HOME ?? '/tmp', '.cache/grail-builds'), stamp, name);
-  if (process.env.GRAIL_NO_BUILD_CACHE !== '1') {
+  // A caller that asks for the compiler's own output (`output`) is measuring the compiler - the
+  // unit-identity check compiles the same program twice, an empty unit store then a warm one, and
+  // counts what each run reports - so it gets a real compile, never a stored artefact.
+  if ((process.env.GRAIL_NO_BUILD_CACHE !== '1') && !output) {
     try {
       if (readFileSync(stampFile, 'utf8') === stamp && statSync(executable).size > 0) {
         if (output) output.push('');
