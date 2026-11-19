@@ -282,6 +282,26 @@ const fixtures = [
     ],
   },
   {
+    where: 'a block comment inside a line, and code after it (synthetic)',
+    line: 'fn add(a: u64, /* the left side */ b: u64) -> u64 {',
+    expect: [
+      ['the left side', 'comment.block.grail'],
+    ],
+    absent: [
+      ['b: u64', 'comment.block.grail'],
+    ],
+  },
+  {
+    where: 'a block comment that opens on this line and closes on a later one (synthetic)',
+    line: '    /* commented out: fn helper() {',
+    expect: [
+      ['fn helper', 'comment.block.grail'],
+    ],
+    absent: [
+      ['fn', 'storage.type.function.grail'],
+    ],
+  },
+  {
     where: 'a line comment that mentions code (synthetic)',
     line: '// fn add is retired: 0xFF',
     expect: [
