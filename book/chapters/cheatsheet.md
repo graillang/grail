@@ -20,7 +20,7 @@ is checked to agree.
 | `(a, b)`, `let (q, r) = ...;` | `(a, b)`, `(q, r) := ...;` | |
 | `\|n\| n > 4` | `\|n\| n > 4` | Types are inferred from the call; comparisons see through references. |
 | `F: Fn() -> R + Send + 'static` | `f: FnMut<Send, Owned>() -> R` | Bounds on the closure type: `Send`, `Share` (Rust's `Sync`), `Owned` (no borrows). A bare `Fn(..)` is neither `Send` nor `Share`. |
-| `data.par_chunks_mut(n).for_each(f)` (rayon) | `data.par_chunks_mut(n, f)` | Pieces of at most `n` elements; the split never depends on the number of cores. `pool::split`, `range` and `reduce` are the owned, index and folding forms. |
+| `data.par_chunks_mut(n).for_each(f)` (rayon) | `data.par_chunks_mut(n, f)` | Pieces of at most `n` elements; the split never depends on the number of cores. `v.into_par_chunks(n, f)`, `pool::range` and `data.par_chunks_reduce(..)` are the owned, index and folding forms. |
 | `rayon::join(a, b)` | `pool::join(a, b)` | `a` may run on another worker; `b` runs here. |
 | `v.iter().filter(..).collect()` | `v.iter().filter(..).collect()` | Borrows `v` and yields `&T`, lazily, in both; `iter::of(v)` (`v.into_iter()`) moves the elements out. |
 | `Rc::new(v)`, `Rc::clone(&r)` | `rc::new(v)`, `r.clone()` | `Arc` is the same shape. |
