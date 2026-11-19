@@ -70,8 +70,10 @@ const original = join(work, 'original.s'), reformatted = join(work, 'reformatted
 // which makes `lib/` a module root by location, and the formatted copies live somewhere else - so
 // without naming it here the two runs would compile two different programs (`use` resolution,
 // docs/design/module-resolution.md).
-command([grail, '--module-root', join(root, 'lib'), original, ...compilerSources]);
-command([grail, '--module-root', join(root, 'lib'), reformatted, ...compilerSources.map(f => formatted.get(f))]);
+// Without debug information: its line table records source lines and file names, which formatting
+// and the copies' paths change by design, as the runtime-error call-site table below does.
+command([grail, '--no-debug-info', '--module-root', join(root, 'lib'), original, ...compilerSources]);
+command([grail, '--no-debug-info', '--module-root', join(root, 'lib'), reformatted, ...compilerSources.map(f => formatted.get(f))]);
 // The runtime-error call-site table records source lines and file names, which formatting and the
 // copies' paths change by design; everything else must be byte-identical.
 const withoutSites = (text) => text.replace(/\n\.section grail_sites,"a"\n[\s\S]*?\n\.text\n/g, '\n');

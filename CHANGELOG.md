@@ -48,6 +48,28 @@
   place and gave up; it now takes `ABUNDANCE_ENGINE_BUILD`, then the reference root's build, then the
   checkout's. `--only=bc_ispc` runs and matches against the pinned reference instead of reporting
   "skipped", so the encode path is gated rather than assumed.
+- Fixed: LLVM builds for AArch64 and RISC-V passed the wrong values to functions of more than six
+  argument words when the call crossed between a lifted body and a native one, including functions
+  whose big result adds a hidden destination word. The thunks between the two conventions assumed
+  every argument was in x0..x5 (a0..a5), which stopped being true when call ABI S3 (fc27e6e2) moved
+  words past the sixth onto the stack. The word machine passes word 6 + k at 8k(sp), while LLVM
+  passes words 6 and 7 in x6/x7 (a6/a7) and the rest on the stack. Native code calling a lifted body
+  lost its seventh and later words (`more-than-six-parameters` printed 3015; `unboxed-big-results`
+  and `refinement-wrapper-dest-result` crashed). The thunks now move these words in both directions,
+  sized by the body's parameter count or the callee's signature. Covered by the new
+  `many-argument-words-cross-convention` case: 10- and 12-word calls in both directions.
+
+- **`--verify-facts` checks the loop-head hoist of loop-stable vectors.** The lifter now keeps
+  FACT_LOOP_STABLE regions under --verify-facts (still not under --range-facts). The head checks the
+  header it reads, and every fact-carrying access in the region, typed-sibling calls included,
+  checks that the header still holds that `data`/`len`. So a loop that rewrites a header it was
+  claimed stable for aborts in the vf legs, where it used to go unchecked. Fixed with it: two
+  test-facts checks. The F1 element-address check had not fired since stale fields stopped being
+  re-read after calls, because all of `f1_header.grl`'s accesses followed a call; the fixture gains a
+  loop-stable loop. The range check counted only untyped `rt_atb` calls, missing the typed sibling
+  the default build now emits in such loops. Release codegen is unchanged (sort 4.54 G
+  instructions).
+
 - **The landing service removes each leg's build cache when the leg ends.** Every gate leg and retry
   had a fresh `GRAIL_CACHE_DIR` in /tmp that nothing removed - about 17k files each - and /tmp (a
   tmpfs) ran out of inodes after two days of landings.
@@ -450,6 +472,99 @@
   block byte with the engine's committed BC7, BC7-sRGB and BC6H blocks (48 reference lines); it is
   skipped by name on a host without Abundance's materials build tree.
 
+- **Methods on every built-in type, and integers have Rust's everyday ones.** Every program now gets
+  `lib/scalar.grl` beside `core`: each integer type has `min`, `max`, `clamp`, `pow`, `abs`/`signum`
+  (signed), `checked_add`/`_sub`/`_mul`/`_div` (`None` on overflow), `saturating_add`/`_sub`,
+  `wrapping_add`/`_sub`/`_mul`, `count_ones`, `leading_zeros`, `trailing_zeros` and `to_string`;
+  `char` gains `to_digit`, `is_digit`, the `is_ascii_*` family, `to_ascii_uppercase`/`_lowercase`,
+  `eq_ignore_ascii_case`, `is_control` and `to_string`; floats have `x.to_bits()` and
+  `f64::from_bits(b)` / `f32::from_bits(b)`. `use math;` gives `f64` and `f32` their functions as
+  methods - `x.sin()`, `y.atan2(x)`, `x.powi(3)`, `x.hypot(y)`, `x.fmod(y)` and the rest - and the free
+  `math::sin`... forms are gone, as are `math::sqrt`/`abs`/`floor`/`ceil`/`round` (the built-in
+  methods) and `strings::from_u64`/`from_i64` (`x.to_string()`). The compiler lets a
+  standard-library impl give methods to any built-in receiver (every integer, `char`, `*T`, `T?`,
+  tuples, `Mutex<T>`; `impl u64` used to be refused), refuses one that would shadow a built-in
+  method, and calls a scalar's associated function through the type's name. **Breaking:** an
+  inherent impl on a built-in type is now the standard library's alone; a program writes an
+  interface instead (`impl Twice for u64`), whose methods on a built-in receiver resolve only where
+  the interface is in scope - declared in the module, or its module named in a `use` line - with an
+  ambiguity error when two such interfaces define the name.
+- **Faster `sort` in both builds: a merge loop's bounds checks and header loads leave the loop.**
+  Release (`--release --overflow=wrap`) `sort` runs 4.53 G instructions instead of 6.94 G (C: 4.26 G)
+  and 0.885 s of CPU time against C's 0.793 s (1.12x; it was 1.30x), Rust 0.836, Go 0.828 and C++
+  0.503 (std::merge, branch-free) in the same run; development builds run 9.47 G instead of 11.21 G
+  and 1.010 s against Go's 0.828 (1.22x; it was 1.43x). (1) The prover reads
+  short-circuit operators: the left operand of `&&` holds while its right operand runs, and the
+  negation of a single comparison on the left of `||` does too, so `(i < mid) && ((j >= hi) || (v[i]
+  <= v[j]))` proves `v[i]` (`i < mid`, `mid <= n`) and `v[j]` (`j < hi`); a right operand that calls,
+  takes a mutable loan or holds a block gets nothing. An `if` whose condition cannot be read whole
+  (an `||` or a `!` in it) still states each `&&` conjunct it can read in its block, so the arm's
+  `tmp[k] = v[i]` is proved too; its `else` gains nothing from a partial read. (2) The LLVM lifter
+  uses the front end's loop-stability fact (FACT_LOOP_STABLE, until now read only by the native
+  optimiser): at the head of such a loop the sequence's `data` and `len` are read once, with the
+  header tag, and every accessor inside the loop uses them, when the head dominates the loop's lines
+  (no jump from outside them names a label inside). The accessors' own `data` loads sat under a
+  branch behind an `inttoptr` that LLVM can never prove safe to hoist, so both vectors' data
+  pointers were re-read for every element. The merge loop is now the shape C's is: `v[i]` loaded
+  once, ahead of the `j >= hi` test, both data pointers in registers, and one bounds check left (the
+  `else` arm's `v[j]`, which needs the merge invariant; Rust keeps the same one). Also `json` runs
+  4.3% fewer release instructions and `strings` 0.8% fewer; no other benchmark changes.
+
+- **One form for named and anonymous functions.** A function literal is a named function with the
+  name dropped: `fn(a: u64) -> u64 { a * 2 }` is a closure, usable wherever one is (an argument, a
+  binding, a returned value, a body's tail), capturing by the closure rules. `|params| body` stays
+  as its abbreviation, with the same type; parameter and result types may be left out of either
+  where the call fixes them (`v.map(fn(x) { x * 2 })`, `(fn(x) { x + 1 })(41)`). The `fn` form's
+  body is always a block. Inside a body, `fn name(params) -> R { body }` declares a local function -
+  that literal bound to `name` - which may capture and may call itself; a recursive one writes its
+  result type (refused otherwise, with a help line), may not write what it captured, and a local
+  function takes no type or lifetime parameters. Top-level functions are unchanged. A closure or
+  literal that captures nothing now converts to a function pointer `fn(T) -> R` where one is
+  expected (it used to be refused); one that captures is refused with the captures named and
+  `Fn(T) -> R` suggested as the type to take. Assigning a different closure to a binding that holds
+  a closure as its own type (`mut h = |x: u64| x * 2; h = |x: u64| x * 3;`) is now refused - it used
+  to store the new closure and keep calling the old one; `mut h: Fn(u64) -> u64 = ..` holds either.
+  `grail fmt` lays out the new forms and writes a literal's final `return x;` as its tail. The book
+  explains the one form, local functions and when to take `Fn(..)` rather than `fn(..)`
+  (*Closures*, *Functions and recursion*, the Rust cheatsheet).
+
+- **`*p` reads and writes through raw pointers.** Inside `unsafe`, `*p` is `p.read()` and `*p = v` is
+  `p.write(v)` (it needs a `*mut T`); `*p += v` and the other compound assignments read, combine and
+  write, and `**pp` / `**pp = v` go through a pointer to a pointer. The contract is `read`/`write`'s:
+  reading an owned value duplicates ownership, and writing moves `v` in without dropping the old
+  value. Outside `unsafe` both are refused exactly as `p.read()` and `p.write(v)` are, and the method
+  forms stay. `*p = v` types `v` as the pointee, as `*r = v` does (a literal takes the pointee's
+  width, a mismatch is refused); `p.write(v)` keeps storing its operand as it is. `grail fmt` keeps
+  prefix `**` and `&&` and a `*` after `mut` together (`**r`, `&&u64`, `*mut *mut T`) instead of
+  spacing them as binary operators. Book: the cheatsheet row and the raw-pointer section use `*p`.
+- **Implicit returns: a block's last expression, written without `;`, is its value** (Rust's rule).
+  `fn f(a: u64) -> u64 { a }` returns `a`, compiled exactly as `return a;` is (the value moves out,
+  the body's locals drop). It holds for closure blocks (`|x: u64| { y := x * 2; y + 1 }`, whose
+  result type the tail now gives when nothing else does), for `if`/`match` arms used as values,
+  which may now hold statements before their value (`if c { t := f(); t + 1 } else { 0 }`), and for
+  a plain block expression (`area := { w := 3; w * w };`, also `unsafe { ...; v }`). A final
+  `if`/`match`/`{ }` in a body returns from each arm, so `if c { &p.x } else { &q.y }` ends a
+  function returning a reference, and `if let` works there too. `return` stays valid everywhere.
+  Refused with a diagnostic: a final `if` without `else` in a function that returns a value; a
+  body that can end without a value (now naming the type it owes, and pointing at the `;` to remove
+  when the last statement is `expr;` of that type); a non-unit tail in a unit body or in a
+  statement block (`while ... { ...; i }`), with the help to end it with `;`. `grail fmt` writes a
+  function's or closure's final `return x;` as `x` (early returns, `return;`, `return ();` and a
+  returned `if`/`match`/block stay), and lays out a brace that holds statements as a block wherever
+  it appears (a closure in an argument, an `if` arm). The book shows the tail form
+  (*Functions and recursion*, *Branches and loops*, the Rust cheatsheet) and its examples use it.
+
+- **Testing an optional against `None` narrows it.** Where `a != None` (or the `else` of
+  `a == None`, or the rest of a block after `if a == None { return ...; }`) proves it present, `a` is
+  its value, with no unwrapping: `if target == None { return 0; } return target.hp;`. It applies to
+  a binding that is not `mut` holding an optional of a value that owns nothing (numbers, bools,
+  references); the narrowed name carries the optional's borrows, and the optional is left as it was.
+  An owned optional is still taken apart with `if let Some(s) = s`.
+- **Block comments, and they nest.** `/* ... */` may span lines or sit inside one, and each `/*`
+  inside a block comment needs its own `*/`, so code that already holds a comment can be commented
+  out whole. An unclosed one is reported at its opening `/*`. `grail fmt` keeps block comments where
+  they were written (inline or on their own lines); `grail doc`, the book's highlighter and the VS
+  Code grammar know them too.
 - **A loot site's life is ported.** `abundance/src/site_life.grl` carries `loot_sites/site_life.hpp`
   and `.cpp` from `cmake/tx/loot_sites.cmake`: the tuning with its per-field ranges and the
   cross-field consistency rules, the file's own draw (`mix`, the seeded `unit`, `exponential` and
@@ -607,6 +722,95 @@
   `abundance/tests/world_chunk_codec_test.grl`. The canonical-shape section, the server layers and
   `voxel/world_voxel_save` are the next increment.
 
+- **`v.iter()` is every vector's, view's and slice's own method, with no `use` line.** It borrows
+  `v` and yields `&T`, as Rust's `iter()` does, so `v` is still usable afterwards and stays borrowed
+  while the chain or an item from it lives (`iter::of(v)` and `v.into_iter()` remain the consuming
+  form). The chain is the typed one, now with `map`, `filter`, `take`, `enumerate`, `fold`,
+  `collect`, `count`, `any`, `all` and `find`: `v.iter().filter(|n| **n > 4).map(|n| *n * 2).collect()`.
+  The compiler brings in `iter` for a source that calls `.iter(`, and the per-module build orders it
+  first. Fixed on the way: `filter` straight over reference items (its fold and `next` were refused,
+  and an item it handed out had no tracked source), a generic record holding a `&[T]` built in a
+  generic function (a compiler crash), a slice copied out of a record field and looped over (it read
+  as empty: the copy's slot was written before its words), and a closure calling a captured `FnMut`
+  is itself `FnMut`. The cheatsheet shows `fn area(&self)`, `pool::split_mut(&mut data, n, f)` and one
+  `v.iter().filter(..).collect()` row.
+- **Library operations on an obvious receiver are methods.** `rc::downgrade(&r)` is `r.downgrade()`;
+  an `arena::Arena<T>` has `a.insert(x)`, `a.get(&k)`, `a.get_mut(&k)`, `a.remove(&k)`, `a.len()` and
+  `a.is_empty()`; a `thread::Thread<R>` has `t.join()`, `t.try_join()` and `t.detach()`; a
+  `hash::Hasher` has `h.write_num(x)`, `h.write_byte(b)`, `h.write_bytes(s)` and `h.finish()` (and
+  `@derive(Hash)` emits them). pool's data-parallel forms are rayon-named methods on the data:
+  `v.par_map(f)` (was `pool::map`), `v.into_par_chunks(grain, f)` (`pool::split`), and on a slice or a
+  whole vector `d.par_chunks_mut(grain, f)` (`pool::split_mut(&mut d[0: len], ..)`),
+  `d.par_chunks_mut_at(grain, f)` (`pool::chunks_mut_at`) and `d.par_chunks_reduce(grain, zero, leaf,
+  merge)` (`pool::reduce_chunks`); `pool::run`/`range`/`reduce`/`zip2..4`/`spawn`/`wait`/`join` stay
+  functions. The replaced free functions are deleted, as are `rc::arc_share`, `collections::push`/
+  `pop`/`get`/`get_mut`, `hashmap::map_contains`/`map_remove`/`map_entry`/`value_at_mut` and
+  `strings::encode_utf8` (`out.push_char(c)`); the hashmap free functions the compiler lowers map
+  syntax to stay, and programs call `m.insert(k, v)`, `m.get(&k)`, `m.len()`. `Arena::get_mut` now ties
+  its result to the arena's borrow, so writing through it compiles.
+- **`v.contains(&x)` works for every element type with `hash::Equal`** (with `use vecs;`), on vectors
+  and slices: `names.contains(&name)`. Integer and bool vectors keep the compiler's own `contains`, which
+  now also takes `&x` as well as the value; `vecs::contains(&v, &x)` is gone. Without `use vecs;` the
+  refusal names the module, and an element type without `hash::Equal` gets the unmet bound.
+- **`s.chars()` is a lazy iterator** (`iter::Iter<char>`, Rust's `str::chars`), from `use strings;`:
+  `s.chars().count()`, `s.chars().collect()` for the `char[]` the compiler's eager `.chars()` used to
+  return, `for c in s.chars()`. `strings::chars(&s)` and the built-in eager version are gone; a call
+  without the import says to add `use strings;`.
+- **A vector reaches the impls of `[T]`.** When `T[]` has no method of a name, `v.m(..)` calls the
+  `impl<T> [T]` one with the slice over the whole vector (an exclusive slice for `&mut self`, which needs
+  a `mut` binding), as Rust's `Vec` derefs to a slice.
+- **A development build carries debug information by default.** `grail build` (and `grail run`,
+  `grail test`) now write line tables and function ranges, as `go build`, Zig Debug and cargo's dev
+  profile do, with the optimiser still on: DWARF (`.debug_line`, a compile unit per object with its
+  subprograms) on Linux x86-64, AArch64 and RISC-V, and CodeView linked into a PDB on Windows
+  x86-64. The rows are derived after optimisation from the statement markers the runtime-error table
+  is built from (`native.grl` site_table), so they follow code the optimiser moved, a function's
+  prologue gets its declaration line, and code the optimiser inlined keeps the caller's statement:
+  no row names a line of a function the code is not in. Because the rows come from the final text,
+  the build store, the per-function cache, parallel body workers and assembler units are untouched
+  and the output is deterministic per unit (pinned by `tools/test-debug-lines.mjs`: a store rebuild
+  and an edit-and-revert give the same image). Each object's compile unit now names its own line
+  table (`DW_AT_stmt_list` against `.debug_line`), which a program linked from several objects
+  needs. Variables are not described yet in this build (`--debug` describes them). The generated
+  code is unchanged; on the 26,000-line compile benchmark program the cost is within noise cold
+  (22.9G against 22.8-23.3G user instructions), +5.6% on an edit's rebuild (5.45G against 5.16G),
+  and the binary grows 8.3% (2.54 to 2.75 MB). `--no-debug-info` gives the old build (it is part of
+  the store's key). `--debug` still means unoptimised, for stepping, with typed variables, and is
+  still refused on macOS and Windows AArch64, where the default build silently has no debug
+  information; `--release` has none, like cargo's release profile. A build without statement
+  markers (`--no-error-sites`, `--split`) has no line tables either. The `--debug` refusal now names
+  the targets it is implemented for (Linux x86-64, AArch64, RISC-V and Windows x86-64).
+
+- **Comparisons see through references to plain values.** `==`, `!=`, `<`, `<=`, `>` and `>=` accept
+  an operand that is a reference, at any depth (`&T`, `&&T`, `&mut T`), to an integer, float, bool or
+  char and compare the value behind it, on either side: `iter::of(v).filter(|n| n > 4)`, `4 < n`,
+  `a == b` with two `&u64`. Rust needs `**n` or `|&n|` there. Arithmetic does not read through a
+  reference: `n + 1` stays a type mismatch, now with a help line naming `*n`. Records and vectors
+  still compare as values only.
+- **The Performance chapter reports its numbers plainly.** The rebuild with nothing changed is no
+  longer measured or charted: on a one-file project every tool answers it in milliseconds, so it
+  timed process start-up, and its ratio (about 44x) led the summary chart. The charts state a ratio
+  and its unit (Grail's figure over the fastest rival's: CPU time, wall time or instructions) instead
+  of "faster", "slower" or "met"; the summary's axis spans its data. The languages overview averages
+  each panel only over the rows every language in it was measured on, and names the rows it leaves
+  out (the scheduler's join on a worker, which has no Grail figure). The chapter states its four
+  targets as targets, with where each stands on the commit charted - including where Grail is behind
+  (development builds behind Go's, the scheduler behind oneTBB) - and a section on the limits of the
+  numbers: one machine, twins written by the project, no confidence intervals, instructions are not
+  time. Two wrong statements are corrected: the development build does not beat Zig Debug on every
+  program (Zig is ahead on two), and it ranges from 0.67x to 2.87x Go's time, not 1.06x to 1.78x.
+- **The languages overview sums up the whole Performance chapter.** Besides release and development
+  run time, it has a compile-speed panel (every program and scenario of `bench/results/compile.json`,
+  by user-space instructions) and a scheduler panel (`bench/results/sched-rivals.json`'s wall times:
+  Grail's release build against rayon for Rust and oneTBB for C++, the importer's rounds inverted, as
+  more is better there), all four on the same 1×-based logarithmic scale. Each panel names its file,
+  its figure and the languages it has no bar for.
+- **Compile speed measures C and C++.** `tools/compile-rivals.mjs` has `c` and `cpp` columns:
+  hello world, the generated N-record programs and the engine twins (`bench/NAME.c`,
+  `bench/rivals/NAME.cpp`), each one translation unit with a one-target Makefile run by `make`. A check
+  is `clang -fsyntax-only` (`clang++ -std=c++20`), a build `-O0 -g` linked with `-fuse-ld=lld`; an
+  edit recompiles the unit, and a rebuild with nothing changed is make finding it up to date. Grail's
+  ratio in the compile tables is now to the fastest of all five.
 - **The book's sidebar drops its "Find a topic" subtitle;** the search box (labelled for screen readers) sits under the title.
 - **The languages overview chart reads plainly.** Its bars start at 1× (the fastest language's time)
   on one logarithmic scale shared by the release and development groups, each group lists the

@@ -235,6 +235,12 @@ struct Closure {
     bindings: u64[],
     // Lifetimes the parameters introduced (`|x: &T|`): regions 2.. of the closure's own namespace.
     regions: u64,
+    // A local named function (`fn walk(n: u64) -> u64 { .. walk(n - 1) .. }`) that calls itself:
+    // its name, bound in the body to a shared reference to the closure the body belongs to.
+    self_name: u8[],
+    // Converted to a thin `fn(..)` pointer (it captures nothing): a `_thin` entry is emitted after
+    // the body that supplies the environment the body expects and calls it.
+    thin: u64,
     // The captures the body writes, one flag per entry of `captures`. Only a written capture is
     // mutable in the body, and a closure with any written capture is `FnMut` (mode 1), not `Fn`.
     written: u64[],
@@ -427,14 +433,15 @@ struct DebugFunc {
     module: u8[],
     file: u64,
     line: u64,
-    start: u64,
-    end: u64,
     params: u64,
     vars: DebugVar[],
-    // The label namespace this function's start and end labels were minted in (B1 stage 5): every
-    // label is `.L<unit>_<n>`, where <unit> is `<unit prefix>_<function ordinal>`, so a table that names a label by its number alone would name one the
-    // unit never emitted. Captured where the function is recorded, i.e. inside its own unit.
-    unit: u8[]
+    // The linkage name: the symbol the function is defined under.
+    link: u8[],
+    // The labels at the function's first byte and past its last. A `--debug` body mints them in its
+    // own namespace (B1 stage 5: `.L<unit>_<n>`, dlabel), the line pass of an optimised build
+    // (site_table) as `.Lgn<k>` / `.Lge<k>`.
+    lo: u8[],
+    hi: u8[]
 }
 // One module of the program, as an interface sees it.
 struct IModule {
@@ -508,6 +515,11 @@ struct C {
     plat: u64,
     // Emit .file/.loc DWARF line info (Linux x86-64 native output only).
     debug: u64,
+    // Line tables and function ranges in an optimised build (the default where DWARF or CodeView is
+    // written): the line pass in site_table derives them from the statement markers that went
+    // through the optimiser. `no_debug_info` is `--no-debug-info`.
+    lines: u64,
+    no_debug_info: u64,
     // 1: lower the raw word stream to LLVM IR (compiler/llvm.grl) instead of optimize/machine.
     backend: u64,
     // Typed-IR facts for that lifter (docs/design/typed-ir.md). They travel beside `out`, never in
@@ -975,6 +987,33 @@ struct C {
     arm_ty: u64,
     arm_hint: u64,
     arm_at: u64,
+    // Tail expressions (a block's last item without `;` is its value; docs/design/tail-expressions.md).
+    // `tail_mode` is how the next block() ends - 0 a statement block (a tail must be unit), 1 a
+    // function or closure body (the tail is returned), 2 a value block (the tail goes to the sink) -
+    // set just before the construct that opens it and taken by that block. `arm_tail` is the mode of
+    // the statement `match` whose arms are being compiled. `tail_now` asks statement_body to compile
+    // the item it is at as a tail (1 + the way it ends, see tail_value). The sink of a value block:
+    // 1 an `if` arm, 2 a `match` arm, 3 a block expression, with its type hint, the token of the arm
+    // that fixed it, the frame word and, once the tail has run, the value's type.
+    tail_mode: u64,
+    arm_tail: u64,
+    tail_now: u64,
+    // Optional narrowing (optional_narrow): pairs of local indices (1-based), a narrowed binding and
+    // the optional it narrows, while both are in scope.
+    narrowed: u64[],
+    // `fn name(..)` inside a body: the token of the name while closure_literal reads the function,
+    // and the name itself when the body calls it (a recursive local function).
+    local_fn: u64,
+    local_self: u8[],
+    sink: u64,
+    sink_hint: u64,
+    sink_hint_at: u64,
+    sink_slot: u64,
+    sink_ty: u64,
+    // The last expression statement's `;` and the value it discarded: a function that falls through
+    // right after it is told to drop the `;`.
+    last_semi_at: u64,
+    last_semi_ty: u64,
     no_union: u64,
     // Set while the operand of `ignore_failure(...)` is evaluated: a join outcome may be dropped
     // there and nowhere else (docs/design/task-failure-containment.md).
@@ -991,6 +1030,12 @@ struct C {
     deny_ambient: u64,
     host_optin: u64,
     host_modules: u8[][],
+    // The modules each module names in a `use` line, as pairs (use_from[i] uses use_to[i]); every
+    // module read from source also has the pair (m, m), so a module with no pair at all is one this
+    // compile read from its interface. An interface method on a built-in receiver resolves only
+    // where its interface is in scope (interface_in_scope).
+    use_from: u8[][],
+    use_to: u8[][],
     // Capability diagnostics for the parallel surface (docs/design/parallelism.md): the reason code
     // of the first denied leaf and the field path that reached it. `capability_begin` resets both,
     // so a rejection names the offending field instead of repeating the whole type.
@@ -2280,6 +2325,14 @@ fn record_debug_func<a, b, d>(c: (&a mut C), name: &b [u8], module: &d [u8], sit
         unit.push(95);
         decimal(&mut unit, c.fscope);
     }
+    mut link = copy_bytes(view("f_"));
+    push_bytes(&mut link, module);
+    link.push(95);
+    push_bytes(&mut link, name);
+    mut lo = u8[];
+    dlabel(&mut lo, view(unit), site.start);
+    mut hi = u8[];
+    dlabel(&mut hi, view(unit), site.end);
     c
         .debug_funcs
         .push(
@@ -2288,11 +2341,11 @@ fn record_debug_func<a, b, d>(c: (&a mut C), name: &b [u8], module: &d [u8], sit
                 module: copy_bytes(view(module)),
                 file: site.file,
                 line: site.line,
-                start: site.start,
-                end: site.end,
                 params: site.params,
                 vars: vars,
-                unit: unit
+                link: link,
+                lo: lo,
+                hi: hi
             }
         );
     return ();
@@ -2512,13 +2565,11 @@ fn codeview_symbols<a>(c: &a C, index: (&u64[])) -> u8[] {
     push_bytes(&mut out, view(".long 241\n.long .Lcvsyms_end-.Lcvsyms\n.Lcvsyms:\n"));
     for i in c.debug_funcs.len() {
         f := &c.debug_funcs[i];
-        fstart := f.start;
-        fend := f.end;
         mut range = u8[];
         push_bytes(&mut range, view(".long "));
-        dlabel(&mut range, view(f.unit), fend);
+        push_bytes(&mut range, view(f.hi));
         range.push(45); // '-'
-        dlabel(&mut range, view(f.unit), fstart);
+        push_bytes(&mut range, view(f.lo));
         range.push(10);
         cv_record_start(&mut out, i, 0, 4368);
         // parent, end, next: lld-link fills the scope links.
@@ -2527,9 +2578,9 @@ fn codeview_symbols<a>(c: &a C, index: (&u64[])) -> u8[] {
         push_bytes(&mut out, view(".long 0\n"));
         push_bytes(&mut out, view(range));
         push_bytes(&mut out, view(".long 0\n.secrel32 "));
-        dlabel(&mut out, view(f.unit), fstart);
+        push_bytes(&mut out, view(f.lo));
         push_bytes(&mut out, view("\n.secidx "));
-        dlabel(&mut out, view(f.unit), fstart);
+        push_bytes(&mut out, view(f.lo));
         push_bytes(&mut out, view("\n.byte 0\n.asciz \""));
         if f.module.len() != 0 {
             push_bytes(&mut out, view(f.module));
@@ -2560,11 +2611,10 @@ fn codeview_symbols<a>(c: &a C, index: (&u64[])) -> u8[] {
     push_bytes(&mut out, view(".Lcvsyms_end:\n"));
     return out;
 }
-fn debug_sections<a, b>(c: &a C, entry: &b [u8]) -> u8[] {
+// The DWARF sections of `funcs` (c.debug_funcs for a `--debug` build, the line pass's list for an
+// optimised one), with the types c.debug_types holds.
+fn debug_sections<a, b>(c: &a C, funcs: (&DebugFunc[]), entry: &b [u8]) -> u8[] {
     mut out = u8[];
-    if c.debug == 0 {
-        return out;
-    }
     dput(&mut out, view(".section .debug_abbrev,\"\",@progbits\n"));
     dput(&mut out, view(".Ldebug_abbrev:\n"));
     // 1: compile unit, children.
@@ -2585,7 +2635,7 @@ fn debug_sections<a, b>(c: &a C, entry: &b [u8]) -> u8[] {
     dattr(&mut out, 0x6e, 0x08);
     dattr(&mut out, 0x11, 0x01);
     dattr(&mut out, 0x12, 0x07);
-    dattr(&mut out, 0x3a, 0x0b);
+    dattr(&mut out, 0x3a, 0x0f);
     dattr(&mut out, 0x3b, 0x0f);
     dattr(&mut out, 0x40, 0x18);
     dput(&mut out, view(".byte 0\n.byte 0\n"));
@@ -2659,27 +2709,22 @@ fn debug_sections<a, b>(c: &a C, entry: &b [u8]) -> u8[] {
     dput(&mut out, view(".byte 12\n"));
     dstring(&mut out, entry);
     dstring(&mut out, view("."));
-    mut first_start = 0;
-    mut last_end = 0;
-    mut first_unit = u8[];
-    mut last_unit = u8[];
-    if c.debug_funcs.len() != 0 {
-        first_start = c.debug_funcs[0].start;
-        first_unit = c.debug_funcs[0].unit.copy();
-        last_end = c.debug_funcs[c.debug_funcs.len() - 1].end;
-        last_unit = c.debug_funcs[c.debug_funcs.len() - 1].unit.copy();
-    }
-    if c.debug_funcs.len() == 0 {
-        dput(&mut out, view(".quad 0\n.quad 0\n.long 0\n"));
+    // DW_AT_stmt_list names this object's own line table: a program linked from several objects
+    // (the build store's) has one table per object in .debug_line, so a constant 0 would point every
+    // unit after the first at the first one's table. The label opens the section the assembler
+    // fills from the `.loc` rows.
+    if funcs.len() == 0 {
+        dput(&mut out, view(".quad 0\n.quad 0\n"));
     } else {
         dput(&mut out, view(".quad "));
-        dlabel(&mut out, view(first_unit), first_start);
+        dput(&mut out, view(funcs[0].lo));
         dput(&mut out, view("\n.quad "));
-        dlabel(&mut out, view(last_unit), last_end);
+        dput(&mut out, view(funcs[funcs.len() - 1].hi));
         dput(&mut out, view("-"));
-        dlabel(&mut out, view(first_unit), first_start);
-        dput(&mut out, view("\n.long 0\n"));
+        dput(&mut out, view(funcs[0].lo));
+        dput(&mut out, view("\n"));
     }
+    dput(&mut out, view(".long .Ldebug_line\n"));
     // One DIE per entry of c.debug_types, labelled .Ldebug_type_N; DW_AT_type is the CU-relative
     // offset (from the unit length field, four bytes before .Ldebug_cu_start).
     for i in c.debug_types.len() {
@@ -2738,27 +2783,18 @@ fn debug_sections<a, b>(c: &a C, entry: &b [u8]) -> u8[] {
         }
     }
 
-    for i in c.debug_funcs.len() {
-        f := &c.debug_funcs[i];
+    for i in funcs.len() {
+        f := &funcs[i];
         duleb(&mut out, 2);
         dstring(&mut out, view(f.name));
-        mut link = u8[];
-        dput(&mut link, view("f_"));
-        for k in f.module.len() {
-            link.push(f.module[k]);
-        }
-        link.push(95);
-        for k in f.name.len() {
-            link.push(f.name[k]);
-        }
-        dstring(&mut out, view(link));
+        dstring(&mut out, view(f.link));
         dput(&mut out, view(".quad "));
-        dlabel(&mut out, view(f.unit), f.start);
+        dput(&mut out, view(f.lo));
         dput(&mut out, view("\n.quad "));
-        dlabel(&mut out, view(f.unit), f.end);
+        dput(&mut out, view(f.hi));
         dput(&mut out, view("-"));
-        dlabel(&mut out, view(f.unit), f.start);
-        dput(&mut out, view("\n.byte "));
+        dput(&mut out, view(f.lo));
+        dput(&mut out, view("\n.uleb128 "));
         dnum(&mut out, f.file);
         dput(&mut out, view("\n.uleb128 "));
         dnum(&mut out, f.line);
@@ -2792,6 +2828,7 @@ fn debug_sections<a, b>(c: &a C, entry: &b [u8]) -> u8[] {
         dput(&mut out, view(".byte 0\n"));
     }
     dput(&mut out, view(".byte 0\n.Ldebug_cu_end:\n"));
+    dput(&mut out, view(".section .debug_line,\"\",@progbits\n.Ldebug_line:\n"));
     return out;
 }
 // ---- runtime error locations -------------------------------------------------------------------
@@ -3210,6 +3247,32 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
     mut pending_func = 0;
     mut pending_name = u8[];
     mut report_fn = u8[];
+    // The line pass (c.lines): a `.loc` (`.cv_loc` on Windows) at the first instruction of each of
+    // the function's own statements, a row for its prologue at the line it is declared on, and its
+    // range as `.Lgn<k>`..`.Lge<k>`. A body the optimiser copied in from another function (`.gposa`)
+    // and an inlined runtime body keep the caller's statement, so no row names a line of a function
+    // the code is not in; the caller's statement is restated after the copy (inline_calls).
+    lines := c.lines != 0;
+    cv := c.target == 3;
+    mut by_symbol = LineNames { heads: u64[], next: u64[], syms: u8[][], funcs: u64[] };
+    if lines {
+        by_symbol = line_names(&mut c);
+        c.debug_funcs.clear();
+    }
+    mut loc_pending = false;
+    mut loc_file = 0;
+    mut loc_line = 0;
+    mut loc_col = 0;
+    mut said_file = 0;
+    mut said_line = 0;
+    mut said_col = 0;
+    // The files the rows name, by site index; a file's number in the table is its position plus one.
+    // (Site indices are not dense: a file an interface carried is numbered from 1000000.)
+    mut line_files = u64[];
+    mut fn_open = false;
+    mut fn_label = 0;
+    mut in_text = true;
+    mut text_stack = u64[];
     // Lines are read in place, and what passes through unchanged is copied in runs: `pend` is the
     // first byte not yet copied to `out`. A line that is dropped or replaced, or that gets a label in
     // front of it, flushes the run before it.
@@ -3255,6 +3318,12 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
                         }
                         cur_col = w[2];
                         cur_internal = internal;
+                        if lines && !absolute && fn_open && (w[0] != 0) {
+                            loc_pending = true;
+                            loc_file = line_file_number(&mut line_files, w[0]);
+                            loc_line = cur_line;
+                            loc_col = w[2];
+                        }
                     }
                     // The pending function's first statement names its table entry: the runtime's own
                     // functions have none, so a backtrace never prints `rt_` frames.
@@ -3299,6 +3368,38 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
             }
         }
         directive := (a < e) && (text[a] == 46);
+        if lines && directive && (e - a >= 4) {
+            // A function's range ends at its `.size` (ELF) or where the text stops being its own: a
+            // switch to another section, which a Windows function (no `.size`) ends with.
+            ch := text[a + 1];
+            mut close = false;
+            if (ch == 115) && site_at(text, a, e, view(".size ")) {
+                close = true;
+            } else if (ch == 116) && site_at(text, a, e, view(".text")) {
+                in_text = true;
+            } else if (ch == 100) && site_at(text, a, e, view(".data")) {
+                in_text = false;
+                close = true;
+            } else if (ch == 98) && site_at(text, a, e, view(".bss")) {
+                in_text = false;
+                close = true;
+            } else if (ch == 115) && site_at(text, a, e, view(".section ")) {
+                in_text = site_at(text, a, e, view(".section .text"));
+                close = !in_text;
+            } else if (ch == 112) && site_at(text, a, e, view(".pushsection ")) {
+                text_stack.push(u64(in_text));
+                in_text = site_at(text, a, e, view(".pushsection .text"));
+            } else if (ch == 112) && site_at(text, a, e, view(".popsection")) && (text_stack.len() != 0) {
+                in_text = text_stack.pop()! != 0;
+            }
+            if close && fn_open {
+                out.append(text[pend..a]);
+                pend = a;
+                line_fn_end(&mut out, fn_label);
+                fn_open = false;
+                loc_pending = false;
+            }
+        }
         // A function starts: positions are its own again, and the code up to its first statement -
         // its prologue - names no place.
         if (e - a > 1) && (text[e - 1] == 58) && !directive {
@@ -3321,10 +3422,52 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
                     site_func_entry(&mut funcs, pending_func, 0);
                 }
                 func_count += 1;
+                // A data label (one inside a `.pushsection .rodata`) neither ends nor starts a range.
+                if lines && fn_open && in_text {
+                    line_fn_end(&mut out, fn_label);
+                    fn_open = false;
+                }
                 site_func_label(&mut out, func_count);
                 pending_func = func_count;
                 pending_name = span_copy(text[a..e], 0, e - a - 1);
                 report_fn = pending_name.copy();
+                if lines && in_text {
+                    loc_pending = false;
+                    // The prologue's row: the line the function is declared on (its `.gbase`), in the
+                    // file of its first statement.
+                    fn_open = true;
+                    fn_label = func_count;
+                    mut file = line_first_file(text, next);
+                    mut line = base_line;
+                    if file == 0 {
+                        // No statement of its own (a shim): a row of line 0, which names no place,
+                        // rather than the code before it.
+                        file = 2;
+                        line = 0;
+                    }
+                    fid := c.debug_funcs.len();
+                    if cv {
+                        push_bytes(&mut out, view(".cv_func_id "));
+                        decimal(&mut out, fid);
+                        out.push(10);
+                    }
+                    said_file = line_file_number(&mut line_files, file);
+                    said_line = line;
+                    said_col = 0;
+                    line_loc(&mut out, cv, fid, said_file, line, 0);
+                    c.debug_funcs.push(line_func(&mut c, &by_symbol, view(pending_name), said_file, line, func_count));
+                }
+            }
+        }
+        if loc_pending && !directive {
+            loc_pending = false;
+            if (loc_file != said_file) || (loc_line != said_line) || (loc_col != said_col) {
+                out.append(text[pend..a]);
+                pend = a;
+                said_file = loc_file;
+                said_line = loc_line;
+                said_col = loc_col;
+                line_loc(&mut out, cv, c.debug_funcs.len() - 1, loc_file, loc_line, loc_col);
             }
         }
         if pending_site && !directive {
@@ -3400,6 +3543,13 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
         a = next;
     }
     out.append(text[pend..n]);
+    if fn_open {
+        if (out.len() != 0) && (out[out.len() - 1] != 10) {
+            out.push(10);
+        }
+        line_fn_end(&mut out, fn_label);
+        fn_open = false;
+    }
     // A last function whose body holds no statement (the entry shim, a body of only calls emitted
     // without positions) keeps its range and no name.
     if pending_func != 0 {
@@ -3479,7 +3629,158 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
     }
     push_bytes(&mut out, view(names));
     push_bytes(&mut out, view(".text\n"));
+    if lines {
+        // The file table the rows name, in the order they were first named (CodeView wants every
+        // number declared), ahead of the first row.
+        mut head = u8[];
+        for f in line_files.len() {
+            k := f + 1;
+            if cv {
+                push_bytes(&mut head, view(".cv_file "));
+            } else {
+                push_bytes(&mut head, view(".file "));
+            }
+            decimal(&mut head, k);
+            push_bytes(&mut head, view(" \""));
+            given := site_path(&c, line_files[f]);
+            path := site_relative(view(given), view(cwd));
+            for i in path.len() {
+                ch := path[i];
+                if (ch == 34) || (ch == 92) {
+                    head.push(92);
+                }
+                head.push(ch);
+            }
+            push_bytes(&mut head, view("\"\n"));
+        }
+        head.append(view(out));
+        return head;
+    }
     return out;
+}
+// The functions the line pass names, by symbol: every declared function's symbol as `mangle_name`
+// spells it, hashed, so a function label finds its Grail name and module. A label no declaration
+// spells (a specialisation, a helper the emitter made) keeps the symbol as its name.
+struct LineNames {
+    heads: u64[],
+    next: u64[],
+    syms: u8[][],
+    funcs: u64[]
+}
+fn line_hash<a>(s: &a [u8]) -> u64 {
+    mut h: u64 = 0;
+    for i in s.len() {
+        h = (h * 131 + u64(s[i])) & 0xffffffff;
+    }
+    return h;
+}
+fn line_names<a>(c: (&a mut C)) -> LineNames {
+    mut size: u64 = 64;
+    while size < c.funcs.len() * 2 {
+        size = size * 2;
+    }
+    mut t = LineNames { heads: u64[0; size], next: u64[], syms: u8[][], funcs: u64[] };
+    for i in c.funcs.len() {
+        if c.funcs[i].ext != 0 {
+            continue;
+        }
+        m := c.funcs[i].module.copy();
+        n := c.funcs[i].name.copy();
+        sym := mangle_name(&mut c, view(m), view(n));
+        h := line_hash(view(sym)) & (size - 1);
+        t.next.push(t.heads[h]);
+        t.syms.push(sym);
+        t.funcs.push(i);
+        t.heads[h] = t.syms.len();
+    }
+    return t;
+}
+// The function the line pass opens at the label `symbol` (`.Lgn<k>`), declared at `file`/`line`.
+fn line_func<a, b>(c: (&a mut C), names: (&LineNames), symbol: &b [u8], file: u64, line: u64, k: u64) -> DebugFunc {
+    mut name = symbol.copy();
+    mut module = u8[];
+    if names.heads.len() != 0 {
+        mut at = names.heads[line_hash(symbol) & (names.heads.len() - 1)];
+        while at != 0 {
+            if same(view(names.syms[at - 1]), symbol) {
+                f := &c.funcs[names.funcs[at - 1]];
+                name = f.name.copy();
+                if !same(view(f.module), view("runtime")) && !starts_with(view(f.module), view(".")) {
+                    module = f.module.copy();
+                }
+                break;
+            }
+            at = names.next[at - 1];
+        }
+    }
+    mut lo = copy_bytes(view(".Lgn"));
+    decimal(&mut lo, k);
+    mut hi = copy_bytes(view(".Lge"));
+    decimal(&mut hi, k);
+    return DebugFunc { name: name, module: module, file: file, line: line, params: 0, vars: DebugVar[], link: symbol.copy(), lo: lo, hi: hi };
+}
+// The line-table number of the site file `file`, given one at its first use. The list is short (the
+// files of one run) and a run of rows names one file, so the search starts at the last entry.
+fn line_file_number<a>(files: (&a mut u64[]), file: u64) -> u64 {
+    mut i = files.len();
+    while 0 < i {
+        i -= 1;
+        if files[i] == file {
+            return i + 1;
+        }
+    }
+    files.push(file);
+    return files.len();
+}
+// `.Lge<k>:`, the end of the function the line pass opened as `.Lgn<k>`.
+fn line_fn_end<a>(out: (&a mut u8[]), k: u64) -> unit {
+    push_bytes(&mut out, view(".Lge"));
+    decimal(&mut out, k);
+    push_bytes(&mut out, view(":\n"));
+    return ();
+}
+// A row: `.loc FILE LINE COL`, or `.cv_loc FUNC FILE LINE COL` for CodeView.
+fn line_loc<a>(out: (&a mut u8[]), cv: bool, fid: u64, file: u64, line: u64, col: u64) -> unit {
+    if cv {
+        push_bytes(&mut out, view(".cv_loc "));
+        decimal(&mut out, fid);
+        out.push(32);
+    } else {
+        push_bytes(&mut out, view(".loc "));
+    }
+    decimal(&mut out, file);
+    out.push(32);
+    decimal(&mut out, line);
+    out.push(32);
+    decimal(&mut out, col);
+    out.push(10);
+    return ();
+}
+// The file of the first statement of the function whose label ends at `from`: the site file
+// (input index) of its first own `.gpos`, or 0 when it has none before the next function.
+fn line_first_file<a>(text: &a [u8], from: u64) -> u64 {
+    n := text.len();
+    mut a = from;
+    while a < n {
+        e := bytes::find_byte(view(text), a, 10);
+        if (e - a > 6) && (text[a] == 46) && site_at(text, a, e, view(".gpos ")) {
+            mut v = 0;
+            mut i = a + 6;
+            while (i < e) && (47 < text[i]) && (text[i] < 58) {
+                v = v * 10 + u64(text[i]) - 48;
+                i += 1;
+            }
+            return v;
+        }
+        if (e - a > 5) && (text[a] == 46) && site_at(text, a, e, view(".size ")) {
+            return 0;
+        }
+        if (e > a) && (text[e - 1] == 58) && (text[a] != 46) {
+            return 0;
+        }
+        a = e + 1;
+    }
+    return 0;
 }
 // Source line/column of the current token. The assembler turns .loc into .debug_line.
 fn emit_loc<a>(c: (&a mut C)) -> unit {
@@ -11671,6 +11972,113 @@ fn pv_ir_atoms<a>(c: (&a mut C), lo: u64, hi: u64) -> Atom[] {
     }
     return out;
 }
+// The atoms of each `&&` conjunct of a condition at its own depth that the prover can read, the
+// others (an `||`, a `!`, anything unread) left out: every conjunct holds where the whole does.
+fn pv_ir_conjuncts<a>(c: (&a mut C), lo: u64, hi: u64) -> Atom[] {
+    mut out = Atom[];
+    if (lo >= hi) || !pv_ir_live(&c) || pv_span_calls(&mut c, lo, hi) {
+        return out;
+    }
+    mut depth = 0;
+    mut start = lo;
+    mut i = lo;
+    mut parts = 0;
+    while i <= hi {
+        mut k = 0;
+        if i < hi {
+            k = kind_at(&mut c, i);
+        }
+        if (k == 40) || (k == 91) || (k == 123) {
+            depth += 1;
+        }
+        if ((k == 41) || (k == 93) || (k == 125)) && (depth > 0) {
+            depth -= 1;
+        }
+        if (i == hi) || ((k == 273) && (depth == 0)) {
+            if parts == 0 && (i == hi) {
+                // No `&&` at the condition's own depth: there is nothing to split.
+                return out;
+            }
+            parts += 1;
+            if start < i {
+                mut raws = Atom[];
+                if pv_atoms(&mut c, start, i, &mut raws) {
+                    mut facts = Atom[];
+                    pv_ir_read(&mut c, &mut facts);
+                    mut got = Atom[];
+                    if pv_settle_all(&mut c, &raws, &mut facts, &mut got) {
+                        for j in got.len() {
+                            if out.len() < 16 {
+                                out.push(copy_atom_value(&got[j]));
+                            }
+                        }
+                    }
+                }
+            }
+            start = i + 1;
+        }
+        i += 1;
+    }
+    return out;
+}
+// Where the right operand of `&&` (k 273) or `||` (274) that starts at `lo` ends, or past it: the first
+// token at its own depth that closes, separates or opens a block, and for `&&` also the next `&&` or
+// `||`, for `||` the next `||`. Ending late only widens the span a caller checks.
+fn pv_operand_end<a>(c: (&a mut C), lo: u64, k: u64) -> u64 {
+    mut depth = 0;
+    mut i = lo;
+    while i < c.toks.len() {
+        t := kind_at(&mut c, i);
+        if t == 0 {
+            return i;
+        }
+        if depth == 0 {
+            if (t == 41) || (t == 93) || (t == 125) || (t == 44) || (t == 59) || (t == 123) || (t == 274) {
+                return i;
+            }
+            if (t == 273) && (k == 273) {
+                return i;
+            }
+        }
+        if (t == 40) || (t == 91) || (t == 123) {
+            depth += 1;
+        }
+        if (t == 41) || (t == 93) || (t == 125) {
+            depth -= 1;
+        }
+        i += 1;
+    }
+    return i;
+}
+// What the left operand of `&&` states while its right operand runs (the right runs only when the
+// left is true), and for `||` its negation (the right runs only when it is false); nothing when the
+// right operand calls, takes a mutable loan or holds a block, any of which could write what the
+// atoms name before the access they would prove.
+fn pv_short_facts<a>(c: (&a mut C), k: u64, lstart: u64, op_at: u64) -> Atom[] {
+    mut out = Atom[];
+    if !pv_ir_live(&c) || (lstart >= op_at) {
+        return out;
+    }
+    rs := op_at + 1;
+    re := pv_operand_end(&mut c, rs, k);
+    if pv_span_calls(&mut c, rs, re) {
+        return out;
+    }
+    for i in rs..re {
+        if kind_at(&mut c, i) == 123 {
+            return out;
+        }
+    }
+    left := pv_ir_atoms(&mut c, lstart, op_at);
+    if k == 274 {
+        pv_negation(&left, &mut out);
+        return out;
+    }
+    if left.len() != 0 {
+        return left;
+    }
+    return pv_ir_conjuncts(&mut c, lstart, op_at);
+}
 // A statement keyword whose own conditions and statements report what they do as they are compiled.
 // A statement that calls may write through the names it mentions, so what they meant before it is
 // forgotten after it. A compound statement is not scanned here: its condition and its own statements
@@ -12520,9 +12928,9 @@ fn file_path<a>(c: (&a mut C), index: u64) -> u8[] {
     return out;
 }
 // A literal the lexer could not finish arrives as a token (kind 998 a character literal, 996 an
-// unclosed string, 995 a string holding a raw control byte) because the lexer has no diagnostic
-// channel; this is where those tokens become errors. Before this, the lexer aborted on them and the
-// reader saw "assertion failed" and a compiler source line.
+// unclosed string, 995 a string holding a raw control byte, 994 an unclosed block comment) because
+// the lexer has no diagnostic channel; this is where those tokens become errors. Before this, the
+// lexer aborted on them and the reader saw "assertion failed" and a compiler source line.
 fn fail_literal<a>(c: (&a mut C), at: u64, kind: u64) -> unit {
     exchange(&mut c.pos, at);
     text := tok_text(&mut c, at);
@@ -12548,6 +12956,10 @@ fn fail_literal<a>(c: (&a mut C), at: u64, kind: u64) -> unit {
     }
     if kind == 996 {
         fail(&mut c, view("unclosed string literal: add the closing `\"`"));
+    }
+    if kind == 994 {
+        diag_help(&mut c, view("block comments nest: every `/*` inside one needs its own `*/`"));
+        fail(&mut c, view("unclosed block comment: add the closing `*/`"));
     }
     // 995: a raw control byte inside a string literal.
     mut seen = 0;
@@ -12660,7 +13072,7 @@ fn load_file<a>(c: (&a mut C), index: u64) -> unit {
     exchange(&mut c.pos, 0);
     for i in c.toks.len() {
         k := c.toks[i].kind;
-        if (k == 999) || (k == 995) || (k == 996) || (k == 997) || (k == 998) {
+        if (k == 999) || (k == 994) || (k == 995) || (k == 996) || (k == 997) || (k == 998) {
             exchange(&mut c.pos, i);
             exchange(&mut c.file, index);
             if k != 999 {
@@ -15690,7 +16102,7 @@ fn callable_contract<a, b>(
             lk := ty_kind(&mut c, left);
             if ((lk == 5) || (lk == 7) || (lk == 27)) && (ty_kind(&mut c, right) == lk)
                 && (ty_mode(&mut c, left) == ty_mode(&mut c, right)) {
-                if callable_contract(&mut c, ty_arg(&mut c, left), ty_arg(&mut c, right), &mut map, depth + 1) {
+                if param_referent_fits(&mut c, ty_arg(&mut c, left), ty_arg(&mut c, right), &mut map, depth + 1) {
                     continue;
                 }
                 return false;
@@ -15714,6 +16126,24 @@ fn callable_contract<a, b>(
         }
     }
     return true;
+}
+// The referent of a closure's reference parameter, compared as a signature. The regions of the
+// references inside it are not compared: a generic substitution drops or renames them (`FnMut((&T))`
+// with `T` bound to `&a K` is `FnMut(&&K)`, while a closure built for `&&a K` names `a`), and, as for
+// the parameter's own reference, they are the loan pass's business, not the shape's -
+// `filter(|n| **n > 4)` over a vector's `iter()` is one signature either way.
+fn param_referent_fits<a, b>(c: (&a mut C), left: u64, right: u64, map: (&b mut u64[]), depth: u64) -> bool {
+    lk := ty_kind(&mut c, left);
+    if ((lk == 5) || (lk == 7) || (lk == 27)) && (ty_kind(&mut c, right) == lk) && (ty_mode(&mut c, left) == ty_mode(&mut c, right))
+        && (depth < 64) {
+        return param_referent_fits(&mut c, ty_arg(&mut c, left), ty_arg(&mut c, right), &mut map, depth + 1);
+    }
+    // A specialisation's alias inside the referent is the type it stands for (the bound is built
+    // from plain types, a closure written in the specialisation from its aliases).
+    if (ty_kind(&mut c, left) == 10) || (ty_kind(&mut c, right) == 10) {
+        return callable_contract(&mut c, base_type(&mut c, left), base_type(&mut c, right), &mut map, depth);
+    }
+    return callable_contract(&mut c, left, right, &mut map, depth);
 }
 fn same_type<a>(c: (&a mut C), x: u64, y: u64) -> u64 {
     a := ty_kind(&mut c, x);
@@ -15999,6 +16429,42 @@ fn source_type_name<a>(c: (&a mut C), ty: u64) -> u8[] {
         out.push(93);
         return out;
     }
+    if (k == 27) || (k == 5) {
+        out.push(91);
+        if k == 5 {
+            push_bytes(&mut out, view("u8"));
+        } else {
+            push_bytes(&mut out, view(source_type_name(&mut c, arg)));
+        }
+        out.push(93);
+        return out;
+    }
+    if k == 34 {
+        out.push(42);
+        if ty_mode(&mut c, ty) != 0 {
+            push_bytes(&mut out, view("mut "));
+        }
+        push_bytes(&mut out, view(source_type_name(&mut c, arg)));
+        return out;
+    }
+    if k == 13 {
+        push_bytes(&mut out, view("Mutex<"));
+        push_bytes(&mut out, view(source_type_name(&mut c, arg)));
+        out.push(62);
+        return out;
+    }
+    if (k == 8) && same(view(c.decls[arg].module), view(".tuple")) {
+        out.push(40);
+        elems := type_args(&mut c, ty);
+        for i in elems.len() {
+            if i != 0 {
+                push_bytes(&mut out, view(", "));
+            }
+            push_bytes(&mut out, view(source_type_name(&mut c, elems[i])));
+        }
+        out.push(41);
+        return out;
+    }
     if k == 7 {
         out.push(38);
         if ty_mode(&mut c, ty) != 0 {
@@ -16103,9 +16569,14 @@ fn require_type<a>(c: (&a mut C), actual: u64, expected: u64) -> unit {
     }
     // A specialisation's binding (an alias, kind 10) where its own base type is named: the
     // implementation reached through a bound takes `Self` as the concrete type the parameter is
-    // bound to here, and the two are one type in this specialisation.
-    if (ty_kind(&mut c, actual) == 10) && (ty_kind(&mut c, want) != 10) && (base_type(&mut c, actual) == want) {
-        return ();
+    // bound to here, and the two are one type in this specialisation. The base is compared as a
+    // type, not as an id: `Filter<SliceIter<a, T>, F>` reaches `SliceIter`'s `fold` with its `I`
+    // bound to a `SliceIter` interned apart from the one the method names.
+    if (ty_kind(&mut c, actual) == 10) && (ty_kind(&mut c, want) != 10) {
+        base := base_type(&mut c, actual);
+        if (base == want) || (same_type(&mut c, base, want) != 0) {
+            return ();
+        }
     }
     if (want == 0) & is_bool(&mut c, actual) {
         return ();
@@ -22480,6 +22951,9 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     // checked it or the caller proved it (what a proved call means), and they are this body's alone.
     pv_begin(&mut c);
     exchange(&mut c.pv_spec_ok, 1);
+    // The body's tail is its result (tail_mode 1: returned, as `return` would).
+    exchange(&mut c.last_semi_at, 0);
+    exchange(&mut c.tail_mode, 1);
     block(&mut c);
     exchange(&mut c.pv_spec_ok, 0);
     pv_end(&mut c);
@@ -22495,7 +22969,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     exchange(&mut c.export_copyback, u64[]);
     if c.raw == 0 {
         if (c.terminated == 0) & (ret != 1) {
-            fail(&mut c, view("function may fall through without return"));
+            fall_through(&mut c, view("function"), ret);
         }
     }
     cleanup(&mut c, 0);
@@ -23137,6 +23611,54 @@ fn protocol_method_name<a, b>(c: (&a mut C), k: u64, name: &b [u8]) -> bool {
     }
     return false;
 }
+// Whether `ty` is a vector or slice whose `contains` is the compiler's own: integer and bool elements,
+// which it compares as words.
+fn builtin_contains<a>(c: (&a mut C), ty: u64) -> bool {
+    k := ty_kind(&mut c, ty);
+    if (k != 6) & (k != 27) {
+        return false;
+    }
+    elem := ty_arg(&mut c, ty);
+    return integer(&mut c, elem) || is_bool(&mut c, elem);
+}
+// The methods the compiler itself answers on a float, a `char`, a raw pointer and a `Mutex`
+// (collection_method): a library impl adds to these lists, and may not take one of their names over.
+fn builtin_method_name<a, b>(c: (&a mut C), k: u64, name: &b [u8]) -> bool {
+    n := view(name);
+    if k == 21 {
+        return same(n, view("sqrt"))
+            || same(n, view("abs"))
+            || same(n, view("floor"))
+            || same(n, view("ceil"))
+            || same(n, view("trunc"))
+            || same(n, view("round"))
+            || same(n, view("min"))
+            || same(n, view("max"))
+            || same(n, view("is_nan"))
+            || same(n, view("is_finite"))
+            || same(n, view("is_infinite"))
+            || same(n, view("next_up"))
+            || same(n, view("next_down"));
+    }
+    if k == 22 {
+        return char_method(n);
+    }
+    if k == 34 {
+        return same(n, view("addr"))
+            || same(n, view("is_null"))
+            || same(n, view("cast"))
+            || same(n, view("add"))
+            || same(n, view("sub"))
+            || same(n, view("read"))
+            || same(n, view("write"))
+            || same(n, view("as_ref"))
+            || same(n, view("as_mut"));
+    }
+    if k == 13 {
+        return same(n, view("lock_with"));
+    }
+    return false;
+}
 // A method that would set what a protocol name means is refused where it is defined, so no call site
 // silently changes meaning: the message says what the name is and asks for another one.
 fn inherent_protocol_refused<a, b>(c: (&a mut C), owner: u64, name: &b [u8], at: u64) -> unit {
@@ -23144,7 +23666,24 @@ fn inherent_protocol_refused<a, b>(c: (&a mut C), owner: u64, name: &b [u8], at:
     if ty == NO_TYPE {
         return ();
     }
+    if builtin_method_name(&mut c, ty_kind(&mut c, ty), name) {
+        mut msg = copy_bytes(view("`"));
+        push_bytes(&mut msg, view(name));
+        push_bytes(&mut msg, view("` is a built-in method of `"));
+        push_bytes(&mut msg, view(source_type_name(&mut c, ty)));
+        push_bytes(
+            &mut msg,
+            view("`, so an inherent impl cannot define it: the compiler answers that name itself, and the impl's method would shadow it. Give this method another name.")
+        );
+        exchange(&mut c.pos, at);
+        fail(&mut c, view(msg));
+    }
     if !protocol_method_name(&mut c, ty_kind(&mut c, ty), name) {
+        return ();
+    }
+    if same(view(name), view("contains")) & !builtin_contains(&mut c, ty) {
+        // The compiler's `contains` compares integers and bools; any other element type's
+        // `contains` is a library method (vecs: `impl<T: hash::Equal> [T]`).
         return ();
     }
     mut msg = copy_bytes(view("`"));
@@ -23217,7 +23756,7 @@ fn inherent_match<a, b>(c: (&a mut C), pattern: u64, actual: u64, map: (&b mut u
             return false;
         }
     }
-    if (pk == 5) || (pk == 6) || (pk == 7) || (pk == 27) {
+    if (pk == 5) || (pk == 6) || (pk == 7) || (pk == 13) || (pk == 27) || (pk == 34) {
         if ty_mode(&mut c, pattern) != ty_mode(&mut c, a) {
             return false;
         }
@@ -23452,28 +23991,59 @@ fn ambiguous_inherent_fail<a, b>(c: (&a mut C), ty: u64, name: &b [u8]) -> unit 
 // Register (signature pass) or find (later passes) a written-type impl's record. The later passes
 // re-parse the same header, so the key is looked up by the type: every pass must name the same
 // module `.inherent_<key-1>`, and pick the same type arguments when a method is called.
+// A built-in type that is spelled with a declaration underneath: `T?` (`result::Option<T>`) and a
+// tuple. An impl on one is an impl on the written type, like `impl<T> T[]`, not on the declaration.
+fn written_named<a>(c: (&a mut C), ty: u64) -> bool {
+    if ty_kind(&mut c, ty) != 8 {
+        return false;
+    }
+    if is_option_storage(&mut c, ty) {
+        return true;
+    }
+    return same(view(c.decls[ty_arg(&mut c, ty)].module), view(".tuple"));
+}
 fn inherent_type_key<a>(c: (&a mut C), ty: u64, pass: u64) -> u64 {
     k := ty_kind(&mut c, ty);
-    // A scalar (`u64`, `u32`, `bool`, `char`, `f64`), a string, a byte vector, a vector of any
-    // element, the byte view `[u8]`, and the slice `[T]`.
+    // Every built-in type a value can have: an integer, `bool`, `char`, a float, a string, a byte
+    // vector, a vector of any element, the byte view `[u8]`, the slice `[T]`, a raw pointer `*T`,
+    // `Mutex<T>`, an optional `T?` and a tuple.
     if !(
         (k == 0)
+            || (k == 1)
             || (k == 3)
             || (k == 4)
             || (k == 5)
             || (k == 6)
+            || (k == 13)
             || (k == 18)
             || (k == 19)
             || (k == 21)
             || (k == 22)
             || (k == 27)
+            || (k == 34)
+            || written_named(&mut c, ty)
     ) {
         fail(
             &mut c,
             view(
-                "an inherent impl's type must be a scalar, a string, a vector, a slice or a type this module declares; a reference, a `dyn` interface and a bare type parameter have no inherent methods"
+                "an inherent impl's type must be a built-in type (an integer, `bool`, `char`, a float, a string, a vector, a slice, a raw pointer, `Mutex<T>`, `T?` or a tuple) or a type this module declares; a reference, a `dyn` interface and a bare type parameter have no inherent methods"
             )
         );
+    }
+    // Rust's coherence rule: the methods a built-in type has are the language's and its standard
+    // library's, so a program cannot change what `x.abs()` means for everyone else. A program
+    // extends a built-in type through an interface, whose methods resolve only where it is in scope.
+    if !ct_std_file(&mut c, c.file) {
+        mut msg = copy_bytes(view("an inherent impl on the built-in type `"));
+        push_bytes(&mut msg, view(source_type_name(&mut c, ty)));
+        push_bytes(&mut msg, view("` belongs to the standard library"));
+        help := copy_bytes(
+            view(
+                "declare an interface and implement it for the type - `interface Twice { fn twice(&self) -> u64; }` and `impl Twice for u64 { ... }` - and its methods are callable as `x.twice()` in every module that declares the interface or names its module in a `use` line"
+            )
+        );
+        diag_help(&mut c, view(help));
+        fail(&mut c, view(msg));
     }
     // One key per impl header: two blocks that spell the same owner type and the same parameters
     // are one impl (Rust merges them), so their methods share a module and a duplicate name is the
@@ -23622,7 +24192,7 @@ fn implementation<a>(c: (&a mut C), pass: u64) -> unit {
         module := module_copy(&mut c);
         ty := parse_inherent_owner(&mut c);
         mut owner = 0;
-        if ty_kind(&mut c, ty) == 8 {
+        if (ty_kind(&mut c, ty) == 8) && !written_named(&mut c, ty) {
             // A declared type: the owner is the declaration, and its arguments must be this impl's
             // own parameters, in order.
             owner = ty_arg(&mut c, ty) + 1;
@@ -26171,7 +26741,7 @@ fn r4_compute<a>(c: (&a mut C)) -> unit {
                 whole = true;
                 break;
             }
-            if (same(view(t), view("|")) || same(view(t), view("||"))) && (same(view(prev), view("(")) || same(view(prev), view(",")) || same(view(prev), view("=")) || same(view(prev), view(":=")) || same(view(prev), view("return"))) {
+            if (same(view(t), view("|")) || same(view(t), view("||"))) && (same(view(prev), view("(")) || same(view(prev), view(",")) || same(view(prev), view("=")) || same(view(prev), view(":=")) || same(view(prev), view("return")) || same(view(prev), view("{")) || same(view(prev), view(";")) || same(view(prev), view("=>"))) {
                 whole = true;
                 break;
             }
@@ -28044,13 +28614,23 @@ fn resolve_modules<a>(c: (&a mut C), offset: u64) -> unit {
         i += 1;
     }
     // `core` is part of every program that has it: `Some(x)` and `None` lower to its constructors.
-    // It is the one name asked for without a `use` line, and a root with no core.grl has no core.
-    if !mod_known(&c, view("core")) {
-        found := mod_find(&c, view("core"));
-        if found.len() != 0 {
-            c.mod_names.push(copy_bytes(view("core")));
-            queue.push(found.copy());
-            c.mod_files.push(found);
+    // `scalar` is too: the methods of the integers, `char` and the floats' bits (`x.abs()`,
+    // `c.to_digit(10)`, `f64::from_bits(b)`), which a program calls without importing anything.
+    // They are the two names asked for without a `use` line, and a root without the file has
+    // neither. (`scalar` is not in core because the published bootstrap compiles core, and it does
+    // not accept an impl on `u64`.)
+    for implicit in 2 {
+        mut name = "core";
+        if implicit == 1 {
+            name = "scalar";
+        }
+        if !mod_known(&c, view(name)) {
+            found := mod_find(&c, view(name));
+            if found.len() != 0 {
+                c.mod_names.push(copy_bytes(view(name)));
+                queue.push(found.copy());
+                c.mod_files.push(found);
+            }
         }
     }
     mut k = 0;
@@ -28059,6 +28639,17 @@ fn resolve_modules<a>(c: (&a mut C), offset: u64) -> unit {
         k += 1;
         text := host::read_file(view(file));
         h := header_of(view(text));
+        // `iter()` on a vector is a vector's, a view's and a slice's own method, written with no `use` line:
+        // its iterator type and the impls that give it live in `iter`, so a source that calls it
+        // brings that module in, as every program brings in `core`. Other programs do not pay for it.
+        if !mod_known(&c, view("iter")) && lexer::calls_iter(view(text)) {
+            found := mod_find(&c, view("iter"));
+            if found.len() != 0 {
+                c.mod_names.push(copy_bytes(view("iter")));
+                c.mod_files.push(found.copy());
+                queue.push(found);
+            }
+        }
         for j in h.uses.len() {
             name := h.uses[j];
             // `use host;` is a module's opt-in to the ambient host:: interface, not a file, and a
@@ -28124,6 +28715,37 @@ fn print_inputs<a>(c: (&a mut C), count: u64) -> unit {
 
 // Modules that declared `use host;`. Recorded per module so a replayed generic body is checked
 // against its defining module, not against whichever file was parsed last.
+// Record that module `from` names `to` in a `use` line (once: every pass reads the header again).
+fn note_use<a, b, d>(c: (&a mut C), from: &b [u8], to: &d [u8]) -> unit {
+    if !uses_module(&c, from, to) {
+        c.use_from.push(copy_bytes(from));
+        c.use_to.push(copy_bytes(to));
+    }
+    return ();
+}
+fn uses_module<a, b, d>(c: (&a C), from: &b [u8], to: &d [u8]) -> bool {
+    for i in c.use_from.len() {
+        if same(view(c.use_from[i]), view(from)) && same(view(c.use_to[i]), view(to)) {
+            return true;
+        }
+    }
+    return false;
+}
+// Whether interface `iface`'s methods are in scope in the module being compiled: it declares the
+// interface, or it names the interface's module in a `use` line (Rust's rule that a trait's methods
+// need the trait in scope). A module this compile read from its interface file recorded no `use`
+// lines, so its replayed bodies are taken as already checked.
+fn interface_in_scope<a>(c: (&a mut C), iface: u64) -> bool {
+    here := module_copy(&mut c);
+    home := c.interfaces[iface - 1].module.copy();
+    if same(view(here), view(home)) {
+        return true;
+    }
+    if !uses_module(&c, view(here), view(here)) {
+        return true;
+    }
+    return uses_module(&c, view(here), view(home));
+}
 fn host_opted<a, b>(c: (&a C), m: &b [u8]) -> bool {
     for i in c.host_modules.len() {
         if same(view(c.host_modules[i]), view(m)) {
@@ -28171,8 +28793,11 @@ fn toplevel<a>(c: (&a mut C), pass: u64) -> unit {
     exchange(&mut c.module, m);
     exchange(&mut c.imports, Import[]);
     exchange(&mut c.host_optin, 0);
+    here := module_copy(&mut c);
+    note_use(&mut c, view(here), view(here));
     while eat(&mut c, view("use")) {
         m = ident(&mut c);
+        note_use(&mut c, view(here), view(m));
         // `use host;` (or `use host::name;`) is this module's explicit opt-in to the ambient
         // `host::` interface; --deny-ambient-host refuses host:: references without it.
         if same(view(m), view("host")) {
@@ -28660,7 +29285,7 @@ fn dr_hash_block<a, b, d>(c: (&a mut C), out: (&b mut u8[]), d: u64, name: &d [u
                 push_bytes(&mut out, view(a));
                 push_bytes(&mut out, view(")"));
             }
-            push_bytes(&mut out, view(" => { hash::write_num(state, "));
+            push_bytes(&mut out, view(" => { state.write_num("));
             decimal(&mut out, i);
             push_bytes(&mut out, view("); "));
             if has {
@@ -29027,6 +29652,15 @@ fn dr_append<a>(c: (&a mut C), text: u8[]) -> unit {
 // still valid) and the parser walks the new tail as ordinary top-level items.
 fn dr_parse_tail<a>(c: (&a mut C), pass: u64) -> unit {
     text := exchange(&mut c.dr_tail, u8[]);
+    // The generated bodies call each field's own `clone`, `debug`, `hash`, ... - an interface method
+    // on a built-in field type - so the derived interfaces' modules are in scope in this module, as
+    // the `impl ops::Eq for ...` headers the derive writes already name them.
+    here_module := module_copy(&mut c);
+    note_use(&mut c, view(here_module), view("ops"));
+    note_use(&mut c, view(here_module), view("order"));
+    note_use(&mut c, view(here_module), view("hash"));
+    note_use(&mut c, view(here_module), view("clone"));
+    note_use(&mut c, view(here_module), view("debug"));
     mut before = c.toks.len();
     while before != 0 {
         before = before - 1;
@@ -31044,6 +31678,10 @@ fn pop_locals<a>(c: (&a mut C), mark: u64) -> unit {
     while mark < c.locals.len() {
         c.locals.pop()!;
     }
+    while (1 < c.narrowed.len()) && (mark < c.narrowed[c.narrowed.len() - 2]) {
+        c.narrowed.pop()!;
+        c.narrowed.pop()!;
+    }
     return ();
 }
 // Loads, addresses and stores record fields.
@@ -31873,6 +32511,14 @@ fn frame_copy<a>(c: (&a mut C), src: u64, ty: u64) -> u64 {
         o(&mut c, view("(%rcx),%rax\nmovq %rax,"));
         on(&mut c, k * 8);
         o(&mut c, view("(%rdx)\n"));
+    }
+    k := ty_kind(&mut c, base_type(&mut c, ty));
+    if (k == 5) || (k == 27) {
+        // A view's value is defined after its words are written: a binding adopts this slot, and
+        // the optimiser reads a slice descriptor's `data` and `len` once, where that slot is written
+        // (SEQ-STABLE), so the slot must not be written before the copy fills the words.
+        o(&mut c, view("movq %rdx,%rax\n"));
+        return save(&mut c);
     }
     return dst;
 }
@@ -34214,6 +34860,10 @@ fn byte_sequence_value<a>(c: (&a mut C), ty: u64) -> bool {
 fn view_type_of<a>(c: (&a mut C)) -> u64 {
     return intern_full(&mut c, 5, 0, 0, u64[]);
 }
+// `[T]` for a vector type `T[]`: the type a vector receiver's slice impls are written for.
+fn slice_type_of<a>(c: (&a mut C), vector: u64) -> u64 {
+    return intern_full(&mut c, 27, ty_arg(&mut c, vector), 0, u64[]);
+}
 // A byte view handed to a `&[u8]` method receiver is reborrowed for the call: the same storage and
 // length as a fresh value whose loan is the one the receiver already holds, so the binding is still
 // usable afterwards. `rt_vslice` over the whole view is that reborrow.
@@ -35737,7 +36387,7 @@ fn argument_ranges<a>(c: (&a mut C)) -> u64[] {
         if k == 0 {
             return u64[];
         }
-        if (k == 124) || (k == 274) {
+        if (k == 124) || (k == 274) || fn_literal_at(&mut c, at) {
             return u64[];
         }
         if (k == 40) || (k == 91) || (k == 123) {
@@ -35998,6 +36648,37 @@ fn two_phase_order<a, b>(c: (&a mut C), ranges: (&b u64[])) -> u64[] {
     }
     return order;
 }
+// The module of the inherent impl that gives the scalar type spelled `m` (`f64`, `u32`, `char`,
+// `bool`) the function `name`, or empty: `f64::from_bits(b)` names a type, not a module.
+fn scalar_static<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> u8[] {
+    mut ty = NO_TYPE;
+    code := int_name(m);
+    if code != 0 {
+        ty = int_type_named(&mut c, code);
+    } else if same(view(m), view("f64")) {
+        ty = float_type(&mut c);
+    } else if same(view(m), view("f32")) {
+        ty = f32_type(&mut c);
+    } else if same(view(m), view("char")) {
+        ty = char_type(&mut c);
+    } else if same(view(m), view("bool")) {
+        ty = bool_type(&mut c);
+    }
+    if ty == NO_TYPE {
+        return u8[];
+    }
+    for i in c.inherent_types.len() {
+        key := inherent_type_base() + i + 1;
+        if same_type(&mut c, c.inherent_types[i], ty) == 0 {
+            continue;
+        }
+        owner := inherent_type_module(key);
+        if find_func(&mut c, view(owner), view(name)) != 0 {
+            return owner;
+        }
+    }
+    return u8[];
+}
 fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
     // The program point the prover reads: everything up to the callee's name holds when the call is
     // made, and the arguments (which follow) are what it proves about.
@@ -36014,6 +36695,13 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
         if d != 0 {
             owner := private_module(view(".inherent_"), d - 1);
             f = find_func(&mut c, view(owner), view(name));
+        }
+    }
+    if f == 0 {
+        // `f64::from_bits(b)`: an associated function a standard-library impl gives a scalar.
+        owner := scalar_static(&mut c, view(m), view(name));
+        if owner.len() != 0 {
+            return call(&mut c, view(owner), view(name));
         }
     }
     if f == 0 {
@@ -36203,7 +36891,7 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
                 }
                 if known != 0 {
                     context = bind_types(&mut c, c.params[template_first + argi], &map);
-                } else if (kind(&mut c) == 124) || (kind(&mut c) == 274) {
+                } else if closure_at(&mut c, c.pos) {
                     // A closure argument of a generic call: the parameter types the call already
                     // fixes type its parameters; its result is inferred from its body. For a
                     // callable-bound parameter the bound is the type that hints it.
@@ -36538,7 +37226,13 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
         }
         exchange(&mut c.pos, dflt.lo);
         mut v = expr_expected(&mut c, 0, context);
-        if c.pos != dflt.hi {
+        // A default an interface carried is a virtual source of its own (pred_of_text), whose span
+        // runs to the end of its tokens - the end-of-file token included.
+        mut dflt_end = dflt.hi;
+        if (dflt.lo < dflt_end) && (kind_at(&mut c, dflt_end - 1) == 0) {
+            dflt_end -= 1;
+        }
+        if c.pos != dflt_end {
             fail(&mut c, view("a parameter's default value is not one expression: it ends at `= value`"));
         }
         // The checks a written argument owes its parameter, the same ones in the same order (see the
@@ -36926,10 +37620,19 @@ fn captured_bonds<a, b, d, e, g>(c: (&a mut C), result: Val, map: (&b u64[]), so
                 continue;
             }
             // A reference argument is lent for the call only; what it points at is the caller's.
-                    if (ty_kind(&mut c, t) != 7) && contains_borrow(&mut c, t, 0) {
+            if (ty_kind(&mut c, t) != 7) && contains_borrow(&mut c, t, 0) {
                 source := place_of(&mut c, sources[i]);
                 if source != 0 {
                     return_bonds(&mut c, source, holder, u64(aggregate));
+                }
+            }
+            // ...but the borrows its referent holds may be handed out: `it.next()` on a
+            // `Filter<SliceIter<a, T>, F>` returns an `I::Item`, a reference into the vector `it`
+            // borrows. A result whose own type can hold a borrow keeps those loans (not `it`).
+            if (ty_kind(&mut c, t) == 7) && contains_borrow(&mut c, ty_arg(&mut c, t), 0) && contains_borrow(&mut c, result.ty, 0) {
+                storage := target_of(&mut c, sources[i]);
+                if storage != 0 {
+                    return_bonds(&mut c, storage, holder, u64(aggregate));
                 }
             }
         }
@@ -37071,6 +37774,125 @@ fn function_as_closure<a>(c: (&a mut C), v: Val, expected: u64) -> Val {
     fn_use(&mut c, FN_THUNK);
     own(&mut c, obj, expected);
     return val(obj, expected);
+}
+// The reverse: a closure where a function pointer `fn(..) -> R` is expected. One that captures
+// nothing is a function - its body reads no environment - so it converts, to the address of a thin
+// entry (emit_thin_entry) that calls the body with an empty environment. One that captures does
+// not: the pointer has nowhere to keep what it captured, so the refusal names the captures and the
+// parameter type that takes them, `Fn(..)`. A signature that differs is left to require_type.
+// `Fn(u64) -> u64` (or `FnMut`) for a closure or function type: its parameters and result.
+fn closure_type_spelling<a>(c: (&a mut C), ty: u64) -> u8[] {
+    mut spelled = copy_bytes(view("Fn("));
+    if (ty_kind(&mut c, ty) == 20) && ((ty_mode(&mut c, ty) & CLOSURE_FNMUT) != 0) {
+        spelled = copy_bytes(view("FnMut("));
+    }
+    want := type_args(&mut c, ty);
+    for i in want.len() {
+        if i != 0 {
+            push_bytes(&mut spelled, view(", "));
+        }
+        push_bytes(&mut spelled, view(source_type_name(&mut c, want[i])));
+    }
+    push_bytes(&mut spelled, view(") -> "));
+    push_bytes(&mut spelled, view(source_type_name(&mut c, ty_arg(&mut c, ty))));
+    return spelled;
+}
+fn closure_as_function<a>(c: (&a mut C), v: Val, expected: u64) -> Val {
+    params := type_args(&mut c, v.ty);
+    want := type_args(&mut c, expected);
+    if params.len() != want.len() {
+        return v;
+    }
+    for i in params.len() {
+        if same_type(&mut c, params[i], want[i]) == 0 {
+            return v;
+        }
+    }
+    result := ty_arg(&mut c, v.ty);
+    if same_type(&mut c, result, ty_arg(&mut c, expected)) == 0 {
+        return v;
+    }
+    spelled := closure_type_spelling(&mut c, expected);
+    if (ty_mode(&mut c, v.ty) & CLOSURE_UNBUILT) != 0 {
+        // Template validation: the specialisation builds and converts the real closure.
+        moved := move_value(&mut c, v);
+        move_out(&mut c, moved);
+        return val(imm(&mut c, 0), expected);
+    }
+    env := ty_env(&mut c, v.ty);
+    mut index = 0;
+    if env != 0 {
+        d := ty_arg(&mut c, env);
+        for i in c.closures.len() {
+            if (c.closures[i].decl == d) && (c.closures[i].symbol.len() != 0) {
+                index = i + 1;
+            }
+        }
+    }
+    if index == 0 {
+        mut help = copy_bytes(view("take `"));
+        push_bytes(&mut help, view(spelled));
+        push_bytes(&mut help, view("` where a closure is passed on, or give a named function or a closure literal that captures nothing"));
+        diag_help(&mut c, view(help));
+        fail(&mut c, view("a closure value of type `Fn(..)` may hold captures, so it is not a function pointer `fn(..)`"));
+    }
+    caps := copy_names(&c.closures[index - 1].captures);
+    if caps.len() != 0 {
+        mut said = copy_bytes(view("this closure captures "));
+        for i in caps.len() {
+            if i != 0 {
+                push_bytes(&mut said, view(", "));
+            }
+            said.push(96);
+            push_bytes(&mut said, view(caps[i]));
+            said.push(96);
+        }
+        push_bytes(&mut said, view(", so it is not a function pointer `fn(..)`: a function pointer has no room for what a closure captures"));
+        mut help = copy_bytes(view("take `"));
+        push_bytes(&mut help, view(spelled));
+        push_bytes(&mut help, view("` instead, which accepts closures and named functions"));
+        diag_help(&mut c, view(help));
+        fail(&mut c, view(said));
+    }
+    exchange(&mut c.closures[index - 1].thin, 1);
+    mut thin = c.closures[index - 1].symbol.copy();
+    push_bytes(&mut thin, view("_thin"));
+    // The pointer is the code alone. A temporary object is not needed any more; a named one (a
+    // local function) holds nothing, so it stays usable and is dropped with its binding.
+    if is_local_slot(&mut c, v.t) {
+        observe(&mut c, v.t);
+    } else {
+        moved := move_value(&mut c, v);
+        discard_value(&mut c, moved);
+    }
+    o(&mut c, view("leaq "));
+    mangle(&mut c, view(".closure"), view(thin));
+    o(&mut c, view("(%rip),%rax\n"));
+    return val(save(&mut c), expected);
+}
+// A closure converted to a function pointer (closure_as_function) is called without the hidden
+// environment argument: the entry shifts the arguments up one register, as grail_fn_thunk shifts
+// them down, and hands the body the address of a word holding the address of a word holding the
+// body's own code - the environment of a closure that captures nothing, enough for a recursive local
+// function to call itself through. Fn types take at most five arguments, so the sixth register is
+// free.
+fn emit_thin_entry<a, b>(c: (&a mut C), symbol: &b [u8], weak: u64) -> unit {
+    mut thin = copy_bytes(view(symbol));
+    push_bytes(&mut thin, view("_thin"));
+    mut mark = 0;
+    if weak != 0 {
+        mark = 1;
+    }
+    saved_spec := exchange(&mut c.current_spec, mark);
+    func_directive(&mut c, view(".closure"), view(thin), view(thin), 0);
+    exchange(&mut c.current_spec, saved_spec);
+    mangle(&mut c, view(".closure"), view(thin));
+    o(&mut c, view(":\npushq %rbp\nmovq %rsp,%rbp\nsubq $16,%rsp\n"));
+    o(&mut c, view("movq %r8,%r9\nmovq %rcx,%r8\nmovq %rdx,%rcx\nmovq %rsi,%rdx\nmovq %rdi,%rsi\nleaq "));
+    mangle(&mut c, view(".closure"), view(symbol));
+    o(&mut c, view("(%rip),%rax\nmovq %rax,-16(%rbp)\nleaq -16(%rbp),%rax\nmovq %rax,-8(%rbp)\nleaq -8(%rbp),%rdi\nmovq -16(%rbp),%rax\ncall *%rax\nleave\nret\n"));
+    size_directive(&mut c, view(".closure"), view(thin), view(thin), 0);
+    return ();
 }
 // The record type of a function's closure object: {__code, __drop, target}, created once.
 fn fn_value_decl<a>(c: (&a mut C)) -> u64 {
@@ -37526,7 +38348,8 @@ fn closure_captures_nothing<a>(c: (&a mut C), ty: u64) -> bool {
     d := ty_arg(&mut c, env);
     for i in c.closures.len() {
         if (c.closures[i].decl == d) && (c.closures[i].symbol.len() != 0) {
-            return c.closures[i].captures.len() == 0;
+            // A recursive local function calls itself through the environment it is handed.
+            return (c.closures[i].captures.len() == 0) && (c.closures[i].self_name.len() == 0);
         }
     }
     return false;
@@ -40797,6 +41620,56 @@ fn builtin<a>(c: (&a mut C), id: u64) -> Val {
 }
 // `*r` (and the `load` builtin): copies the referent of a typed reference. Only values that need no
 // drop can be copied; a shared view referent is reborrowed.
+// Whether the statement at the cursor assigns (`=`, `+=` ... `%=` outside any bracket before its `;`).
+fn deref_assignment_ahead<a>(c: (&a mut C)) -> bool {
+    mut depth = 0;
+    mut i = c.pos;
+    while i < c.toks.len() {
+        k := kind_at(&mut c, i);
+        if (k == 40) || (k == 91) || (k == 123) {
+            depth += 1;
+        } else if (k == 41) || (k == 93) || (k == 125) {
+            if depth == 0 {
+                return false;
+            }
+            depth -= 1;
+        } else if depth == 0 {
+            if k == 59 {
+                return false;
+            }
+            if (k == 61) || ((261 < k) & (k < 267)) {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    return false;
+}
+// `*p = v` and `*p op= v` through a raw `*mut T`: `p.write(v)`, and `p.write(p.read() op v)` - the
+// old value is not dropped, as `ptr::write` does not drop it. `op` is the token after `*p`.
+fn pointer_assignment<a>(c: (&a mut C), p: Val, op: u64) -> unit {
+    raw_pointer_gate(&mut c, view("write"));
+    pointer_writable(&mut c, ty_mode(&mut c, p.ty));
+    pointee := ty_arg(&mut c, p.ty);
+    mut v = val(0, 0);
+    if op == 61 {
+        advance(&mut c);
+        v = pointer_operand(&mut c, pointee);
+    } else if (261 < op) & (op < 267) {
+        advance(&mut c);
+        current := pointer_read(&mut c, p.t, pointee);
+        start := c.pos;
+        mut rhs = expr(&mut c, 0);
+        rhs = adopt_value(&mut c, rhs, start, c.pos, pointee);
+        v = compound_value(&mut c, compound_operator(op), current.t, rhs, pointee);
+    } else {
+        fail(&mut c, view("expected = after *pointer"));
+    }
+    expect(&mut c, view(";"));
+    pointer_store(&mut c, p.t, v, pointee);
+    release_temporary(&mut c, p.t);
+    return ();
+}
 fn deref_value<a>(c: (&a mut C), a: Val) -> Val {
     observe(&mut c, a.t);
     if c.raw == 0 {
@@ -41117,7 +41990,7 @@ fn parallel_split_builtin<a>(c: (&a mut C), data: Val) -> Val {
         fail(&mut c, view("parallel_split requires a callable"));
     }
     signature := type_args(&mut c, fty);
-    // (&mut [T]), or (u64, &mut [T]) for each piece's first index too (pool::chunks_mut_at).
+    // (&mut [T]), or (u64, &mut [T]) for each piece's first index too (`par_chunks_mut_at` in lib/pool.grl).
     with_at := signature.len() == 2;
     if (signature.len() != 1) && !with_at {
         fail(&mut c, view("parallel_split callback takes (&mut [T]) or (u64, &mut [T])"));
@@ -42241,6 +43114,23 @@ fn ref_to_text<a>(c: (&a mut C), ty: u64) -> bool {
     inner := ty_arg(&mut c, ty);
     return is_text(&mut c, inner);
 }
+// A reference, at any depth (`&T`, `&&T`), to a plain value: an integer, a float, a bool or a char.
+// A comparison reads the value behind it (`|n| n > 4` with `n: &u64`); arithmetic does not.
+fn ref_to_plain<a>(c: (&a mut C), ty: u64) -> bool {
+    return (ty_kind(&mut c, ty) == 7) && (plain_behind(&mut c, ty) != NO_TYPE);
+}
+// The plain type behind any number of references, or NO_TYPE when what is behind them is not plain.
+fn plain_behind<a>(c: (&a mut C), ty: u64) -> u64 {
+    mut inner = ty;
+    while ty_kind(&mut c, inner) == 7 {
+        inner = ty_arg(&mut c, inner);
+    }
+    k := ty_kind(&mut c, inner);
+    if (inner == 0) || (k == 18) || (k == 19) || (k == 21) || (k == 22) {
+        return inner;
+    }
+    return NO_TYPE;
+}
 fn is_float<a>(c: (&a mut C), ty: u64) -> bool {
     return ty_kind(&mut c, ty) == 21;
 }
@@ -42708,6 +43598,9 @@ fn adopt_value<a>(c: (&a mut C), v: Val, start: u64, end: u64, expected: u64) ->
         }
         if (ty_kind(&mut c, v.ty) == 12) & (ty_kind(&mut c, expected) == 20) {
             return function_as_closure(&mut c, v, expected);
+        }
+        if (ty_kind(&mut c, v.ty) == 20) & (ty_kind(&mut c, expected) == 12) {
+            return closure_as_function(&mut c, v, expected);
         }
         if (ty_kind(&mut c, v.ty) == 20) & (ty_kind(&mut c, expected) == 20) {
             erased := closure_erase(&mut c, val(v.t, v.ty), expected);
@@ -43376,6 +44269,18 @@ fn capture_written_at<a>(c: (&a mut C), i: u64, end: u64, ty: u64) -> bool {
             return true;
         }
     }
+    if kind_at(&mut c, i + 1) == 40 {
+        // `f(..)` on a captured `FnMut` - a closure that changes its own captures, or a parameter
+        // bound by one - changes `f`, so the environment holding it must be exclusive: a closure
+        // that calls one is itself `FnMut`.
+        mut callee = ty;
+        if ty_kind(&mut c, callee) != 20 {
+            callee = param_callable(&mut c, ty);
+        }
+        if (callee != NO_TYPE) && (ty_kind(&mut c, callee) == 20) && ((ty_mode(&mut c, callee) & CLOSURE_FNMUT) != 0) {
+            return true;
+        }
+    }
     if (kind_at(&mut c, i + 1) == 46) & (kind_at(&mut c, i + 3) == 40) {
         k := ty_kind(&mut c, ty);
         if ((k == 5) || (k == 7) || (k == 27)) & (ty_mode(&mut c, ty) == 0) {
@@ -43712,7 +44617,7 @@ fn immediate_call_hint<a>(c: (&a mut C)) -> unit {
     if kind_at(&mut c, open) != 40 {
         return ();
     }
-    if (kind_at(&mut c, open + 1) != 124) & (kind_at(&mut c, open + 1) != 274) {
+    if !closure_at(&mut c, open + 1) {
         return ();
     }
     close := matching_paren(&mut c, open);
@@ -43730,7 +44635,7 @@ fn immediate_call_hint<a>(c: (&a mut C)) -> unit {
     mut at = call + 1;
     mut types = u64[];
     while at < stop {
-        if (kind_at(&mut c, at) == 124) | (kind_at(&mut c, at) == 274) {
+        if closure_at(&mut c, at) {
             return ();
         }
         mut no_names = u8[][];
@@ -43799,6 +44704,26 @@ fn lent_parameter<a>(c: (&a mut C), ty: u64) -> bool {
     }
     return type_regions(&mut c, ty).len() == 0;
 }
+// The end of a closure's parameter list: `|` in the bar form, `)` in the `fn(..)` form.
+fn closure_params_close<a>(c: (&a mut C), fn_form: bool) -> bool {
+    if fn_form {
+        return eat(&mut c, view(")"));
+    }
+    return eat(&mut c, view("|"));
+}
+// Whether a closure literal starts at token `i`: `|..|`, `||`, or the function literal `fn(..)`,
+// which is the same closure spelled as a function without its name. (Where a type is read,
+// `fn(T) -> R` is the function pointer type; this asks only where an expression starts.)
+fn closure_at<a>(c: (&a mut C), i: u64) -> bool {
+    k := kind_at(&mut c, i);
+    if (k == 124) || (k == 274) {
+        return true;
+    }
+    return fn_literal_at(&mut c, i);
+}
+fn fn_literal_at<a>(c: (&a mut C), i: u64) -> bool {
+    return (kind_at(&mut c, i) == 1) && (kind_at(&mut c, i + 1) == 40) && is_at(&mut c, i, view("fn"));
+}
 fn closure_literal<a>(c: (&a mut C)) -> Val {
     // The whole argument of a lent parameter (lent_arg_at), decided again once the literal ends.
     lent_start := exchange(&mut c.lent_arg_at, 0) == c.pos + 1;
@@ -43812,10 +44737,25 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
     mut names = u8[][];
     mut params = u64[];
     mut param_regions = 0;
-    if !eat(&mut c, view("||")) {
-        expect(&mut c, view("|"));
-        exchange(&mut c.no_union, 1);
-        if !eat(&mut c, view("|")) {
+    // `fn(a: u64) -> u64 { a * 2 }` is the same closure as `|a: u64| -> u64 { a * 2 }`: only the
+    // parameter list is spelled differently, and the body is a block, as a named function's is. A
+    // local `fn name(..)` (local_function) comes here at its `fn` with the name still to read.
+    fn_form := fn_literal_at(&mut c, c.pos) || (c.local_fn != 0);
+    mut self_name = u8[];
+    if fn_form {
+        expect(&mut c, view("fn"));
+        if exchange(&mut c.local_fn, 0) != 0 {
+            self_name = exchange(&mut c.local_self, u8[]);
+            advance(&mut c);
+        }
+        expect(&mut c, view("("));
+    }
+    if fn_form || !eat(&mut c, view("||")) {
+        if !fn_form {
+            expect(&mut c, view("|"));
+            exchange(&mut c.no_union, 1);
+        }
+        if !closure_params_close(&mut c, fn_form) {
             // Parameters are typed in the closure's own lifetime namespace (`env` is region 1): each
             // elided reference is a fresh input lifetime, borrowed anew on every call.
             mut closure_names = u8[][];
@@ -43836,9 +44776,15 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
                         // its type, and a later use cannot (a closure's parameters are explicit).
                         mut text = copy_bytes(view("closure parameter `"));
                         push_bytes(&mut text, view(n));
-                        push_bytes(&mut text, view("` needs a type here (nothing fixes it): write |"));
-                        push_bytes(&mut text, view(n));
-                        push_bytes(&mut text, view(": T|"));
+                        if fn_form {
+                            push_bytes(&mut text, view("` needs a type here (nothing fixes it): write fn("));
+                            push_bytes(&mut text, view(n));
+                            push_bytes(&mut text, view(": T)"));
+                        } else {
+                            push_bytes(&mut text, view("` needs a type here (nothing fixes it): write |"));
+                            push_bytes(&mut text, view(n));
+                            push_bytes(&mut text, view(": T|"));
+                        }
                         here := c.pos;
                         exchange(&mut c.pos, here - 1);
                         fail(&mut c, view(text));
@@ -43847,7 +44793,7 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
                 }
                 names.push(n);
                 params.push(ty);
-                if eat(&mut c, view("|")) {
+                if closure_params_close(&mut c, fn_form) {
                     break;
                 }
                 expect(&mut c, view(","));
@@ -43860,8 +44806,16 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
     }
     exchange(&mut c.no_union, 0);
     mut ret = 1;
+    if fn_form && !is(&mut c, view("->")) && !is(&mut c, view("{")) {
+        diag_help(&mut c, view("write it as a named function's: `fn(x: u64) -> u64 { x * 2 }`"));
+        fail(&mut c, view("a function literal's body is a block"));
+    }
     if eat(&mut c, view("->")) {
         ret = parse_type(&mut c);
+        if fn_form && !is(&mut c, view("{")) {
+            diag_help(&mut c, view("write it as a named function's: `fn(x: u64) -> u64 { x * 2 }`"));
+            fail(&mut c, view("a function literal's body is a block"));
+        }
     } else if hinted && (hint_ret != NO_TYPE) {
         ret = hint_ret;
     } else if !is(&mut c, view("{")) {
@@ -43888,7 +44842,7 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
                     break;
                 }
             }
-            if (k == 124) || (k == 274) {
+            if (k == 124) || (k == 274) || fn_literal_at(&mut c, q) || (is_at(&mut c, q, view("fn")) && (kind_at(&mut c, q + 1) == 1)) {
                 nested = true;
             }
             if (k == 1) & (valued == 0) {
@@ -43900,8 +44854,17 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
         }
         if (valued != 0) && !nested {
             exchange(&mut c.pos, valued);
-            diag_help(&mut c, view("write the result type before the block: `|a: u64| -> u64 { return a + 1; }`"));
+            if fn_form {
+                diag_help(&mut c, view("write the result type before the block: `fn(a: u64) -> u64 { return a + 1; }`"));
+            } else {
+                diag_help(&mut c, view("write the result type before the block: `|a: u64| -> u64 { return a + 1; }`"));
+            }
             fail(&mut c, view("this closure's block returns a value, and nothing says what type its result is"));
+        }
+        // A block that ends in a value (`|x: u64| { y := x * 2; y + 1 }`) has that value's type, found
+        // as an expression body's is: the block compiled once in isolation, as a block expression.
+        if block_has_value(&mut c, c.pos, block_end(&mut c, c.pos)) {
+            ret = closure_body_type(&mut c, &names, &params);
         }
     }
     start := c.pos;
@@ -43934,6 +44897,10 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
     mut nested_mark = 18446744073709551615;
     mut captures = u8[][];
     mut inner = u8[][];
+    // A recursive local function's own name is its body's reference to itself, not a capture.
+    if self_name.len() != 0 {
+        inner.push(self_name.copy());
+    }
     mut i = start;
     while i < end {
         if kind_at(&mut c, i) == 1 {
@@ -44040,6 +45007,11 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
         if written[j] != 0 {
             mode = 1;
         }
+    }
+    if (mode != 0) && (self_name.len() != 0) {
+        // Each call would write the one environment the calls still running are using.
+        diag_help(&mut c, view("pass what it writes as a parameter instead of capturing it: `fn walk(total: &mut u64, n: u64) -> u64`"));
+        fail_at(&mut c, start, view("a local function that calls itself cannot also write what it captured"));
     }
     // The names this closure writes are the body's to forget after a call: the call names the
     // closure, not what it captured, so the set is kept per body (docs/design/refinements.md).
@@ -44293,6 +45265,8 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
                     tnames: tn,
                     bindings: bn,
                     regions: param_regions,
+                    self_name: self_name.copy(),
+                    thin: 0,
                     written: written,
                     weak: weak,
                     unit: owner_unit,
@@ -44667,6 +45641,22 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
             own(&mut c, slot, ty);
             init_parameter(&mut c, slot, ty);
         }
+        self_name := c.closures[i].self_name.copy();
+        if self_name.len() != 0 {
+            // `walk(n - 1)` in walk's own body: the name is a shared reference to the closure being
+            // called - the hidden first argument, the address of the word that holds the object -
+            // typed as the erased closure, which a call goes through as through any `&Fn(..)`.
+            erased := intern_args(&mut c, 20, ret, 0, u64[], copy_numbers(&params));
+            mut env_region = u64[];
+            env_region.push(1);
+            selfty := intern_full(&mut c, 7, erased, 0, env_region);
+            envslot := c.locals[0].id;
+            get(&mut c, envslot, view("%rax"));
+            me := save(&mut c);
+            bind(&mut c, self_name, selfty, me, 0);
+            own(&mut c, me, selfty);
+            init_parameter(&mut c, me, selfty);
+        }
         if is(&mut c, view("{")) {
             end := block_end(&mut c, start);
             exchange(&mut c.scope_end, end);
@@ -44701,6 +45691,8 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
                     pv_add(&mut c.pv_pending, 2, view(a), view(b), 0);
                 }
             }
+            exchange(&mut c.last_semi_at, 0);
+            exchange(&mut c.tail_mode, 1);
             block(&mut c);
             pv_end(&mut c);
             exchange(&mut c.cur_ppreds, saved_preds);
@@ -44717,7 +45709,7 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
             exchange(&mut c.pv_trown, saved_trown);
             exchange(&mut c.pv_caps, saved_caps);
             if (c.terminated == 0) & (ret != 1) {
-                fail(&mut c, view("closure may fall through without return"));
+                fall_through(&mut c, view("closure"), ret);
             }
         } else {
             start := c.pos;
@@ -44746,6 +45738,9 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
         on(&mut c, (c.next + 1) / 2 * 16);
         c.out.push(10);
         size_directive(&mut c, view(".closure"), view(symbol), view(symbol), 0);
+        if c.closures[i].thin != 0 {
+            emit_thin_entry(&mut c, view(symbol), weak);
+        }
         scope_end(&mut c);
         exchange(&mut c.closure_env, 0);
         exchange(&mut c.closure_spec, 0);
@@ -46244,13 +47239,6 @@ fn text_method<a, b>(c: (&a mut C), xt: u64, k: u64, name: &b [u8]) -> Val {
         r := invoke(&mut c, view("rt_seq_repeat"), two(xt, n.t));
         return own(&mut c, r, result);
     }
-    if same(view(name), view("chars")) {
-        expect(&mut c, view(")"));
-        r := invoke(&mut c, view("rt_seq_chars"), one(xt));
-        ch := char_type(&mut c);
-        vt := intern(&mut c, 6, ch);
-        return own(&mut c, r, vt);
-    }
     return val(0, NO_TYPE);
 }
 fn char_method<a>(n: &a [u8]) -> bool {
@@ -46344,24 +47332,15 @@ fn pointer_method<a, d>(c: (&a mut C), value: Val, pty: u64, name: &d [u8]) -> V
     }
     if same(view(name), view("read")) {
         expect(&mut c, view(")"));
-        slot := ptr_load(&mut c, address, pointee);
-        // The value read out is the reader's: `ptr::read` duplicates ownership, so the result is an
-        // owner with a drop flag of its own, which is what lets it be dropped or moved with the
-        // ordinary rules (the reader owes the source a value it will not use twice).
-        own(&mut c, slot, pointee);
+        v := pointer_read(&mut c, address, pointee);
         release_temporary(&mut c, word);
-        return val(slot, pointee);
+        return v;
     }
     if same(view(name), view("write")) {
-        if mode == 0 {
-            fail(&mut c, view("write needs a *mut T; a *T only reads"));
-        }
+        pointer_writable(&mut c, mode);
         v := expr(&mut c, 0);
         expect(&mut c, view(")"));
-        ptr_store(&mut c, address, v.t, pointee);
-        // And `ptr::write` hands it over: the operand is moved into the destination, so an owned
-        // local argument is consumed and not also dropped where it came from.
-        move_out(&mut c, val(v.t, v.ty));
+        pointer_store(&mut c, address, v, pointee);
         release_temporary(&mut c, word);
         return val(imm(&mut c, 0), intern(&mut c, 2, 0));
     }
@@ -46435,6 +47414,47 @@ fn pointer_method<a, d>(c: (&a mut C), value: Val, pty: u64, name: &d [u8]) -> V
     push_bytes(&mut msg, view(name));
     fail(&mut c, view(msg));
     return val(0, 0);
+}
+// `p.read()` and `*p`: the value read out is the reader's. `ptr::read` duplicates ownership, so the
+// result is an owner with a drop flag of its own, which is what lets it be dropped or moved with the
+// ordinary rules (the reader owes the source a value it will not use twice).
+fn pointer_read<a>(c: (&a mut C), address: u64, pointee: u64) -> Val {
+    slot := ptr_load(&mut c, address, pointee);
+    own(&mut c, slot, pointee);
+    return val(slot, pointee);
+}
+fn pointer_writable<a>(c: (&a mut C), mode: u64) -> unit {
+    if mode == 0 {
+        fail(&mut c, view("write needs a *mut T; a *T only reads"));
+    }
+    return ();
+}
+// The value `*p = v` stores: an expression of the pointee's type (a bare literal takes it), exactly
+// as `*r = v` reads its right side. (`p.write(v)` stores its operand as it is.)
+fn pointer_operand<a>(c: (&a mut C), pointee: u64) -> Val {
+    start := c.pos;
+    mut v = expr_expected(&mut c, 0, pointee);
+    v = adopt_value(&mut c, v, start, c.pos, pointee);
+    if c.raw == 0 {
+        require_type(&mut c, v.ty, pointee);
+    }
+    return v;
+}
+// `p.write(v)` and `*p = v`: `ptr::write` hands the value over. The operand is moved into the
+// destination, so an owned local is consumed and not also dropped where it came from - and what was
+// there before is not dropped either.
+fn pointer_store<a>(c: (&a mut C), address: u64, v: Val, pointee: u64) -> unit {
+    ptr_store(&mut c, address, v.t, pointee);
+    move_out(&mut c, val(v.t, v.ty));
+    return ();
+}
+// `*p`, `**p` and `*p = v` on a raw pointer `p`: the operator spellings of `p.read()` and
+// `p.write(v)`, with the same unsafe gate.
+fn pointer_deref<a>(c: (&a mut C), p: Val) -> Val {
+    raw_pointer_gate(&mut c, view("read"));
+    v := pointer_read(&mut c, p.t, ty_arg(&mut c, p.ty));
+    release_temporary(&mut c, p.t);
+    return v;
 }
 // `p.read()`: the pointee loaded at its natural width, the same instruction raw_load and friends
 // emit for the intrinsic of that width. A float pointee is refused rather than reinterpreted.
@@ -46513,9 +47533,13 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
     name := ident(&mut c);
     expect(&mut c, view("("));
     mut value = value;
-    if literal_receiver & char_method(view(name)) {
+    if literal_receiver {
+        // A character literal is a char wherever `char` has the method - built in, or from a
+        // library impl (`'7'.to_digit(10)`); an integer literal stays an integer.
         ch := char_type(&mut c);
-        value = val(value.t, ch);
+        if char_method(view(name)) || ((kind_at(&mut c, c.lit_start) == 4) && (inherent_method_for(&mut c, ch, view(name)) != 0)) {
+            value = val(value.t, ch);
+        }
     }
     input := value.t;
     inty := value.ty;
@@ -46570,9 +47594,9 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
         exchange(&mut c.has_receiver, 1);
         return call(&mut c, view(owner), view(name));
     }
-    if k == 34 {
-        return pointer_method(&mut c, val(xt, xty), xty, view(name));
-    }
+    // `T?` and a tuple are declarations underneath, but the impls that give them methods are written
+    // for the type (`impl<T> T?`), so their methods are looked up below, after the declaration's own.
+    mut written = false;
     if k == 8 {
         d := ty_arg(&mut c, xty);
         mut owner = private_module(view(".inherent_"), d);
@@ -46639,14 +47663,18 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
             exchange(&mut c.has_receiver, 1);
             return call(&mut c, view(owner), view(name));
         }
-        field := find_field(&mut c, d, view(name));
-        ft := field_type(&mut c, xty, field);
-        if ty_kind(&mut c, ft) != 12 {
-            fail(&mut c, view("record field is not callable"));
+        if written_named(&mut c, xty) && (inherent_method_for(&mut c, xty, view(name)) != 0) {
+            written = true;
+        } else {
+            field := find_field(&mut c, d, view(name));
+            ft := field_type(&mut c, xty, field);
+            if ty_kind(&mut c, ft) != 12 {
+                fail(&mut c, view("record field is not callable"));
+            }
+            slot := field_load(&mut c, xt, xty, field, 0);
+            projected := alias_field(&mut c, slot, ft, xt, field, 0);
+            return indirect_call(&mut c, projected, 1);
         }
-        slot := field_load(&mut c, xt, xty, field, 0);
-        projected := alias_field(&mut c, slot, ft, xt, field, 0);
-        return indirect_call(&mut c, projected, 1);
     }
     // `item.name()` on a type parameter bounded by interfaces: the bound that declares `name`
     // (Rust's method syntax on generic bounds; `Interface::name(item)` is the same call).
@@ -46758,15 +47786,26 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
         }
     }
     // A method an inherent impl gives a *written* type: `impl<T> T[] { ... }`, `impl [u8] { ... }`,
-    // `impl string { ... }`. It resolves before any interface method of the same name (Rust's
-    // order), and before the builtin collection methods below - which an impl may not redefine at
-    // all (protocol_method_name). A declared type's own methods were looked up above (k == 8).
-    if k != 8 {
+    // `impl string { ... }`, `impl u64 { ... }`. It resolves before any interface method of the same
+    // name (Rust's order), and before the builtin methods below - which an impl may not redefine at
+    // all (protocol_method_name, builtin_method_name), except that `contains` on a vector of integers
+    // or bools stays the compiler's own (builtin_contains). A declared type's own methods were looked
+    // up above (k == 8).
+    if ((k != 8) || written) & !(same(view(name), view("contains")) & builtin_contains(&mut c, xty)) {
         mut method = inherent_method_for(&mut c, xty, view(name));
         // A byte vector or a string is byte text: when no impl names it as it stands, the impls of
         // `[u8]` are the ones it is asking for, and the receiver is viewed for the call below.
         if (method == 0) & byte_sequence_value(&mut c, inty) {
             method = inherent_method_for(&mut c, view_type_of(&mut c), view(name));
+        }
+        // A vector is a slice of itself: when no impl names the method for `T[]`, the impls of
+        // `[T]` are the ones it is asking for (Rust's `Vec<T>` deref to `[T]`), and the receiver is
+        // the slice over the whole vector, as `&v` / `&mut v` passed for a `&[T]` / `&mut [T]`
+        // parameter is (coerce_view).
+        mut whole = false;
+        if (method == 0) & (ty_kind(&mut c, xty) == 6) {
+            method = inherent_method_for(&mut c, slice_type_of(&mut c, xty), view(name));
+            whole = method != 0;
         }
         if method != 0 {
             owner := c.funcs[method - 1].module.copy();
@@ -46793,6 +47832,13 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
             mut rinput = input;
             mut rinty = inty;
             mut rxty = xty;
+            if whole && (ty_kind(&mut c, formal) == 27) {
+                borrowed := method_receiver(&mut c, input, inty, xty, reference_type(&mut c, xty, ty_mode(&mut c, formal)));
+                sliced := coerce_view(&mut c, borrowed, formal);
+                rinput = sliced.t;
+                rinty = sliced.ty;
+                rxty = sliced.ty;
+            }
             if ty_kind(&mut c, formal) == 5 {
                 mut viewed = val(input, inty);
                 if ty_kind(&mut c, inty) == 5 {
@@ -46824,12 +47870,23 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
         mut owner = u8[];
         mut method = 0;
         mut picked = 0;
+        // A bound parameter's method is its bound's, whatever is in scope where the generic body
+        // is replayed; a concrete built-in receiver sees only the interfaces in scope here.
+        scoped := ty_kind(&mut c, xty) != 10;
+        mut hidden = 0;
         for i in c.implementations.len() {
             // stays: a vector element read is a loan, so it conflicts with the call's &mut.
             ity := c.implementations[i].ty;
             mut fits = same_type(&mut c, ity, concrete) != 0;
             if !fits {
                 fits = impl_bindings(&mut c, i + 1, concrete).len() != 0;
+            }
+            contract := c.implementations[i].contract;
+            if fits && scoped && !interface_in_scope(&mut c, contract) {
+                if find_func(&mut c, view(private_module(view(".impl_"), i + 1)), view(name)) != 0 {
+                    hidden = contract;
+                }
+                fits = false;
             }
             if fits {
                 candidate := private_module(view(".impl_"), i + 1);
@@ -46884,6 +47941,29 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
             }
             return v;
         }
+        // Only an out-of-scope interface defines the name, and the compiler does not answer it
+        // itself: say which interface, and what brings it into scope.
+        collection := (k == 3) || (k == 4) || (k == 5) || (k == 6) || (k == 27) || is_array(&mut c, xty);
+        if (hidden != 0) && !collection && !builtin_method_name(&mut c, k, view(name)) {
+            home := c.interfaces[hidden - 1].module.copy();
+            mut msg = copy_bytes(view("`"));
+            push_bytes(&mut msg, view(name));
+            push_bytes(&mut msg, view("` is a method of the interface `"));
+            push_bytes(&mut msg, view(home));
+            push_bytes(&mut msg, view("::"));
+            push_bytes(&mut msg, view(c.interfaces[hidden - 1].name));
+            push_bytes(&mut msg, view("`, which is not in scope in this module"));
+            mut help = copy_bytes(view("add `use "));
+            push_bytes(&mut help, view(home));
+            push_bytes(&mut help, view(";` to this module to call it on `"));
+            push_bytes(&mut help, view(source_type_name(&mut c, xty)));
+            push_bytes(&mut help, view("`"));
+            diag_help(&mut c, view(help));
+            fail(&mut c, view(msg));
+        }
+    }
+    if k == 34 {
+        return pointer_method(&mut c, val(xt, xty), xty, view(name));
     }
     if k == 11 {
         return atomic_method(&mut c, val(xt, xty), view(name));
@@ -47047,7 +48127,12 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
     }
     if c.raw == 0 {
         if (k != 3) & (k != 4) & (k != 5) & (k != 6) & (k != 27) {
-            fail(&mut c, view("collection method requires collection/view"));
+            mut msg = copy_bytes(view("`"));
+            push_bytes(&mut msg, view(source_type_name(&mut c, xty)));
+            push_bytes(&mut msg, view("` has no method `"));
+            push_bytes(&mut msg, view(name));
+            push_bytes(&mut msg, view("`"));
+            fail(&mut c, view(msg));
         }
     }
     if same(view(name), view("len")) {
@@ -47126,16 +48211,28 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
     }
     if ((k == 6) || (k == 27)) && same(view(name), view("contains")) {
         elem := ty_arg(&mut c, xty);
-        if !(integer(&mut c, elem) || is_bool(&mut c, elem)) {
-            fail(
-                &mut c,
-                view("contains on vectors needs integer or bool elements (use vecs::contains for others)")
-            );
+        if !builtin_contains(&mut c, xty) {
+            // Reached only when no impl serves it: `vecs` is not imported, or the element type does
+            // not meet the impl's bound.
+            mut unmet = inherent_unmet_bound(&mut c, xty, view(name));
+            if (unmet.0.len() == 0) & (k == 6) {
+                unmet = inherent_unmet_bound(&mut c, slice_type_of(&mut c, xty), view(name));
+            }
+            if unmet.0.len() != 0 {
+                diag_help(&mut c, view(unmet.1));
+                fail(&mut c, view(unmet.0));
+            }
+            diag_help(&mut c, view("add `use vecs;`: its `contains` takes any element type with `hash::Equal`"));
+            fail(&mut c, view("contains on a vector of other than integers or bools is the `vecs` module's method"));
         }
         vstart := c.pos;
         mut v = expr(&mut c, 0);
         vend := c.pos;
         expect(&mut c, view(")"));
+        // `v.contains(&x)`, the spelling every other element type uses, compares the value too.
+        if (ty_kind(&mut c, v.ty) == 7) && same_type(&mut c, ty_arg(&mut c, v.ty), elem) {
+            v = deref(&mut c, v);
+        }
         v = adopt_value(&mut c, v, vstart, vend, elem);
         require_type(&mut c, v.ty, elem);
         mut f = "rt_vec_contains";
@@ -47160,10 +48257,17 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
         || same(view(name), view("push_char"))
         || same(view(name), view("append"));
     if !known {
-        unmet := inherent_unmet_bound(&mut c, xty, view(name));
+        mut unmet = inherent_unmet_bound(&mut c, xty, view(name));
+        if (unmet.0.len() == 0) & (ty_kind(&mut c, xty) == 6) {
+            // A vector reaches the impls of `[T]` too: name the bound one of those did not meet.
+            unmet = inherent_unmet_bound(&mut c, slice_type_of(&mut c, xty), view(name));
+        }
         if unmet.0.len() != 0 {
             diag_help(&mut c, view(unmet.1));
             fail(&mut c, view(unmet.0));
+        }
+        if same(view(name), view("chars")) & byte_sequence_value(&mut c, inty) {
+            diag_help(&mut c, view("add `use strings;`: `s.chars()` is its lazy iterator over the code points"));
         }
         recv := source_type_name(&mut c, xty);
         mut msg = copy_bytes(view("`"));
@@ -47867,9 +48971,9 @@ fn record_bytes<a>(c: (&a mut C), alias: u64) -> u64 {
         return array_bytes(&mut c, alias);
     }
     ty := base_type(&mut c, closure_record(&mut c, alias));
-    d := ty_arg(&mut c, ty);
-    if c.decls[d].c_layout != 0 {
-        return ffi_record_size(&mut c, d);
+    // A view or slice held inline is its two words; only a record has a declaration to ask.
+    if (ty_kind(&mut c, ty) == 8) && (c.decls[ty_arg(&mut c, ty)].c_layout != 0) {
+        return ffi_record_size(&mut c, ty_arg(&mut c, ty));
     }
     if framable(&mut c, ty) {
         return value_bytes(&mut c, ty);
@@ -48227,7 +49331,7 @@ fn promote_literal_ok<a>(c: (&a mut C), cty: u64) -> bool {
             depth -= 1;
         }
         // A closure in scope could capture it by value.
-        if (same(view(t), view("|")) || same(view(t), view("||"))) && (same(view(prev), view("(")) || same(view(prev), view(",")) || same(view(prev), view("=")) || same(view(prev), view(":=")) || same(view(prev), view("return"))) {
+        if (same(view(t), view("|")) || same(view(t), view("||"))) && (same(view(prev), view("(")) || same(view(prev), view(",")) || same(view(prev), view("=")) || same(view(prev), view(":=")) || same(view(prev), view("return")) || same(view(prev), view("{")) || same(view(prev), view(";")) || same(view(prev), view("=>"))) {
             return false;
         }
         if (k == 1) && same(view(t), view(name)) && !same(view(prev), view(".")) && !same(view(prev), view("::")) {
@@ -48757,13 +49861,24 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
     // the expression and restored after it, so move, drop and borrow rules still apply inside.
     if (k == 1) & is(&mut c, view("unsafe")) & is_at(&mut c, c.pos + 1, view("{")) {
         advance(&mut c);
-        expect(&mut c, view("{"));
         depth := c.unsafe_depth;
         exchange(&mut c.unsafe_depth, depth + 1);
+        if arm_holds_statements(&mut c, c.pos, block_end(&mut c, c.pos)) {
+            // `unsafe { stmts; value }`: a block expression inside the boundary.
+            v := block_value(&mut c, expected);
+            exchange(&mut c.unsafe_depth, depth);
+            return v;
+        }
+        expect(&mut c, view("{"));
         v := expr(&mut c, 0);
         expect(&mut c, view("}"));
         exchange(&mut c.unsafe_depth, depth);
         return v;
+    }
+    // `{ stmts; value }` where a value is required: a block expression. (A `{` that begins a
+    // statement is the statement block, parsed before any expression.)
+    if k == 123 {
+        return block_value(&mut c, expected);
     }
     // `@expr`: the next operand, folded at compile time (stage C1: literals, constants, size_of,
     // align_of and target; a call in it is the run tier, C3).
@@ -48829,6 +49944,18 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
         // reference is only passed through, never kept, so it needs no loan of its own.
         advance(&mut c);
         r := expr(&mut c, 10);
+        // A raw pointer at either level is read through (`**pp` for `pp: *mut *mut T`, or `**r` for
+        // `r: &*T`): each `*` is the one it would be alone.
+        if ty_kind(&mut c, r.ty) == 34 {
+            inner := pointer_deref(&mut c, r);
+            if ty_kind(&mut c, inner.ty) == 34 {
+                return pointer_deref(&mut c, inner);
+            }
+            return deref_value(&mut c, inner);
+        }
+        if (ty_kind(&mut c, r.ty) == 7) && (ty_kind(&mut c, ty_arg(&mut c, r.ty)) == 34) {
+            return pointer_deref(&mut c, deref_value(&mut c, r));
+        }
         observe(&mut c, r.t);
         if ty_kind(&mut c, r.ty) != 7 {
             fail(&mut c, view("* requires a typed reference"));
@@ -48854,6 +49981,9 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
         // `*r`: dereference; postfix accessors bind tighter (`*r.f` is `*(r.f)`).
         advance(&mut c);
         r := expr(&mut c, 10);
+        if ty_kind(&mut c, r.ty) == 34 {
+            return pointer_deref(&mut c, r);
+        }
         return deref_value(&mut c, r);
     }
     if k == 38 {
@@ -49036,7 +50166,7 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
         exchange(&mut c.lit_negative, 0);
         return val(slot, 0);
     }
-    if ((k == 124) || (k == 274)) && (c.raw == 0) {
+    if ((k == 124) || (k == 274) || fn_literal_at(&mut c, c.pos)) && (c.raw == 0) {
         return closure_literal(&mut c);
     }
     if k == 33 {
@@ -49603,6 +50733,12 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
         return call(&mut c, view(m), view(first));
     }
     mut l = find_local(&mut c, view(first));
+    if (l != 0) && (c.narrowed.len() != 0) {
+        origin := narrowed_origin(&mut c, l);
+        if (origin != 0) && narrowed_as_optional(&mut c, expected) {
+            l = origin;
+        }
+    }
     if l != 0 {
         id := local_id(&mut c, l - 1);
         ty := local_ty(&mut c, l - 1);
@@ -51019,7 +52155,7 @@ fn expr<a>(c: (&a mut C), min: u64) -> Val {
 }
 fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
     lstart := c.pos;
-    if (kind(&mut c) == 124) || (kind(&mut c) == 274) {
+    if closure_at(&mut c, c.pos) {
         if expected != NO_TYPE {
             none := u64[];
             closure_hint(&mut c, expected, &none);
@@ -51202,7 +52338,21 @@ fn expr_rest<a>(c: (&a mut C), min: u64, expected: u64, lstart: u64, first: Val)
                                         jump(&mut c, view("jne"), done);
                                     }
                                 }
+                                // What the left operand says holds while the right one runs.
+                                mut scoped = false;
+                                if c.raw == 0 {
+                                    short_facts := pv_short_facts(&mut c, k, lstart, c.pos - 1);
+                                    if short_facts.len() != 0 {
+                                        saved_pending := exchange(&mut c.pv_pending, short_facts);
+                                        pv_ir_open(&mut c);
+                                        exchange(&mut c.pv_pending, saved_pending);
+                                        scoped = true;
+                                    }
+                                }
                                 right := expr(&mut c, p + 1);
+                                if scoped {
+                                    pv_ir_close(&mut c);
+                                }
                                 rt := right.ty;
                                 if c.raw == 0 {
                                     if !(is_bool(&mut c, rt) || rt == 0) {
@@ -51282,6 +52432,35 @@ fn expr_rest<a>(c: (&a mut C), min: u64, expected: u64, lstart: u64, first: Val)
                                     ty = over.ty;
                                     left_lit = false;
                                     continue;
+                                }
+                            }
+                            // Comparisons see through references to plain values, on either side and
+                            // at any depth: `n > 4`, `4 < n` and `a == b` compare the values behind
+                            // them. Arithmetic does not: `n + 1` stays a mismatch that names `*n`.
+                            if (c.raw == 0)
+                                && (ref_to_plain(&mut c, ty) || ref_to_plain(&mut c, rty)) {
+                                if is_comparison(k) {
+                                    if ref_to_plain(&mut c, ty) {
+                                        x := deref(&mut c, val(t, ty));
+                                        snap = x.t;
+                                        ty = x.ty;
+                                    }
+                                    if ref_to_plain(&mut c, rty) {
+                                        right = deref(&mut c, val(right.t, rty));
+                                        rty = right.ty;
+                                    }
+                                } else {
+                                    if c.tolerant == 0 {
+                                        diag_help(
+                                            &mut c,
+                                            view("only comparisons read through a reference; dereference it for arithmetic: `*n + 1`")
+                                        );
+                                        if ref_to_plain(&mut c, ty) {
+                                            require_type(&mut c, ty, plain_behind(&mut c, ty));
+                                        } else {
+                                            require_type(&mut c, rty, plain_behind(&mut c, rty));
+                                        }
+                                    }
                                 }
                             }
                             if c.raw == 0 {
@@ -51621,7 +52800,380 @@ fn strict_bool_fail<a, b>(c: (&a mut C), msg: &b [u8]) -> unit {
     return ();
 }
 // ---- statements ----
+// ---- tail expressions ------------------------------------------------------------------------------
+// The last item of a block, written without `;`, is the block's value (Rust's rule;
+// docs/design/tail-expressions.md). The items of a block are told apart by tokens alone - an item
+// ends at its `;` at the block's own depth, or, for a construct (`if`, `match`, a loop, `{ }`,
+// `unsafe { }`), at its last `}` - so a block knows which item is its tail before compiling it.
+//
+// What a tail does depends on how its block ends (`tail_mode`). A function or closure body returns
+// it: the tail compiles exactly as `return x;` does (return_exit), so the two spellings are the same
+// program. A value block (an arm of an `if`/`match` expression, a block expression) stores it into
+// the word the value is joined in, as a one-expression arm does. Any other block is a statement
+// block, whose value nobody takes: its tail must be unit. A final `if`, `match`, `{ }` or
+// `unsafe { }` passes its block's mode on to its own blocks, so `fn f() -> u64 { if c { 1 } else
+// { 2 } }` returns from each arm.
+
+// The first `{` from `p` outside parentheses and brackets (a construct's body after its head), or 0.
+fn tail_open_brace<a>(c: (&a mut C), p: u64) -> u64 {
+    mut i = p;
+    mut depth = 0;
+    while i < c.toks.len() {
+        k := kind_at(&mut c, i);
+        if (k == 0) || ((k == 125) & (depth == 0)) || ((k == 59) & (depth == 0)) {
+            return 0;
+        }
+        if (k == 40) || (k == 91) {
+            depth += 1;
+        }
+        if (k == 41) || (k == 93) {
+            if depth == 0 {
+                return 0;
+            }
+            depth -= 1;
+        }
+        if (k == 123) & (depth == 0) {
+            return i;
+        }
+        i += 1;
+    }
+    return 0;
+}
+// The construct an item at `p` starts: 1 `if`, 2 `match`, 3 `{ }`, 4 `unsafe { }`, 5 a loop, 6 an
+// `@if`/`@for`/`@bounded` form, or 0 for an item that is not one.
+fn tail_construct<a>(c: (&a mut C), p: u64) -> u64 {
+    k := kind_at(&mut c, p);
+    if k == 123 {
+        return 3;
+    }
+    if k == 64 {
+        if is_at(&mut c, p + 1, view("if")) || is_at(&mut c, p + 1, view("for")) || is_at(&mut c, p + 1, view("bounded")) {
+            return 6;
+        }
+        return 0;
+    }
+    if k != 1 {
+        return 0;
+    }
+    if is_at(&mut c, p, view("if")) {
+        return 1;
+    }
+    if is_at(&mut c, p, view("match")) {
+        return 2;
+    }
+    if is_at(&mut c, p, view("unsafe")) && (kind_at(&mut c, p + 1) == 123) {
+        return 4;
+    }
+    if is_at(&mut c, p, view("while")) || is_at(&mut c, p, view("for")) || is_at(&mut c, p, view("loop")) {
+        return 5;
+    }
+    // A local `fn name(..) { .. }`: an item that ends at its body's `}`, with no value.
+    if is_at(&mut c, p, view("fn")) && (kind_at(&mut c, p + 1) == 1) {
+        return 7;
+    }
+    return 0;
+}
+// The last `}` of the construct `what` at `p` (an `if` with its `else` chain), or 0.
+fn construct_close<a>(c: (&a mut C), p: u64, what: u64) -> u64 {
+    mut open = p;
+    if what == 4 {
+        open = p + 1;
+    } else if what != 3 {
+        open = tail_open_brace(&mut c, p + 1);
+    }
+    if open == 0 {
+        return 0;
+    }
+    mut e = block_end(&mut c, open);
+    if (what == 1) || (what == 6) {
+        while is_at(&mut c, e + 1, view("else")) {
+            open = tail_open_brace(&mut c, e + 2);
+            if open == 0 {
+                return e;
+            }
+            e = block_end(&mut c, open);
+        }
+    }
+    return e;
+}
+// The token after the item that starts at `p` in a block closing at `limit`: past its `;`, past a
+// construct's last `}`, or `limit` for a last item without `;`.
+fn item_end<a>(c: (&a mut C), p: u64, limit: u64) -> u64 {
+    what := tail_construct(&mut c, p);
+    if what != 0 {
+        e := construct_close(&mut c, p, what);
+        if (e != 0) & (e < limit) {
+            // `{ a, b } := r;` destructures: a statement that ends at its `;`.
+            nk := kind_at(&mut c, e + 1);
+            if !((what == 3) & ((nk == 261) || (nk == 61))) {
+                return e + 1;
+            }
+        }
+    }
+    mut i = p;
+    mut depth = 0;
+    while i < limit {
+        k := kind_at(&mut c, i);
+        if (k == 40) || (k == 91) || (k == 123) {
+            depth += 1;
+        }
+        if ((k == 41) || (k == 93) || (k == 125)) & (depth != 0) {
+            depth -= 1;
+        }
+        if (k == 59) & (depth == 0) {
+            return i + 1;
+        }
+        i += 1;
+    }
+    return limit;
+}
+// Whether the item at `p` is the block's last and has no `;`.
+fn tail_item<a>(c: (&a mut C), p: u64, limit: u64) -> bool {
+    return (item_end(&mut c, p, limit) == limit) & (kind_at(&mut c, limit - 1) != 59);
+}
+// Whether a last item that is not a construct is an expression: not a statement (a statement word,
+// a binding, an assignment), which keeps its `;` and is refused without it as before.
+fn tail_value_item<a>(c: (&a mut C), p: u64, limit: u64) -> bool {
+    if (kind_at(&mut c, p) == 1) && statement_head(view(tok_text(&mut c, p))) {
+        return false;
+    }
+    mut i = p;
+    mut depth = 0;
+    while i < limit {
+        k := kind_at(&mut c, i);
+        if (k == 40) || (k == 91) || (k == 123) {
+            depth += 1;
+        }
+        if ((k == 41) || (k == 93) || (k == 125)) & (depth != 0) {
+            depth -= 1;
+        }
+        if (depth == 0) & ((k == 61) || ((260 < k) & (k < 267))) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+// Whether the block from `open` to `close` ends in a value: its last item is an expression without
+// `;`, or a construct one of whose blocks does.
+fn block_has_value<a>(c: (&a mut C), open: u64, close: u64) -> bool {
+    mut p = open + 1;
+    while p < close {
+        e := item_end(&mut c, p, close);
+        if e == close {
+            if kind_at(&mut c, close - 1) == 59 {
+                return false;
+            }
+            what := tail_construct(&mut c, p);
+            if what == 0 {
+                return tail_value_item(&mut c, p, close);
+            }
+            return construct_has_value(&mut c, p, what);
+        }
+        p = e;
+    }
+    return false;
+}
+// Whether the construct `what` at `p` produces a value: a block of it ends in one, or an arm of a
+// `match` is an expression. A loop or an `@` form never does.
+fn construct_has_value<a>(c: (&a mut C), p: u64, what: u64) -> bool {
+    if what == 3 {
+        return block_has_value(&mut c, p, block_end(&mut c, p));
+    }
+    if what == 4 {
+        return block_has_value(&mut c, p + 1, block_end(&mut c, p + 1));
+    }
+    if what == 1 {
+        mut open = tail_open_brace(&mut c, p + 1);
+        while open != 0 {
+            e := block_end(&mut c, open);
+            if block_has_value(&mut c, open, e) {
+                return true;
+            }
+            if !is_at(&mut c, e + 1, view("else")) {
+                return false;
+            }
+            open = tail_open_brace(&mut c, e + 2);
+        }
+        return false;
+    }
+    if what == 2 {
+        open := tail_open_brace(&mut c, p + 1);
+        if open == 0 {
+            return false;
+        }
+        close := block_end(&mut c, open);
+        mut i = open + 1;
+        mut depth = 0;
+        while i < close {
+            k := kind_at(&mut c, i);
+            if (k == 257) & (depth == 0) {
+                body := i + 1;
+                if kind_at(&mut c, body) != 123 {
+                    return true;
+                }
+                e := block_end(&mut c, body);
+                if block_has_value(&mut c, body, e) {
+                    return true;
+                }
+                i = e + 1;
+                continue;
+            }
+            if (k == 40) || (k == 91) || (k == 123) {
+                depth += 1;
+            }
+            if ((k == 41) || (k == 93) || (k == 125)) & (depth != 0) {
+                depth -= 1;
+            }
+            i += 1;
+        }
+    }
+    return false;
+}
+// One item of a block whose mode is `mode` and whose `}` is at `end`: a statement, or its tail.
+fn block_item<a>(c: (&a mut C), mode: u64, end: u64) -> unit {
+    p := c.pos;
+    if !tail_item(&mut c, p, end) {
+        stmt(&mut c);
+        return ();
+    }
+    what := tail_construct(&mut c, p);
+    if what != 0 {
+        if (what == 5) || (what == 6) || (what == 7) {
+            stmt(&mut c);
+            return ();
+        }
+        if mode == 2 {
+            // In a value block a construct with a value is that value's expression (`if`/`match`
+            // expressions, a block expression); one without is a statement, which must diverge.
+            if construct_has_value(&mut c, p, what) {
+                exchange(&mut c.tail_now, 3);
+            }
+            stmt(&mut c);
+            return ();
+        }
+        exchange(&mut c.tail_mode, mode);
+        stmt(&mut c);
+        exchange(&mut c.tail_mode, 0);
+        return ();
+    }
+    if !tail_value_item(&mut c, p, end) {
+        stmt(&mut c);
+        return ();
+    }
+    exchange(&mut c.tail_now, mode + 1);
+    stmt(&mut c);
+    return ();
+}
+// The tail item at c.pos, compiled the way `how` says: 1 a statement block's (a unit value,
+// discarded), 2 a function or closure body's (returned, a unit function's unit value too), 3 a value
+// block's (sunk).
+fn tail_value<a>(c: (&a mut C), how: u64) -> unit {
+    if how == 2 {
+        return_exit(&mut c, 1);
+        return ();
+    }
+    at := c.pos;
+    if how == 3 {
+        hint := c.sink_hint;
+        mut v = expr_expected(&mut c, 0, hint);
+        tail_close(&mut c);
+        if hint != NO_TYPE {
+            v = adopt_value(&mut c, v, at, c.pos, hint);
+        }
+        sink_store(&mut c, v, at);
+        return ();
+    }
+    mut v = expr(&mut c, 0);
+    tail_close(&mut c);
+    if (c.raw == 0) & (c.tolerant == 0) & (v.ty != 1) & (v.ty != NO_TYPE) {
+        this := source_type_name(&mut c, v.ty);
+        diag_help(&mut c, view("end it with `;` to discard the value"));
+        mut said = copy_bytes(view("this block ends in a `"));
+        push_bytes(&mut said, view(this));
+        push_bytes(&mut said, view("` value, and a statement block has none: nothing takes it"));
+        fail_at(&mut c, at, view(said));
+    }
+    discard_value(&mut c, v);
+    return ();
+}
+// A tail ends at its block's `}`; anything else after it is the `;` a statement needed.
+fn tail_close<a>(c: (&a mut C)) -> unit {
+    if !is(&mut c, view("}")) {
+        expect(&mut c, view(";"));
+    }
+    return ();
+}
+// A value block's tail goes where its sink says: the word an `if` expression's arms share, the word a
+// `match` expression's arms share, or a block expression's own word.
+fn sink_store<a>(c: (&a mut C), v: Val, at: u64) -> unit {
+    exchange(&mut c.sink_ty, v.ty);
+    if c.sink == 1 {
+        if_arm_store(&mut c, v, at, c.sink_hint, c.sink_hint_at, c.sink_slot);
+    } else if c.sink == 2 {
+        match_arm_value(&mut c, v, at);
+    } else {
+        if contains_borrow(&mut c, v.ty, 0) {
+            diag_help(&mut c, view("bind the reference before the block, or use it inside the block"));
+            fail_at(&mut c, at, view("a block expression cannot produce a value that borrows"));
+        }
+        store_arm_word(&mut c, v, c.sink_slot);
+    }
+    return ();
+}
+// `{ stmts; value }` where a value is required, its tail going to `sink`: compiled as a block whose
+// last item is stored, by the sink, into the word `slot`. The type of the value, or NO_TYPE when the
+// block has none (it diverged, or it ends in a statement).
+fn value_block<a>(c: (&a mut C), sink: u64, hint: u64, hint_at: u64, slot: u64) -> u64 {
+    old_sink := exchange(&mut c.sink, sink);
+    old_hint := exchange(&mut c.sink_hint, hint);
+    old_at := exchange(&mut c.sink_hint_at, hint_at);
+    old_slot := exchange(&mut c.sink_slot, slot);
+    old_ty := exchange(&mut c.sink_ty, NO_TYPE);
+    exchange(&mut c.tail_mode, 2);
+    block(&mut c);
+    ty := exchange(&mut c.sink_ty, old_ty);
+    exchange(&mut c.sink, old_sink);
+    exchange(&mut c.sink_hint, old_hint);
+    exchange(&mut c.sink_hint_at, old_at);
+    exchange(&mut c.sink_slot, old_slot);
+    return ty;
+}
+// `x := { a := f(); a + 1 };`: a block in expression position. Its value is moved into a word of
+// this frame before the block's own locals are dropped, and that word is owned after the block.
+fn block_value<a>(c: (&a mut C), expected: u64) -> Val {
+    at := c.pos;
+    slot := fresh(&mut c);
+    ty := value_block(&mut c, 3, expected, 0, slot);
+    if ty == NO_TYPE {
+        diag_help(&mut c, view("end the block with its value: an expression written without `;`"));
+        fail_at(&mut c, at, view("this block has no value"));
+    }
+    return own(&mut c, slot, ty);
+}
+// A body that can reach its end without a value: named with the type it owes, and, when its last
+// statement is an expression of that type ended by `;` (the `;` right before the body's `}`), with
+// the `;` to remove.
+fn fall_through<a, b>(c: (&a mut C), what: &b [u8], ret: u64) -> unit {
+    mut said = copy_bytes(view(what));
+    push_bytes(&mut said, view(" may fall through without a value: it returns `"));
+    push_bytes(&mut said, view(source_type_name(&mut c, ret)));
+    push_bytes(&mut said, view("`"));
+    at := c.last_semi_at;
+    if (at != 0) & (at + 2 == c.pos) & (c.last_semi_ty != NO_TYPE) {
+        if same_type(&mut c, c.last_semi_ty, ret) != 0 {
+            diag_help(&mut c, view("remove this `;`: a block's last expression, written without `;`, is its value"));
+            fail_at(&mut c, at, view(said));
+        }
+    }
+    diag_help(&mut c, view("end the body with its value (an expression without `;`), or `return` one"));
+    fail(&mut c, view(said));
+    return ();
+}
 fn block<a>(c: (&a mut C)) -> unit {
+    // How this block ends (`tail_mode`): taken here, so a block nested in it starts as a statement
+    // block unless the construct that opens it hands the mode on.
+    mode := exchange(&mut c.tail_mode, 0);
     end := block_end(&mut c, c.pos);
     oldend := c.scope_end;
     exchange(&mut c.scope_end, end);
@@ -51633,7 +53185,7 @@ fn block<a>(c: (&a mut C)) -> unit {
     mark := c.locals.len();
     mut owners = c.resources.len();
     while !is(&mut c, view("}")) {
-        stmt(&mut c);
+        block_item(&mut c, mode, end);
     }
     if (c.pv_spec_open != 0) && (c.pv_spec_open == brace) {
         pv_spec_check(&mut c, brace);
@@ -52726,9 +54278,195 @@ fn write_statement<a>(c: (&a mut C)) -> unit {
     cleanup(&mut c, temps);
     return ();
 }
+// The test optional_narrow takes: `name != None` or `name == None` and then the block, where `name`
+// is a binding that is not `mut` and holds an optional of a value that owns nothing - a number, a
+// bool, a reference. Anything else is an ordinary comparison.
+fn narrowable<a>(c: (&a mut C)) -> bool {
+    p := c.pos;
+    if kind_at(&mut c, p) != 1 {
+        return false;
+    }
+    if !(is_at(&mut c, p + 1, view("!=")) || is_at(&mut c, p + 1, view("=="))) {
+        return false;
+    }
+    if !is_at(&mut c, p + 2, view("None")) || !is_at(&mut c, p + 3, view("{")) {
+        return false;
+    }
+    name := tok_text(&mut c, p);
+    l := find_local(&mut c, view(name));
+    if l == 0 {
+        return false;
+    }
+    mut local = &c.locals[l - 1];
+    if local.mutable != 0 {
+        return false;
+    }
+    ty := local.ty;
+    if !is_option_storage(&mut c, ty) {
+        return false;
+    }
+    d := ty_arg(&mut c, ty);
+    pty := field_type(&mut c, ty, find_field(&mut c, d, view("Some")));
+    return !needs_drop(&mut c, pty);
+}
+// Narrowing an optional by testing it against `None`, without taking it apart: where the test proved
+// it present, its name is its value - a copy, since the value owns nothing (narrowable), carrying the
+// optional's borrows, as `if let Some(name) = name` would bind it, but leaving the optional itself
+// as it was.
+//   if a != None { a.x } else { .. }    `a` is the value in the first block
+//   if a == None { .. } else { a.x }    and in the `else`
+//   if a == None { return 0; }  a.x     a guard that leaves: the value for the rest of the block
+//
+// `mode` is the tail mode the `if` was reached in (a body's final `if` returns from its arms), as
+// for if_let.
+fn optional_narrow<a>(c: (&a mut C), mode: u64, at: u64) -> unit {
+    name := ident(&mut c);
+    present := eat(&mut c, view("!="));
+    if !present {
+        expect(&mut c, view("=="));
+    }
+    expect(&mut c, view("None"));
+    l := find_local(&mut c, view(name));
+    xty := local_ty(&mut c, l - 1);
+    xt := local_id(&mut c, l - 1);
+    d := ty_arg(&mut c, xty);
+    k := find_field(&mut c, d, view("Some"));
+    pty := field_type(&mut c, xty, k);
+    tag := rec_load(&mut c, xt, 0, 0);
+    before := ownership::snapshot(&c.check);
+    other := label(&mut c);
+    end := label(&mut c);
+    get(&mut c, tag, view("%rax"));
+    o(&mut c, view("cmpq $"));
+    on(&mut c, k);
+    o(&mut c, view(",%rax\n"));
+    // The first block runs where the test holds: `!=` jumps away when the tag is not Some, `==` when
+    // it is.
+    if present {
+        jump(&mut c, view("jne"), other);
+    } else {
+        jump(&mut c, view("je"), other);
+    }
+    mark := c.locals.len();
+    exchange(&mut c.terminated, 0);
+    if present {
+        narrow_bind(&mut c, name, xt, xty, pty, l);
+    }
+    exchange(&mut c.tail_mode, mode);
+    block(&mut c);
+    pop_locals(&mut c, mark);
+    yes := ownership::snapshot(&c.check);
+    yt := c.terminated;
+    jump(&mut c, view("jmp"), end);
+    mark(&mut c, other);
+    ownership::restore(&mut c.check, &before);
+    exchange(&mut c.terminated, 0);
+    had_else := eat(&mut c, view("else"));
+    if had_else {
+        else_mark := c.locals.len();
+        if !present {
+            narrow_bind(&mut c, name, xt, xty, pty, l);
+        }
+        exchange(&mut c.tail_mode, mode);
+        if is(&mut c, view("if")) {
+            statement(&mut c);
+        } else {
+            block(&mut c);
+        }
+        pop_locals(&mut c, else_mark);
+    } else {
+        tail_if_needs_else(&mut c, mode, at);
+    }
+    nt := c.terminated;
+    if yt == 0 {
+        if nt != 0 {
+            ownership::restore(&mut c.check, &yes);
+        } else {
+            ownership::merge(&mut c.check, &yes);
+        }
+    }
+    exchange(&mut c.terminated, yt & nt);
+    mark(&mut c, end);
+    // `if a == None { <leaves> }` with no `else`: only the present optional reaches here, so the rest
+    // of the enclosing block sees `a` as its value (the binding lasts until that block closes).
+    if !present && !had_else && (yt != 0) {
+        narrow_bind(&mut c, name, xt, xty, pty, l);
+    }
+    return ();
+}
+// Binds `name` to the payload of the optional `xt`, known to be Some: a copy that carries the
+// optional's borrows (transfer_bonds adds them to the copy and leaves them on the optional).
+fn narrow_bind<a, b>(c: (&a mut C), name: &b [u8], xt: u64, xty: u64, pty: u64, optional: u64) -> unit {
+    payload := payload_load(&mut c, xt, xty, pty);
+    own(&mut c, payload, pty);
+    if contains_borrow(&mut c, pty, 0) {
+        transfer_bonds(&mut c, place_of(&mut c, xt), place_of(&mut c, payload));
+    }
+    stored_source(&mut c, payload, pty);
+    bind(&mut c, copy_bytes(name), pty, payload, 0);
+    c.narrowed.push(c.locals.len());
+    c.narrowed.push(optional);
+    return ();
+}
+// The optional a narrowed binding (`l`, 1-based) stands for, or 0 when `l` narrows nothing.
+fn narrowed_origin<a>(c: (&a mut C), l: u64) -> u64 {
+    mut i = c.narrowed.len();
+    while 1 < i {
+        i -= 2;
+        if c.narrowed[i] == l {
+            return c.narrowed[i + 1];
+        }
+    }
+    return 0;
+}
+// Whether the narrowed name just read (the token before c.pos) is used as the optional it narrows
+// rather than as its value: where an optional is expected (an argument, a binding or a result of
+// type `T?`), unwrapped again (`a!`, `a?`), tested against `None`, given an optional's method
+// (`a.is_some()`, `a.unwrap_or(..)`), or taken apart (`match a`, `if let Some(x) = a`). Code
+// written before narrowing uses the name only in these ways, and keeps compiling as it did.
+fn narrowed_as_optional<a>(c: (&a mut C), expected: u64) -> bool {
+    if (expected != NO_TYPE) && (expected != 0) && is_option_storage(&mut c, expected) {
+        return true;
+    }
+    p := c.pos;
+    if is(&mut c, view("!")) || is(&mut c, view("?")) {
+        return true;
+    }
+    if (is(&mut c, view("==")) || is(&mut c, view("!="))) && is_at(&mut c, p + 1, view("None")) {
+        return true;
+    }
+    if is(&mut c, view(".")) && is_at(&mut c, p + 2, view("(")) {
+        if is_at(&mut c, p + 1, view("is_some")) || is_at(&mut c, p + 1, view("is_none"))
+            || is_at(&mut c, p + 1, view("unwrap")) || is_at(&mut c, p + 1, view("unwrap_or"))
+            || is_at(&mut c, p + 1, view("map")) || is_at(&mut c, p + 1, view("ok_or"))
+            || is_at(&mut c, p + 1, view("to_result")) {
+            return true;
+        }
+    }
+    if (1 < p) && is_at(&mut c, p - 2, view("match")) {
+        return true;
+    }
+    if (1 < p) && is_at(&mut c, p - 2, view("=")) && is(&mut c, view("{")) {
+        return true;
+    }
+    return false;
+}
 // if let Variant(binding) = value { ... } else { ... }: consumes value like match; the else
 // branch drops it (so a different variant's payload is cleaned up).
-fn if_let<a>(c: (&a mut C)) -> unit {
+// A body's final `if` without `else` in a function that returns a value: with the condition false
+// the body ends without one.
+fn tail_if_needs_else<a>(c: (&a mut C), mode: u64, at: u64) -> unit {
+    if (mode == 1) & (c.result != 1) & (c.raw == 0) {
+        diag_help(&mut c, view("add `else { ... }` with a value, or end the body with one after the `if`"));
+        fail_at(
+            &mut c,
+            at,
+            view("this `if` ends a function that returns a value, so it needs an `else`: with the condition false there would be none")
+        );
+    }
+    return ();
+}
+fn if_let<a>(c: (&a mut C), mode: u64, at: u64) -> unit {
     name := ident(&mut c);
     mut binding = u8[];
     mut has_binding = 0;
@@ -52780,6 +54518,7 @@ fn if_let<a>(c: (&a mut C)) -> unit {
         bind(&mut c, binding, pty, payload, 0);
     }
     exchange(&mut c.terminated, 0);
+    exchange(&mut c.tail_mode, mode);
     block(&mut c);
     cleanup(&mut c, payloads);
     pop_locals(&mut c, mark);
@@ -52792,11 +54531,14 @@ fn if_let<a>(c: (&a mut C)) -> unit {
     get(&mut c, xt, view("%rdi"));
     drop_call(&mut c, xty);
     if eat(&mut c, view("else")) {
+        exchange(&mut c.tail_mode, mode);
         if is(&mut c, view("if")) {
             statement(&mut c);
         } else {
             block(&mut c);
         }
+    } else {
+        tail_if_needs_else(&mut c, mode, at);
     }
     nt := c.terminated;
     if yt == 0 {
@@ -52847,21 +54589,30 @@ fn arm_statement_word<a>(c: (&a mut C)) -> bool {
 fn arm_body<a>(c: (&a mut C)) -> unit {
     at := c.pos;
     if is(&mut c, view("{")) {
-        block(&mut c);
-        // An expression `match` needs a value from every arm that reaches the join. A block that
-        // always leaves the arm (`return`, `break`) produces none and needs none.
-        if c.arm_value != 0 {
-            if c.terminated == 0 {
-                diag_help(
-                    &mut c,
-                    view("write one expression for the arm's value, or make the arm diverge with `return` or `break`")
-                );
-                fail_at(
-                    &mut c,
-                    at,
-                    view("this arm of an expression `match` is a block of statements, so it has no value")
-                );
-            }
+        if c.arm_value == 0 {
+            // A statement `match`'s arm ends as the `match` does: returned from when the `match`
+            // ends a body.
+            exchange(&mut c.tail_mode, c.arm_tail);
+            block(&mut c);
+            return ();
+        }
+        // An expression `match` needs a value from every arm that reaches the join: the block's
+        // tail. A block that always leaves the arm (`return`, `break`) produces none and needs none.
+        mut hint = c.arm_hint;
+        if c.arm_ty != NO_TYPE {
+            hint = c.arm_ty;
+        }
+        ty := value_block(&mut c, 2, hint, 0, c.arm_slot);
+        if (ty == NO_TYPE) & (c.terminated == 0) {
+            diag_help(
+                &mut c,
+                view("end the arm's block with its value (an expression without `;`), or make the arm diverge with `return` or `break`")
+            );
+            fail_at(
+                &mut c,
+                at,
+                view("this arm of an expression `match` is a block of statements, so it has no value")
+            );
         }
         return ();
     }
@@ -52870,6 +54621,12 @@ fn arm_body<a>(c: (&a mut C)) -> unit {
             &mut c,
             view("this arm body is a statement, so it needs braces: write `Pat => { if ... }`")
         );
+    }
+    if (c.arm_value == 0) & (c.arm_tail == 1) & (c.result != 1) {
+        // An arm of the `match` that ends a body returns its value, as the arm block's tail would.
+        return_exit(&mut c, 2);
+        arm_end(&mut c);
+        return ();
     }
     mut hint = c.arm_hint;
     if c.arm_ty != NO_TYPE {
@@ -52897,6 +54654,11 @@ fn arm_body<a>(c: (&a mut C)) -> unit {
     } else {
         discard_value(&mut c, v);
     }
+    arm_end(&mut c);
+    return ();
+}
+// An expression arm ends at `,` or at the `match`'s `}`.
+fn arm_end<a>(c: (&a mut C)) -> unit {
     if kind(&mut c) == 59 {
         fail(
             &mut c,
@@ -52975,7 +54737,9 @@ fn match_value<a>(c: (&a mut C), expected: u64) -> Val {
     exchange(&mut c.arm_ty, NO_TYPE);
     exchange(&mut c.arm_hint, expected);
     exchange(&mut c.arm_at, 0);
+    old_tail := exchange(&mut c.arm_tail, 0);
     match_statement(&mut c);
+    exchange(&mut c.arm_tail, old_tail);
     ty := c.arm_ty;
     exchange(&mut c.arm_value, old_value);
     exchange(&mut c.arm_slot, old_slot);
@@ -53075,26 +54839,14 @@ fn if_arm<a>(c: (&a mut C), hint: u64, hint_at: u64, slot: u64) -> u64 {
     open := c.pos;
     end := block_end(&mut c, open);
     if arm_holds_statements(&mut c, open, end) {
-        // `{ write; value }`: statements and then a value. A block here is a statement block, which
-        // hands out no value, so the arm is refused where it starts rather than inside the block.
-        last := kind_at(&mut c, end - 1);
-        if (last != 59) & (last != 125) & (1 < end - open) {
-            diag_help(
-                &mut c,
-                view("write only the value in the arm and put its statements before the `if`")
-            );
-            fail_at(
-                &mut c,
-                open,
-                view("this arm of an `if` expression holds statements and then a value")
-            );
-        }
-        block(&mut c);
-        if c.terminated == 0 {
+        // `{ stmts; value }`: a value block whose tail is the arm's value. One that ends in a
+        // statement has none, which only an arm that always leaves the branch may do.
+        ty := value_block(&mut c, 1, hint, hint_at, slot);
+        if (ty == NO_TYPE) & (c.terminated == 0) {
             diag_help(
                 &mut c,
                 view(
-                    "write one expression for the arm's value, or make the arm diverge with `return` or `break`"
+                    "end the arm's block with its value (an expression without `;`), or make the arm diverge with `return` or `break`"
                 )
             );
             fail_at(
@@ -53103,7 +54855,7 @@ fn if_arm<a>(c: (&a mut C), hint: u64, hint_at: u64, slot: u64) -> u64 {
                 view("this arm of an `if` expression is a block of statements, so it has no value")
             );
         }
-        return NO_TYPE;
+        return ty;
     }
     expect(&mut c, view("{"));
     pv_ir_open(&mut c);
@@ -53192,6 +54944,11 @@ fn if_value<a>(c: (&a mut C), hint: u64, hint_at: u64, into: u64) -> Val {
     mut conds = pv_ir_atoms(&mut c, cond_at, cond_end);
     mut gains = Atom[];
     pv_negation(&conds, &mut gains);
+    // A condition the prover cannot read whole (an `||` or a `!` in it) still states each `&&`
+    // conjunct it can read, in the block it guards; the `else` gains nothing from a partial read.
+    if conds.len() == 0 {
+        conds = pv_ir_conjuncts(&mut c, cond_at, cond_end);
+    }
     pv_ir_statement(&mut c, cond_at, cond_end);
     // An `if` in expression position needs an `else`: without one, nothing names the value when the
     // condition is false. Said before either arm compiles, so it points at the `if`.
@@ -53934,14 +55691,185 @@ fn zero_record_binding<a>(c: (&a mut C), name: u8[], ty: u64, mutable: u64) -> u
 // One statement of a body, with the facts the typed-IR walker keeps: a statement that calls may write
 // through the names it mentions, so what they meant before it is forgotten after it
 // (docs/design/refinements.md, "Facts over the typed IR").
+// `fn name(params) -> R { body }` inside a body: the function literal `fn(params) -> R { body }`
+// bound to `name` - a closure like any other, so it may capture, with the same rules. Its body may
+// call it by name; nothing else could then fix its result type, so a recursive one writes it out.
+fn local_function<a>(c: (&a mut C)) -> unit {
+    at := c.pos;
+    name_at := at + 1;
+    name := tok_text(&mut c, name_at);
+    if kind_at(&mut c, at + 2) == 60 {
+        exchange(&mut c.pos, at + 2);
+        diag_help(&mut c, view("declare it at the top level, or give its parameters concrete types"));
+        fail(&mut c, view("a local function cannot have type or lifetime parameters"));
+    }
+    if kind_at(&mut c, at + 2) != 40 {
+        exchange(&mut c.pos, at + 2);
+        expect(&mut c, view("("));
+    }
+    close := matching_paren(&mut c, at + 2);
+    mut open = 0;
+    if close != 0 {
+        open = tail_open_brace(&mut c, close + 1);
+    }
+    if open == 0 {
+        exchange(&mut c.pos, at + 2);
+        fail(&mut c, view("a local function needs a parameter list and a block body"));
+    }
+    end := block_end(&mut c, open);
+    // A use of the name in the body - not a field, a path segment or a binding of that name.
+    mut recursive = false;
+    mut q = open + 1;
+    while q < end {
+        if (kind_at(&mut c, q) == 1) && same(view(tok_text(&mut c, q)), view(name)) {
+            pk := kind_at(&mut c, q - 1);
+            nk := kind_at(&mut c, q + 1);
+            if (pk != 46) && (pk != 260) && (nk != 58) && (nk != 260) && (nk != 261) {
+                recursive = true;
+            }
+        }
+        q += 1;
+    }
+    if recursive && !is_at(&mut c, close + 1, view("->")) {
+        mut help = copy_bytes(view("write its result type: `fn "));
+        push_bytes(&mut help, view(name));
+        push_bytes(&mut help, view("(..) -> T { .. }`"));
+        diag_help(&mut c, view(help));
+        mut said = copy_bytes(view("local function `"));
+        push_bytes(&mut said, view(name));
+        push_bytes(&mut said, view("` calls itself, so its result type must be written"));
+        fail_at(&mut c, name_at, view(said));
+    }
+    exchange(&mut c.hint_set, 0);
+    exchange(&mut c.lent_arg_at, 0);
+    exchange(&mut c.local_fn, name_at);
+    if recursive {
+        exchange(&mut c.local_self, name.copy());
+    }
+    v := closure_literal(&mut c);
+    // A local function that writes what it captured is `FnMut`, and calling one needs a mutable
+    // binding: its name is that binding.
+    mutable := u64((ty_mode(&mut c, v.ty) & CLOSURE_FNMUT) != 0);
+    vty := v.ty;
+    held := bind_value(&mut c, v, vty);
+    bind(&mut c, name, held.ty, held.t, mutable);
+    return ();
+}
 fn statement<a>(c: (&a mut C)) -> unit {
     lo := c.pos;
     statement_body(&mut c);
     pv_ir_statement(&mut c, lo, c.pos);
     return ();
 }
+// `return x;` (how 0), and the two places a value is returned without the word: a body's tail
+// expression `x }` (how 1) and an arm `P => x,` of a `match` that is a body's tail (how 2). All three
+// are one exit, so `fn f() -> u64 { x }` is the same program as `fn f() -> u64 { return x; }`.
+fn return_exit<a>(c: (&a mut C), how: u64) -> unit {
+    rstart := c.pos;
+    expected_result := c.result;
+    exchange(&mut c.in_return, 1);
+    // A bare `return;` is legal exactly when the enclosing function's result is unit: unit is the
+    // absent-value type, so `return ()` would name a value the function does not have, falling
+    // off the end of a unit function is already allowed, and `return;` is that same exit made
+    // explicit. A function with a result still has to name one, and the refusal names the type
+    // it owes instead of "expected a name here, found `;`"
+    // (docs/design/frontend-robustness.md).
+    // The unit value of a bare `return;` is a slot of its own: slot 0 is the first parameter's,
+    // and checking that as the returned value made a borrowed parameter "escape".
+    mut v = val(0, 1);
+    if (how == 0) && is(&mut c, view(";")) {
+        v = val(imm(&mut c, 0), 1);
+        if expected_result != 1 {
+            mut said = copy_bytes(view("`return` needs a value: this function returns `"));
+            push_bytes(&mut said, view(source_type_name(&mut c, expected_result)));
+            push_bytes(&mut said, view("`"));
+            fail(&mut c, view(said));
+        }
+    } else {
+        v = expr_expected(&mut c, 0, expected_result);
+    }
+    if (how != 0) & (expected_result == 1) & (c.raw == 0) & (c.tolerant == 0) & (v.ty != 1) & (v.ty != NO_TYPE) {
+        // `fn f() { a + 1 }`: the tail of a unit body has a value nothing returns.
+        this := source_type_name(&mut c, v.ty);
+        mut help = copy_bytes(view("end it with `;` to discard the value, or declare the result: `-> "));
+        push_bytes(&mut help, view(this));
+        push_bytes(&mut help, view("`"));
+        diag_help(&mut c, view(help));
+        mut said = copy_bytes(view("this body returns `unit`, but it ends in a `"));
+        push_bytes(&mut said, view(this));
+        push_bytes(&mut said, view("` value"));
+        fail_at(&mut c, rstart, view(said));
+    }
+    exchange(&mut c.in_return, 0);
+    rend := c.pos;
+    if how == 0 {
+        expect(&mut c, view(";"));
+    } else if how == 1 {
+        tail_close(&mut c);
+    }
+    // Context lowering (None/Some, union injection, a function used as a closure) is not a
+    // check: an `unsafe module` needs the value built the same way everywhere, or a `!` on a
+    // None that was left as a raw 0 dereferences a null payload instead of aborting.
+    v = adopt_value(&mut c, v, rstart, rend, expected_result);
+    if (borrowed_object(&mut c, expected_result) != 0) & (borrowed_object(&mut c, v.ty) == 0) {
+        v = borrow_dyn(&mut c, v, expected_result);
+    }
+    if c.raw == 0 {
+        require_type(&mut c, v.ty, expected_result);
+    }
+    validate_return(&mut c, val(v.t, v.ty));
+    rterm := pv_span_term(&mut c, rstart, rend);
+    ref_result(&mut c, v.t, v.ty, view(rterm), rstart);
+    move_out(&mut c, val(v.t, v.ty));
+    callback_copy_back(&mut c);
+    cleanup(&mut c, 0);
+    restore := c.export_tls;
+    if restore != 0 {
+        tls_leave_callback(&mut c, restore, c.export_adopt, c.export_pin);
+    }
+    if borrowed_object(&mut c, v.ty) != 0 {
+        // The pair travels by value: data in %rax, vtable in %rdx. The caller stores both in its
+        // own frame, so no handle into this frame escapes it. Both words are live at the return,
+        // which is a typed-IR fact about this function; a one-word result keeps %rax alone.
+        dyn_result(&mut c);
+        get(&mut c, v.t, view("%rax"));
+        o(&mut c, view("movq 8(%rax),%rdx\nmovq (%rax),%rax\n"));
+    } else if framed(&mut c, v.ty) {
+        frame_result(&mut c, v.t, v.ty);
+    } else {
+        get(&mut c, v.t, view("%rax"));
+    }
+    fret := c.export_fret;
+    if fret != 0 {
+        // A C caller reads a float result from the vector register.
+        if (c.target == 0) || (c.target == 3) {
+            o(&mut c, view("movq %rax,%xmm0\n"));
+            if fret == 2 {
+                o(&mut c, view("cvtsd2ss %xmm0,%xmm0\n"));
+            }
+        } else {
+            if fret == 2 {
+                o(&mut c, view("cbfret32\n"));
+            } else {
+                o(&mut c, view("cbfret64\n"));
+            }
+        }
+    }
+    o(&mut c, view("leave\nret\n"));
+    exchange(&mut c.terminated, 1);
+    return ();
+}
 fn statement_body<a>(c: (&a mut C)) -> unit {
     emit_loc(&mut c);
+    if c.tail_now != 0 {
+        how := exchange(&mut c.tail_now, 0);
+        tail_value(&mut c, how);
+        return ();
+    }
+    if is(&mut c, view("fn")) && (kind_at(&mut c, c.pos + 1) == 1) && (c.raw == 0) {
+        local_function(&mut c);
+        return ();
+    }
     if is(&mut c, view("static")) && (kind_at(&mut c, c.pos + 1) == 1) {
         fail(&mut c, view("a static is declared at module level, not inside a function: move it out of the body"));
     }
@@ -54003,82 +55931,7 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
         return ();
     }
     if eat(&mut c, view("return")) {
-        rstart := c.pos;
-        expected_result := c.result;
-        exchange(&mut c.in_return, 1);
-        // A bare `return;` is legal exactly when the enclosing function's result is unit: unit is the
-        // absent-value type, so `return ()` would name a value the function does not have, falling
-        // off the end of a unit function is already allowed, and `return;` is that same exit made
-        // explicit. A function with a result still has to name one, and the refusal names the type
-        // it owes instead of "expected a name here, found `;`"
-        // (docs/design/frontend-robustness.md).
-        // The unit value of a bare `return;` is a slot of its own: slot 0 is the first parameter's,
-        // and checking that as the returned value made a borrowed parameter "escape".
-        mut v = val(0, 1);
-        if is(&mut c, view(";")) {
-            v = val(imm(&mut c, 0), 1);
-            if expected_result != 1 {
-                mut said = copy_bytes(view("`return` needs a value: this function returns `"));
-                push_bytes(&mut said, view(source_type_name(&mut c, expected_result)));
-                push_bytes(&mut said, view("`"));
-                fail(&mut c, view(said));
-            }
-        } else {
-            v = expr_expected(&mut c, 0, expected_result);
-        }
-        exchange(&mut c.in_return, 0);
-        rend := c.pos;
-        expect(&mut c, view(";"));
-        // Context lowering (None/Some, union injection, a function used as a closure) is not a
-        // check: an `unsafe module` needs the value built the same way everywhere, or a `!` on a
-        // None that was left as a raw 0 dereferences a null payload instead of aborting.
-        v = adopt_value(&mut c, v, rstart, rend, expected_result);
-        if (borrowed_object(&mut c, expected_result) != 0) & (borrowed_object(&mut c, v.ty) == 0) {
-            v = borrow_dyn(&mut c, v, expected_result);
-        }
-        if c.raw == 0 {
-            require_type(&mut c, v.ty, expected_result);
-        }
-        validate_return(&mut c, val(v.t, v.ty));
-        rterm := pv_span_term(&mut c, rstart, rend);
-        ref_result(&mut c, v.t, v.ty, view(rterm), rstart);
-        move_out(&mut c, val(v.t, v.ty));
-        callback_copy_back(&mut c);
-        cleanup(&mut c, 0);
-        restore := c.export_tls;
-        if restore != 0 {
-            tls_leave_callback(&mut c, restore, c.export_adopt, c.export_pin);
-        }
-        if borrowed_object(&mut c, v.ty) != 0 {
-            // The pair travels by value: data in %rax, vtable in %rdx. The caller stores both in its
-            // own frame, so no handle into this frame escapes it. Both words are live at the return,
-            // which is a typed-IR fact about this function; a one-word result keeps %rax alone.
-            dyn_result(&mut c);
-            get(&mut c, v.t, view("%rax"));
-            o(&mut c, view("movq 8(%rax),%rdx\nmovq (%rax),%rax\n"));
-        } else if framed(&mut c, v.ty) {
-            frame_result(&mut c, v.t, v.ty);
-        } else {
-            get(&mut c, v.t, view("%rax"));
-        }
-        fret := c.export_fret;
-        if fret != 0 {
-            // A C caller reads a float result from the vector register.
-            if (c.target == 0) || (c.target == 3) {
-                o(&mut c, view("movq %rax,%xmm0\n"));
-                if fret == 2 {
-                    o(&mut c, view("cvtsd2ss %xmm0,%xmm0\n"));
-                }
-            } else {
-                if fret == 2 {
-                    o(&mut c, view("cbfret32\n"));
-                } else {
-                    o(&mut c, view("cbfret64\n"));
-                }
-            }
-        }
-        o(&mut c, view("leave\nret\n"));
-        exchange(&mut c.terminated, 1);
+        return_exit(&mut c, 0);
         return ();
     }
     if is(&mut c, view("{")) && record_pattern_ahead(&mut c) {
@@ -54727,12 +56580,26 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
         return ();
     }
     if eat(&mut c, view("match")) {
+        // A statement `match`: its arms end the way its block's tail does when it is that tail, and
+        // they are never an enclosing expression `match`'s value arms.
+        old_tail := exchange(&mut c.arm_tail, exchange(&mut c.tail_mode, 0));
+        old_value := exchange(&mut c.arm_value, 0);
         match_statement(&mut c);
+        exchange(&mut c.arm_value, old_value);
+        exchange(&mut c.arm_tail, old_tail);
         return ();
     }
     if eat(&mut c, view("if")) {
+        // A body's final `if` returns from its arms (tail_mode 1); every other `if` statement's
+        // blocks are statement blocks.
+        if_at := c.pos - 1;
+        mode := exchange(&mut c.tail_mode, 0);
         if eat(&mut c, view("let")) {
-            if_let(&mut c);
+            if_let(&mut c, mode, if_at);
+            return ();
+        }
+        if narrowable(&mut c) {
+            optional_narrow(&mut c, mode, if_at);
             return ();
         }
         tests := c.resources.len();
@@ -54750,6 +56617,11 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
         mut conds = pv_ir_atoms(&mut c, cond_at, cond_end);
         mut gains = Atom[];
         pv_negation(&conds, &mut gains);
+        // A condition the prover cannot read whole (an `||` or a `!` in it) still states each `&&`
+        // conjunct it can read, in the block it guards; the `else` gains nothing from a partial read.
+        if conds.len() == 0 {
+            conds = pv_ir_conjuncts(&mut c, cond_at, cond_end);
+        }
         pv_ir_statement(&mut c, cond_at, cond_end);
         get(&mut c, v.t, view("%rax"));
         no := label(&mut c);
@@ -54758,6 +56630,7 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
         jump(&mut c, view("jz"), no);
         before := ownership::snapshot(&c.check);
         pv_ir_pending(&mut c, &conds);
+        exchange(&mut c.tail_mode, mode);
         block(&mut c);
         yes := ownership::snapshot(&c.check);
         yt := c.terminated;
@@ -54767,6 +56640,7 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
         exchange(&mut c.terminated, 0);
         had_else := eat(&mut c, view("else"));
         if had_else {
+            exchange(&mut c.tail_mode, mode);
             if is(&mut c, view("if")) {
                 // `else if`: the failed condition still holds while the next one is tested.
                 pv_ir_open(&mut c);
@@ -54777,6 +56651,8 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
                 pv_ir_pending(&mut c, &gains);
                 block(&mut c);
             }
+        } else {
+            tail_if_needs_else(&mut c, mode, if_at);
         }
         nt := c.terminated;
         if yt == 0 {
@@ -54864,6 +56740,26 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
         chained_field_assignment(&mut c);
         return ();
     }
+    if (kind(&mut c) == 267) && deref_assignment_ahead(&mut c) {
+        // `**pp = v`: `*(*pp) = v` - the outer level is read (a raw pointer, or a reference to one)
+        // and the pointer it holds is written through.
+        advance(&mut c);
+        r := expr(&mut c, 10);
+        op := kind(&mut c);
+        if ty_kind(&mut c, r.ty) == 34 {
+            inner := pointer_deref(&mut c, r);
+            if ty_kind(&mut c, inner.ty) != 34 {
+                fail(&mut c, view("**p = v writes through a pointer to a raw pointer"));
+            }
+            pointer_assignment(&mut c, inner, op);
+            return ();
+        }
+        if (ty_kind(&mut c, r.ty) == 7) && (ty_kind(&mut c, ty_arg(&mut c, r.ty)) == 34) {
+            pointer_assignment(&mut c, deref_value(&mut c, r), op);
+            return ();
+        }
+        fail(&mut c, view("**p = v writes through a pointer to a raw pointer"));
+    }
     if kind(&mut c) == 42 {
         // `*r = v`: store through a mutable reference; the old value is dropped. `*r op= v`
         // combines with the current (copyable) value first.
@@ -54872,6 +56768,10 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
         rt := r.t;
         rty := r.ty;
         op := kind(&mut c);
+        if ty_kind(&mut c, rty) == 34 {
+            pointer_assignment(&mut c, r, op);
+            return ();
+        }
         if ty_kind(&mut c, rty) != 7 {
             fail(&mut c, view("* requires a typed reference"));
         }
@@ -55021,6 +56921,8 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
     }
     mut v = expr(&mut c, 0);
     expect(&mut c, view(";"));
+    exchange(&mut c.last_semi_at, c.pos - 1);
+    exchange(&mut c.last_semi_ty, v.ty);
     discard_value(&mut c, v);
     return ();
 }
@@ -55260,6 +57162,18 @@ fn assignment_tail<a, b>(c: (&a mut C), l: u64, id: u64, ty: u64, target: u64, t
         mut expected = fieldty;
         if through == 0 {
             expected = local_ty(&mut c, l - 1);
+        }
+        // A binding that holds a closure as its own type (`mut h = |x: u64| x * 2;`) is that one
+        // closure: its calls go straight to its body. Another closure is another type, which an
+        // erased `Fn(..)` binding holds; without this the new value was stored and the old body
+        // still called.
+        if (ty_kind(&mut c, v.ty) == 20) && (ty_kind(&mut c, expected) == 20) && (ty_env(&mut c, expected) != 0)
+            && (ty_env(&mut c, v.ty) != ty_env(&mut c, expected)) {
+            mut help = copy_bytes(view("declare the binding with a closure type to hold either: `mut h: "));
+            push_bytes(&mut help, view(closure_type_spelling(&mut c, expected)));
+            push_bytes(&mut help, view(" = ..;`"));
+            diag_help(&mut c, view(help));
+            fail(&mut c, view("this binding holds one particular closure, and a different closure is a different type"));
         }
         require_type(&mut c, v.ty, expected);
     }
@@ -58236,6 +60150,17 @@ fn iface_enc_env<a>(c: (&a mut C), decl: u64, deps: (&a mut u64[])) -> u8[] {
     return body;
 }
 // Every item of one module, in name order, with the bytes it will occupy and the names it cites.
+// The methods of written-type impl `key` that module `m` wrote.
+fn iface_written_methods<a, b>(c: (&a mut C), key: u64, m: &b [u8]) -> u64[] {
+    all := iface_func_ids(&mut c, view(inherent_type_module(key)));
+    mut mine = u64[];
+    for i in all.len() {
+        if same(view(c.funcs[all[i]].home), view(m)) {
+            mine.push(all[i]);
+        }
+    }
+    return mine;
+}
 fn iface_items<a>(c: (&a mut C), m: &a [u8]) -> IItem[] {
     mut items = IItem[];
     decls := iface_decl_ids(&mut c, view(m));
@@ -58421,13 +60346,12 @@ fn iface_items<a>(c: (&a mut C), m: &a [u8]) -> IItem[] {
     // interface carries it.
     mut written = u64[];
     mut spelled = u8[][];
+    // Two modules may write the same header (`impl f64` in core and in math): one impl, whose
+    // methods each module's interface carries for the methods it wrote.
     for i in c.inherent_types.len() {
         key := inherent_type_base() + i + 1;
-        methods := iface_func_ids(&mut c, view(inherent_type_module(key)));
+        methods := iface_written_methods(&mut c, key, view(m));
         if methods.len() == 0 {
-            continue;
-        }
-        if !same(view(c.funcs[methods[0]].home), view(m)) {
             continue;
         }
         mut spell_deps = u64[];
@@ -58439,8 +60363,7 @@ fn iface_items<a>(c: (&a mut C), m: &a [u8]) -> IItem[] {
     worder := iface_sorted(&spelled);
     for i in worder.len() {
         key := written[worder[i]];
-        owner_module := inherent_type_module(key);
-        methods := iface_func_ids(&mut c, view(owner_module));
+        methods := iface_written_methods(&mut c, key, view(m));
         mut deps = u64[];
         mut body = u8[];
         iface_w_type(&mut c, &mut body, &mut deps, c.inherent_types[key - inherent_type_base() - 1]);
@@ -62187,6 +64110,8 @@ pub fn main() -> u64 {
         plat: 0,
         cpu: 0,
         debug: 0,
+        lines: 0,
+        no_debug_info: 0,
         backend: 0,
         facts: llvm::facts_new(),
         facts_fn: u8[],
@@ -62459,6 +64384,19 @@ pub fn main() -> u64 {
         arm_ty: NO_TYPE,
         arm_hint: NO_TYPE,
         arm_at: 0,
+        tail_mode: 0,
+        arm_tail: 0,
+        tail_now: 0,
+        narrowed: u64[],
+        local_fn: 0,
+        local_self: u8[],
+        sink: 0,
+        sink_hint: NO_TYPE,
+        sink_hint_at: 0,
+        sink_slot: 0,
+        sink_ty: NO_TYPE,
+        last_semi_at: 0,
+        last_semi_ty: NO_TYPE,
         no_union: 0,
         ignored_failure: 0,
         parsing_input: 0,
@@ -62471,6 +64409,8 @@ pub fn main() -> u64 {
         deny_ambient: 0,
         host_optin: 0,
         host_modules: u8[][],
+        use_from: u8[][],
+        use_to: u8[][],
         cap_denial: 0,
         cap_segs: u8[][],
         iface_dir: u8[],
@@ -63046,6 +64986,9 @@ pub fn main() -> u64 {
                             if same(view(option), view("--debug")) {
                                 exchange(&mut c.debug, 1);
                                 offset += 1;
+                            } else if same(view(option), view("--no-debug-info")) {
+                                exchange(&mut c.no_debug_info, 1);
+                                offset += 1;
                             } else {
                                 if same(view(option), view("--backend=llvm")) {
                                     exchange(&mut c.backend, 1);
@@ -63183,14 +65126,24 @@ pub fn main() -> u64 {
         fail_option(
             &mut c,
             view(
-                "usage: grail [--target ARCH] [--overflow=checked|wrap] [--debug] [--verify-facts] [--emit-ir] [--strict-refinements] [--deny-ambient-host] [--split] OUT.s ENTRY.grl MODULE.grl..."
+                "usage: grail [--target ARCH] [--overflow=checked|wrap] [--debug] [--no-debug-info] [--verify-facts] [--emit-ir] [--strict-refinements] [--deny-ambient-host] [--split] OUT.s ENTRY.grl MODULE.grl..."
             )
         );
     }
     // DWARF on Linux x86-64, AArch64 and RISC-V 64; CodeView line tables (a PDB through lld-link
     // /DEBUG) on Windows x86-64.
     if (c.debug != 0) && (((c.target == 4) || (c.plat != 0))) {
-        fail_option(&mut c, view("--debug line info is only implemented for Linux and Windows x86_64"));
+        fail_option(&mut c, view("--debug line info is only implemented for Linux (x86_64, aarch64, riscv64) and Windows x86_64"));
+    }
+    if (c.debug != 0) && (c.no_debug_info != 0) {
+        fail_option(&mut c, view("--debug and --no-debug-info contradict each other"));
+    }
+    // An optimised build carries line tables and function ranges wherever `--debug` could write
+    // them, unless told not to. They come from the statement markers, so a build without them
+    // (`--no-error-sites`, `--split`, the LLVM backend) has none; elsewhere (macOS, Windows ARM64)
+    // it silently has none.
+    if (c.no_debug_info == 0) && site_table_on(&c) && (c.target != 4) {
+        exchange(&mut c.lines, 1);
     }
     if (c.backend != 0) && (((c.target > 2) || (c.plat != 0) || (c.debug != 0))) {
         fail_option(&mut c, view("--backend=llvm is implemented for Linux x86_64, aarch64 and riscv64 without --debug"));
@@ -63746,8 +65699,10 @@ pub fn main() -> u64 {
         if target == 3 {
             // PE/COFF unwind data must be emitted from the final frame sizes.
             mut image = win_unwind(view(out));
-            if c.debug != 0 {
-                image = debug_locs(view(image));
+            if (c.debug != 0) || (c.debug_funcs.len() != 0) {
+                if c.debug != 0 {
+                    image = debug_locs(view(image));
+                }
                 // CodeView: the symbol records (functions with their typed locals), one line table
                 // per recorded function, then the file checksums and the string table they index;
                 // lld-link /DEBUG builds the PDB from this section.
@@ -63760,12 +65715,9 @@ pub fn main() -> u64 {
                     push_bytes(&mut image, view(".cv_linetable "));
                     decimal(&mut image, i);
                     push_bytes(&mut image, view(", "));
-                    fstart := c.debug_funcs[i].start;
-                    fend := c.debug_funcs[i].end;
-                    funit := c.debug_funcs[i].unit.copy();
-                    dlabel(&mut image, view(funit), fstart);
+                    push_bytes(&mut image, view(c.debug_funcs[i].lo));
                     push_bytes(&mut image, view(", "));
-                    dlabel(&mut image, view(funit), fend);
+                    push_bytes(&mut image, view(c.debug_funcs[i].hi));
                     image.push(10);
                 }
                 push_bytes(&mut image, view(".cv_filechecksums\n.cv_stringtable\n"));
@@ -63775,10 +65727,10 @@ pub fn main() -> u64 {
         }
         if c.debug != 0 {
             out = debug_locs(view(out));
-            sections := debug_sections(&c, view(host::arg(2 + offset)));
-            for i in sections.len() {
-                out.push(sections[i]);
-            }
+        }
+        if (c.debug != 0) || (c.debug_funcs.len() != 0) {
+            sections := debug_sections(&c, &c.debug_funcs, view(host::arg(2 + offset)));
+            out.append(view(sections));
         }
         if c.backend != 0 {
             // LLVM IR for the lifted functions beside the native remainder: PATH.ll and PATH.
@@ -63837,11 +65789,9 @@ pub fn main() -> u64 {
         return write_image(&mut c, view(path), view(image));
     }
     mut native = machine::lower(view(out), target, c.plat);
-    if c.debug != 0 {
-        sections := debug_sections(&c, view(host::arg(2 + offset)));
-        for i in sections.len() {
-            native.push(sections[i]);
-        }
+    if (c.debug != 0) || (c.debug_funcs.len() != 0) {
+        sections := debug_sections(&c, &c.debug_funcs, view(host::arg(2 + offset)));
+        native.append(view(sections));
     }
     if target == 4 {
         image := arm_unwind(view(native));

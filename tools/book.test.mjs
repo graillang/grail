@@ -117,9 +117,10 @@ test('performance charts render from a results file: SVG, direction captions, ra
   expect(html).toContain('importer rounds ↑');
   expect(html).toContain('logarithmic axis'); // the scheduler rows span more than 8x
   expect(html).toContain('linear axis');
-  expect(html).toContain('Grail 1.02x the fastest rival · met'); // fnv: 0.55 / 0.54, under 1.05
-  expect(html).toContain('Grail 6.84x the fastest rival'); // xform_f32: 0.13 / 0.019
-  expect(html).toContain('Grail 0.74x the fastest rival · met'); // frame p99
+  expect(html).toContain('Grail ÷ fastest rival: 1.02x'); // fnv: 0.55 / 0.54
+  expect(html).toContain('Grail ÷ fastest rival: 6.84x'); // xform_f32: 0.13 / 0.019
+  expect(html).toContain('Grail ÷ fastest rival: 0.74x'); // frame p99
+  expect(html).not.toMatch(/ met\b/); // a ratio, not a verdict
   expect(rowRatio(fixture.tables[1], fixture.tables[1].rows[1])).toBeCloseTo(2.4); // higher is better: 3600 / 1500
   expect(html).toContain('A table without a chart'); // a numbers-only table still renders as a table
   expect(html).toContain('0123456789ab (fixture)');
@@ -134,25 +135,74 @@ test('performance charts render from a results file: SVG, direction captions, ra
   expect(perfBlock('perf-results#no-such-table|numbers-only', join(root, 'tools/fixtures'))).toContain('A table without a chart'); // the first table present
   expect(() => renderResults({ schema: 2 })).toThrow('not a rivals result file');
 });
-test('the languages overview: geometric mean of each language over the fastest per program, missing twins averaged over the rest', async () => {
+test('the languages overview: geometric mean of each language over the fastest per program, on the programs every language has', async () => {
   const { overviewRows, overview } = await import('./perf-charts.mjs');
   const table = (id, rows) => ({ id, rows: rows.map(([name, values]) => ({ name, values })) });
   const files = {
     'bench-rivals': { commit: 'abc', tables: [table('release', [['a', { c: 1, cpp: 2, 'rust-release': 4, go: 8, 'zig-fast': 1, 'grail-llvm': 2 }], ['b', { c: 4, 'rust-release': 1, go: 2, 'zig-fast': 4, 'grail-llvm': null }]])] },
-    parallel: { commit: 'abc', tables: [table('release', [['p x1', { c: 1, cpp: 100, 'grail-llvm': 1 }], ['p x8', { c: 2, cpp: 1, 'grail-llvm': 4 }]])] },
+    parallel: { commit: 'abc', tables: [table('release', [['p x1', { c: 1, cpp: 100, 'grail-llvm': 1 }], ['p x8', { c: 2, cpp: 1, 'rust-release': 2, go: 4, 'zig-fast': 2, 'grail-llvm': 4 }]])] },
   };
   const [release, dev] = overviewRows(files);
-  expect(release.programs.map(p => p.name)).toEqual(['a', 'b', 'p x8']); // the parallel file at its most workers only
+  // The parallel file at its most workers only; b has no C++ twin and a null (a wrong answer) for
+  // Grail, so it is left out of every language's mean and named.
+  expect(release.programs.map(p => p.name)).toEqual(['a', 'p x8']);
+  expect(release.dropped).toEqual(['b']);
   const lang = key => release.languages.find(l => l.key === key);
-  expect(lang('c').mean).toBeCloseTo(Math.cbrt(1 * 4 * 2));
-  expect(lang('cpp').mean).toBeCloseTo(Math.sqrt(2 * 1)); // no twin of b: averaged over a and p x8
-  expect(lang('cpp').missing).toEqual(['b']);
-  expect(lang('grail-llvm').count).toBe(2); // a null (a wrong answer) is not a figure
+  expect(lang('c').mean).toBeCloseTo(Math.sqrt(1 * 2));
+  expect(lang('cpp').mean).toBeCloseTo(Math.sqrt(2 * 1));
+  expect(lang('grail-llvm').mean).toBeCloseTo(Math.sqrt(2 * 4));
+  expect(lang('grail-llvm').count).toBe(2);
+  expect(lang('cpp').missing).toEqual([]);
   expect(lang('zig-fast').fastest).toBe(1);
   expect(dev.programs).toEqual([]);
   const html = overview(files);
   expect(html).toContain('id="chart-overview"');
-  expect(html).toContain('no twin of b');
+  expect(html).toContain('Not counted, as some language here has no figure: b');
+  expect(html).not.toContain('\n');
+});
+test('the languages overview: compile speed and scheduler panels, a language with no figure, a row where more is better', async () => {
+  const { overviewRows, overview } = await import('./perf-charts.mjs');
+  const table = (id, rows, direction = 'lower') => ({ id, direction, rows: rows.map(([name, values, dir]) => ({ name, values, ...(dir ? { direction: dir } : {}) })) });
+  const files = {
+    compile: { commit: 'abc', tables: [table('compile', [['hello check cold', { grail: 1, go: 4, zig: 8, rust: 2 }], ['hello build no-op', { grail: 1, go: 2, zig: 2, rust: 4, 'go-build': 0.5 }], ['syn build cold', { grail: 2, go: 4, zig: 8, rust: 4 }]])] },
+    'sched-rivals': { commit: 'abc', tables: [table('scheduler', [
+      ['join', { 'grail-native': 1, 'grail-llvm': 2, rayon: 4, onetbb: 1 }],
+      ['join, on a worker', { rayon: 2, onetbb: 1 }],
+      ['one at a time', { 'grail-native': 1, 'grail-llvm': 2 }],
+      ['importer rounds', { 'grail-llvm': 50, rayon: 100, onetbb: 25 }, 'higher'],
+    ])] },
+  };
+  const panels = overviewRows(files);
+  const compile = panels.find(p => p.id === 'compile'), sched = panels.find(p => p.id === 'scheduler');
+  const lang = (panel, key) => panel.languages.find(l => l.key === key);
+  expect(compile.programs.map(p => p.name)).toEqual(['hello check cold', 'syn build cold']); // a rebuild with nothing changed is not counted
+  expect(lang(compile, 'grail').mean).toBe(1);
+  expect(lang(compile, 'rust').mean).toBeCloseTo(Math.sqrt(2 * 2));
+  expect(compile.languages.map(l => l.key)).not.toContain('go-build'); // Go's other check is not a language
+  expect(lang(compile, 'c').count).toBe(0); // a file without C or C++ columns: not measured, said so
+  expect(compile.unmeasured).toEqual(['C', 'C++']);
+  expect(compile.absent).toEqual([]);
+  // The scheduler: Grail's release build, rayon as Rust, oneTBB as C++; a row with one language is
+  // left out, and so is a row Grail has no figure on (named in the panel's source line).
+  expect(sched.programs.map(p => p.name)).toEqual(['join', 'importer rounds']);
+  expect(sched.dropped).toEqual(['join, on a worker']);
+  expect(sched.absent).toEqual(['C', 'Go', 'Zig']);
+  const rounds = sched.programs.find(p => p.name === 'importer rounds');
+  expect(rounds.higher).toBe(true);
+  expect(rounds.ratios).toEqual({ 'grail-llvm': 2, rayon: 1, onetbb: 4 }); // more is better: the most over each
+  expect(lang(sched, 'grail-llvm').mean).toBeCloseTo(Math.sqrt(2 * 2));
+  expect(lang(sched, 'onetbb').mean).toBeCloseTo(Math.sqrt(1 * 4));
+  expect(lang(sched, 'rayon').mean).toBeCloseTo(Math.sqrt(4 * 1));
+  expect(lang(sched, 'rayon').fastest).toBe(1);
+  const html = overview(files);
+  expect(html).toContain('Compile speed - 2 measurements');
+  expect(html).toContain('bench/results/compile.json; user-space instructions');
+  expect(html).toContain('No C or C++: not measured in this file');
+  expect(html).toContain('bench/results/sched-rivals.json; wall time');
+  expect(html).toContain('Grail is its release (LLVM) build, Rust is rayon, C++ is oneTBB');
+  expect(html).toContain('No C, Go or Zig: they have no scheduler twin');
+  expect(html).toContain('Not counted, as some language here has no figure: join, on a worker');
+  expect(html).not.toContain('Release builds'); // a panel without data is left out
   expect(html).not.toContain('\n');
 });
 test('the Performance chapter renders every committed result file', () => {

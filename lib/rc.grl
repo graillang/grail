@@ -84,6 +84,16 @@ impl<T> Rc<T> {
             return self.block.cast(u64).sub(1).read() - 1;
         }
     }
+
+    // A `Weak` handle on the same value: it keeps the block, not the value.
+    pub fn downgrade(self: &Rc<T>) -> Weak<T> {
+        unsafe {
+            counts := self.block.cast(u64).sub(2);
+            w := counts.add(1).read();
+            counts.add(1).write(w + 1);
+            return Weak { block: self.block };
+        }
+    }
 }
 
 // `Weak<T>`: a handle that does not keep the value alive. It keeps the *block*, so `upgrade` can
@@ -105,15 +115,6 @@ impl<T> Drop for Weak<T> {
                 }
             }
         }
-    }
-}
-
-pub fn downgrade<a, T>(r: &a Rc<T>) -> Weak<T> {
-    unsafe {
-        counts := r.block.cast(u64).sub(2);
-        w := counts.add(1).read();
-        counts.add(1).write(w + 1);
-        return Weak { block: r.block };
     }
 }
 
@@ -216,10 +217,4 @@ impl<T> Arc<T> {
             return n;
         }
     }
-}
-
-// `Arc<T>` may cross threads only when the value may: the audited classification skips the fields,
-// so the type argument is what carries the requirement.
-pub fn arc_share<T: Share>(a: &Arc<T>) -> u64 {
-    return a.strong_count();
 }

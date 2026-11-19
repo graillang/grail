@@ -1,11 +1,98 @@
 # Closures
 
-A closure is a function written inline that can use values from where it was created.
-`|x: u64| -> u64 x + offset` takes a `u64`, returns a `u64`, and captures `offset`. The `-> u64`
-may be left out when the body is an expression - `|x: u64| x + offset` has the type of `x + offset`
-as its result - and must be written when the body is a block that returns a value.
+A closure is a function written inline that can use values from where it was created. It is
+written the way a named function is, without the name:
+
+```grl
+add_offset := fn(x: u64) -> u64 { x + offset };
+```
+
+takes a `u64`, returns a `u64`, and captures `offset`. `|params| body` is the abbreviation of the
+same thing: `|x: u64| -> u64 x + offset` is exactly `fn(x: u64) -> u64 { x + offset }`, with the same
+type and the same captures. The bar form also takes an expression for its body, where the `fn` form
+always takes a block. In both, the `-> u64` may be left out when the body's value fixes it -
+`|x: u64| x + offset` has the type of `x + offset` as its result - and must be written when a block
+returns a value with `return`.
 
 {{example:closures}}
+
+Whatever one form does the other does: either is an argument, a binding or a returned value, and
+both infer parameter types where the call fixes them (see *Inferred parameter types* below), so
+`v.map(fn(x) { x * 2 })` and `v.map(|x| x * 2)` are the same call. Use whichever reads better; the
+formatter keeps the one you wrote.
+
+## Local functions
+
+`fn name(params) -> R { body }` inside a function body binds `name` to that function literal. It is a
+closure with a name: it captures what it uses from the body around it, by the rules below, and it is
+called, passed and returned like any closure. It may also call itself; nothing else could then say
+what it returns, so a local function that calls itself writes its result type, and leaving it out
+is refused with a help line that shows where it goes.
+
+{{example:local-functions}}
+
+A local function that calls itself may not write what it captured: each call would write the one
+environment the calls still running are using. Pass what it changes as a parameter instead. A local
+function has no type or lifetime parameters; a generic one is declared at the top level.
+
+Top-level functions stay what they were: they capture nothing, and their signatures are written out
+in full, because they are the module's interface (and what the build cache compares).
+
+### Refactoring between them
+
+Because the forms differ only by the name, moving code between them is moving text. A computation
+starts as a literal at the one call that needs it:
+
+```grl
+fn report(prices: &u64[]) -> u64 {
+    sum_by(prices, fn(p: u64) -> u64 { p + p / 5 })
+}
+```
+
+When it grows, or a second call wants it, it gets a name where it is used:
+
+```grl
+fn report(prices: &u64[]) -> u64 {
+    fn with_tax(p: u64) -> u64 { p + p / 5 }
+    sum_by(prices, with_tax)
+}
+```
+
+and when other functions want it, the same text moves to the top level:
+
+```grl
+fn with_tax(p: u64) -> u64 { p + p / 5 }
+fn report(prices: &u64[]) -> u64 {
+    sum_by(prices, with_tax)
+}
+```
+
+Only the name and the placement changed. A local function that captures something - say a `rate`
+of `report`'s - becomes a top-level one by making each capture a parameter.
+
+## Closures and function pointers: `Fn(..)` and `fn(..)`
+
+`Fn(T) -> R` accepts any callable: a closure, a function literal, a local or a named function. `fn(T)
+-> R` is a plain function pointer with no environment, for C callbacks and tables of functions. A
+closure that captures nothing is a function, so it converts to `fn(..)` where one is expected - an
+argument, a binding, a record field, a result:
+
+```grl
+fn twice(f: fn(u64) -> u64, x: u64) -> u64 { f(f(x)) }
+twice(|x| x + 1, 5);                     // 7
+table := (fn(u64) -> u64)[fn(x: u64) -> u64 { x * 2 }, |x: u64| x + 1];
+```
+
+A closure that captures cannot: the pointer has nowhere to keep what it captured. The refusal names
+the captures and suggests the type that takes them:
+
+```text
+error: this closure captures `k`, so it is not a function pointer `fn(..)`: a function pointer has no room for what a closure captures
+  = help: take `Fn(u64) -> u64` instead, which accepts closures and named functions
+```
+
+So a parameter that only calls what it is given takes `Fn(..)`; take `fn(..)` only when a raw
+function pointer is what you need.
 
 Closures have the type `Fn(params) -> result`, so they can be passed to and returned from
 functions. Numbers and other plain values are copied into the closure; owned values such as the
@@ -88,11 +175,11 @@ number is the closure's own copy:
 ```grl
 mut compares = 0;
 counter := &mut compares;
-items.sort_by(|a: &u64, b: &u64| -> bool { *counter += 1; return *a < *b; });
+items.sort_by(|a, b| { *counter += 1; return a < b; });
 println(compares);
 ```
 
-The `pool` callbacks that run on workers (`pool::map`, `run`, `split`, `split_mut`, `range`, `reduce`) stay `Fn`:
+The `pool` callbacks that run on workers (`par_map`, `into_par_chunks`, `par_chunks_mut`, `pool::run`, `pool::range`, `pool::reduce`) stay `Fn`:
 every worker shares one closure, so a closure that writes its captures is refused there with the
 `FnMut, not Fn` message.
 
@@ -165,7 +252,8 @@ println((|p| p.x)(Point { x: 2, y: 3 }));
 An argument that is itself a closure, and an argument borrowed (`&buf`) whose parameter would then
 be a reference, do not fix the parameter: write it out, `|v: &[u8]|`. Where nothing fixes a
 parameter's type at all (`f := |x| x + 1`), the error names the parameter and suggests its
-annotation: ``write |x: T|``.
+annotation: ``write |x: T|`` (``write fn(x: T)`` for the `fn` form). The `fn` form infers exactly
+where the bar form does: `fn(x) { x + 1 }` passed to a typed parameter, or called at once.
 
 ## Callable bounds
 

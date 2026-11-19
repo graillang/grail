@@ -79,8 +79,18 @@ function build(env, sample) {
     child.stdout.on('data', d => { out += d; });
     child.stderr.on('data', d => { out += d; });
     let peak = 0;
+    // Only this build's processes: the gate runs other legs with the same compiler at the same
+    // time, and counting every process on the machine counted theirs.
     const timer = sample ? setInterval(() => {
-      const ps = spawnSync('ps', ['-eo', 'args'], { encoding: 'utf8' }).stdout.split('\n').filter(l => l.startsWith(compiler)).length;
+      const rows = spawnSync('ps', ['-eo', 'pid=,ppid=,args='], { encoding: 'utf8' }).stdout.split('\n')
+        .map(line => line.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/)).filter(Boolean)
+        .map(m => ({ pid: Number(m[1]), ppid: Number(m[2]), args: m[3] }));
+      const mine = new Set([child.pid]);
+      for (let grew = true; grew;) {
+        grew = false;
+        for (const row of rows) if (!mine.has(row.pid) && mine.has(row.ppid)) { mine.add(row.pid); grew = true; }
+      }
+      const ps = rows.filter(row => mine.has(row.pid) && row.args.startsWith(compiler)).length;
       peak = Math.max(peak, ps);
     }, 25) : null;
     child.on('close', status => { if (timer) clearInterval(timer); resolve({ status, out, peak }); });

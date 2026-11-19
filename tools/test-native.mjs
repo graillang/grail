@@ -305,7 +305,11 @@ function runCase(test, position, context) {
       // `driverFile` names the entry explicitly, which is the shape that resolves `use` through the
       // module roots the command line gives (`--module-root DIR`), rather than through `src/`.
       const entryArgs = test.driverFile ? [test.driverFile] : [];
-      const built = execute(compiler, ['build', '--target', target, ...buildFlags, ...entryArgs, '-o', output], target, { cwd: project, env: { ...process.env, GRAIL_HOME: root } });
+      // A build store of the case's own (GRAIL_CACHE_DIR): with GRAIL_HOME set the store would be the
+      // worktree's, shared by every case and every leg, so a module another build had stored was
+      // replayed instead of compiled - no `.s` - and what the checks below read depended on what ran
+      // before.
+      const built = execute(compiler, ['build', '--target', target, ...buildFlags, ...entryArgs, '-o', output], target, { cwd: project, env: { ...process.env, GRAIL_HOME: root, GRAIL_CACHE_DIR: join(directory, 'store') } });
       assert.equal(built.status, 0, `${test.name}: grail build failed\n${built.stdout}${built.stderr}`);
       assert.equal(built.signal, null, `${test.name}: grail build crashed (${built.signal})`);
       // One run per module, one interface per module: runtime is the trusted base and has none. A
@@ -472,7 +476,9 @@ function runCase(test, position, context) {
       // table that names a label no body defines. A case some other flag keeps from `--debug` is
       // left to its own flags.
       let debugChecked = 0;
-      if (!(test.flags ?? []).includes('--debug')) {
+      // `--debug` is refused beside `--no-debug-info`: a case that turns debug information off has no
+      // debug build to compare.
+      if (!(test.flags ?? []).includes('--debug') && !(test.flags ?? []).includes('--no-debug-info')) {
         const debugAssembly = join(directory, 'program-debug.s');
         const debug = more => { compileProgram(compiler, files, directory, { target, overflow: test.overflow ?? 'checked', runtime, osRuntime, name: 'program-debug', extra: [...caseRoots, ...(test.flags ?? []), '--debug', ...more] }); return readFileSync(debugAssembly); };
         const plainDebug = debug([]);
@@ -613,10 +619,18 @@ function stage(context) {
   for (const file of readdirSync(join(root, 'lib')).filter(f => f.endsWith('.grl'))) {
     writeFileSync(join(stdSnapshot, file), readFileSync(join(root, 'lib', file)));
   }
+  // tests/std holds standard-library fixtures (inherent impls on built-in types are the standard
+  // library's alone): staged with their marker core.grl beside them, so they stay standard modules.
+  const stdFixture = join(snapshot, 'std-fixture');
+  mkdirSync(stdFixture, { recursive: true });
+  for (const file of readdirSync(join(root, 'tests/std')).filter(f => f.endsWith('.grl'))) {
+    writeFileSync(join(stdFixture, file), readFileSync(join(root, 'tests/std', file)));
+  }
   for (let i = 0; i < context.cases.length; i++) {
     for (const field of ['files', 'modules', 'interfaceFiles']) if (context.cases[i][field]) context.cases[i][field] = context.cases[i][field].map((file, j) => {
       const source = resolve(root, file);
       if (dirname(source) === join(root, 'lib')) return join(stdSnapshot, basename(source));
+      if (dirname(source) === join(root, 'tests/std')) return join(stdFixture, basename(source));
       const path = join(snapshot, `${i}-${field}-${j}-${basename(file)}`);
       writeFileSync(path, readFileSync(source));
       return path;

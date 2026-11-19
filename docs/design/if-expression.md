@@ -58,11 +58,13 @@ whatever the arms produce; nothing about the layout depends on the source order 
   arm. The expected type of the place the value goes into is handed to each arm (`primary` now takes
   it), so a literal, a `None` or a narrower integer adopts the context's type before the arms are
   compared: `n: u8 := if c { 1 } else { 2 };` is two `u8`s, not two `u64`s.
-- **An arm is one expression, not a block of statements.** A block has no value: *this arm of an `if`
-  expression is a block of statements, so it has no value*, with the help *write one expression for
-  the arm's value, or make the arm diverge with `return` or `break`*. The mixed shape is told apart
-  and named too: *this arm of an `if` expression holds statements and then a value* (write only the
-  value in the arm), and *an arm of an `if` expression is one value, not an assignment*.
+- **An arm is a block whose value is its last expression.** Originally an arm was exactly one
+  expression; since tail expressions (`docs/design/tail-expressions.md`) an arm may hold statements
+  before its value (`{ t := f(); t + 1 }`). A block that ends in a statement has no value: *this arm
+  of an `if` expression is a block of statements, so it has no value*, with the help *end the arm's
+  block with its value (an expression without `;`), or make the arm diverge with `return` or
+  `break`*. A one-expression arm that assigns is still named: *an arm of an `if` expression is one
+  value, not an assignment*.
 - **A diverging arm needs no value.** An arm whose block always leaves the branch - `return`,
   `break`, or a call that aborts - produces no value and stores none. The value's type then comes
   from the arm that has one: `n := if c { 7 } else { return 3; };` is a `u64`. If *both* arms
@@ -96,8 +98,9 @@ round-trips `if` expressions in initializers, arguments, returns, record fields 
 
 Corpus: `exprif-initializer`, `exprif-else-if-chain`, `exprif-argument`, `exprif-record-field`,
 `exprif-declared-type`, `exprif-diverging-arm`, `exprif-drops-value`, `exprif-nested-in-match-arm`,
+`exprif-statement-arm` (statements then a value, accepted since tail expressions),
 `exprif-nested-arms` (a nested `if` and a nested `match` as a function's very first expression,
 which is frame word zero - the word number is not the "is there a word" answer), and the refusals
-`exprif-type-mismatch`, `exprif-missing-else`, `exprif-statement-arm`, `exprif-statement-block`,
+`exprif-type-mismatch`, `exprif-missing-else`, `exprif-statement-block`,
 `exprif-no-value`, `exprif-borrows`, `exprif-statement-word`.
 Book: *Branches and loops*.

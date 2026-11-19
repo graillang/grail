@@ -1,6 +1,9 @@
 // F1 fixture (docs/design/typed-ir.md): two vectors read by index and by length, every index past
 // 0 so a wrong element width or a wrong header moves a value rather than just an address, plus a
-// borrowed &[u64] read through the same accessors.
+// borrowed &[u64] read through the same accessors. The last loop reads both vectors with no call
+// that may change them (FACT_LOOP_STABLE): there the facts' `data`/`len` are read once at the loop
+// head and every element address is a getelementptr on them. The reads before it follow calls
+// that are given the headers, so their hoisted fields are stale and they keep the word lowering.
 fn total(a: (&a u64[])) -> u64 {
     mut s: u64 = 0;
     for i in a.len() {
@@ -19,4 +22,9 @@ fn main() {
     println(v[3] + v[8]);
     v[5] = 41;
     println(v[5] + w[6] + total(&v));
+    mut s: u64 = 0;
+    for i in 9 {
+        s = s + v[i] * w[8 - i];
+    }
+    println(s);
 }

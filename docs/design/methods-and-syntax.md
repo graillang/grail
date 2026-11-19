@@ -183,3 +183,27 @@ moved, never copied; indices out of range stop the program; changing methods nee
 `==` and `!=` compare two structs or enums of the same type: numbers and `bool` by value,
 `f64` by IEEE rules, text by content, vectors of integers/bools element by element, nested structs field by field, and enums by variant and then payload (`some(5) == some(5)`). Other field types
 (vectors of non-scalars, closures, handles) are a compile-time error.
+
+## Methods on built-in types
+
+A built-in type's inherent methods are the language's and the standard library's: `impl u64 { ... }`,
+`impl<T> T[] { ... }`, `impl char`, `impl<T> *mut T`, `impl<T> T?`, `impl (A, B)` and
+`impl<T> Mutex<T>` are accepted only in a standard-library module (one beside `core.grl`), as Rust
+allows inherent impls on primitives only in core/std. Such an impl may add to the compiler's own
+method lists (float, char, raw pointer, `Mutex`) but not take one of their names, and it may not
+define a collection protocol name. The integers', `char`'s and the floats' bit methods live in
+`lib/scalar.grl`, which the compiler adds to every program beside `core` (core itself is compiled by
+the published bootstrap, which does not accept `impl u64`); the float functions are `impl f64` /
+`impl f32` in `lib/math.grl`. A scalar's associated function is called through the type's name:
+`f64::from_bits(b)`.
+
+A program adds methods to a built-in type through an interface (Rust's extension trait): `interface
+Twice { fn twice(&self) -> u64; }` and `impl Twice for u64 { ... }`. On a built-in receiver the
+interface's methods resolve only in a module that declares the interface or names its module in a
+`use` line, and two such interfaces that define the same method are ambiguous. A generic body's
+bound decides its methods wherever the body is specialised.
+
+Declared structs and enums keep resolving interface methods without the `use` requirement. Extending
+the scope rule to them, as Rust does for traits, is a possible later change: it would refuse calls
+that compile today, so it waits for its own migration.
+

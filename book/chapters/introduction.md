@@ -33,6 +33,7 @@ Comparison notes distinguish actual differences from capabilities both languages
 requires a supported Linux CPU, Clang used only as an assembler, and LLD. Checking the Rust comparisons also needs `rustc` (edition 2024). Reading/building the static book needs neither compiler toolchains nor Rust.
 
 **Your own programs:** `just install` puts the `grail` tool on your path. `grail new hello`
-creates a project, `grail run` builds and runs it, `grail test` runs the programs in `tests/`,
+creates a project, `grail run` builds and runs it (an optimised development build with line
+tables a debugger reads; `--release` for the LLVM build, `--debug` to step through unoptimised code), `grail test` runs the programs in `tests/`,
 `grail fmt` applies the canonical layout used in this book, and `grail add NAME` adds a
 dependency (`--path` and `--git` for a directory or a repository) resolved into `grail.lock`.

@@ -17,6 +17,39 @@ conditions.
 
 Methods also work on generic types: `impl<T> Stack<T> { ... }`.
 
+## Methods on built-in types
+
+Numbers, characters, text and vectors have methods too: `x.abs()`, `x.checked_add(y)`,
+`n.to_string()`, `c.to_digit(10)`, `angle.sin()`, `v.sort()`. They come from the compiler and from
+the standard library, which is the only place an inherent `impl u64 { ... }` or `impl<T> T[] { ... }`
+may be written - as in Rust, where only core and std give `u64` and slices their methods. To give a
+built-in type a method of your own, declare an interface and implement it for the type:
+
+```grl
+interface Percent {
+    fn percent_of(&self, whole: u64) -> u64;
+}
+
+impl Percent for u64 {
+    fn percent_of(&self, whole: u64) -> u64 {
+        return *self * 100 / whole;
+    }
+}
+
+fn main() {
+    done: u64 = 3;
+    println(done.percent_of(12));    // 25
+    println(done.pow(2).max(5));     // 9: integer methods every program has
+}
+```
+
+The interface's methods work on a built-in receiver only where the interface is in scope: in the
+module that declares it, or in a module with a `use` line for that module. Elsewhere `x.percent_of(..)`
+is refused with a message naming the interface and the `use` line that brings it in. If two
+interfaces in scope both define the method for the receiver, the call is ambiguous, and
+`Percent::percent_of(&done, 12)` names the one you mean. (Methods on your own structs and enums do
+not need the `use` line.)
+
 **Try it:** remove `mut` from `visits` and read the compiler's message.
 
 ## Deriving the boring impls

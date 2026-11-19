@@ -437,6 +437,10 @@ struct L {
     // one (the entry block and its fall-through continuations, which have a single predecessor
     // each). The hoisted words are reused only where they are known to dominate the use.
     eblk: u64[],
+    // The loop region (stream lines, head exclusive, last back edge inclusive) over which slot k's
+    // fields, read at the region's head, dominate every use; ehi 0 when there is none.
+    elo: u64[],
+    ehi: u64[],
     blk: u64,
     // The id of the `body` block: the first block of the function's own code, which dominates
     // every block of it.
@@ -2478,7 +2482,10 @@ fn copy_width(width: u64) -> u8[] {
 // Hoists `data` and `len` at the point a fact is established: the word `w` is the header pointer,
 // so the two fields are read once, here, and every access in the region that follows reads the SSA
 // values instead of re-loading (docs/design/typed-ir.md, F1b).
-fn establish(l: (&mut L), k: u64, w: (&[u8])) -> unit {
+// `tagged`: the two loads carry the header tag (a region head's, which replace the accessors' own
+// tagged loads; untagged, they may alias every element store, and a store loop is neither hoisted
+// nor vectorised).
+fn establish(l: (&mut L), k: u64, w: (&[u8]), tagged: bool) -> unit {
     while l.eon.len() <= k {
         l.eon.push(0);
         l.edata.push(u8[]);
@@ -2489,11 +2496,25 @@ fn establish(l: (&mut L), k: u64, w: (&[u8])) -> unit {
     while l.eblk.len() <= k {
         l.eblk.push(0);
     }
+    // A write's fields hold from its block on; region_establish sets the loop region after this.
+    while l.ehi.len() <= k {
+        l.ehi.push(0);
+        l.elo.push(0);
+    }
+    l.ehi[k] = 0;
     what := header_slot_kind(&l, k);
     h := def(&mut l, view("inttoptr i64 {} to ptr"), &u8[][copy(w)]);
-    dp := def(&mut l, view("load ptr, ptr {}, align 8"), &u8[][copy(view(h))]);
+    mut dp = u8[];
+    mut ln = u8[];
+    if tagged {
+        dp = def(&mut l, view("load ptr, ptr {}, align 8, !tbaa !1"), &u8[][copy(view(h))]);
+        lp := def(&mut l, view("getelementptr i8, ptr {}, i64 8"), &u8[][copy(view(h))]);
+        ln = def(&mut l, view("load i64, ptr {}, align 8, !tbaa !1"), &u8[][lp]);
+    } else {
+        dp = def(&mut l, view("load ptr, ptr {}, align 8"), &u8[][copy(view(h))]);
+        ln = header_load(&mut l, view(h), 8);
+    }
     d := def(&mut l, view("ptrtoint ptr {} to i64"), &u8[][copy(view(dp))]);
-    ln := header_load(&mut l, view(h), 8);
     exchange(&mut l.edptr[k], dp);
     if l.verify != 0 {
         verify_header(&mut l, w, view(h), what, view(ln));
@@ -2547,10 +2568,22 @@ fn reachable(l: (&L), k: u64) -> bool {
     if l.eblk[k] == l.blk {
         return true;
     }
+    // Established at the head of a stable loop region that this line is inside.
+    if (k < l.ehi.len()) && (l.ehi[k] != 0) && (l.rline > l.elo[k]) && (l.rline <= l.ehi[k]) {
+        return true;
+    }
     // SEQ-STABLE: a slice descriptor whose one write is in the function's first block. That block
     // dominates every other, and nothing writes the descriptor while the slice lives, so the fields
     // read there are the fields everywhere (docs/design/release-builds-and-parity.md).
     return (l.eblk[k] == l.body_blk) && header_stable(&l, k);
+}
+// Whether slot k's fields were read at the head of a stable loop region this line is inside, and
+// are still current.
+fn in_region(l: (&L), k: u64) -> bool {
+    if (established(&l, k) != 1) || (k >= l.ehi.len()) || (l.ehi[k] == 0) {
+        return false;
+    }
+    return (l.rline > l.elo[k]) && (l.rline <= l.ehi[k]);
 }
 fn header_stable(l: (&L), k: u64) -> bool {
     for i in l.hslots.len() {
@@ -3095,9 +3128,24 @@ fn generic_element(l: (&mut L), target: (&[u8])) -> bool {
     s := get_reg(&mut l, view("rdi"));
     i := get_reg(&mut l, view("rsi"));
     h := def(&mut l, view("inttoptr i64 {} to ptr"), &u8[][s]);
+    // The header's fields as read at the head of a stable loop region this access is inside, else
+    // read here.
+    kid := reg_index(view("rdi")) + 1;
+    mut hk: u64 = 0;
+    if (chain_kind(&l, kid) == 1) && (chain_off(&l, kid) == 0) {
+        k := chain_slot(&l, kid);
+        if in_region(&l, k) && (k < l.edptr.len()) {
+            hk = k + 1;
+        }
+    }
     if checked {
-        lp := def(&mut l, view("getelementptr i8, ptr {}, i64 8"), &u8[][copy(view(h))]);
-        len := def(&mut l, view("load i64, ptr {}, align 8, !tbaa !1"), &u8[][lp]);
+        mut len = u8[];
+        if hk != 0 {
+            len = copy(view(l.elen[hk - 1]));
+        } else {
+            lp := def(&mut l, view("getelementptr i8, ptr {}, i64 8"), &u8[][copy(view(h))]);
+            len = def(&mut l, view("load i64, ptr {}, align 8, !tbaa !1"), &u8[][lp]);
+        }
         ok := def(&mut l, view("icmp ult i64 {}, {}"), &u8[][copy(view(i)), copy(view(len))]);
         good := fresh_block(&mut l);
         wrong := fresh_block(&mut l);
@@ -3113,7 +3161,12 @@ fn generic_element(l: (&mut L), target: (&[u8])) -> bool {
         emit(&mut l, view("unreachable"), &u8[][]);
         begin_block(&mut l, view(good));
     }
-    d := def(&mut l, view("load ptr, ptr {}, align 8, !tbaa !1"), &u8[][h]);
+    mut d = u8[];
+    if hk != 0 {
+        d = copy(view(l.edptr[hk - 1]));
+    } else {
+        d = def(&mut l, view("load ptr, ptr {}, align 8, !tbaa !1"), &u8[][h]);
+    }
     off := def(&mut l, view("mul i64 {}, {}"), &u8[][copy(view(i)), copy_width(width)]);
     p := def(&mut l, view("getelementptr i8, ptr {}, i64 {}"), &u8[][d, off]);
     if value != 0 {
@@ -3213,25 +3266,30 @@ fn hex_digit(n: u64) -> u8 {
     }
     return u8(87 + n);
 }
+// --verify-facts: the header this call was handed still holds the `data` and `len` the fact
+// hoisted for slot k. A SEQ-STABLE claim about a descriptor that did change - or a vector fact
+// whose staleness was missed, or a loop region whose header the loop rewrote - aborts here, on the
+// first access after the change.
+fn verify_current(l: (&mut L), k: u64) -> unit {
+    h := def(&mut l, view("inttoptr i64 {} to ptr"), &u8[][copy(view(get_reg(&mut l, view("rdi"))))]);
+    d := header_load(&mut l, view(h), 0);
+    ln := header_load(&mut l, view(h), 8);
+    sd := def(&mut l, view("icmp eq i64 {}, {}"), &u8[][d, copy(view(l.edata[k]))]);
+    sl := def(&mut l, view("icmp eq i64 {}, {}"), &u8[][ln, copy(view(l.elen[k]))]);
+    same := def(&mut l, view("and i1 {}, {}"), &u8[][sd, sl]);
+    good := fresh_block(&mut l);
+    wrong := fresh_block(&mut l);
+    emit(&mut l, view("br i1 {}, label %{}, label %{}"), &u8[][same, copy(view(good)), copy(view(wrong))]);
+    begin_block(&mut l, view(wrong));
+    emit(&mut l, view("call void @\"rt_abort.cold\"() #0"), &u8[][]);
+    emit(&mut l, view("unreachable"), &u8[][]);
+    begin_block(&mut l, view(good));
+    return ();
+}
 fn element_address(l: (&mut L), target: (&[u8]), k: u64, width: u64) -> unit {
     i := get_reg(&mut l, view("rsi"));
     if l.verify != 0 {
-        // --verify-facts: the header this call was handed still holds the `data` and `len` the
-        // fact hoisted. A SEQ-STABLE claim about a descriptor that did change - or a vector fact
-        // whose staleness was missed - aborts here, on the first access after the change.
-        h := def(&mut l, view("inttoptr i64 {} to ptr"), &u8[][copy(view(get_reg(&mut l, view("rdi"))))]);
-        d := header_load(&mut l, view(h), 0);
-        ln := header_load(&mut l, view(h), 8);
-        sd := def(&mut l, view("icmp eq i64 {}, {}"), &u8[][d, copy(view(l.edata[k]))]);
-        sl := def(&mut l, view("icmp eq i64 {}, {}"), &u8[][ln, copy(view(l.elen[k]))]);
-        same := def(&mut l, view("and i1 {}, {}"), &u8[][sd, sl]);
-        good := fresh_block(&mut l);
-        wrong := fresh_block(&mut l);
-        emit(&mut l, view("br i1 {}, label %{}, label %{}"), &u8[][same, copy(view(good)), copy(view(wrong))]);
-        begin_block(&mut l, view(wrong));
-        emit(&mut l, view("call void @\"rt_abort.cold\"() #0"), &u8[][]);
-        emit(&mut l, view("unreachable"), &u8[][]);
-        begin_block(&mut l, view(good));
+        verify_current(&mut l, k);
     }
     if eq(target, view("rt_slot")) || eq(target, view("rt_slot4")) {
         ok := def(&mut l, view("icmp ult i64 {}, {}"), &u8[][copy(view(i)), copy(view(l.elen[k]))]);
@@ -3496,6 +3554,9 @@ fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> uni
             if address_accessor(target) {
                 element_address(&mut l, view(target), k, hf.width);
                 return ();
+            }
+            if l.verify != 0 {
+                verify_current(&mut l, k);
             }
             a0 := get_reg(&mut l, view("rdi"));
             p := def(&mut l, view("inttoptr i64 {} to ptr"), &u8[][a0]);
@@ -4585,7 +4646,7 @@ fn instruction<a, b, c>(l: (&a mut L), line: &b [u8], facts: (&c Facts)) -> unit
         if hk != 0 {
             // The fact is established here: this word is the header, so `data` and `len` are read
             // once on this path and the region that follows uses those two words.
-            establish(&mut l, hk - 1, view(v));
+            establish(&mut l, hk - 1, view(v), false);
         }
         return ();
     }
@@ -6337,6 +6398,8 @@ fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), fact
     exchange(&mut l.elen, u8[][]);
     exchange(&mut l.edptr, u8[][]);
     exchange(&mut l.eblk, u64[]);
+    exchange(&mut l.elo, u64[]);
+    exchange(&mut l.ehi, u64[]);
     l.blk = 0;
     exchange(&mut l.dnames, u8[][]);
     exchange(&mut l.dmap, map_new(16));
@@ -6649,6 +6712,8 @@ fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), fact
             }
         }
     }
+    heads := loop_stable_heads(&facts, view(f.name));
+    regions := stable_regions(&l, &instrs, &heads);
     for m in instrs.len() {
         if l.fail != 0 {
             return ();
@@ -6661,6 +6726,9 @@ fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), fact
                 emit(&mut l, view("br label %{}"), &u8[][copy(view(b))]);
             }
             begin_block(&mut l, view(b));
+            if regions.len() != 0 {
+                region_establish(&mut l, m, &regions);
+            }
             continue;
         }
         if starts(line, view(".gsite")) {
@@ -6683,6 +6751,159 @@ fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), fact
     }
     if l.term == 0 {
         emit(&mut l, view("unreachable"), &u8[][]);
+    }
+    return ();
+}
+
+// The loop-stability facts of `name` (FACT_LOOP_STABLE) as pairs: the header's frame slot and the
+// number of the loop head's label (`.L<unit>_<f>_<head>`).
+fn loop_stable_heads<a, b>(facts: (&a Facts), name: &b [u8]) -> u64[] {
+    mut out = u64[];
+    for i in facts.items.len() {
+        f := &facts.items[i];
+        if (f.kind == FACT_LOOP_STABLE) && eq(view(f.fn), name) {
+            out.push(f.a);
+            out.push(f.b);
+        }
+    }
+    return out;
+}
+// The loop regions in which a stable sequence's fields may be read once, at the head (FACT_LOOP_STABLE):
+// triples of the header's slot, the line of the head's label and the last line naming it (its last
+// back edge). A region is kept only when the head dominates every line of it: no jump from outside the lines
+// [head, last back edge] names a label inside them, so the only way in is through the head (the
+// line before the region falls into the head itself). Not under --range-facts, whose accessors
+// stay calls so the proved ones can be counted. Under --verify-facts the regions are kept: the head
+// checks the header it reads (verify_header) and each fact-carrying access in the region checks
+// that the header still holds the two words read there (element_address, verify_element), so the
+// hoist itself is what that mode verifies.
+fn stable_regions<a, b>(l: (&a L), instrs: (&b u8[][]), heads: (&a u64[])) -> u64[] {
+    mut out = u64[];
+    if (heads.len() == 0) || (l.proof.len() != 0) {
+        return out;
+    }
+    // One pass over the body: every label's line and number, then the first and last line naming
+    // each (a jump, a `leaq`, a table), so each region is checked against its own labels only.
+    mut lmap = map_new(64);
+    mut lline = u64[];
+    mut lnum = u64[];
+    mut first = u64[];
+    mut last = u64[];
+    for m in instrs.len() {
+        line := view(instrs[m]);
+        nm := label_of(line);
+        if (nm.len() != 0) && (nm.len() + 1 == line.len()) {
+            map_put(&mut lmap, view(nm), lline.len());
+            lline.push(m);
+            lnum.push(label_number(view(nm)));
+            first.push(18446744073709551615);
+            last.push(0);
+        }
+    }
+    for m in instrs.len() {
+        line := view(instrs[m]);
+        mut i = 0;
+        while i + 1 < line.len() {
+            if (line[i] == 46) && (line[i + 1] == 76) && ((i == 0) || !ident_char(line[i - 1])) {
+                mut j = i + 2;
+                while (j < line.len()) && ident_char(line[j]) {
+                    j += 1;
+                }
+                // A label's own line defines it; anything else names it.
+                if (i != 0) || (j >= line.len()) || (line[j] != 58) {
+                    hit := map_get(&lmap, view(sub(line, i, j)));
+                    if hit != 0 {
+                        id := hit - 1;
+                        if m < first[id] {
+                            first[id] = m;
+                        }
+                        if m > last[id] {
+                            last[id] = m;
+                        }
+                    }
+                }
+                i = j;
+                continue;
+            }
+            i += 1;
+        }
+    }
+    mut q = 0;
+    while q + 1 < heads.len() {
+        k := heads[q];
+        n := heads[q + 1];
+        q += 2;
+        mut hid = lline.len();
+        for id in lline.len() {
+            if lnum[id] == n + 1 {
+                hid = id;
+                break;
+            }
+        }
+        if hid == lline.len() {
+            continue;
+        }
+        t := lline[hid];
+        end := last[hid];
+        if end <= t {
+            continue;
+        }
+        mut ok = true;
+        mut id = hid + 1;
+        while (id < lline.len()) && (lline[id] <= end) {
+            if (last[id] != 0) && ((first[id] < t) || (last[id] > end)) {
+                ok = false;
+                break;
+            }
+            id += 1;
+        }
+        if ok {
+            out.push(k);
+            out.push(t);
+            out.push(end);
+        }
+    }
+    return out;
+}
+// A label's number after its last `_`, plus one; 0 when it is not `.L..._<digits>`.
+fn label_number(label: (&[u8])) -> u64 {
+    mut cut = label.len();
+    while (cut > 0) && (label[cut - 1] >= 48) && (label[cut - 1] <= 57) {
+        cut -= 1;
+    }
+    if (cut == label.len()) || (cut == 0) || (label[cut - 1] != 95) || !starts(label, view(".L")) || (label.len() - cut > 18) {
+        return 0;
+    }
+    mut n: u64 = 0;
+    for i in cut..label.len() {
+        n = n * 10 + u64(label[i] - 48);
+    }
+    return n + 1;
+}
+// At the head of a stable region: the sequence's `data` and `len` are read from the header in its
+// slot once, and every accessor of it inside the region reads those words (`reachable`). The head
+// runs on entry and on every iteration, so the reads are unconditional there and LICM can take them
+// out of the loop, where each access's own read sits under a branch and, through an `inttoptr`, is
+// never provably safe to hoist. A region inside one already established for the slot keeps the
+// outer words, which dominate it too.
+fn region_establish(l: (&mut L), m: u64, regions: (&u64[])) -> unit {
+    mut q = 0;
+    while q + 2 < regions.len() {
+        k := regions[q];
+        t := regions[q + 1];
+        end := regions[q + 2];
+        q += 3;
+        if t != m {
+            continue;
+        }
+        if (established(&l, k) == 1) && (k < l.ehi.len()) && (l.ehi[k] != 0) && (l.elo[k] < t) && (end <= l.ehi[k]) {
+            continue;
+        }
+        sp := address(&mut l, view(slot_needle(k)));
+        w := def(&mut l, view("load i64, ptr {}, align 1"), &u8[][sp]);
+        establish(&mut l, k, view(w), true);
+        l.elo[k] = t;
+        l.ehi[k] = end;
     }
     return ();
 }
@@ -9148,10 +9369,13 @@ fn target_triple(target: u64) -> u8[] {
     return copy(view("x86_64-unknown-linux-gnu"));
 }
 // On AArch64 and RISC-V the word machine returns rax:rdx in x9:x2 (t0:a2), while LLVM's C
-// convention returns in x0:x1 (a0:a1); arguments already agree (x0..x5 / a0..a5). IR functions
-// are therefore defined as NAME.ll, native code reaches them through a thunk named NAME, and IR
-// reaches native functions through NAME.c.
-fn thunk_into_ir<a>(out: (&a mut u8[]), name: &a [u8], target: u64, weak: bool) -> unit {
+// convention returns in x0:x1 (a0:a1). IR functions are therefore defined as NAME.ll, native code
+// reaches them through a thunk named NAME, and IR reaches native functions through NAME.c.
+// Arguments agree only up to the sixth word (x0..x5 / a0..a5): the word machine passes word 6 + k
+// at 8k(sp) at the call (x86's 16+8k(%rbp) in the callee, native.grl `stack_params`), while LLVM
+// lowers a signature of more than six words with words 6 and 7 in x6/x7 (a6/a7) and word 8 + k at
+// 8k(sp). The thunks move words 6 and later between the two (`words`, the body's parameter count).
+fn thunk_into_ir<a>(out: (&a mut u8[]), name: &a [u8], target: u64, weak: bool, words: u64) -> unit {
     // A name the stream declared `.weak` keeps that binding: a second `.globl` is an assembler
     // error (`changed binding to STB_GLOBAL`).
     if weak {
@@ -9165,18 +9389,71 @@ fn thunk_into_ir<a>(out: (&a mut u8[]), name: &a [u8], target: u64, weak: bool) 
     out.push(10);
     put(&mut out, name);
     put(&mut out, view(":\n"));
+    // The words LLVM takes on the stack (8 and later), in a 16-byte aligned area.
+    mut spill: u64 = 0;
+    if words > 8 {
+        spill = (words - 8 + 1) / 2 * 16;
+    }
     if target == 1 {
-        put(&mut out, view("stp x29,x30,[sp,#-16]!\nmov x29,sp\nbl "));
+        // After the prologue, word 6 + k is at 16 + 8k(x29).
+        put(&mut out, view("stp x29,x30,[sp,#-16]!\nmov x29,sp\n"));
+        if words > 6 {
+            put(&mut out, view("ldr x6,[x29,#16]\n"));
+        }
+        if words > 7 {
+            put(&mut out, view("ldr x7,[x29,#24]\n"));
+        }
+        if spill != 0 {
+            put(&mut out, view("sub sp,sp,#"));
+            num(&mut out, spill);
+            out.push(10);
+            for k in words - 8 {
+                put(&mut out, view("ldr x9,[x29,#"));
+                num(&mut out, 32 + 8 * k);
+                put(&mut out, view("]\nstr x9,[sp,#"));
+                num(&mut out, 8 * k);
+                put(&mut out, view("]\n"));
+            }
+        }
+        put(&mut out, view("bl "));
         put(&mut out, name);
-        put(&mut out, view(".ll\nmov x9,x0\nmov x2,x1\nldp x29,x30,[sp],#16\nret\n"));
+        put(&mut out, view(".ll\n"));
+        if spill != 0 {
+            put(&mut out, view("mov sp,x29\n"));
+        }
+        put(&mut out, view("mov x9,x0\nmov x2,x1\nldp x29,x30,[sp],#16\nret\n"));
     } else {
-        put(&mut out, view("addi sp,sp,-16\nsd ra,8(sp)\nsd s0,0(sp)\naddi s0,sp,16\ncall "));
+        // After the prologue, s0 is the entry sp and word 6 + k is at 8k(s0).
+        put(&mut out, view("addi sp,sp,-16\nsd ra,8(sp)\nsd s0,0(sp)\naddi s0,sp,16\n"));
+        if words > 6 {
+            put(&mut out, view("ld a6,0(s0)\n"));
+        }
+        if words > 7 {
+            put(&mut out, view("ld a7,8(s0)\n"));
+        }
+        if spill != 0 {
+            put(&mut out, view("addi sp,sp,-"));
+            num(&mut out, spill);
+            out.push(10);
+            for k in words - 8 {
+                put(&mut out, view("ld t1,"));
+                num(&mut out, 16 + 8 * k);
+                put(&mut out, view("(s0)\nsd t1,"));
+                num(&mut out, 8 * k);
+                put(&mut out, view("(sp)\n"));
+            }
+        }
+        put(&mut out, view("call "));
         put(&mut out, name);
-        put(&mut out, view(".ll\nmv t0,a0\nmv a2,a1\nld ra,8(sp)\nld s0,0(sp)\naddi sp,sp,16\nret\n"));
+        put(&mut out, view(".ll\n"));
+        if spill != 0 {
+            put(&mut out, view("addi sp,s0,-16\n"));
+        }
+        put(&mut out, view("mv t0,a0\nmv a2,a1\nld ra,8(sp)\nld s0,0(sp)\naddi sp,sp,16\nret\n"));
     }
     return ();
 }
-fn thunk_from_ir<a>(out: (&a mut u8[]), name: &a [u8], target: u64) -> unit {
+fn thunk_from_ir<a>(out: (&a mut u8[]), name: &a [u8], target: u64, words: u64) -> unit {
     // Weak: every unit of a per-module release build that calls the native NAME from IR carries
     // the same thunk, and the link keeps one (`duplicate symbol: rt_abort.c` otherwise).
     put(&mut out, view(".text\n.weak "));
@@ -9186,16 +9463,84 @@ fn thunk_from_ir<a>(out: (&a mut u8[]), name: &a [u8], target: u64) -> unit {
     put(&mut out, view(".c\n"));
     put(&mut out, name);
     put(&mut out, view(".c:\n"));
+    // The word machine's outgoing area (words 6 and later), 16-byte aligned.
+    mut area: u64 = 0;
+    if words > 6 {
+        area = (words - 6 + 1) / 2 * 16;
+    }
     if target == 1 {
-        put(&mut out, view("stp x29,x30,[sp,#-16]!\nmov x29,sp\nbl "));
+        // After the prologue, LLVM's word 8 + k is at 16 + 8k(x29).
+        put(&mut out, view("stp x29,x30,[sp,#-16]!\nmov x29,sp\n"));
+        if area != 0 {
+            put(&mut out, view("sub sp,sp,#"));
+            num(&mut out, area);
+            put(&mut out, view("\nstr x6,[sp,#0]\n"));
+            if words > 7 {
+                put(&mut out, view("str x7,[sp,#8]\n"));
+            }
+            if words > 8 {
+                for k in words - 8 {
+                    put(&mut out, view("ldr x9,[x29,#"));
+                    num(&mut out, 16 + 8 * k);
+                    put(&mut out, view("]\nstr x9,[sp,#"));
+                    num(&mut out, 16 + 8 * k);
+                    put(&mut out, view("]\n"));
+                }
+            }
+        }
+        put(&mut out, view("bl "));
         put(&mut out, name);
-        put(&mut out, view("\nmov x0,x9\nmov x1,x2\nldp x29,x30,[sp],#16\nret\n"));
+        out.push(10);
+        if area != 0 {
+            put(&mut out, view("mov sp,x29\n"));
+        }
+        put(&mut out, view("mov x0,x9\nmov x1,x2\nldp x29,x30,[sp],#16\nret\n"));
     } else {
-        put(&mut out, view("addi sp,sp,-16\nsd ra,8(sp)\nsd s0,0(sp)\naddi s0,sp,16\ncall "));
+        // After the prologue, s0 is the entry sp and LLVM's word 8 + k is at 8k(s0).
+        put(&mut out, view("addi sp,sp,-16\nsd ra,8(sp)\nsd s0,0(sp)\naddi s0,sp,16\n"));
+        if area != 0 {
+            put(&mut out, view("addi sp,sp,-"));
+            num(&mut out, area);
+            put(&mut out, view("\nsd a6,0(sp)\n"));
+            if words > 7 {
+                put(&mut out, view("sd a7,8(sp)\n"));
+            }
+            if words > 8 {
+                for k in words - 8 {
+                    put(&mut out, view("ld t1,"));
+                    num(&mut out, 8 * k);
+                    put(&mut out, view("(s0)\nsd t1,"));
+                    num(&mut out, 16 + 8 * k);
+                    put(&mut out, view("(sp)\n"));
+                }
+            }
+        }
+        put(&mut out, view("call "));
         put(&mut out, name);
-        put(&mut out, view("\nmv a0,t0\nmv a1,a2\nld ra,8(sp)\nld s0,0(sp)\naddi sp,sp,16\nret\n"));
+        out.push(10);
+        if area != 0 {
+            put(&mut out, view("addi sp,s0,-16\n"));
+        }
+        put(&mut out, view("mv a0,t0\nmv a1,a2\nld ra,8(sp)\nld s0,0(sp)\naddi sp,sp,16\nret\n"));
     }
     return ();
+}
+// The argument words of a `define` line: its `i64 %aK` parameters.
+fn define_words<a>(line: &a [u8]) -> u64 {
+    mut n: u64 = 0;
+    mut i: u64 = 0;
+    while i + 6 <= line.len() {
+        if occurs_at_safe(line, i, view("i64 %a")) {
+            n += 1;
+            i += 6;
+            continue;
+        }
+        if line[i] == 41 {
+            break;
+        }
+        i += 1;
+    }
+    return n;
 }
 // `line` with each `@"NAME"(` call or definition renamed to NAME.ll (lifted) or NAME.c (native).
 fn rename_calls<a, b>(line: &a [u8], lifted: (&b Set)) -> u8[] {
@@ -9941,7 +10286,7 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
             set_add(&mut weak, view(sub(wl, 6, wl.len())));
         }
     }
-    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, pairs: u64[], pair_widths: u64[], pair_written: u64[], fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], edptr: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], hstable: u64[], hesc: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, body_blk: 0, r11sym: u8[], sitepath: u8[], siteline: 0, sitecol: 0, sitedefs: u8[], sitecount: 0, rdiconst: u8[], slotconst: u8[][], lastload: u8[], lastconst: u8[], regconst: u8[][], kmap: map_new(16), kvals: u8[][], ebase: u64[], eptrs: set_new(16), evals: set_new(16), eslot: u64[], dnames: u8[][], dmap: map_new(16), hmap: map_new(16), cmap: map_new(16), sl_start: u64[], sl_lines: u64[], proof: u64[], rline: 0, ranges: ranges, sigs: set_new(16), nargs: 6, retw: 2, rdxdead: 0, pvreg: u8[][], pvptr: u8[][], pvoff: i64[], asy: u8[][], asx: u8[][], rdxcallee: u8[], curline: u8[], sigerr: u8[], wrong: u8[][], area: u8[][], areaopen: 0, argwritten: 0, ffis: set_new(16), ffimem: set_new(16), entryextra: u8[], outer: u8[][], outeropen: 0, why: host::env(view("GRAIL_LLVM_WHY")), refsigs: set_new(16), takenslots: u8[][], ownrefs: 0, argptrs: u8[][], grail_bodies: set_new(16), xpend: 0, xstale: 18446744073709551615 };
+    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, pairs: u64[], pair_widths: u64[], pair_written: u64[], fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], edptr: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], hstable: u64[], hesc: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], elo: u64[], ehi: u64[], blk: 0, body_blk: 0, r11sym: u8[], sitepath: u8[], siteline: 0, sitecol: 0, sitedefs: u8[], sitecount: 0, rdiconst: u8[], slotconst: u8[][], lastload: u8[], lastconst: u8[], regconst: u8[][], kmap: map_new(16), kvals: u8[][], ebase: u64[], eptrs: set_new(16), evals: set_new(16), eslot: u64[], dnames: u8[][], dmap: map_new(16), hmap: map_new(16), cmap: map_new(16), sl_start: u64[], sl_lines: u64[], proof: u64[], rline: 0, ranges: ranges, sigs: set_new(16), nargs: 6, retw: 2, rdxdead: 0, pvreg: u8[][], pvptr: u8[][], pvoff: i64[], asy: u8[][], asx: u8[][], rdxcallee: u8[], curline: u8[], sigerr: u8[], wrong: u8[][], area: u8[][], areaopen: 0, argwritten: 0, ffis: set_new(16), ffimem: set_new(16), entryextra: u8[], outer: u8[][], outeropen: 0, why: host::env(view("GRAIL_LLVM_WHY")), refsigs: set_new(16), takenslots: u8[][], ownrefs: 0, argptrs: u8[][], grail_bodies: set_new(16), xpend: 0, xstale: 18446744073709551615 };
     // A function whose address is taken (`NAME(%rip)`, or named by data such as a vtable) is
     // called through a pointer by code that does not know its signature, so it keeps the six-word
     // form: an indirect call passes six words and reads rax:rdx, and LLVM must never see a call
@@ -10302,7 +10647,7 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
                 e += 1;
             }
             fname := sub(line, at, e - 3);
-            thunk_into_ir(&mut thunks, view(fname), target, set_has(&weak, view(fname)));
+            thunk_into_ir(&mut thunks, view(fname), target, set_has(&weak, view(fname)), define_words(line));
         }
         if at != 0 {
             // A body the stream declared `.weak` (a generic specialisation, a content-addressed
@@ -10380,7 +10725,12 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
                 marker.push(1);
                 if !set_has(&lifted, view(marker)) {
                     set_add(&mut lifted, view(marker));
-                    thunk_from_ir(&mut thunks, name, target);
+                    code := set_get(&l.sigs, name);
+                    mut words = 6;
+                    if code != 0 {
+                        words = code / 4;
+                    }
+                    thunk_from_ir(&mut thunks, name, target, words);
                 }
             }
         }

@@ -47,7 +47,7 @@ fn on_threads(n: u64, sh: (&rc::Arc<Shared>), work: u64) -> u64 {
         })!);
     }
     while let Some(t) = ts.pop() {
-        thread::join(t);
+        t.join();
     }
     return now_ns() - start;
 }
@@ -56,12 +56,12 @@ fn main() {
     // Uncontended: the dedicated-thread path, after a second thread exists (the threaded allocator
     // and the real lock path are in force).
     first := sh.clone();
-    report("mutex-uncontended", thread::join(thread::spawn<u64>(thread::config(), |ctx: (&thread::Ctx)| -> u64 {
+    report("mutex-uncontended", thread::spawn<u64>(thread::config(), |ctx: (&thread::Ctx)| -> u64 {
         s := first.get();
         start := now_ns();
         for k in 5000000 { s.m.lock_with(1, bump); }
         return now_ns() - start;
-    })!), 5000000);
+    })!.join(), 5000000);
     report("mutex-contended", on_threads(8, &sh, 0), 1600000);
     report("rwlock-read", on_threads(8, &sh, 1), 1600000);
     report("rwlock-mixed", on_threads(8, &sh, 2), 1600000);
@@ -85,8 +85,8 @@ fn main() {
         }
         return 0;
     })!;
-    thread::join(pa);
-    thread::join(pb);
+    pa.join();
+    pb.join();
     report("condition-pingpong", now_ns() - start, 100000);
     report("semaphore-contended", on_threads(8, &sh, 3), 800000);
 }

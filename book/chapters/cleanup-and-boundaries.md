@@ -13,10 +13,10 @@ fn main() {
     mut x: u64 = 41;
     unsafe {
         p := ptr_of(&mut x);     // *mut u64: the address a reference already carries
-        p.write(p.read() + 1);
+        *p += 1;
         q := alloc(u64, 4);      // *mut u64 over four zeroed elements
-        q.add(1).write(9);       // steps by the element width
-        println(q.add(1).read());
+        *q.add(1) = 9;           // steps by the element width
+        println(*q.add(1));
         free(q);
     }
     println(x);                  // 42
@@ -29,14 +29,18 @@ fn main() {
 | `alloc(T, n)` | `*mut T` over `n` zeroed elements; `free(p)` releases it |
 | `p.addr()` / `ptr_from_addr(T, a)` | the address as a `u64`, and a `*mut T` at one |
 | `p.add(n)` / `p.sub(n)` | step by the element width: the natural width of a sized integer, f32 and f64, one word for everything else |
-| `p.read()` / `p.write(v)` | load and store at that width; `write` needs `*mut T` |
+| `*p` / `*p = v` | load and store at that width; storing needs `*mut T`, and `*p += v` (any `op=`) is both |
+| `p.read()` / `p.write(v)` | the same load and store, spelled as methods |
 | `p.is_null()` / `p.cast(U)` | the null pointer, and the same address as `*U` |
 
-`p.read()` on an owned value duplicates ownership and `p.write(v)` moves `v` in without dropping
-what was there - the same contract as Rust's `ptr::read` and `ptr::write`. The compiler enforces that
-contract in both directions: the value `read` hands out is an owner (so it can be dropped or moved
-on with the ordinary rules), and the operand of `write` is consumed (so an owned local written into a
-block is not also dropped where it came from). A pointer also pins what
+`*p` is `p.read()` and `*p = v` is `p.write(v)`; `*p.add(1)` is `*(p.add(1))`, as for references, and
+`**pp` reads through a pointer to a pointer. Reading an owned value duplicates ownership and writing
+moves `v` in without dropping what was there - the same contract as Rust's `ptr::read` and
+`ptr::write`, and unlike `*r = v` through a reference, which drops the old value. The compiler
+enforces that contract in both directions: the value `*p` hands out is an owner (so it can be
+dropped or moved on with the ordinary rules), and the operand of `*p = v` is consumed (so an owned
+local written into a block is not also dropped where it came from). `*p += v` reads, combines and
+writes, so it is for plain values. A pointer also pins what
 it names: a pointer made from a reference keeps that reference's loan for the rest of the function,
 so the storage cannot be moved or freed underneath it. A record holding a raw pointer is
 thread-affine, so it cannot cross to another thread.
@@ -65,8 +69,8 @@ down, so it needs no inner `unsafe` block, and every call from safe code must be
 
 ```grl
 unsafe fn bump(p: *mut u64) -> u64 {
-    q := p.read() + 1;      // no inner `unsafe` needed
-    p.write(q);
+    q := *p + 1;            // no inner `unsafe` needed
+    *p = q;
     return q;
 }
 
@@ -175,7 +179,7 @@ println("{}", b.get().retries);  // the value, borrowed from the handle
 
 `r.get()` hands out `&T`, borrowed for as long as the handle lives, and there is no way to write
 through it: shared mutation is `Arc<Mutex<T>>`, not interior mutability. The last handle to leave
-drops the value and frees the block; a `Weak<T>` (`rc::downgrade(&r)`) keeps the block without
+drops the value and frees the block; a `Weak<T>` (`r.downgrade()`) keeps the block without
 keeping the value alive, so `w.upgrade()` answers `None` once the last strong handle has gone.
 
 `Rc<T>` holds a raw pointer, so the language's own rule makes it thread-affine: it cannot cross to
@@ -210,10 +214,10 @@ is refused by name. `Arc` gives shared *ownership*, not shared *mutation* - that
 ```grl
 use arena;
 mut a = arena::new<Node>();
-root := arena::insert(&mut a, Node { weight: 1 });
-child := arena::insert(&mut a, Node { weight: 2 });
-println("{}", arena::get(&a, &root)!.weight);
-taken := arena::remove(&mut a, &child)!;   // the value comes back, still owned
+root := a.insert(Node { weight: 1 });
+child := a.insert(Node { weight: 2 });
+println("{}", a.get(&root)!.weight);
+taken := a.remove(&child)!;   // the value comes back, still owned
 ```
 
 `get`/`get_mut` borrow the value, `remove` returns it, and a key whose value is gone answers `None`:
@@ -290,9 +294,14 @@ system library.
   debugger attach. Vulkan has a verified swapchain/present/draw path including depth and MSAA, and
   the D3D12 backend runs under Wine with vkd3d-proton; COM adds, releases and queries an `IUnknown`
   through the Win32 ABI in an executed case.
-- Linux x86-64 emits DWARF `.debug_line` tables and typed locals (`.debug_info`, read back with
-  `grail debug lines` and `grail debug info`) with `grail build --debug`; breakpoints, attach and
-  DAP are not implemented. `grail profile` samples a Linux x86-64 program's own runtime with
+- A development build (`grail build`, optimised) carries line tables and function ranges by
+  default, as `go build`, Zig Debug and cargo's dev profile do: DWARF on Linux (x86-64, AArch64,
+  RISC-V) and a PDB on Windows x86-64, none on macOS and Windows AArch64. They are read back with
+  `grail debug lines` and `grail debug info`, and `--no-debug-info` leaves them out. Code the
+  optimiser inlined is attributed to the statement that called it, so a row never names a line of
+  another function. `grail build --debug` is the build for stepping through: the optimiser off,
+  and typed parameters and locals described as well. A release build (`--release`) has no debug
+  information. Debugger attach and DAP are not implemented. `grail profile` samples a Linux x86-64 program's own runtime with
   `ITIMER_PROF` and attributes samples to functions without `perf` or a debug section, and the
   language server `tools/lsp/main.grl` gives editors compiler-sourced diagnostics and same-file
   definitions. The `sys_grail` wrappers over the Linux ABI (files, clocks, environment, loopback

@@ -235,6 +235,9 @@ function layOutCase(directory, sourcePath, bytes) {
   const name = basename(sourcePath);
   for (const sibling of readdirSync(dirname(sourcePath)).sort()) {
     if (!sibling.endsWith('.grl') || sibling === name) continue;
+    // The other targets' platform modules define the same runtime functions as os-linux.grl: a
+    // project holding all three is refused as it stands, whatever the mutation.
+    if (dirname(sourcePath) === join(root, 'compiler') && OTHER_TARGET_MODULES.has(sibling)) continue;
     try {
       symlinkSync(join(dirname(sourcePath), sibling), join(source, sibling));
     } catch {
@@ -518,6 +521,7 @@ function firstErrorFile(output) {
 // regressed or the harness is broken - a bug of kind `baseline`, never a fine refusal. (A library that
 // stopped checking made every mutated case that used it look like a fine refusal; nothing was loud.)
 const OTHER_TARGET_MODULES = new Set(['darwin.grl', 'os-windows.grl']);
+const PLATFORM_MODULES = new Set(['os-linux.grl', ...OTHER_TARGET_MODULES]);
 async function baselines(results, options, compiler) {
   const suspects = new Map();
   for (const result of results) {
@@ -528,10 +532,11 @@ async function baselines(results, options, compiler) {
   }
   const found = [];
   for (const [path, sample] of suspects) {
-    // The platform modules of other targets are compiled only for those targets: checked on this
-    // host, beside os-linux.grl's definitions of the same runtime functions, they are refused as
-    // they stand. That says nothing about a mutation, and it is no regression.
-    if (dirname(path) === join(root, 'compiler') && OTHER_TARGET_MODULES.has(basename(path))) continue;
+    // The platform modules are not programs of their own: `grail check` adds this host's platform
+    // module to whatever it checks, so a platform module checked alone declares the runtime
+    // functions twice (os-linux.grl beside itself; darwin.grl and os-windows.grl beside it). That
+    // says nothing about a mutation, and it is no regression.
+    if (dirname(path) === join(root, 'compiler') && PLATFORM_MODULES.has(basename(path))) continue;
     const bytes = readFileSync(path);
     // A fixture that is meant to be refused as it stands (a strict-mode refusal, a rejection case's
     // input) says so on its first line - `// fuzz: refused`, or those words in the comment already

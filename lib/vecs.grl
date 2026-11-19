@@ -120,11 +120,6 @@ impl<T> T[] {
     pub fn into_iter(self) -> iter::Iter<T> {
         return iter::of(self);
     }
-    // Every element in order, by reference: the vector stays borrowed meanwhile. A typed iterator,
-    // so `v.iter().map(..).filter(..).fold(..)` is one loop over the vector.
-    pub fn iter<a>(self: (&a T[])) -> iter::SliceIter<a, T> {
-        return iter::slice_iter(self);
-    }
     pub fn any<Cb: FnMut(&T) -> bool>(&self, test: Cb) -> bool {
         mut call = test;
         for x in self {
@@ -196,6 +191,20 @@ impl<T> T[] {
 }
 
 // Drops later elements that equal an earlier one, keeping first occurrences in order.
+impl<T: hash::Equal> [T] {
+    // Whether any element equals `wanted`, for a vector or a slice: `names.contains(&name)`. A
+    // vector of integers or bools uses the compiler's own `contains`, which also takes the value
+    // itself (`v.contains(3)`); this one serves every other element type with `hash::Equal`.
+    pub fn contains(&self, wanted: &T) -> bool {
+        for i in self.len() {
+            if hash::Equal::equal(&self[i], wanted) {
+                return true;
+            }
+        }
+        return false;
+    }
+}
+
 impl<T: hash::Equal> T[] {
     pub fn dedup(self) -> T[] {
         mut source = self;
@@ -531,16 +540,4 @@ fn permute<a, T>(items: (&a mut T[]), order: (&a u64[])) {
         }
     }
     return ();
-}
-
-// Whether any element equals `wanted`. The `.contains` method on vectors is the compiler's own and
-// takes integer or bool elements only; this one takes any element type with `hash::Equal`.
-pub fn contains<a, b, T: hash::Equal>(items: (&a T[]), wanted: (&b T)) -> bool {
-    for i in items.len() {
-        item := &items[i];
-        if hash::Equal::equal(item, wanted) {
-            return true;
-        }
-    }
-    return false;
 }

@@ -7,8 +7,31 @@ Comparisons produce `bool` values, which combine with `&&`, `||` and `!`.
 
 {{example:numbers}}
 
-When you want arithmetic modulo 2⁶⁴, such as a rolling hash, say so: `wrapping_add`,
-`wrapping_sub`, `wrapping_mul` and `wrapping_pow` take two `u64` values, evaluated left to right.
+When you want arithmetic modulo 2⁶⁴, such as a rolling hash, say so: `a.wrapping_add(b)`,
+`wrapping_sub` and `wrapping_mul` (also written `wrapping_add(a, b)`, with `wrapping_pow`, on `u64`).
+
+## Integer methods
+
+Every integer type has Rust's everyday methods, with no `use` line: `min`, `max`, `clamp`, `pow`,
+`abs` and `signum` (signed types), `checked_add`, `checked_sub`, `checked_mul` and `checked_div`
+(`None` on overflow or a zero divisor), `saturating_add` and `saturating_sub`, `wrapping_add`,
+`wrapping_sub` and `wrapping_mul` (modulo the type's own width), `count_ones`, `leading_zeros` and
+`trailing_zeros` (a `u32`, counted in the type's width) and `to_string`.
+
+```grl
+fn main() {
+    small: u8 = 250;
+    println(small.checked_add(10).is_none());   // true: 260 does not fit
+    println(small.saturating_add(10));          // 255
+    println(small.wrapping_add(10));            // 4
+    delta: i32 = -7;
+    println(delta.abs().pow(2));                // 49
+    flags: u64 = 40;
+    println(flags.count_ones());                // 2
+    println(flags.trailing_zeros());            // 3
+    println(flags.to_string().len());           // 2
+}
+```
 
 ## Updates, division and powers
 
@@ -28,7 +51,7 @@ For a particular width or for negative numbers, use `u8`, `u16`, `u32`, `i8`, `i
 A suffix such as `200u8` or `-12i32` fixes a literal's type, and an unsuffixed literal next to a sized
 value takes that value's type, checked to fit. Nothing converts implicitly: `u16(small)` converts and
 stops the program if the value does not fit, `wrapping_u8(300)` deliberately keeps the low bits, and
-`bits(x)` gives the raw 64-bit pattern. `&`, `|`, `^`, `<<` and `>>` work on integers; `>>` keeps a
+`bits(x)` gives the raw 64-bit pattern (`x.to_bits()` on a float, and `f64::from_bits(b)` back). `&`, `|`, `^`, `<<` and `>>` work on integers; `>>` keeps a
 signed value's sign.
 
 ## Floating point
@@ -41,7 +64,22 @@ same value, which is why `0.1 + 0.2` shows its rounding error.
 
 Floats have `sqrt`, `abs`, `floor`, `ceil`, `trunc`, `round` (halves away from zero), `min`, `max`
 (a NaN operand yields the other), `is_nan`, `is_finite`, `is_infinite`, `next_up` and `next_down`,
-all bit-identical to the C library.
+all bit-identical to the C library, and `to_bits` (with `f64::from_bits(b)` and `f32::from_bits(b)`
+for the way back). `use math;` adds the elementary functions as methods of `f64` and `f32`: `sin`,
+`cos`, `tan`, `asin`, `acos`, `atan`, `y.atan2(x)`, `exp`, `exp2`, `ln`, `log2`, `log10`, `pow`,
+`powi`, `hypot` and `fmod`, with the constants `math::PI`, `math::TAU` and `math::E`.
+
+```grl
+use math;
+
+fn main() {
+    angle := math::PI / 6.0;
+    println(angle.sin());              // 0.49999999999999994
+    println(3.0.hypot(4.0));           // 5
+    println(2.0.powi(10));             // 1024
+    println(1.0.atan2(1.0) * 4.0);     // 3.141592653589793
+}
+```
 
 ## f32 and characters
 
@@ -49,7 +87,9 @@ all bit-identical to the C library.
 (`ratio: f32 := 0.1`). Every result is rounded to `f32`, and an `f32[]` stores 4 bytes per element.
 `char` is a Unicode scalar value: `'ï'` is a `char`, while an ASCII literal such as `'g'` is a byte
 unless a `char` context adopts it. Characters compare with `<` and `==`, convert with `u32(c)` and the
-checked `char(n)`, and offer `is_alphabetic`, `is_whitespace`, `to_uppercase` and similar methods.
+checked `char(n)`, and offer `is_alphabetic`, `is_whitespace`, `to_uppercase`, `to_digit(radix)`,
+`is_digit(radix)`, `is_ascii_punctuation`, `to_ascii_lowercase`, `eq_ignore_ascii_case`, `to_string`
+and Rust's other everyday character methods.
 
 {{example:chars-f32}}
 

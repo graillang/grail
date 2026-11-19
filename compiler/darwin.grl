@@ -276,6 +276,20 @@ fn rt_os_mremap(old: u64, oldsize: u64, newsize: u64) -> u64 {
     rt_os_result(raw_import("munmap", old, oldsize, 0));
     return fresh;
 }
+// flock(2) through libSystem: the same LOCK_SH 1, LOCK_EX 2, LOCK_NB 4 and LOCK_UN 8 as Linux. 0 or a
+// positive errno; a lock held elsewhere under LOCK_NB is EWOULDBLOCK, 35 here, answered as Linux's 11
+// because that is the value the runtime documents and fs::File::lock tests for.
+fn rt_flock(fd: u64, operation: u64) -> u64 {
+    r := rt_os_result(raw_import("flock", fd, operation, 0));
+    if r == 0 {
+        return 0;
+    }
+    e := wrapping_sub(0, r);
+    if e == 35 {
+        return 11;
+    }
+    return e;
+}
 pub fn rt_call(n: u64, a: u64, b: u64, c: u64) -> u64 {
     if n == 0 {
         return rt_os_result(raw_import("read", a, b, c));

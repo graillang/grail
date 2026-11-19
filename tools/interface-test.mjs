@@ -1442,11 +1442,14 @@ function proveWrittenInherent() {
   mkdirSync(directory, { recursive: true });
   const ifaces = join(directory, 'ifaces');
   mkdirSync(ifaces, { recursive: true });
-  const lib = join(root, 'tests/interfaces/arithmetic.grl');
+  const lib = join(root, 'tests/std/arithmetic.grl');
   const user = join(root, 'tests/interfaces/written_inherent_user.grl');
   const libFiles = [lib, runtime, platform];
+  // The fixture is a standard module (beside tests/std/core.grl, a marker), so its directory is a
+  // module root by location; lib/ comes first, so `core` and `scalar` are the real ones.
+  const stdRoot = ['--module-root', join(root, 'lib')];
   // The emitting run has no entry: a library module has no `main`.
-  const emitRun = compile(libFiles, join(directory, 'emit'), ['--emit-interface', ifaces, '--no-entry']);
+  const emitRun = compile(libFiles, join(directory, 'emit'), [...stdRoot, '--emit-interface', ifaces, '--no-entry']);
   assert.equal(emitRun.status, 0, `written inherent: emitting the library interface failed\n${emitRun.output}`);
   // The file is a record stream; the dump is its text form, written by the same reader a build uses.
   const text = dump(join(ifaces, 'arithmetic.iface'));
@@ -1455,7 +1458,7 @@ function proveWrittenInherent() {
   }
   assert.match(text, /^  fn first_byte \(\(ref \[1\] bytes\)\) -> \(int 8u\) /m, 'written inherent: the method signature is not in the interface');
   // The importer is compiled against the interface with the library's source absent.
-  const viaInterface = compile([user, runtime, platform], join(directory, 'via'), ['--use', ifaces]);
+  const viaInterface = compile([user, runtime, platform], join(directory, 'via'), [...stdRoot, '--use', ifaces]);
   assert.equal(
     viaInterface.status,
     0,
@@ -1468,16 +1471,19 @@ function proveWrittenInherent() {
   const without = join(directory, 'without');
   mkdirSync(without, { recursive: true });
   const withoutLib = join(without, 'arithmetic.grl');
+  // A standard module, as tests/std/arithmetic.grl is: only the standard library writes inherent
+  // impls on built-in types, and a module beside core.grl is one (in_std_dir).
+  writeFileSync(join(without, 'core.grl'), readFileSync(join(root, 'tests/std/core.grl'), 'utf8'));
   writeFileSync(withoutLib, readFileSync(lib, 'utf8').replace(/impl u8\[\] \{[\s\S]*?\n\}\n/, ''));
   const withoutIfaces = join(without, 'ifaces');
   mkdirSync(withoutIfaces, { recursive: true });
-  const emitWithout = compile([withoutLib, runtime, platform], join(without, 'emit'), ['--emit-interface', withoutIfaces, '--no-entry']);
+  const emitWithout = compile([withoutLib, runtime, platform], join(without, 'emit'), [...stdRoot, '--emit-interface', withoutIfaces, '--no-entry']);
   assert.equal(emitWithout.status, 0, `written inherent: emitting the reduced library failed\n${emitWithout.output}`);
   assert.ok(
     !dump(join(withoutIfaces, 'arithmetic.iface')).includes('inherent_type bytes '),
     'written inherent: the reduced library still published an `inherent_type bytes` section',
   );
-  const stripped = compile([user, runtime, platform], join(without, 'build'), ['--use', withoutIfaces]);
+  const stripped = compile([user, runtime, platform], join(without, 'build'), [...stdRoot, '--use', withoutIfaces]);
   assert.equal(stripped.status, 1, 'written inherent: the consumer built against an interface with no such section');
   assert.match(
     stripped.output,
@@ -1485,7 +1491,7 @@ function proveWrittenInherent() {
     `written inherent: the refusal does not name the missing method\n${stripped.output}`,
   );
   // The same importer, from source, still builds: this is about the interface, not the method.
-  const fromSource = compile([user, lib, runtime, platform], join(directory, 'source'));
+  const fromSource = compile([user, lib, runtime, platform], join(directory, 'source'), stdRoot);
   assert.equal(fromSource.status, 0, `written inherent: the source build failed\n${fromSource.output}`);
   return 'pub methods on written types travel, and the section is what carries them';
 }

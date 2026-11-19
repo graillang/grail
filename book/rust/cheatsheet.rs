@@ -70,8 +70,8 @@ fn main() {
         Some(e) => println!("even {}", e),
         None => println!("none"),
     }
-    let big: Vec<u64> = v.into_iter().filter(|n| *n > 4).collect();
-    println!("{} big, total {}", big.len(), total);
+    let big: Vec<&u64> = v.iter().filter(|n| **n > 4).collect();
+    println!("{} big of {}, total {}", big.len(), v.len(), total);
     let shared = Rc::new(Guard {
         name: "g".to_string(),
     });

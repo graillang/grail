@@ -35,82 +35,84 @@ pub fn new<T>() -> Arena<T> {
     return Arena { slots: Slot<T>[], free: u64[], live: 0 };
 }
 
-// A fresh key for `v`.
-pub fn insert<T>(self: &mut Arena<T>, v: T) -> Key {
-    if self.free.len() != 0 {
-        last := self.free.len() - 1;
-        index := self.free[last];
-        self.free.pop()!;
-        slot := &mut self.slots[index];
-        slot.gen = slot.gen + 1;
-        slot.value.push(v);
+impl<T> Arena<T> {
+    // A fresh key for `v`.
+    pub fn insert(self: &mut Arena<T>, v: T) -> Key {
+        if self.free.len() != 0 {
+            last := self.free.len() - 1;
+            index := self.free[last];
+            self.free.pop()!;
+            slot := &mut self.slots[index];
+            slot.gen = slot.gen + 1;
+            slot.value.push(v);
+            self.live = self.live + 1;
+            return Key { index: index, gen: slot.gen };
+        }
+        index := self.slots.len();
+        mut values = T[];
+        values.push(v);
+        self.slots.push(Slot { gen: 1, value: values });
         self.live = self.live + 1;
-        return Key { index: index, gen: slot.gen };
+        return Key { index: index, gen: 1 };
     }
-    index := self.slots.len();
-    mut values = T[];
-    values.push(v);
-    self.slots.push(Slot { gen: 1, value: values });
-    self.live = self.live + 1;
-    return Key { index: index, gen: 1 };
-}
 
-// 1 when `k` still names the value it was issued for.
-fn holds<a, T>(self: &a Arena<T>, k: (&Key)) -> u64 {
-    if self.slots.len() <= k.index {
-        return 0;
+    // 1 when `k` still names the value it was issued for.
+    fn holds<a>(self: &a Arena<T>, k: (&Key)) -> u64 {
+        if self.slots.len() <= k.index {
+            return 0;
+        }
+        slot := &self.slots[k.index];
+        if slot.gen != k.gen {
+            return 0;
+        }
+        if slot.value.len() == 0 {
+            return 0;
+        }
+        return 1;
     }
-    slot := &self.slots[k.index];
-    if slot.gen != k.gen {
-        return 0;
-    }
-    if slot.value.len() == 0 {
-        return 0;
-    }
-    return 1;
-}
 
-// The value `k` names, borrowed from the arena.
-pub fn get<a, T>(self: &a Arena<T>, k: (&Key)) -> (&a T)? {
-    if holds(self, k) == 0 {
-        return None;
+    // The value `k` names, borrowed from the arena.
+    pub fn get<a>(self: &a Arena<T>, k: (&Key)) -> (&a T)? {
+        if self.holds(k) == 0 {
+            return None;
+        }
+        slot := &self.slots[k.index];
+        return Some(&slot.value[0]);
     }
-    slot := &self.slots[k.index];
-    return Some(&slot.value[0]);
-}
 
-// The value `k` names, for writing.
-pub fn get_mut<a, T>(self: &mut Arena<T>, k: (&Key)) -> (&a mut T)? {
-    if self.slots.len() <= k.index {
-        return None;
+    // The value `k` names, for writing.
+    pub fn get_mut<a>(self: &a mut Arena<T>, k: (&Key)) -> (&a mut T)? {
+        if self.slots.len() <= k.index {
+            return None;
+        }
+        slot := &mut self.slots[k.index];
+        if (slot.gen != k.gen) || (slot.value.len() == 0) {
+            return None;
+        }
+        return Some(&mut slot.value[0]);
     }
-    slot := &mut self.slots[k.index];
-    if (slot.gen != k.gen) || (slot.value.len() == 0) {
-        return None;
-    }
-    return Some(&mut slot.value[0]);
-}
 
-// Take the value back out. The slot is kept for reuse and its generation moves on, so `k` is dead
-// afterwards and a second `remove` answers `None`.
-pub fn remove<T>(self: &mut Arena<T>, k: (&Key)) -> T? {
-    if self.slots.len() <= k.index {
-        return None;
+    // Take the value back out. The slot is kept for reuse and its generation moves on, so `k` is dead
+    // afterwards and a second `remove` answers `None`.
+    pub fn remove(self: &mut Arena<T>, k: (&Key)) -> T? {
+        if self.slots.len() <= k.index {
+            return None;
+        }
+        slot := &mut self.slots[k.index];
+        if (slot.gen != k.gen) || (slot.value.len() == 0) {
+            return None;
+        }
+        slot.gen = slot.gen + 1;
+        self.live = self.live - 1;
+        self.free.push(k.index);
+        return Some(slot.value.pop()!);
     }
-    slot := &mut self.slots[k.index];
-    if (slot.gen != k.gen) || (slot.value.len() == 0) {
-        return None;
+
+    pub fn len(self: &Arena<T>) -> u64 {
+        return self.live;
     }
-    slot.gen = slot.gen + 1;
-    self.live = self.live - 1;
-    self.free.push(k.index);
-    return Some(slot.value.pop()!);
-}
 
-pub fn len<T>(self: &Arena<T>) -> u64 {
-    return self.live;
-}
-
-pub fn is_empty<T>(self: &Arena<T>) -> bool {
-    return self.live == 0;
+    pub fn is_empty(self: &Arena<T>) -> bool {
+        return self.live == 0;
+    }
 }

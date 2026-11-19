@@ -9,6 +9,10 @@ visibility modifier, return annotation, or manual byte view is needed.
 The omitted result type is `unit`, and reaching the closing brace returns normally with status 0.
 There is no automatic numeric output.
 
+Comments are `// ...` to the end of the line, or `/* ... */`, which may span lines or sit inside one
+(`add(a, /* left */ b)`). Block comments nest: every `/*` inside one needs its own `*/`, so a stretch
+of code that already holds a comment can be commented out whole.
+
 ## Run it
 
 From the repository root:
@@ -28,8 +32,9 @@ On small screens the comparison stacks vertically; you can collapse it at any ti
 
 For raw compiler commands and self-compilation instructions, see `compiler/NATIVE.md`.
 A `main` may explicitly return `u64` to set the process exit status; it does not print that number.
-Ordinary functions use explicit result types when returning values, and there are no tail-expression
-returns: a function that produces a value ends that path with `return`. A source file may also
+Ordinary functions use explicit result types when returning values. A body's last expression,
+written without `;`, is its result (`fn double(n: u64) -> u64 { n * 2 }`), and `return` leaves
+early. A source file may also
 declare an explicit `module`, as later examples do to make their names clear.
 
 **Try it:** add a second `println` call, or use `print("Hello, "); println("world!");` to control

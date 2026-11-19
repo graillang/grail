@@ -120,7 +120,7 @@ pub fn nearbyint(x: f64) -> f64 {
 
 // Point64 from a double: std::round, halves away from zero (Point<T>::Init).
 pub fn point64_from_f64(x: f64, y: f64) -> Point64 {
-    return Point64 { x: i64(math::round(x)), y: i64(math::round(y)) };
+    return Point64 { x: i64(x.round()), y: i64(y.round()) };
 }
 
 // MultiplyUInt64: the exact 128-bit product as (lo, hi), used for the cross-product comparisons.
@@ -549,8 +549,8 @@ pub fn scale_paths_d_to_64(paths: &PointD[][], scale: f64) -> Point64[][]? {
         for vi in paths[pi].len() {
             path.push(
                 Point64 {
-                    x: i64(math::round(paths[pi][vi].x * scale)),
-                    y: i64(math::round(paths[pi][vi].y * scale)),
+                    x: i64((paths[pi][vi].x * scale).round()),
+                    y: i64((paths[pi][vi].y * scale).round()),
                 }
             );
         }
@@ -4519,9 +4519,9 @@ pub fn new_d(precision_in: i64) -> ClipperD {
         cd.error_code = cd.error_code | PRECISION_ERROR;
         precision = check_precision_range(precision);
     }
-    pow10 := math::powi(10.0, precision);
+    pow10 := 10.0.powi(precision);
     e := i64((bits(pow10) >> 52) & 2047) - 1023;
-    cd.scale = math::powi(2.0, e + 1);
+    cd.scale = 2.0.powi(e + 1);
     cd.inv_scale = 1.0 / cd.scale;
     cd.core.inv_scale = cd.inv_scale;
     return cd;
@@ -4757,7 +4757,7 @@ fn get_unit_normal(pt1: Point64, pt2: Point64) -> PointD {
     }
     mut dx = f64(pt2.x - pt1.x);
     mut dy = f64(pt2.y - pt1.y);
-    hypot := math::sqrt(dx * dx + dy * dy);
+    hypot := (dx * dx + dy * dy).sqrt();
     inverse_hypot := 1.0 / hypot;
     dx *= inverse_hypot;
     dy *= inverse_hypot;
@@ -4765,7 +4765,7 @@ fn get_unit_normal(pt1: Point64, pt2: Point64) -> PointD {
 }
 
 fn normalize_vector(v: PointD) -> PointD {
-    h := math::sqrt(v.x * v.x + v.y * v.y);
+    h := (v.x * v.x + v.y * v.y).sqrt();
     if almost_zero(h, 0.001) {
         return PointD { x: 0.0, y: 0.0 };
     }
@@ -4838,13 +4838,13 @@ fn ellipse(center: Point64, radius_x: f64, radius_y_in: f64, steps_in: u64) -> P
     }
     mut steps = steps_in;
     if steps <= 2 {
-        steps = u64(PI_VALUE * math::sqrt((radius_x + radius_y) / 2.0));
+        steps = u64(PI_VALUE * ((radius_x + radius_y) / 2.0).sqrt());
     }
     if steps == 0 {
         steps = 1;
     }
-    si := math::sin(2.0 * PI_VALUE / f64(steps));
-    co := math::cos(2.0 * PI_VALUE / f64(steps));
+    si := (2.0 * PI_VALUE / f64(steps)).sin();
+    co := (2.0 * PI_VALUE / f64(steps)).cos();
     mut dx = co;
     mut dy = si;
     mut result = Point64[];
@@ -5147,7 +5147,7 @@ fn do_round(co: &mut ClipperOffset, path: &Point64[], j: u64, k: u64, angle: f64
         offset_vec = negate_vec(offset_vec);
     }
     co.path_out.push(point64_from_f64(f64(pt.x) + offset_vec.x, f64(pt.y) + offset_vec.y));
-    steps := i64(math::ceil(co.steps_per_rad * angle.abs()));
+    steps := i64((co.steps_per_rad * angle.abs()).ceil());
     mut i: i64 = 1;
     while i < steps {
         offset_vec = PointD {
@@ -5197,7 +5197,7 @@ fn offset_point(co: &mut ClipperOffset, path: &Point64[], j: u64, k: u64) {
             do_square(co, path, j, k);
         }
     } else if co.join_type == 2 {
-        do_round(co, path, j, k, math::atan2(sin_a, cos_a));
+        do_round(co, path, j, k, sin_a.atan2(cos_a));
     } else if co.join_type == 1 {
         do_bevel(co, path, j, k);
     } else {
@@ -5321,14 +5321,14 @@ fn do_group_offset(co: &mut ClipperOffset, group_index: u64) {
                 arc_tol = co.arc_tolerance;
             }
         }
-        pi_over := PI_VALUE / math::acos(1.0 - arc_tol / abs_delta);
+        pi_over := PI_VALUE / (1.0 - arc_tol / abs_delta).acos();
         abs_pi := abs_delta * PI_VALUE;
         mut steps_per_360 = abs_pi;
         if pi_over < abs_pi {
             steps_per_360 = pi_over;
         }
-        co.step_sin = math::sin(2.0 * PI_VALUE / steps_per_360);
-        co.step_cos = math::cos(2.0 * PI_VALUE / steps_per_360);
+        co.step_sin = (2.0 * PI_VALUE / steps_per_360).sin();
+        co.step_cos = (2.0 * PI_VALUE / steps_per_360).cos();
         if co.group_delta < 0.0 {
             co.step_sin = -co.step_sin;
         }
@@ -5347,11 +5347,11 @@ fn do_group_offset(co: &mut ClipperOffset, group_index: u64) {
                 radius := abs_delta;
                 mut steps: u64 = 0;
                 if co.steps_per_rad > 0.0 {
-                    steps = u64(math::ceil(co.steps_per_rad * 2.0 * PI_VALUE));
+                    steps = u64((co.steps_per_rad * 2.0 * PI_VALUE).ceil());
                 }
                 co.path_out = ellipse(pt, radius, radius, steps);
             } else {
-                d := i64(math::ceil(abs_delta));
+                d := i64(abs_delta.ceil());
                 co.path_out = rect_as_path(pt, d);
             }
             co.solution.push(clone_path(&co.path_out));
@@ -5518,7 +5518,7 @@ pub fn inflate_paths_d(
     if precision_ok == false {
         return result;
     }
-    scale := math::powi(10.0, precision);
+    scale := 10.0.powi(precision);
     scaled := scale_paths_d_to_64(paths, scale);
     mut scaled_paths = Point64[][];
     match scaled {

@@ -5324,7 +5324,7 @@ fn rt_job_chunk_leaf(d: u64, k: u64) -> u64 {
 fn rt_parallel_split(s: u64, grain: u64, f: u64, env: u64, width: u64) -> u64 {
     return rt_parallel_split_at(s, grain, f, env, width, 0);
 }
-// The same split; with `at` set the callback also gets each piece's first index (pool::chunks_mut_at).
+// The same split; with `at` set the callback also gets each piece's first index (`par_chunks_mut_at` in lib/pool.grl).
 fn rt_parallel_split_at(s: u64, grain: u64, f: u64, env: u64, width: u64, at: u64) -> u64 {
     n := rt_len(s);
     if n == 0 {
@@ -9986,75 +9986,6 @@ fn rt_char_len_utf8(v: u64) -> u64 {
     }
     return 4;
 }
-// UTF-8 text to scalar values; malformed sequences become U+FFFD.
-fn rt_seq_chars(a: u64) -> u64 {
-    out := rt_new();
-    n := rt_len(a);
-    mut i = 0;
-    while i < n {
-        b := rt_atb(a, i);
-        mut need = 0;
-        mut cp = b;
-        mut min = 0;
-        if b < 128 {
-            need = 0;
-        } else {
-            if (b & 224) == 192 {
-                need = 1;
-                cp = b & 31;
-                min = 128;
-            } else {
-                if (b & 240) == 224 {
-                    need = 2;
-                    cp = b & 15;
-                    min = 2048;
-                } else {
-                    if (b & 248) == 240 {
-                        need = 3;
-                        cp = b & 7;
-                        min = 65536;
-                    } else {
-                        need = 99;
-                    }
-                }
-            }
-        }
-        if need == 99 {
-            rt_push(out, 65533);
-            i += 1;
-            continue;
-        }
-        mut ok = 1;
-        mut j = 1;
-        while j < need + 1 {
-            if n < i + j + 1 {
-                ok = 0;
-                break;
-            }
-            d := rt_atb(a, i + j);
-            if (d & 192) != 128 {
-                ok = 0;
-                break;
-            }
-            cp = cp * 64 + (d & 63);
-            j += 1;
-        }
-        if ok {
-            if (cp < min) + (1114111 < cp) + ((55295 < cp) & (cp < 57344)) {
-                ok = 0;
-            }
-        }
-        if ok {
-            rt_push(out, cp);
-            i += need + 1;
-        } else {
-            rt_push(out, 65533);
-            i += 1;
-        }
-    }
-    return out;
-}
-
 // Exactly `digits` decimals: round(value * 10^digits) computed exactly, ties to even (like Rust).
 fn rt_big_half(p: u64) -> u64 {
     mut carry = 0;

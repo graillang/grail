@@ -121,7 +121,10 @@ ok('the sibling states the header is 24 bytes at eight-byte alignment',
   /define internal \{i64, i64\} @"rt_slot\.h2w8"\(ptr nocapture nofree dereferenceable\(24\) align 8 %a0/.test(f1ir));
 // An element address under a fact is written in place: the bounds check against the hoisted
 // `len` and a `getelementptr` on the hoisted `data` pointer, so neither field is re-loaded and the
-// address keeps its provenance (the sibling stays for the accessors that return a value).
+// address keeps its provenance (the sibling stays for the accessors that return a value). Since
+// stale fields are no longer re-read after a call, the fixture's last loop is where this happens:
+// its two vectors are loop-stable, read once at the loop head, and checked there under
+// --verify-facts.
 ok('a fact-carrying element address is a getelementptr on the hoisted data pointer',
   /= load ptr, ptr %t\d+, align 8/.test(f1ir) && /getelementptr i8, ptr %t\d+, i64 %t\d+\n%t\d+ = ptrtoint ptr/.test(f1ir));
 ok('the header loads are `align 8`', /load i64, ptr %t\d+, align 8/.test(f1ir));
@@ -186,7 +189,9 @@ ok('range fixture: --verify-facts re-inserts the check and it does not fire',
 const plainIr = readFileSync(rangePlain.ll, 'utf8');
 const onIr = readFileSync(rangeOn.ll, 'utf8');
 const checkedIr = readFileSync(rangeChecked.ll, 'utf8');
-const accessorCalls = text => (text.match(/call (i64|\{i64, i64\}) @"rt_atb"/g) ?? []).length;
+// The accessor and its typed sibling (`rt_atb.h4w1`, the form a fact-carrying access in a
+// loop-stable region takes in the default build): either is a call the range proof removes.
+const accessorCalls = text => (text.match(/call (i64|\{i64, i64\}) @"rt_atb(\.h\d+w\d+)?"/g) ?? []).length;
 ok('the pass is off by default: the accessor is called and no verdict is recorded',
   accessorCalls(plainIr) > 0 && !plainIr.includes('; range '));
 ok('--range-facts proves the access it is given and stops calling the accessor',
