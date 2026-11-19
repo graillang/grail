@@ -5,7 +5,7 @@ struct Key {
 }
 impl hash::Hash for Key {
     fn hash<a, b>(key: (&a Self), state: (&b mut hash::Hasher)) {
-        hash::write_num(state, key.number);
+        state.write_num(key.number);
     }
 }
 impl hash::Equal for Key {
@@ -83,9 +83,9 @@ fn main() {
     for length in expected.len() {
         mut state = hash::hasher(506097522914230528, 1084818905618843912);
         for i in length {
-            hash::write_byte(&mut state, i);
+            state.write_byte(i);
         }
-        assert(hash::finish(state) == expected[length]);
+        assert(state.finish() == expected[length]);
     }
     // The word-at-a-time paths are the byte stream exactly: any split of the 0..63 message into a
     // byte prefix, a write_bytes middle and a byte tail, and write_num at every alignment.
@@ -98,25 +98,25 @@ fn main() {
             if prefix <= length {
                 mut state = hash::hasher(506097522914230528, 1084818905618843912);
                 for i in prefix {
-                    hash::write_byte(&mut state, i);
+                    state.write_byte(i);
                 }
-                hash::write_bytes(&mut state, message[prefix: length]);
-                assert(hash::finish(state) == expected[length]);
+                state.write_bytes(message[prefix: length]);
+                assert(state.finish() == expected[length]);
             }
             if prefix + 8 <= length {
                 mut state = hash::hasher(506097522914230528, 1084818905618843912);
                 for i in prefix {
-                    hash::write_byte(&mut state, i);
+                    state.write_byte(i);
                 }
                 mut word: u64 = 0;
                 for k in 8 {
                     word = word | ((prefix + k) << (8 * k));
                 }
-                hash::write_num(&mut state, word);
+                state.write_num(word);
                 for i in length - prefix - 8 {
-                    hash::write_byte(&mut state, prefix + 8 + i);
+                    state.write_byte(prefix + 8 + i);
                 }
-                assert(hash::finish(state) == expected[length]);
+                assert(state.finish() == expected[length]);
             }
         }
     }
@@ -130,17 +130,17 @@ fn main() {
     for i in words.len() {
         w := words[i];
         mut st = hash::table_hasher(5, 7);
-        hash::write_num(&mut st, w);
-        assert(hash::hash(&w, 5, 7) == hash::finish(st));
+        st.write_num(w);
+        assert(hash::hash(&w, 5, 7) == st.finish());
     }
     small: u8 = 200;
     mut st8 = hash::table_hasher(5, 7);
-    hash::write_num(&mut st8, 200);
-    assert(hash::hash(&small, 5, 7) == hash::finish(st8));
+    st8.write_num(200);
+    assert(hash::hash(&small, 5, 7) == st8.finish());
     negative: i64 = -3;
     mut sti = hash::table_hasher(5, 7);
-    hash::write_num(&mut sti, bits(negative));
-    assert(hash::hash(&negative, 5, 7) == hash::finish(sti));
+    sti.write_num(bits(negative));
+    assert(hash::hash(&negative, 5, 7) == sti.finish());
     a := Key { number: 42 };
     b := Key { number: 42 };
     c := Key { number: 43 };

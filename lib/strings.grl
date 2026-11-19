@@ -180,6 +180,23 @@ impl [u8] {
     // subpart*, the longest prefix of a well-formed sequence plus the byte that broke it (Unicode's
     // recommended practice, what Rust's `from_utf8_lossy` does).
 
+    // Every code point in order, lazily: `for c in s.chars()`, `s.chars().count()`,
+    // `s.chars().collect()`. Invalid sequences decode to U+FFFD by maximal subpart. The iterator owns
+    // a copy of the bytes: an `iter::Iter<T>` carries no lifetime, so Grail cannot keep a borrow of
+    // the text alive inside it (Rust's `str::chars` borrows instead).
+    pub fn chars(&self) -> iter::Iter<char> {
+        mut bytes = self.copy();
+        mut at = 0;
+        return iter::from_fn(|| -> char? {
+            if at >= bytes.len() {
+                return None;
+            }
+            step := decode_owned(&bytes, at);
+            at = at + step.1;
+            return Some(step.0);
+        });
+    }
+
     // Whether every byte is part of a well-formed UTF-8 sequence.
     pub fn is_utf8(&self) -> bool {
         mut at = 0;
@@ -260,7 +277,7 @@ impl [u8] {
         len := self.len();
         while at < len {
             step := decode_at(self, at);
-            encode_utf8(step.0, &mut out);
+            out.push_char(step.0);
             at = at + step.1;
         }
         return out.text();
@@ -557,30 +574,6 @@ fn decode_owned<a>(bytes: (&a u8[]), at: u64) -> (char, u64, u64) {
     }
     return step_at(u8(bytes[at]), b1, b2, b3, left);
 }
-// Appends the UTF-8 encoding of `c` to `out` (1 to 4 bytes).
-pub fn encode_utf8<a>(c: char, out: (&a mut u8[])) {
-    v := u64(c);
-    if v < 128 {
-        out.push(u8(v));
-        return ();
-    }
-    if v < 2048 {
-        out.push(u8(192 + v / 64));
-        out.push(u8(128 + v % 64));
-        return ();
-    }
-    if v < 65536 {
-        out.push(u8(224 + v / 4096));
-        out.push(u8(128 + (v / 64) % 64));
-        out.push(u8(128 + v % 64));
-        return ();
-    }
-    out.push(u8(240 + v / 262144));
-    out.push(u8(128 + (v / 4096) % 64));
-    out.push(u8(128 + (v / 64) % 64));
-    out.push(u8(128 + v % 64));
-    return ();
-}
 // Decimal text of an unsigned value.
 pub fn from_u64(value: u64) -> string {
     if value == 0 {
@@ -622,22 +615,6 @@ pub fn from_i64(value: i64) -> string {
     return out.text();
 }
 
-// Every code point in order, lazily; invalid sequences decode to U+FFFD by maximal subpart. The
-// iterator owns a copy of the bytes: an `iter::Iter<T>` carries no lifetime, so Grail cannot keep a
-// borrow of the text alive inside it (Rust's `str::chars` borrows instead). The `.chars()` method on
-// byte text is the compiler's own and returns every code point at once, as a `char[]`.
-pub fn chars<a>(text: (&a [u8])) -> iter::Iter<char> {
-    mut bytes = text.copy();
-    mut at = 0;
-    return iter::from_fn(|| -> char? {
-        if at >= bytes.len() {
-            return None;
-        }
-        step := decode_owned(&bytes, at);
-        at = at + step.1;
-        return Some(step.0);
-    });
-}
 // Whether `text` is `word` (lowercase ASCII) in any case.
 fn ascii_lower_is<a, b>(text: &a [u8], word: &b [u8]) -> bool {
     if text.len() != word.len() {

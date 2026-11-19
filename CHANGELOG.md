@@ -1,5 +1,30 @@
 ## Unreleased
 
+- **Library operations on an obvious receiver are methods.** `rc::downgrade(&r)` is `r.downgrade()`;
+  an `arena::Arena<T>` has `a.insert(x)`, `a.get(&k)`, `a.get_mut(&k)`, `a.remove(&k)`, `a.len()` and
+  `a.is_empty()`; a `thread::Thread<R>` has `t.join()`, `t.try_join()` and `t.detach()`; a
+  `hash::Hasher` has `h.write_num(x)`, `h.write_byte(b)`, `h.write_bytes(s)` and `h.finish()` (and
+  `@derive(Hash)` emits them). pool's data-parallel forms are rayon-named methods on the data:
+  `v.par_map(f)` (was `pool::map`), `v.into_par_chunks(grain, f)` (`pool::split`), and on a slice or a
+  whole vector `d.par_chunks_mut(grain, f)` (`pool::split_mut(&mut d[0: len], ..)`),
+  `d.par_chunks_mut_at(grain, f)` (`pool::chunks_mut_at`) and `d.par_chunks_reduce(grain, zero, leaf,
+  merge)` (`pool::reduce_chunks`); `pool::run`/`range`/`reduce`/`zip2..4`/`spawn`/`wait`/`join` stay
+  functions. The replaced free functions are deleted, as are `rc::arc_share`, `collections::push`/
+  `pop`/`get`/`get_mut`, `hashmap::map_contains`/`map_remove`/`map_entry`/`value_at_mut` and
+  `strings::encode_utf8` (`out.push_char(c)`); the hashmap free functions the compiler lowers map
+  syntax to stay, and programs call `m.insert(k, v)`, `m.get(&k)`, `m.len()`. `Arena::get_mut` now ties
+  its result to the arena's borrow, so writing through it compiles.
+- **`v.contains(&x)` works for every element type with `hash::Equal`** (with `use vecs;`), on vectors
+  and slices: `names.contains(&name)`. Integer and bool vectors keep the compiler's own `contains`, which
+  now also takes `&x` as well as the value; `vecs::contains(&v, &x)` is gone. Without `use vecs;` the
+  refusal names the module, and an element type without `hash::Equal` gets the unmet bound.
+- **`s.chars()` is a lazy iterator** (`iter::Iter<char>`, Rust's `str::chars`), from `use strings;`:
+  `s.chars().count()`, `s.chars().collect()` for the `char[]` the compiler's eager `.chars()` used to
+  return, `for c in s.chars()`. `strings::chars(&s)` and the built-in eager version are gone; a call
+  without the import says to add `use strings;`.
+- **A vector reaches the impls of `[T]`.** When `T[]` has no method of a name, `v.m(..)` calls the
+  `impl<T> [T]` one with the slice over the whole vector (an exclusive slice for `&mut self`, which needs
+  a `mut` binding), as Rust's `Vec` derefs to a slice.
 - **The book's sidebar drops its "Find a topic" subtitle;** the search box (labelled for screen readers) sits under the title.
 - **The languages overview chart reads plainly.** Its bars start at 1× (the fastest language's time)
   on one logarithmic scale shared by the release and development groups, each group lists the

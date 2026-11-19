@@ -42,42 +42,44 @@ fn compress2<a>(state:(&a mut Hasher),word:u64){
     v2=wrapping_add(v2,v1);v1=((v1<<17)|(v1>>47))^v2;v2=(v2<<32)|(v2>>32);
     state.v0=v0^word;state.v1=v1;state.v2=v2;state.v3=v3;
 }
-// `tail` holds the `used` (< 8) bytes not yet compressed, little-endian.
-@no_alloc
-@no_block
-pub fn write_byte<a>(state:(&a mut Hasher),value:u64 where value<256){
-    state.tail=state.tail^(value<<(state.used*8));state.used+=1;state.total=wrapping_add(state.total,1);
-    if state.used==8{word:=state.tail;compress(&mut state,word);state.tail=0;state.used=0;}
-}
-// Eight bytes, little-endian: the same as eight write_byte calls, one compression.
-@no_alloc
-@no_block
-pub fn write_num<a>(state:(&a mut Hasher),value:u64){
-    if state.used==0{state.total=wrapping_add(state.total,8);compress(&mut state,value);}
-    else{write_unaligned(&mut state,value);}
-}
-fn write_unaligned<a>(state:(&a mut Hasher),value:u64){
-    state.total=wrapping_add(state.total,8);
-    shift:=state.used*8;word:=state.tail^(value<<shift);compress(&mut state,word);state.tail=value>>(64-shift);
-}
-// Bytes, eight at a time where they line up with the state.
-@no_alloc
-@no_block
-pub fn write_bytes<a,b>(state:(&a mut Hasher),data:&b [u8]){
-    n:=data.len();mut i:u64=0;
-    while (i<n)&&(state.used!=0){write_byte(&mut state,data[i]);i+=1;}
-    start:=i;
-    while i+8<=n{
-        word:=u64(data[i])|(u64(data[i+1])<<8)|(u64(data[i+2])<<16)|(u64(data[i+3])<<24)
-            |(u64(data[i+4])<<32)|(u64(data[i+5])<<40)|(u64(data[i+6])<<48)|(u64(data[i+7])<<56);
-        compress(&mut state,word);i+=8;
+impl Hasher{
+    // `tail` holds the `used` (< 8) bytes not yet compressed, little-endian.
+    @no_alloc
+    @no_block
+    pub fn write_byte(self:&mut Hasher,value:u64 where value<256){
+        self.tail=self.tail^(value<<(self.used*8));self.used+=1;self.total=wrapping_add(self.total,1);
+        if self.used==8{word:=self.tail;compress(&mut self,word);self.tail=0;self.used=0;}
     }
-    state.total=wrapping_add(state.total,i-start);
-    while i<n{write_byte(&mut state,u64(data[i]));i+=1;}
+    // Eight bytes, little-endian: the same as eight write_byte calls, one compression.
+    @no_alloc
+    @no_block
+    pub fn write_num(self:&mut Hasher,value:u64){
+        if self.used==0{self.total=wrapping_add(self.total,8);compress(&mut self,value);}
+        else{self.write_unaligned(value);}
+    }
+    fn write_unaligned(self:&mut Hasher,value:u64){
+        self.total=wrapping_add(self.total,8);
+        shift:=self.used*8;word:=self.tail^(value<<shift);compress(&mut self,word);self.tail=value>>(64-shift);
+    }
+    // Bytes, eight at a time where they line up with the state.
+    @no_alloc
+    @no_block
+    pub fn write_bytes<b>(self:&mut Hasher,data:&b [u8]){
+        n:=data.len();mut i:u64=0;
+        while (i<n)&&(self.used!=0){self.write_byte(data[i]);i+=1;}
+        start:=i;
+        while i+8<=n{
+            word:=u64(data[i])|(u64(data[i+1])<<8)|(u64(data[i+2])<<16)|(u64(data[i+3])<<24)
+                |(u64(data[i+4])<<32)|(u64(data[i+5])<<40)|(u64(data[i+6])<<48)|(u64(data[i+7])<<56);
+            compress(&mut self,word);i+=8;
+        }
+        self.total=wrapping_add(self.total,i-start);
+        while i<n{self.write_byte(u64(data[i]));i+=1;}
+    }
+    @no_alloc
+    @no_block
+    pub fn finish(self:Hasher)->u64{mut current=self;return finish_at(&mut current);}
 }
-@no_alloc
-@no_block
-pub fn finish(state:Hasher)->u64{mut current=state;return finish_at(&mut current);}
 fn finish_at<a>(state:(&a mut Hasher))->u64{
     word:=state.tail^((state.total&255)<<56);
     mut v0=state.v0;mut v1=state.v1;mut v2=state.v2;mut v3=state.v3^word;
@@ -112,41 +114,41 @@ fn finish_at<a>(state:(&a mut Hasher))->u64{
     }
     return v0^v1^v2^v3;
 }
-impl Hash for u64{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){write_num(state,*value);}
+impl Hash for u64{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){state.write_num(*value);}
     fn table_hash<a,b>(value:(&a Self),base:(&b Hasher))->u64{return word_mix(*value,base);}}
 impl Equal for u64{fn equal<a,b>(left:(&a Self),right:(&b Self))->bool{return *left==*right;}}
 impl Hash for u8[]{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){
-    write_num(&mut state,value.len());write_bytes(&mut state,view(value));
+    state.write_num(value.len());state.write_bytes(view(value));
 }}
 impl Equal for u8[]{fn equal<a,b>(left:(&a Self),right:(&b Self))->bool{
     if left.len()!=right.len(){return false;}for i in left.len(){if left[i]!=right[i]{return false;}}return true;
 }}
 impl Hash for string{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){
-    write_num(&mut state,value.len());write_bytes(&mut state,view(value));
+    state.write_num(value.len());state.write_bytes(view(value));
 }}
 impl Equal for string{fn equal<a,b>(left:(&a Self),right:(&b Self))->bool{
     if left.len()!=right.len(){return false;}for i in left.len(){if left[i]!=right[i]{return false;}}return true;
 }}
 // Sized integers hash their canonical 64-bit word (sign-extended for signed types).
-impl Hash for u8{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){write_num(state,bits(*value));}
+impl Hash for u8{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){state.write_num(bits(*value));}
     fn table_hash<a,b>(value:(&a Self),base:(&b Hasher))->u64{return word_mix(bits(*value),base);}}
 impl Equal for u8{fn equal<a,b>(left:(&a Self),right:(&b Self))->bool{return *left==*right;}}
-impl Hash for u16{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){write_num(state,bits(*value));}
+impl Hash for u16{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){state.write_num(bits(*value));}
     fn table_hash<a,b>(value:(&a Self),base:(&b Hasher))->u64{return word_mix(bits(*value),base);}}
 impl Equal for u16{fn equal<a,b>(left:(&a Self),right:(&b Self))->bool{return *left==*right;}}
-impl Hash for u32{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){write_num(state,bits(*value));}
+impl Hash for u32{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){state.write_num(bits(*value));}
     fn table_hash<a,b>(value:(&a Self),base:(&b Hasher))->u64{return word_mix(bits(*value),base);}}
 impl Equal for u32{fn equal<a,b>(left:(&a Self),right:(&b Self))->bool{return *left==*right;}}
-impl Hash for i8{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){write_num(state,bits(*value));}
+impl Hash for i8{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){state.write_num(bits(*value));}
     fn table_hash<a,b>(value:(&a Self),base:(&b Hasher))->u64{return word_mix(bits(*value),base);}}
 impl Equal for i8{fn equal<a,b>(left:(&a Self),right:(&b Self))->bool{return *left==*right;}}
-impl Hash for i16{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){write_num(state,bits(*value));}
+impl Hash for i16{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){state.write_num(bits(*value));}
     fn table_hash<a,b>(value:(&a Self),base:(&b Hasher))->u64{return word_mix(bits(*value),base);}}
 impl Equal for i16{fn equal<a,b>(left:(&a Self),right:(&b Self))->bool{return *left==*right;}}
-impl Hash for i32{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){write_num(state,bits(*value));}
+impl Hash for i32{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){state.write_num(bits(*value));}
     fn table_hash<a,b>(value:(&a Self),base:(&b Hasher))->u64{return word_mix(bits(*value),base);}}
 impl Equal for i32{fn equal<a,b>(left:(&a Self),right:(&b Self))->bool{return *left==*right;}}
-impl Hash for i64{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){write_num(state,bits(*value));}
+impl Hash for i64{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){state.write_num(bits(*value));}
     fn table_hash<a,b>(value:(&a Self),base:(&b Hasher))->u64{return word_mix(bits(*value),base);}}
 impl Equal for i64{fn equal<a,b>(left:(&a Self),right:(&b Self))->bool{return *left==*right;}}
 // SipHash-1-3 of the value's stream under the two seed words.

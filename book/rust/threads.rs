@@ -1,5 +1,5 @@
 // The Rust twin of examples/threads.grl. `std::thread::spawn` and `JoinHandle::join` are
-// `thread::spawn` and `thread::join`. The second thread shows the difference: Grail contains a
+// `thread::spawn` and `t.join()`. The second thread shows the difference: Grail contains a
 // failed bounds check on the thread and hands it to `try_join` as a value, while these examples are
 // built with `-C panic=abort`, so the Rust thread has to return the `Result` itself. The standard
 // library has no processor affinity; a Rust program reaches for a crate or `libc`, so the third

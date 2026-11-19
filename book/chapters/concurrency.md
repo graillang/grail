@@ -8,7 +8,7 @@ transferable (may move to another thread) and, where several workers share them,
 foreign handle is neither until its declaration says so, so a handle captured by a closure is
 refused by name, with the capture and the path that reached it in the message. Results must hold no
 borrows. The library's generic bounds are spelled `Send`, `Share` and `Owned`, and a closure
-parameter states the same bounds on its type: `pool::map` takes `f: Fn<Share>(T) -> U`,
+parameter states the same bounds on its type: `v.par_map(f)` takes `f: Fn<Share>(T) -> U`,
 `pool::spawn` takes `f: FnMut<Send, Owned>() -> R` (see "Saying what a closure may capture" in the
 closures chapter). A wrapper that takes a bare `Fn(..)` cannot pass it on to a worker: its type no
 longer shows the captures the worker would reach.
@@ -18,8 +18,9 @@ longer shows the captures the worker would reach.
 Behind `parallel_map` are the scheduler's worker threads, one per CPU - the same ones that run
 tasks - stealing work from each other, so a call pays no thread-creation cost, a nested call uses
 the same workers, and the calling thread runs leaves itself instead of sleeping. For
-`T[]`-shaped work, `lib/pool.grl` wraps it: `pool::map(items, f)` is the per-element form,
-`pool::run(count, f)` gives job `i` to `f(i)`, `pool::split(data, grain, f)` consumes a vector
+`T[]`-shaped work, `lib/pool.grl` wraps it in methods on the data, named after rayon's:
+`items.par_map(f)` is the per-element form,
+`pool::run(count, f)` gives job `i` to `f(i)`, `data.into_par_chunks(grain, f)` consumes a vector
 and hands each job one contiguous owned piece of at most `grain` elements, `pool::range(n, grain, f)`
 calls `f(lo, hi)` per piece of `0..n`, `pool::reduce(n, grain, zero, leaf, merge)` folds the pieces'
 results in index order, and `pool::join(a, b)` forks `a` for any worker to take, runs `b` on the calling thread, and returns
@@ -41,11 +42,11 @@ an index past a piece is a bounds check, never a write into a neighbour's.
 `parallel_split(&mut data[a: b], grain, f)` is the in-place form of the owned one: the compiler
 splits an exclusive slice into disjoint exclusive pieces of at most `grain` elements and hands each
 job `&mut [T]` over its own elements, so nothing is moved or copied - the same 3M-element pass that
-costs ~100 ms through `pool::split` costs ~44 ms here, as one job. Piece `k` is
+costs ~100 ms through `into_par_chunks` costs ~44 ms here, as one job. Piece `k` is
 `[k*grain, min(n, (k+1)*grain))`, so disjointness and coverage are arithmetic rather than a checked
 property. The `&mut` slice is the whole vector's loan, so no capture in the callback can
 reach that data, and the slice a callback holds has its own length, so an index past the chunk is a
-bounds check rather than a write into a neighbour. `pool::split_mut(data, grain, f)` wraps it;
+bounds check rather than a write into a neighbour. `data.par_chunks_mut(grain, f)` wraps it;
 `grain` is a `u64 where grain > 0`, so a zero grain is refused where it is written.
 
 {{example:pool-split-mut}}
@@ -70,9 +71,8 @@ pool::zip3(&mut pos[0: n], &vel[0: n], &mut life[0: n], 4096,
     });
 ```
 
-`pool::chunks_mut_at(&mut xs[0: n], grain, |base: u64, s: &mut [T]| -> unit { .. })` is `split_mut`
-with each piece's first index, so `s[i]` is `xs[base + i]`. `pool::reduce_chunks(&xs[0: n], grain,
-zero, leaf, merge)` is the read-only reduction: `leaf` per piece, the results folded in index order,
+`xs.par_chunks_mut_at(grain, |base: u64, s: &mut [T]| -> unit { .. })` is `par_chunks_mut`
+with each piece's first index, so `s[i]` is `xs[base + i]`. `xs.par_chunks_reduce(grain, zero, leaf, merge)` is the read-only reduction: `leaf` per piece, the results folded in index order,
 so a floating-point sum has the same bits on one worker and on sixteen.
 
 `left, right := split_at_mut(s, mid)` cuts one exclusive slice into its two halves, `s[0: mid]` and
@@ -252,7 +252,7 @@ latency is the operating system's and yours, not the scheduler's. It reaches the
 `main` does, by opening a `task_scope` or calling into `pool`.
 
 - **Joined by default.** `Thread<R>` is move-only and its drop joins, as a `pool::Job<R>`'s drop
-  waits. `thread::join(t)` takes the owned result; `thread::detach(t)` is the one way to let a
+  waits. `t.join()` takes the owned result; `t.detach()` is the one way to let a
   thread outlive its handle, and a detached thread still running when `main` returns does not keep
   the process alive (the exit-time allocation check is not made in that case - the thread's
   allocations are still its own).
@@ -286,7 +286,7 @@ Three things, and one of them removed work rather than adding it.
 - **In-place chunks.** `parallel_split(&mut [T], grain, f)` (then a chunk count, now a grain) splits the caller's own slice and
   gives each job an exclusive `&mut [T]` over its own elements, so the job that used to move every
   element into a chunk now writes the elements where they are. Measured on 3M `u64` with one job:
-  about 100 ms through the owned split (`pool::split`), about 44 ms in place; with eight chunks on eight workers,
+  about 100 ms through the owned split (`into_par_chunks`), about 44 ms in place; with eight chunks on eight workers,
   about 67 ms against 11 ms. The pass has no copy to pay for, which is where the difference comes
   from - it is not a scheduling improvement.
 - **A job handle.** `parallel_spawn(f) -> Job<R>` and `parallel_join(h) -> R` are spawn-then-wait as

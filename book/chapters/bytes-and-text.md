@@ -70,14 +70,14 @@ surrogate, a value above U+10FFFF and a truncated sequence are all rejected), `t
 returns the offset of the first ill-formed sequence (`u64?`), and `text.char_count()` counts
 characters rather than bytes.
 
-`strings::chars(text)` is a lazy iterator of `char` values and `text.char_indices()` of
+`text.chars()` is a lazy iterator of `char` values and `text.char_indices()` of
 `(u64, char)` pairs, the number being the byte offset each character starts at. Both are
-`iter::Iter` values, so they chain with `map`, `filter` and `collect` like any other iterator; the
-built-in `.chars()` method decodes eagerly into a `char[]` when a vector is more convenient.
+`iter::Iter` values, so they chain with `map`, `filter`, `count` and `collect` like any other
+iterator: `text.chars().collect()` is the `char[]` when a vector is more convenient.
 `text.is_char_boundary(i)` answers whether an offset starts a character, and
 `text.slice_chars(lo, hi)` cuts at two of them: an offset that is not a boundary stops the
 program with a runtime error naming the call site, rather than handing back half a character.
-`strings::encode_utf8(c, &mut out)` and `out.push_char(c)` go the other way, appending a `char`'s one
+`out.push_char(c)` goes the other way, appending a `char`'s one
 to four bytes; `bytes.chunks(n)` and `bytes.windows(n)` are the runs and the sliding windows of a byte
 vector.
 
@@ -89,7 +89,7 @@ character for `E2 82` followed by `A`, not three.
 {{example:utf8}}
 
 The Grail and Rust versions answer the same questions with the same numbers; two differences are
-Grail's. `strings::chars` copies the bytes it walks, because an `iter::Iter<T>` carries no lifetime
+Grail's. `text.chars()` copies the bytes it walks, because an `iter::Iter<T>` carries no lifetime
 and so cannot hold a borrow of the argument - Rust's `chars()` borrows the `str` and allocates
 nothing. And a decoded code point is a `char` all the way through, where Rust casts to `u32` to print
 it.

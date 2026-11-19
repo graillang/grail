@@ -23137,6 +23137,16 @@ fn protocol_method_name<a, b>(c: (&a mut C), k: u64, name: &b [u8]) -> bool {
     }
     return false;
 }
+// Whether `ty` is a vector or slice whose `contains` is the compiler's own: integer and bool elements,
+// which it compares as words.
+fn builtin_contains<a>(c: (&a mut C), ty: u64) -> bool {
+    k := ty_kind(&mut c, ty);
+    if (k != 6) & (k != 27) {
+        return false;
+    }
+    elem := ty_arg(&mut c, ty);
+    return integer(&mut c, elem) || is_bool(&mut c, elem);
+}
 // A method that would set what a protocol name means is refused where it is defined, so no call site
 // silently changes meaning: the message says what the name is and asks for another one.
 fn inherent_protocol_refused<a, b>(c: (&a mut C), owner: u64, name: &b [u8], at: u64) -> unit {
@@ -23145,6 +23155,11 @@ fn inherent_protocol_refused<a, b>(c: (&a mut C), owner: u64, name: &b [u8], at:
         return ();
     }
     if !protocol_method_name(&mut c, ty_kind(&mut c, ty), name) {
+        return ();
+    }
+    if same(view(name), view("contains")) & !builtin_contains(&mut c, ty) {
+        // The compiler's `contains` compares integers and bools; any other element type's
+        // `contains` is a library method (vecs: `impl<T: hash::Equal> [T]`).
         return ();
     }
     mut msg = copy_bytes(view("`"));
@@ -28660,7 +28675,7 @@ fn dr_hash_block<a, b, d>(c: (&a mut C), out: (&b mut u8[]), d: u64, name: &d [u
                 push_bytes(&mut out, view(a));
                 push_bytes(&mut out, view(")"));
             }
-            push_bytes(&mut out, view(" => { hash::write_num(state, "));
+            push_bytes(&mut out, view(" => { state.write_num("));
             decimal(&mut out, i);
             push_bytes(&mut out, view("); "));
             if has {
@@ -34185,6 +34200,10 @@ fn byte_sequence_value<a>(c: (&a mut C), ty: u64) -> bool {
 }
 fn view_type_of<a>(c: (&a mut C)) -> u64 {
     return intern_full(&mut c, 5, 0, 0, u64[]);
+}
+// `[T]` for a vector type `T[]`: the type a vector receiver's slice impls are written for.
+fn slice_type_of<a>(c: (&a mut C), vector: u64) -> u64 {
+    return intern_full(&mut c, 27, ty_arg(&mut c, vector), 0, u64[]);
 }
 // A byte view handed to a `&[u8]` method receiver is reborrowed for the call: the same storage and
 // length as a fresh value whose loan is the one the receiver already holds, so the binding is still
@@ -41079,7 +41098,7 @@ fn parallel_split_builtin<a>(c: (&a mut C), data: Val) -> Val {
         fail(&mut c, view("parallel_split requires a callable"));
     }
     signature := type_args(&mut c, fty);
-    // (&mut [T]), or (u64, &mut [T]) for each piece's first index too (pool::chunks_mut_at).
+    // (&mut [T]), or (u64, &mut [T]) for each piece's first index too (`par_chunks_mut_at` in lib/pool.grl).
     with_at := signature.len() == 2;
     if (signature.len() != 1) && !with_at {
         fail(&mut c, view("parallel_split callback takes (&mut [T]) or (u64, &mut [T])"));
@@ -46206,13 +46225,6 @@ fn text_method<a, b>(c: (&a mut C), xt: u64, k: u64, name: &b [u8]) -> Val {
         r := invoke(&mut c, view("rt_seq_repeat"), two(xt, n.t));
         return own(&mut c, r, result);
     }
-    if same(view(name), view("chars")) {
-        expect(&mut c, view(")"));
-        r := invoke(&mut c, view("rt_seq_chars"), one(xt));
-        ch := char_type(&mut c);
-        vt := intern(&mut c, 6, ch);
-        return own(&mut c, r, vt);
-    }
     return val(0, NO_TYPE);
 }
 fn char_method<a>(n: &a [u8]) -> bool {
@@ -46723,12 +46735,21 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
     // `impl string { ... }`. It resolves before any interface method of the same name (Rust's
     // order), and before the builtin collection methods below - which an impl may not redefine at
     // all (protocol_method_name). A declared type's own methods were looked up above (k == 8).
-    if k != 8 {
+    if (k != 8) & !(same(view(name), view("contains")) & builtin_contains(&mut c, xty)) {
         mut method = inherent_method_for(&mut c, xty, view(name));
         // A byte vector or a string is byte text: when no impl names it as it stands, the impls of
         // `[u8]` are the ones it is asking for, and the receiver is viewed for the call below.
         if (method == 0) & byte_sequence_value(&mut c, inty) {
             method = inherent_method_for(&mut c, view_type_of(&mut c), view(name));
+        }
+        // A vector is a slice of itself: when no impl names the method for `T[]`, the impls of
+        // `[T]` are the ones it is asking for (Rust's `Vec<T>` deref to `[T]`), and the receiver is
+        // the slice over the whole vector, as `&v` / `&mut v` passed for a `&[T]` / `&mut [T]`
+        // parameter is (coerce_view).
+        mut whole = false;
+        if (method == 0) & (ty_kind(&mut c, xty) == 6) {
+            method = inherent_method_for(&mut c, slice_type_of(&mut c, xty), view(name));
+            whole = method != 0;
         }
         if method != 0 {
             owner := c.funcs[method - 1].module.copy();
@@ -46755,6 +46776,13 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
             mut rinput = input;
             mut rinty = inty;
             mut rxty = xty;
+            if whole && (ty_kind(&mut c, formal) == 27) {
+                borrowed := method_receiver(&mut c, input, inty, xty, reference_type(&mut c, xty, ty_mode(&mut c, formal)));
+                sliced := coerce_view(&mut c, borrowed, formal);
+                rinput = sliced.t;
+                rinty = sliced.ty;
+                rxty = sliced.ty;
+            }
             if ty_kind(&mut c, formal) == 5 {
                 mut viewed = val(input, inty);
                 if ty_kind(&mut c, inty) == 5 {
@@ -47088,16 +47116,28 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
     }
     if ((k == 6) || (k == 27)) && same(view(name), view("contains")) {
         elem := ty_arg(&mut c, xty);
-        if !(integer(&mut c, elem) || is_bool(&mut c, elem)) {
-            fail(
-                &mut c,
-                view("contains on vectors needs integer or bool elements (use vecs::contains for others)")
-            );
+        if !builtin_contains(&mut c, xty) {
+            // Reached only when no impl serves it: `vecs` is not imported, or the element type does
+            // not meet the impl's bound.
+            mut unmet = inherent_unmet_bound(&mut c, xty, view(name));
+            if (unmet.0.len() == 0) & (k == 6) {
+                unmet = inherent_unmet_bound(&mut c, slice_type_of(&mut c, xty), view(name));
+            }
+            if unmet.0.len() != 0 {
+                diag_help(&mut c, view(unmet.1));
+                fail(&mut c, view(unmet.0));
+            }
+            diag_help(&mut c, view("add `use vecs;`: its `contains` takes any element type with `hash::Equal`"));
+            fail(&mut c, view("contains on a vector of other than integers or bools is the `vecs` module's method"));
         }
         vstart := c.pos;
         mut v = expr(&mut c, 0);
         vend := c.pos;
         expect(&mut c, view(")"));
+        // `v.contains(&x)`, the spelling every other element type uses, compares the value too.
+        if (ty_kind(&mut c, v.ty) == 7) && same_type(&mut c, ty_arg(&mut c, v.ty), elem) {
+            v = deref(&mut c, v);
+        }
         v = adopt_value(&mut c, v, vstart, vend, elem);
         require_type(&mut c, v.ty, elem);
         mut f = "rt_vec_contains";
@@ -47122,10 +47162,17 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
         || same(view(name), view("push_char"))
         || same(view(name), view("append"));
     if !known {
-        unmet := inherent_unmet_bound(&mut c, xty, view(name));
+        mut unmet = inherent_unmet_bound(&mut c, xty, view(name));
+        if (unmet.0.len() == 0) & (ty_kind(&mut c, xty) == 6) {
+            // A vector reaches the impls of `[T]` too: name the bound one of those did not meet.
+            unmet = inherent_unmet_bound(&mut c, slice_type_of(&mut c, xty), view(name));
+        }
         if unmet.0.len() != 0 {
             diag_help(&mut c, view(unmet.1));
             fail(&mut c, view(unmet.0));
+        }
+        if same(view(name), view("chars")) & byte_sequence_value(&mut c, inty) {
+            diag_help(&mut c, view("add `use strings;`: `s.chars()` is its lazy iterator over the code points"));
         }
         recv := source_type_name(&mut c, xty);
         mut msg = copy_bytes(view("`"));
