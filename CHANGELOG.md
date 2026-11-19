@@ -28,6 +28,13 @@
   `room_volume`. The parity grows to 99/99 lines: a voice's send rings the room for four blocks,
   then a decay change and a generation bump clear it for two more.
 
+- **The coherent profile's macro composition is ported bit for bit.** `abundance/src/
+  worldgen_macro_world.grl` carries `macro_composition.cpp`: the six-archetype recipe, the layout
+  primitives (capsules, half-planes, islets, the contained rounded-square clip), the land-fraction
+  bisection on a 112x112 grid, the islet placement, the Catmull-Rom land raster and `land_at`, the
+  ranges' rigid placement onto the composed land (420 scored candidates, then the edge guard), and
+  the bay/valley walk to the ranges. 281 values over four compositions and one whole plan match the
+  worldgen library.
 
 - **The soundscape bed and the ambient-emitter synth run through the audio shim.** `platform_audio.grl`
   gains `bed_attach`/`ambience` (audio.cpp's 15-slot input packing) and `emitter_start`/`emitter_set`/
