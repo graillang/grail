@@ -4730,6 +4730,19 @@
     "stdout": "json ok: 99 accepted, 212 rejected, 612 floats, 60 checks, 2000 float round trips\n"
   },
   {
+    "name": "json-duplicate-key-last-wins-no-leak",
+    "source": "use json;\nfn opts() -> json::Options {\n    mut o = json::default_options();\n    o.allow_duplicate_keys = true;\n    return o;\n}\nfn main() {\n    v := json::parse_with(view(\"{\\\"a\\\":\\\"1\\\",\\\"a\\\":{\\\"d\\\":3},\\\"b\\\":[1,{\\\"c\\\":\\\"x\\\"}],\\\"a\\\":[2]}\"), opts())!;\n    println(\"{}\", v.show());\n    println(\"{}\", v.len());\n}\n",
+    "modules": [
+      "lib/json.grl",
+      "lib/collections.grl",
+      "lib/hashmap.grl",
+      "lib/hash.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "{\"a\":[2],\"b\":[1,{\"c\":\"x\"}]}\n2\n",
+    "note": "`allow_duplicate_keys` keeps the first key's position and the last value; the replaced value is dropped by the store (`add_member`) instead of leaked through an `exchange` of a record field, which left a framed value's storage live and aborted the program in `rt_leak_exit` (exit 134). Both the scan and the map index paths call `add_member`"
+  },
+  {
     "name": "json-reject-drop-with-member-view",
     "source": "use json;fn main(){v:=json::parse(\"[1]\")!;x:=v.at(0)!;drop(v);println(x.is_null());}",
     "modules": [
@@ -4858,6 +4871,26 @@
     ],
     "stdout": "13351429991348588695\n",
     "note": "BC4/BC5 block bytes against the engine's rgbcx encoder: four RGB8 fixtures (gradient 6x10, noise 8x8, flat 4x4, checker 8x8, both dimension alignments) encoded and folded into one FNV checksum"
+  },
+  {
+    "name": "lib-bc7decode",
+    "files": [
+      "tests/lib/bc7_decode_test.grl"
+    ],
+    "modules": [
+      "lib/bc7_decode.grl",
+      "lib/fs.grl",
+      "lib/io.grl",
+      "lib/core.grl",
+      "lib/strings.grl",
+      "lib/bytes.grl",
+      "lib/iter.grl"
+    ],
+    "args": [
+      "../../../../tests/lib/bc7decode"
+    ],
+    "stdout": "457 blocks, 0 failures\n",
+    "note": "BC7 block decode against the engine's own bc7decomp.cpp: every committed bc7e payload plus hand-built blocks for every mode, every subset partition of modes 0/1/2/3/7, mode 4's index mode, every component rotation of 4/5, mode 6's selector field and an invalid mode tag, all 64 RGBA8 bytes of every block"
   },
   {
     "name": "lib-zstd",
@@ -19821,6 +19854,23 @@
     "note": "a closure type written in a struct field takes a reference parameter: its elided lifetime is a fresh input of each call, as in a function's parameter list (it was \"elided output reference needs one input lifetime\")"
   },
   {
+    "name": "closure-type-in-arc-unifies-across-positions",
+    "source": "use rc;\nstruct T { x: u64 }\nstruct S { b: rc::Arc<Fn<Owned>((&T)) -> u64> }\nfn take(s: (&S)) -> rc::Arc<Fn<Owned>((&T)) -> u64> { return s.b.clone(); }\nfn count(b: rc::Arc<Fn<Owned>((&T)) -> u64>) -> u64 { return b.strong_count(); }\nfn main() {\n    s := S{b: rc::arc_new(|t: &T| -> u64 { return t.x * 2; })};\n    println(count(s.b.clone()));\n    c := take(&s);\n    println(c.strong_count());\n    f := c.get();\n    println(f(&T{x: 21}));\n}\n",
+    "modules": [
+      "lib/rc.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "2\n2\n42\n",
+    "note": "a closure type nested in `rc::Arc<..>` is the same type wherever it is written: a field's `Arc<Fn<Owned>((&T)) -> u64>` and the same text in a parameter list or return type differed only in the region the reference parameter was parsed with (a field names one, a generic substitution drops it), so `s.b.clone()` handed to a parameter of the same text was \"type mismatch: expected `rc::Arc<Fn<Owned>(&T) -> u64>`, found `rc::Arc<Fn<Owned>(&T) -> u64>`\""
+  },
+  {
+    "name": "closure-reference-parameter-element-still-typed",
+    "source": "fn take(f: Fn<Owned>((&[u64])) -> u64) -> u64 { return 1; }\nfn main() {\n    g: Fn<Owned>((&[f64])) -> u64 = |v: &[f64]| -> u64 { return v.len(); };\n    println(take(g));\n}\n",
+    "reject": true,
+    "diagnostic": "type mismatch",
+    "note": "the relaxation for a closure's reference parameter drops the reference's own lifetime, not its referent: `Fn((&[u64])) -> u64` and `Fn((&[f64])) -> u64` are different signatures and still refused"
+  },
+  {
     "name": "closure-shared-method-on-capture-is-fn",
     "source": "struct P { v: u64 }\nimpl P { pub fn get(self: &P) -> u64 { return self.v; } }\nfn call_shared(f: Fn<Share>() -> u64) -> u64 { return f(); }\nfn main() { p := P{v: 3}; println(call_shared(|| -> u64 { return p.get(); })); }\n",
     "stdout": "3\n",
@@ -19903,6 +19953,15 @@
     ],
     "stdout": "11\n15\n",
     "note": "the spelling that keeps a closure passed through an intermediate function: `Fn<Owned, Share>` on the parameter and the field. A non-capturing literal and one capturing a local copy are stored through `lock_with` and called later"
+  },
+  {
+    "name": "closure-owned-field-reference-param-through-lock-with",
+    "source": "use sync;\nstruct T { x: u64 }\nunsafe struct Spec: transferable, shareable { body: Fn<Share, Owned>((&T), u64) -> u64, deps: u64[] }\nstruct Box { jobs: Spec[] }\nfn keep(b: (&mut Box), s: Spec) -> u64 { b.jobs.push(s); return 0; }\nfn run0(b: (&mut Box), x: u64) -> u64 { return (b.jobs[0].body)(&T{x: x}, b.jobs[0].deps.len()); }\nfn store(m: (&Mutex<Box>), f: Fn<Share, Owned>((&T), u64) -> u64) -> u64 {\n    return m.lock_with(Spec{body: f, deps: u64[1, 2]}, keep);\n}\nfn main() {\n    m := Mutex::new(Box{jobs: Spec[]});\n    println(store(&m, |t: &T, k: u64| -> u64 { return t.x * k; }));\n    println(m.lock_with(7, run0));\n}\n",
+    "modules": [
+      "lib/sync.grl"
+    ],
+    "stdout": "0\n14\n",
+    "note": "a record whose closure field is `Fn<.., Owned>` holds no borrow its type cannot show (the type names what the closure borrows), so it moves into `lock_with`'s context; a reference the closure only takes as a parameter is not a capture. The call-scoped `Fn(..)` shapes stay refused (`closure-hidden-loan-*`)"
   },
   {
     "name": "closure-record-built-at-literal-through-lock-with-runs",

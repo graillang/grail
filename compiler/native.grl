@@ -8052,7 +8052,16 @@ fn may_hide_borrow<a>(c: (&a mut C), ty: u64) -> bool {
 fn hide_walk<a, b>(c: (&a mut C), ty: u64, trail: (&b mut u64[])) -> bool {
     k := ty_kind(&mut c, ty);
     arg := ty_arg(&mut c, ty);
-    if (k == 12) || (k == 20) || (k == 25) || (k == 33) {
+    // An `Owned` closure type names what it borrows - its signature's regions - so it holds no
+    // borrow the type cannot show, and a record whose closure field says so holds none either
+    // (the rule `owned_walk` and `capture_hides_loan` already apply). A reference the closure only
+    // takes as a parameter is the parameter, not a capture: `Fn<Share, Owned>((&T), u64) -> u64` in
+    // a field is exactly the shape a job table stores. A call-scoped closure type states nothing
+    // and may have captured a reference, so it is still refused.
+    if k == 20 {
+        return (ty_env(&mut c, ty) != 0) || ((ty_mode(&mut c, ty) & CLOSURE_OWNED) == 0);
+    }
+    if (k == 12) || (k == 25) || (k == 33) {
         return true;
     }
     // A job handle owns the closure it runs, whatever its result type is: `Job<u64>` shows no borrow
@@ -15671,11 +15680,25 @@ fn callable_contract<a, b>(
     for i in ax.len() {
         left := ax[i];
         right := ex[i];
-        // A closure's reference parameter is a fresh input lifetime on every call, so an expected
-        // parameter that names no lifetime - a type argument bound to a reference (`C` of
-        // `Fn((&T), C)` given `&a K`), whose lifetime the binding does not carry - accepts any: only
-        // the referent and the mode must match. Result positions are not relaxed.
-        if (ak == 20) || (ak == 12) {
+        // A closure's reference parameter is a fresh input lifetime on every call, so the
+        // reference's own life is not part of the contract: only the referent and the mode are.
+        // Two spellings of one closure type must agree whatever region each was parsed with - a
+        // parameter list names one, a generic substitution may drop it (`C` of `Fn((&T), C)` given
+        // `&a K`), and a field or a local's type carries one of its own - so the region is not
+        // compared here. The referent is: `(&[u64])` and `(&[f64])` are different signatures.
+        if ak == 20 {
+            lk := ty_kind(&mut c, left);
+            if ((lk == 5) || (lk == 7) || (lk == 27)) && (ty_kind(&mut c, right) == lk)
+                && (ty_mode(&mut c, left) == ty_mode(&mut c, right)) {
+                if callable_contract(&mut c, ty_arg(&mut c, left), ty_arg(&mut c, right), &mut map, depth + 1) {
+                    continue;
+                }
+                return false;
+            }
+        }
+        // A `dyn` method's reference parameter keeps the same relaxation, in the one direction a
+        // binding without a lifetime asks for. Result positions are not relaxed.
+        if ak == 12 {
             lk := ty_kind(&mut c, left);
             if ((lk == 5) || (lk == 7) || (lk == 27)) && (ty_kind(&mut c, right) == lk)
                 && (type_regions(&mut c, right).len() == 0) && (type_regions(&mut c, left).len() == 1)

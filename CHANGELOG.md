@@ -9,6 +9,145 @@
   button in its corner that shows that chart alone, scaled to the screen; the button or Esc leaves.
   Browsers without element full screen (an iPhone) get no button. The languages overview no longer
   reserves a wide empty margin for notes it does not draw, so it fills the column.
+- Fixed: `frame_loop_test.grl`'s submit callback takes the scheduler's `rc::Arc<JobScheduler>` handle; the
+  `SchedulerRef` wrapper it still named was deleted with the scheduler's production-surface landing, so
+  `--only=frame_loop` failed to compile. The frame loop's digests are unchanged.
+- **BC7 block decode is ported, gated on the engine's own decoder.** `lib/bc7_decode.grl` carries
+  `bc7decomp::unpack_bc7` (bc7enc_rdo b9438627 — the `bc7decomp.cpp` that
+  `engine/materials/CMakeLists.txt` builds as `abe_bc7_decode` and `material_registry.cpp` calls for
+  the terrain palette's per-cell means and its per-block scan): the four integer-only unpack paths
+  (three-subset modes 0/2, two-subset modes 1/3/7, dual-plane modes 4/5 with component rotation and
+  mode 4's index mode, and mode 6's bit field), the anchor indices' implicit most-significant bits,
+  and the engine's interpolation. The decode tables are the engine's, not transcribed:
+  `abundance/tools/dump_bc7_tables.py` writes them from `bc7decomp.cpp` as packed hex into the
+  module, and `abundance/tests/parity/bc7decode.cpp` compiles that file unmodified to produce the
+  corpus. The 457-block corpus in `tests/lib/bc7decode` is the committed bc7e payloads of the
+  encoder fixtures (the modes bc7e chooses on them: 0, 1, 2, 4, 5 and 6) plus hand-built blocks
+  sweeping every subset partition of modes 0/1/2/3/7, every component rotation of modes 4/5, mode
+  4's index mode, mode 6's selectors and an invalid mode tag, alpha modes included. The port
+  reproduces all 64 RGBA8 bytes of every block; `bc7decode.txt` and the `lib-bc7decode` native case
+  pin it, and the engine's SSE2 and scalar paths agree byte for byte on the whole corpus. BC7 and
+  BC6H *encode* remain unported (bc7e's and texcomp's ISPC mode search).
+
+- **The shader pipeline takes `ui/`, and with it every area of the inventory.** `canvas.vs`/`canvas.ps`
+  (10.8 KB) at pin `ca1f1bc05b`: the pipeline now carries 180 entries and 10.56 MB of SPIR-V across all
+  ten areas (core, post, sky, geometry, lighting, water, materials, characters, vfx, ui), with 64 shared
+  structs pinned field by field. What remains vendorable-but-absent is only what the engine's CMake
+  mirror step reaches, each entry recorded with its blocking include in
+  `docs/design/abundance-shaders.md`.
+
+- **The shader pipeline takes `materials/`, 3 of its 9 entries.** `debug_view`, `mean_albedo` and the
+  screen-tile builder: 20 KB of SPIR-V at pin `ca1f1bc05b`, the layout pin growing from 61 to 64
+  structs. All six `resolve*` passes stay recorded as skipped: a material resolve shades a G-buffer and
+  needs the terrain page contract, so materials is the one area that is mostly blocked rather than
+  mostly taken.
+
+- **The shader pipeline takes `vfx/`, 12 of its 14 entries.** The blast, dust and glass vertex/pixel
+  pairs, both sorts, the dust motion pass, the glass scene copy, surface decals and thermal heat:
+  265 KB of SPIR-V at pin `ca1f1bc05b`, the layout pin growing from 54 to 61 structs. The two
+  simulation compute passes stay recorded as skipped for the terrain mirror.
+- **Abundance: the mesa landform builder is ported and bit-exact.** `src/coherent_mesa.grl` gains
+  `build_mesa_landforms`: the per-region window, the rigid set (water, lakes, visible rivers, the
+  window edge, rigid classes and extra rigid cells) with its fade, the chamfer distances to the main
+  washes, slot washes and rigid ground, the warped disc with rim-growing retreat, the pre-existing
+  depressions handed back to the water stage, the pediment (a 15 % quantile of the active heights)
+  and the dipping caprock, the landform itself (plateau cap, escarpments retreating from every main
+  wash more toward the rim, concave feet, slot canyons cut by the small washes), the isolated spires
+  on the outer pediment, the pit-free closing flood, and the Mesa mask share, cap and raise counts.
+  `tests/coherent_mesa_test.grl` now also matches Abundance's own `build_mesa_landforms`
+  (`-ffp-contract=off`) over the same synthetic world: heights, mask and counts, 21 of 21 lines.
+  Not ported yet: the Mesa-style stepped-hills site list and the Mesa mark/biome hooks.
+- **The coherent generator's mountain ranges are ported bit for bit.** `abundance/src/
+  worldgen_mountains.grl` carries `plan_mountain_ranges` (96-candidate placement scored on edge
+  clearance, range separation, keep-out discs and the area budget), `mountain_range_along_strength`,
+  `coherent_add_mountain_passes` (one pass per ~2.2 km of crest at the lowest along-strike strength)
+  and the Saturday2d82 `rasterize_mountain_plan`; 654 values over four plans match the worldgen
+  library, including all six field rasters.
+
+- **`abundance/src/water_geometry.grl`: the water renderer's CPU half, ported from the engine's own
+  callers.** `water_geometry.cpp` and `water_volume_split.cpp` compiled unchanged are the reference
+  for `buffer_waterway_centerline` (round-join, round-cap buffering of a centreline at the caller's
+  millimetre precision), `union_water_raster_cells` (whole cells unioned on the integer grid, holes
+  nested), `triangulate_water_region` (earcut over outer plus holes), `water_region_area_m2`,
+  `smooth_water_region_for_presentation` (the blended outline re-normalised through Clipper2, with
+  its fallbacks), and the tile layer - `clip_water_region_to_rect`,
+  `split_water_region_to_budget` (adaptive quadtree subdivision that returns over-budget pieces at
+  the depth bound rather than dropping them) and `water_region_vertex_count`. Region order is the
+  engine's area-then-first-point `std::sort`, including its permutation for equal keys, so the
+  pieces come out in the same order. `abundance/tests/water_geometry_test.grl` prints 14 lines that
+  match `parity/water_geometry.cpp`, which compiles both engine sources unmodified against the
+  vendored Clipper2 and earcut and hashes every result canonically: 1 meander buffer, 1 hairpin
+  buffer, 2 cell-union regions, the triangulations, the smoothed outline, the clipped tile, the two
+  subdivision budgets, the vertex count and area, and the four refusal paths. Porting it caught one
+  more arithmetic-order bug of the kind these ports keep finding: the ring area accumulated
+  `(sum + a) - b` where the C++ evaluates `sum + (a - b)`.
+- Fixed: a struct whose closure field is `Fn<.., Owned>` can be moved into a `lock_with` callback again.
+  `struct Spec { body: Fn<Share, Owned>((&T), u64) -> u64, deps: u64[] }` was refused with "this value
+  holds a borrow its type cannot show": the borrow walk counted every closure type as possibly holding
+  a capture, so the reference the closure merely *takes as a parameter* looked like one. An `Owned`
+  closure type names whatever it borrows (the rule `owned_walk` and `capture_hides_loan` already use),
+  so it - and a record holding one - holds no hidden borrow; a call-scoped `Fn(..)` still may, and the
+  `closure-hidden-loan-*` refusals are unchanged. Case
+  `closure-owned-field-reference-param-through-lock-with`.
+- Fixed: lib/json's duplicate-key path no longer leaks, so a parse with `allow_duplicate_keys` no longer
+  aborts in `rt_leak_exit` (exit 134) - the world lane's localization catalog needs the flag, because
+  the engine accepts repeated keys with the last value winning. `add_member` replaced the value of a
+  duplicate through `exchange(&mut slot.value, member.value)`, which leaves a framed value's storage
+  live; a plain store drops the replaced value and the duplicate's own key with the member. Case
+  `json-duplicate-key-last-wins-no-leak` (both the scan and the map-index paths were checked).
+- Fixed: a closure type nested in `rc::Arc<..>` is the same type wherever it is written. `struct S { b:
+  rc::Arc<Fn<Owned>((&T)) -> u64> }` used as a parameter type elsewhere was refused with "type mismatch:
+  expected `rc::Arc<Fn<Owned>(&T) -> u64>`, found `rc::Arc<Fn<Owned>(&T) -> u64>`": the closure's
+  reference parameter carries the region its spelling was parsed in (a parameter list names one, a
+  generic substitution - `s.b.clone()` - drops it), and the comparison relaxed only the direction the
+  substitution produces. A closure's reference parameter is a fresh input lifetime on every call, so
+  its own life is not part of the contract and the two agree; the referent still is. Cases
+  `closure-type-in-arc-unifies-across-positions` and
+  `closure-reference-parameter-element-still-typed`.
+- **World loot's placement is ported (wild scenes; monument yards are a named boundary).**
+  `abundance/src/world_loot_placement.grl` carries `world_loot_sites_in` from
+  `world_loot_placement.cpp`: the jittered 160 m lattice with its mixed-axis cell hash, the
+  per-biome scene mix and the coastal override, all ten scene builders with their exact draws (the
+  engine's right-to-left argument order kept where two draws share a call), the ground fit (four
+  corners plus the centre, dry, within the step, no hump or hollow, the lean from the corner
+  heights), the footprint radii and overlap test, the 40 m centre clearance, the 24 m query margin
+  and the id-sorted, deduplicated answer, with the ground as the host's callback (a scene meeting
+  missing ground waits). The site's yaw/pitch/roll/distance are narrowed to f32 like the engine's
+  `float` fields. `abundance/tests/world_loot_placement_test.grl` prints 88 lines that match a
+  reference calling the engine's own `world_loot_sites_in` over the same synthetic ground. Monument
+  yards are not ported: they need `ab::infinite::MonumentSite` and `monument_outside()` from the
+  world-model lane, so callers pass no monuments and the module says so.
+
+- **The Abundance procedural impact/predator/pickup synthesiser is ported, sample for sample.**
+  `abundance/src/audio_procedural.grl` carries `ABSynthesiseProceduralImpact`,
+  `ABSynthesisePredatorVoice` and `ABSynthesisePickupTick` of
+  `Private/audio/procedural_synthesis_detail.cpp` (cmake/tx/character.cmake's audio side): the
+  engine's FRandomStream LCG and its float construction, the impact's pitch-swept body with the
+  low-passed contact crunch, the predator voice's howl and rough pulsed growl (Square of a double
+  sine, harmonics through sinf), and the pickup tick's soft thump, inharmonic stone partials or
+  brighter metal ring with its click, each peak-normalised and truncated to PCM16 as the C++ casts
+  it. The float maths uses lib/math's glibc-exact `sinf` where the engine calls `std::sin` on a
+  float and its double kernels elsewhere, with the C++'s float/double widths kept apart.
+  `abundance/tests/parity/audio_procedural.cpp` compiles the engine's synthesiser with
+  `-ffp-contract=off` and prints 195 values; `abundance/tests/audio_procedural_test.grl`
+  reproduces every one - 7 intensities (including out-of-range and NaN) and 2 howl modes across
+  three seeds each, four sound classes across three seeds, each compared by sample count, an
+  FNV-1a hash over the int16 stream and its first/last/peak samples.
+- **The Abundance UI design system and shape tessellator are ported, vertex for vertex.** `abundance/src/
+  ui_design.grl` carries `Public/abundance/ui/design_system.hpp`: linear `Rgba` with `srgb`/`mix`/
+  `fade`/`visible`, the palette (and its high-contrast variant), the type scale, the 4 px spacing
+  grid, corner radii, `ShapeStyle` with its scale, the five elevations and the five grade frames.
+  `abundance/src/ui_shape_mesh.grl` carries `ui/shape_mesh.hpp`: `Mesh`/`Rect`, the rounded-rectangle
+  outline, `fill_rounded`, `ring` with its vertical fade, `shadow`, `glow`, `shape`, `radial`,
+  `quad`, `arc`, `polyline`, `stroke_path` with mitred joins and round caps, `disc` and `bar`.
+  The float maths goes through lib/math's glibc-exact `cosf`/`sinf` (a float operand in the C++ is
+  the single-precision call), so vertices agree bit for bit. `abundance/tests/parity/ui_shapes.cpp`
+  compiles the two headers and prints 360 values; `abundance/tests/ui_shapes_test.grl` reproduces
+  every one - palette and grade colours, the elevation surfaces, the type scale, and per-shape
+  vertex/index counts with FNV-1a hashes over the whole vertex stream (x, y, r, g, b, a as binary32
+  patterns) and the index list, across 60 fixtures including the degenerate ones (invalid rects,
+  invisible colours, a zero-length polyline, a hairpin stroke, fractional and out-of-range bar
+  values).
 - **The Jolt surface closes with the overlap query.** `gr_jolt_overlap_capsule` is one `CollideShape`
   of the same capsule the cast sweeps, stopped at the first hit: `abundance/src/jolt.grl` now answers
   the core's `overlap` contract (a boolean, with `invalid_request` for a capsule shorter than its own
@@ -58,6 +197,21 @@
   Burley/resolve/temporal passes, plus the fixture irradiance: 131 KB of SPIR-V at pin
   `ca1f1bc05b`, the layout pin growing from 46 to 54 structs. No character entry reaches the mirror
   trees.
+- **The derelict monument layouts' M1 is ported: the builder, the derelict pass and the Farm
+  template.** `abundance/src/monument_layout.grl` carries `Private/monuments/monument_layout.cpp`'s
+  anonymous-namespace Builder (the site Rng, `LocalPiece`/`Bounds`, `put`, `wall` with its four-cell
+  panels and door/window/garage openings, `RoomSpec`/`room`/`slab`, the gabled cottage with its loft,
+  `fence`/`fence_ring` with grades and gates, `stairs`, `cache`/`wreck`/`tree`), the derelict pass
+  (collapse centres, the per-role base rates, crumbled wall tops, `settle`, `settle_slabs` and
+  `rubble`), `finish` (the world transform, the point rotation and `yaw + 90 T0 mod 360`),
+  `monument_weathering_rgb`, the cache kind names and `build_farm`. Pieces resolve through a
+  committed catalogue table (`tests/parity/monuments_catalog.bin`, magic "ABMN" v1: 266 modules'
+  occupied cells and 1280 (kind, tier, turns) rows of module and material ids) that the reference
+  dumps from the engine's own `ConstructionCatalog`, so this stage carries no construction domain;
+  when `abundance/src/construction_catalog.grl` lands the table becomes its cross-check. 10 118
+  reference lines match over eight Farm sites (three at the 1400-piece cap), each piece digested
+  field by field with the first six per site printed exactly.
+
 - **The damage domain's placed-object entry points are ported.** `abundance/src/damage_actions.grl`
   carries `actions/damage/placed_damage` (cmake/tx/damage): the book rows, `strike_placed`'s skips,
   refusal wording ("damage.placed_energy") and wreck threshold, `first_placed_hit`'s box slab test and
@@ -84,6 +238,18 @@
   `roll_world_loot` exactly. The one place the port first disagreed — the Van's cargo branch —
   was C++ argument evaluation order: `f.picks(table, f.count(..), ..)` draws the count before the
   manifest pick (right-to-left), and the port now keeps that order explicitly.
+- **The whole texture importer runs in Grail: source pixels to `.abtex` bytes, identical to the engine's.**
+  `abundance/src/texture_build.grl` gains `build_mips` - the Kaiser-windowed sinc filter in linear light, the sRGB
+  transfer through `lib/math`'s glibc-exact `sinf`/`powf`, the normal pyramid's 2x2 unnormalised means, alpha
+  coverage preservation, the albedo floor and the cut-out background blend - so the port now covers
+  `engine/materials/src/texture_build.cpp` end to end up to the file's zstd frames.
+  `abundance/tests/texbuild_test.grl` matches all 86 lines of the engine's own `build_mips`/`build_texture`: seven
+  fixtures (tiled BC4 under repeat and clamp, a cut-out mask, an sRGB-decoded mask, a random BC4 chain, an untiled
+  BC5 normal with green-down, an untiled RGBA16F LUT), each chain built from its source image on both sides, then
+  every encoded payload. The mip chains are committed as source images, not chains. Two byte-exactness findings from
+  the filter: the 2x2 normal box accumulates in single precision, and the engine rounds a normal's length to `f32`
+  before dividing by it (a double length costs 1 ulp at mip 2).
+
 - **The frame loop is wired headless: session, job scheduler and render graph's plan in one
   frame boundary.** `abundance/src/frame_loop.grl` runs a frame as `engine/core/engine.cpp` does —
   the session's boundary commits the authority step, the frame's payload goes to one scheduler job
@@ -160,16 +326,18 @@
   u64 respawn container), `survival.join` (string digest, u64 account, u64 character),
   `survival.wetness` (u64 character id, u32 life sequence, two f64s), `survival.habitation_water`
   (i32 x, i32 y, i64 owned quanta, f64 remainder), `gathering.harvesting` (one opaque
-  `vector<u8>`) and `gathering.tree_regrowth` (a vector of u64 seed + f64 remainder, then f64
-  last-advanced). Record tables are a u32 record count then the records' fields in AB_TX_FIELDS
-  order. Decoding is the field codec's: an object count at most 2^22 and at most one per remaining
+  `vector<u8>`), `gathering.tree_regrowth` (a vector of u64 seed + f64 remainder, then f64
+  last-advanced), `inventory.hotbar_selection` (u64 character, u32 slot, u64 sequence, bool),
+  `power.portable_charge` (an `optional` of seven u64s: one tag byte, refused above 1) and
+  `world.block_damage` (WorldCell's three i32, u16 damage, u8 face). Record tables are a u32 record
+  count then the records' fields in AB_TX_FIELDS order. Decoding is the field codec's: an object count at most 2^22 and at most one per remaining
   byte, a string a u32 length at most 65536, a `vector<u8>` bounded only by what remains (the
   harvesting book is deliberately not string-capped), exact consumption, and no key-order check
   (only put() sorts). The reference builds the tables through their own put(), saves them with the
   engine's World::encode_tables, prints every field with floats as bits and signed integers in two's
   complement, and replays sixteen mutated payloads through the engine's decode_tables, whose
   "payload does not load (table N name)" wording the port reproduces verbatim;
-  `abundance/tests/tx_tables_test.grl` matches all 43 lines and re-encodes each blob byte for byte.
+  `abundance/tests/tx_tables_test.grl` matches all 59 lines and re-encodes each blob byte for byte.
 
   checkpoint envelope with the survival record tables - `survival.life` (u64 character id, u64
   respawn container), `survival.join` (string digest, u64 account, u64 character) and
