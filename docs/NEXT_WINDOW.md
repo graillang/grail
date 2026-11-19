@@ -52,6 +52,24 @@ is not worth the cost; the descriptions in each lane's note are the handoff. Del
 `.work` is safe for build caches and unsafe for drafts: from now on, drafts belong in the lane's note
 or on a pushed branch, not in `.work`.
 
+## Where drafts live now
+
+Every draft that was parked in a worktree's `.work` has been copied to that worktree's root as
+`WIP_<lane>_<path>` (and the terrain lane's `SURFACE_WIP.abn-wg-terrain.grl` was already there). Those
+survive a `.work` clear. Two drafts are still genuinely gone and must be rewritten:
+
+- `abn_wg_feat`'s 959-line `Builder` patch;
+- `abn_tools`' content gc/heal module, driver and CLI test.
+
+Drafts found at a worktree root today:
+
+| Lane | File |
+|---|---|
+| `abn-gp-prod` | `WIP_abn-gp-prod_validator-draft_*` — the `validate_item_content_definition` slice, its reference and `reference-expected.txt` (3325 lines compiled, diff unconfirmed) |
+| `abn-gp-world` | `WIP_abn-gp-world_scratch_wip_input_mapping*` — the key-bindings model, 1522/1540 lines |
+| `abn-ecs` | `WIP_abn-ecs_glibc-sin-cos-wip.patch` — superseded by the landed `lib/math_glibc` sin/cos |
+| `abn-wg-terrain` | `SURFACE_WIP.abn-wg-terrain.grl` — the four surface passes, compiled, ungated |
+
 ## First item per lane
 
 Taken from each lane's own resume note at hand-off. Where a lane has no note, the last reported
