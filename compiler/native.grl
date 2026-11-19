@@ -11659,6 +11659,113 @@ fn pv_ir_atoms<a>(c: (&a mut C), lo: u64, hi: u64) -> Atom[] {
     }
     return out;
 }
+// The atoms of each `&&` conjunct of a condition at its own depth that the prover can read, the
+// others (an `||`, a `!`, anything unread) left out: every conjunct holds where the whole does.
+fn pv_ir_conjuncts<a>(c: (&a mut C), lo: u64, hi: u64) -> Atom[] {
+    mut out = Atom[];
+    if (lo >= hi) || !pv_ir_live(&c) || pv_span_calls(&mut c, lo, hi) {
+        return out;
+    }
+    mut depth = 0;
+    mut start = lo;
+    mut i = lo;
+    mut parts = 0;
+    while i <= hi {
+        mut k = 0;
+        if i < hi {
+            k = kind_at(&mut c, i);
+        }
+        if (k == 40) || (k == 91) || (k == 123) {
+            depth += 1;
+        }
+        if ((k == 41) || (k == 93) || (k == 125)) && (depth > 0) {
+            depth -= 1;
+        }
+        if (i == hi) || ((k == 273) && (depth == 0)) {
+            if parts == 0 && (i == hi) {
+                // No `&&` at the condition's own depth: there is nothing to split.
+                return out;
+            }
+            parts += 1;
+            if start < i {
+                mut raws = Atom[];
+                if pv_atoms(&mut c, start, i, &mut raws) {
+                    mut facts = Atom[];
+                    pv_ir_read(&mut c, &mut facts);
+                    mut got = Atom[];
+                    if pv_settle_all(&mut c, &raws, &mut facts, &mut got) {
+                        for j in got.len() {
+                            if out.len() < 16 {
+                                out.push(copy_atom_value(&got[j]));
+                            }
+                        }
+                    }
+                }
+            }
+            start = i + 1;
+        }
+        i += 1;
+    }
+    return out;
+}
+// Where the right operand of `&&` (k 273) or `||` (274) that starts at `lo` ends, or past it: the first
+// token at its own depth that closes, separates or opens a block, and for `&&` also the next `&&` or
+// `||`, for `||` the next `||`. Ending late only widens the span a caller checks.
+fn pv_operand_end<a>(c: (&a mut C), lo: u64, k: u64) -> u64 {
+    mut depth = 0;
+    mut i = lo;
+    while i < c.toks.len() {
+        t := kind_at(&mut c, i);
+        if t == 0 {
+            return i;
+        }
+        if depth == 0 {
+            if (t == 41) || (t == 93) || (t == 125) || (t == 44) || (t == 59) || (t == 123) || (t == 274) {
+                return i;
+            }
+            if (t == 273) && (k == 273) {
+                return i;
+            }
+        }
+        if (t == 40) || (t == 91) || (t == 123) {
+            depth += 1;
+        }
+        if (t == 41) || (t == 93) || (t == 125) {
+            depth -= 1;
+        }
+        i += 1;
+    }
+    return i;
+}
+// What the left operand of `&&` states while its right operand runs (the right runs only when the
+// left is true), and for `||` its negation (the right runs only when it is false); nothing when the
+// right operand calls, takes a mutable loan or holds a block, any of which could write what the
+// atoms name before the access they would prove.
+fn pv_short_facts<a>(c: (&a mut C), k: u64, lstart: u64, op_at: u64) -> Atom[] {
+    mut out = Atom[];
+    if !pv_ir_live(&c) || (lstart >= op_at) {
+        return out;
+    }
+    rs := op_at + 1;
+    re := pv_operand_end(&mut c, rs, k);
+    if pv_span_calls(&mut c, rs, re) {
+        return out;
+    }
+    for i in rs..re {
+        if kind_at(&mut c, i) == 123 {
+            return out;
+        }
+    }
+    left := pv_ir_atoms(&mut c, lstart, op_at);
+    if k == 274 {
+        pv_negation(&left, &mut out);
+        return out;
+    }
+    if left.len() != 0 {
+        return left;
+    }
+    return pv_ir_conjuncts(&mut c, lstart, op_at);
+}
 // A statement keyword whose own conditions and statements report what they do as they are compiled.
 // A statement that calls may write through the names it mentions, so what they meant before it is
 // forgotten after it. A compound statement is not scanned here: its condition and its own statements
@@ -51101,7 +51208,21 @@ fn expr_rest<a>(c: (&a mut C), min: u64, expected: u64, lstart: u64, first: Val)
                                         jump(&mut c, view("jne"), done);
                                     }
                                 }
+                                // What the left operand says holds while the right one runs.
+                                mut scoped = false;
+                                if c.raw == 0 {
+                                    short_facts := pv_short_facts(&mut c, k, lstart, c.pos - 1);
+                                    if short_facts.len() != 0 {
+                                        saved_pending := exchange(&mut c.pv_pending, short_facts);
+                                        pv_ir_open(&mut c);
+                                        exchange(&mut c.pv_pending, saved_pending);
+                                        scoped = true;
+                                    }
+                                }
                                 right := expr(&mut c, p + 1);
+                                if scoped {
+                                    pv_ir_close(&mut c);
+                                }
                                 rt := right.ty;
                                 if c.raw == 0 {
                                     if !(is_bool(&mut c, rt) || rt == 0) {
@@ -52958,6 +53079,11 @@ fn if_value<a>(c: (&a mut C), hint: u64, hint_at: u64, into: u64) -> Val {
     mut conds = pv_ir_atoms(&mut c, cond_at, cond_end);
     mut gains = Atom[];
     pv_negation(&conds, &mut gains);
+    // A condition the prover cannot read whole (an `||` or a `!` in it) still states each `&&`
+    // conjunct it can read, in the block it guards; the `else` gains nothing from a partial read.
+    if conds.len() == 0 {
+        conds = pv_ir_conjuncts(&mut c, cond_at, cond_end);
+    }
     pv_ir_statement(&mut c, cond_at, cond_end);
     // An `if` in expression position needs an `else`: without one, nothing names the value when the
     // condition is false. Said before either arm compiles, so it points at the `if`.
@@ -54516,6 +54642,11 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
         mut conds = pv_ir_atoms(&mut c, cond_at, cond_end);
         mut gains = Atom[];
         pv_negation(&conds, &mut gains);
+        // A condition the prover cannot read whole (an `||` or a `!` in it) still states each `&&`
+        // conjunct it can read, in the block it guards; the `else` gains nothing from a partial read.
+        if conds.len() == 0 {
+            conds = pv_ir_conjuncts(&mut c, cond_at, cond_end);
+        }
         pv_ir_statement(&mut c, cond_at, cond_end);
         get(&mut c, v.t, view("%rax"));
         no := label(&mut c);
