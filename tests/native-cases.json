@@ -19053,6 +19053,69 @@
     "note": "the loop-invariant pass: `v.len == n` and `tmp.len == v.len` are killed by the swap in the body, kept under check, and hold again where the body ends (the swap re-establishes them through `s`); so they hold after the loop and both reads are proved"
   },
   {
+    "name": "pv-and-or-operands-prove-index",
+    "source": "fn pick(n0: u64) -> u64 {\n    n: u64 := 8;\n    mut v = u64[];\n    for i in n {\n        v.push((i * 5 + n0) % 8);\n    }\n    mut s: u64 = 0;\n    for a in 10 {\n        for b in 10 {\n            if (a < n) && ((b >= n) || (v[a] <= v[b])) {\n                s += v[a];\n            } else {\n                s += 1;\n            }\n        }\n    }\n    return s;\n}\nfn main() {\n    println(pick(3));\n}\n",
+    "stdout": "188\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "asmAbsent": [
+      {
+        "in": "f_main_pick",
+        "text": "call rt_fail"
+      }
+    ],
+    "note": "the left operand of `&&` holds while its right operand runs and the negation of a single comparison on the left of `||` does too, so `v[a]` after `a < n &&` and `v[b]` after `b >= n ||` are proved; an `if` whose condition cannot be read whole (it has an `||`) still states each `&&` conjunct it can read in its block, so the arm's `v[a]` is proved too"
+  },
+  {
+    "name": "pv-or-right-operand-keeps-check",
+    "source": "fn probe(v: u64[], a: u64) -> bool {\n    n := v.len();\n    return (a < n) || (v[a] == 0);\n}\nfn main() {\n    mut v = u64[];\n    for i in 8 {\n        v.push(i);\n    }\n    println(probe(v.copy(), 3));\n    println(probe(v, 9));\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "true\n",
+    "stderr": [
+      "error: index 9 out of bounds for length 8"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "the right operand of `a < n || v[a] == 0` runs only when `a < n` is false, so what it knows is `n <= a`: `v[a]` keeps its check and fails"
+  },
+  {
+    "name": "pv-and-right-operand-call-keeps-check",
+    "source": "fn bump(i: &mut u64) -> bool {\n    *i = *i + 1;\n    return true;\n}\nfn main() {\n    mut v = u64[];\n    for k in 8 {\n        v.push(k);\n    }\n    n := v.len();\n    mut i: u64 = 6;\n    while (i < n) && (bump(&mut i) && (v[i] < 100)) {\n        println(i);\n    }\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "7\n",
+    "stderr": [
+      "error: index 8 out of bounds for length 8"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "a right operand that calls (here with `&mut i`) could change what the left operand stated before the access it would prove, so `i < n` is not carried into it and `v[i]` stays checked"
+  },
+  {
+    "name": "pv-partial-condition-else-keeps-check",
+    "source": "fn get(v: u64[], a: u64, b: u64) -> u64 {\n    n := v.len();\n    if (a >= n) && ((b == 0) || (b == 1)) {\n        return 0;\n    } else {\n        return v[a];\n    }\n}\nfn main() {\n    mut v = u64[];\n    for k in 8 {\n        v.push(k + 10);\n    }\n    println(get(v.copy(), 3, 5));\n    println(get(v, 9, 5));\n}\n",
+    "signal": "SIGABRT",
+    "stdout": "13\n",
+    "stderr": [
+      "error: index 9 out of bounds for length 8"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "a condition read only in part (`a >= n` of `a >= n && (b == 0 || b == 1)`) proves its conjuncts in the `then` block, but its negation is not `a < n`: the `else` arm's `v[a]` stays checked"
+  },
+  {
     "name": "bce-loop-invariant-broken-kept",
     "source": "fn last(n0: u64) -> u64 {\n    n: u64 := 8;\n    mut v = u64[];\n    for i in n {\n        v.push(i + n0);\n    }\n    mut w: u64 = 1;\n    while w < n {\n        v.pop()!;\n        w = w * 2;\n    }\n    return v[n - 1];\n}\nfn main() {\n    println(last(0));\n}\n",
     "signal": "SIGABRT",

@@ -1,5 +1,26 @@
 ## Unreleased
 
+- **Faster `sort` in both builds: a merge loop's bounds checks and header loads leave the loop.**
+  Release (`--release --overflow=wrap`) `sort` runs 4.53 G instructions instead of 6.94 G (C: 4.26 G)
+  and 0.885 s of CPU time against C's 0.793 s (1.12x; it was 1.30x), Rust 0.836, Go 0.828 and C++
+  0.503 (std::merge, branch-free) in the same run; development builds run 9.47 G instead of 11.21 G
+  and 1.010 s against Go's 0.828 (1.22x; it was 1.43x). (1) The prover reads
+  short-circuit operators: the left operand of `&&` holds while its right operand runs, and the
+  negation of a single comparison on the left of `||` does too, so `(i < mid) && ((j >= hi) || (v[i]
+  <= v[j]))` proves `v[i]` (`i < mid`, `mid <= n`) and `v[j]` (`j < hi`); a right operand that calls,
+  takes a mutable loan or holds a block gets nothing. An `if` whose condition cannot be read whole
+  (an `||` or a `!` in it) still states each `&&` conjunct it can read in its block, so the arm's
+  `tmp[k] = v[i]` is proved too; its `else` gains nothing from a partial read. (2) The LLVM lifter
+  uses the front end's loop-stability fact (FACT_LOOP_STABLE, until now read only by the native
+  optimiser): at the head of such a loop the sequence's `data` and `len` are read once, with the
+  header tag, and every accessor inside the loop uses them, when the head dominates the loop's lines
+  (no jump from outside them names a label inside). The accessors' own `data` loads sat under a
+  branch behind an `inttoptr` that LLVM can never prove safe to hoist, so both vectors' data
+  pointers were re-read for every element. The merge loop is now the shape C's is: `v[i]` loaded
+  once, ahead of the `j >= hi` test, both data pointers in registers, and one bounds check left (the
+  `else` arm's `v[j]`, which needs the merge invariant; Rust keeps the same one). Also `json` runs
+  4.3% fewer release instructions and `strings` 0.8% fewer; no other benchmark changes.
+
 - **One form for named and anonymous functions.** A function literal is a named function with the
   name dropped: `fn(a: u64) -> u64 { a * 2 }` is a closure, usable wherever one is (an argument, a
   binding, a returned value, a body's tail), capturing by the closure rules. `|params| body` stays
