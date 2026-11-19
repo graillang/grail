@@ -1,5 +1,10 @@
 ## Unreleased
 
+- Fixed: the suite rebuilds a shim library when the commit has moved since that shim was built, not
+  only when the library is absent. A library built at an older commit links as a successful build and
+  then fails on a symbol the port now calls (`gr_sdl_pref_path`, `gr_jolt_overlap_capsule`), which the
+  mtime-based up-to-date check cannot see when a checkout moves source files without touching a
+  neighbour. Each shim is now stamped with the commit it was built at.
 - **Abundance port: a dispatch takes its pipeline from the render graph plan.** The executor reads
   each `Dispatch.pipeline` (the id the plan records when a body binds), falling back to the body's id
   for a plan that carries none, and rebinds the pipeline, its push-constant block and the bindless
