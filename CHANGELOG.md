@@ -1,5 +1,9 @@
 ## Unreleased
 
+- **The landing service removes each leg's build cache when the leg ends.** Every gate leg and retry
+  had a fresh `GRAIL_CACHE_DIR` in /tmp that nothing removed - about 17k files each - and /tmp (a
+  tmpfs) ran out of inodes after two days of landings.
+
 - **Abundance port: a dispatch takes its pipeline from the render graph plan.** The executor reads
   each `Dispatch.pipeline` (the id the plan records when a body binds), falling back to the body's id
   for a plan that carries none, and rebinds the pipeline, its push-constant block and the bindless

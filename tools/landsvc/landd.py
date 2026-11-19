@@ -128,11 +128,19 @@ def gate(out, stamp, post=False):
     if not C: return False, ['the compiler does not build (build.log)'], None
     env = dict(os.environ, GRAIL_COMPILER=C, GRAIL_FFI_COMPILER=C)
     if post: env['GRAIL_LAND_MODE'] = 'post'
+    # Each leg gets a build cache of its own, removed when the leg ends (they are ~17k files each, and
+    # /tmp is a tmpfs whose inodes ran out when they were kept).
     def start(name, cmd):
         d = tempfile.mkdtemp(prefix='landcache-')
         e = dict(env, GRAIL_CACHE_DIR=d)
         f = open(f'{out}/{name}.log', 'w')
-        return name, subprocess.Popen(cmd, cwd=Q, env=e, stdout=f, stderr=subprocess.STDOUT, shell=True, start_new_session=True), f
+        return name, subprocess.Popen(cmd, cwd=Q, env=e, stdout=f, stderr=subprocess.STDOUT, shell=True, start_new_session=True), f, d
+    def fresh(cmd):
+        d = tempfile.mkdtemp(prefix='landcache-')
+        try:
+            return sh(cmd, env=dict(env, GRAIL_CACHE_DIR=d), limit=LEG_LIMIT)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
     # The suites come from the tree being gated (tools/landsvc/suites.txt: one `name command...` per
     # line), so a branch that adds a suite lands its fix and its gate leg together.
     suites = []
@@ -151,7 +159,7 @@ def gate(out, stamp, post=False):
     # Every leg runs in its own process group: a leg that outlives LEG_LIMIT is killed whole, and
     # whatever a finished leg left behind (a compiler orphaned when its driver was killed) goes with it.
     deadline = time.time() + LEG_LIMIT
-    for name, p, f in legs:
+    for name, p, f, d in legs:
         try:
             codes[name] = p.wait(timeout=max(1, deadline - time.time()))
         except subprocess.TimeoutExpired:
@@ -160,6 +168,7 @@ def gate(out, stamp, post=False):
         except (ProcessLookupError, PermissionError): pass
         p.wait()
         f.write(f'exit={codes[name]}\n'); f.close()
+        shutil.rmtree(d, ignore_errors=True)
     ks = known_lines(Q)
     def known(s): return any(k in s for k in ks)
     ok = True
@@ -171,7 +180,7 @@ def gate(out, stamp, post=False):
             notes.append(f'FAIL: x86 shard {i} ended without a verdict'); ok = False
     if fails:
         flt = '^(' + '|'.join(re.escape(c) for c in sorted(fails)) + ')$'
-        r = sh(f'GRAIL_CACHE_DIR=$(mktemp -d) GRAIL_TEST_FILTER=\'{flt}\' bun tools/test-native.mjs x86_64 > {out}/x86_retry.log 2>&1', env=env, limit=LEG_LIMIT)
+        r = fresh(f'GRAIL_TEST_FILTER=\'{flt}\' bun tools/test-native.mjs x86_64 > {out}/x86_retry.log 2>&1')
         txt = open(f'{out}/x86_retry.log').read()
         for c in sorted(fails):
             if re.search(rf'^FAIL {re.escape(c)}\b', txt, re.M):
@@ -182,7 +191,7 @@ def gate(out, stamp, post=False):
     for n in ['selfhost'] + [n for n, _ in suites]:
         if codes[n] == 0: continue
         cmd = retry_cmd[n]
-        r = sh(f'GRAIL_CACHE_DIR=$(mktemp -d) {cmd} > {out}/{n}.retry.log 2>&1', env=env, limit=LEG_LIMIT)
+        r = fresh(f'{cmd} > {out}/{n}.retry.log 2>&1')
         if r.returncode == 0: notes.append(f'flake (passed alone): {n}'); continue
         lines = [l for l in open(f'{out}/{n}.retry.log') if re.match(r'^(FAIL|error)', l)][:20]
         unknown = [l.strip() for l in lines if not known(l)]
