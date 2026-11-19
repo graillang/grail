@@ -1,5 +1,25 @@
 ## Unreleased
 
+- **Abundance: the mesa coupling and marks are ported and bit-exact.** `src/coherent_mesa.grl` gains
+  `mesa_stepped_sites` (the handover to the stepped-hills pass: one Mesa-style site per built region,
+  carrying the caprock, the seed and the `masked` bit that says the Mesa mask already holds the
+  warped edge), `finish_mesa_marks` (flat caprock tops become `MesaTop` at weight 153) and
+  `apply_mesa_biomes` (mesa country drying into Badlands in two-label stages, so the authority's
+  mixture is never replaced by an invented third label and water keeps its own). Gated on the same
+  world: 1 site, 27 marked cells, 1257 biome cells changed (188 Badlands, 362 Desert), all three
+  array digests equal — 48 of 48 lines. The port compares the river cut-off in f32, as the engine's
+  discharge channel does; comparing it in f64 changed 89 cells, which is how the difference was
+  found.
+
+- **Abundance: the mesa planner's ranked keep-apart selection is now gated on a multi-region
+  world.** The mesa fixture is a 12 km plain of bedded rock with four separated basins and one
+  mediocre corner basin. `mesa.multi` keeps four regions while rejecting candidates for separation
+  and stopping the ranked loop on a score below the second-region threshold (0.6193); the two runs
+  beside it show each rule biting on its own — with the threshold off the same world yields seven
+  regions, and forced selection at the same footprint yields six — so the ranking and the separation
+  rule can no longer silently differ. The builder is gated twice: as the engine runs it (the washes
+  carve the landform, no cell reaches the cap) and with the wash thresholds out of reach (the tops
+  reach the caprock, 74 cap cells), which exercises the cap branch too. 36 of 36 lines.
 - **The soundscape bed and the ambient-emitter synth run through the audio shim.** `platform_audio.grl`
   gains `bed_attach`/`ambience` (audio.cpp's 15-slot input packing) and `emitter_start`/`emitter_set`/
   `emitter_render`; the shim hosts audio.cpp's `SoundscapeNode` (a continuous node on the hearing
