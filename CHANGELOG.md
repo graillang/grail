@@ -20,6 +20,23 @@
   pin it, and the engine's SSE2 and scalar paths agree byte for byte on the whole corpus. BC7 and
   BC6H *encode* remain unported (bc7e's and texcomp's ISPC mode search).
 
+- **The shader pipeline takes `ui/`, and with it every area of the inventory.** `canvas.vs`/`canvas.ps`
+  (10.8 KB) at pin `ca1f1bc05b`: the pipeline now carries 180 entries and 10.56 MB of SPIR-V across all
+  ten areas (core, post, sky, geometry, lighting, water, materials, characters, vfx, ui), with 64 shared
+  structs pinned field by field. What remains vendorable-but-absent is only what the engine's CMake
+  mirror step reaches, each entry recorded with its blocking include in
+  `docs/design/abundance-shaders.md`.
+
+- **The shader pipeline takes `materials/`, 3 of its 9 entries.** `debug_view`, `mean_albedo` and the
+  screen-tile builder: 20 KB of SPIR-V at pin `ca1f1bc05b`, the layout pin growing from 61 to 64
+  structs. All six `resolve*` passes stay recorded as skipped: a material resolve shades a G-buffer and
+  needs the terrain page contract, so materials is the one area that is mostly blocked rather than
+  mostly taken.
+
+- **The shader pipeline takes `vfx/`, 12 of its 14 entries.** The blast, dust and glass vertex/pixel
+  pairs, both sorts, the dust motion pass, the glass scene copy, surface decals and thermal heat:
+  265 KB of SPIR-V at pin `ca1f1bc05b`, the layout pin growing from 54 to 61 structs. The two
+  simulation compute passes stay recorded as skipped for the terrain mirror.
 - **The Jolt surface closes with the overlap query.** `gr_jolt_overlap_capsule` is one `CollideShape`
   of the same capsule the cast sweeps, stopped at the first hit: `abundance/src/jolt.grl` now answers
   the core's `overlap` contract (a boolean, with `invalid_request` for a capsule shorter than its own
