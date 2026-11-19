@@ -1,5 +1,23 @@
 ## Unreleased
 
+- **One form for named and anonymous functions.** A function literal is a named function with the
+  name dropped: `fn(a: u64) -> u64 { a * 2 }` is a closure, usable wherever one is (an argument, a
+  binding, a returned value, a body's tail), capturing by the closure rules. `|params| body` stays
+  as its abbreviation, with the same type; parameter and result types may be left out of either
+  where the call fixes them (`v.map(fn(x) { x * 2 })`, `(fn(x) { x + 1 })(41)`). The `fn` form's
+  body is always a block. Inside a body, `fn name(params) -> R { body }` declares a local function -
+  that literal bound to `name` - which may capture and may call itself; a recursive one writes its
+  result type (refused otherwise, with a help line), may not write what it captured, and a local
+  function takes no type or lifetime parameters. Top-level functions are unchanged. A closure or
+  literal that captures nothing now converts to a function pointer `fn(T) -> R` where one is
+  expected (it used to be refused); one that captures is refused with the captures named and
+  `Fn(T) -> R` suggested as the type to take. Assigning a different closure to a binding that holds
+  a closure as its own type (`mut h = |x: u64| x * 2; h = |x: u64| x * 3;`) is now refused - it used
+  to store the new closure and keep calling the old one; `mut h: Fn(u64) -> u64 = ..` holds either.
+  `grail fmt` lays out the new forms and writes a literal's final `return x;` as its tail. The book
+  explains the one form, local functions and when to take `Fn(..)` rather than `fn(..)`
+  (*Closures*, *Functions and recursion*, the Rust cheatsheet).
+
 - **`*p` reads and writes through raw pointers.** Inside `unsafe`, `*p` is `p.read()` and `*p = v` is
   `p.write(v)` (it needs a `*mut T`); `*p += v` and the other compound assignments read, combine and
   write, and `**pp` / `**pp = v` go through a pointer to a pointer. The contract is `read`/`write`'s:
