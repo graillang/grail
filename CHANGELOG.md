@@ -1,5 +1,13 @@
 ## Unreleased
 
+- **Moving an array out of a record field no longer frees its elements twice.** `a := n.a`,
+  `m.a = n.a`, `eat(n.a)` and `exchange(&mut m.a, n.a)`, with `n.a: [string; 2]` held inline in a
+  record, left the field's words in place, so the record's drop and the new owner's both freed the
+  same strings (an abort at exit; for the assignment, a crash on the copy). The array is now copied
+  into storage of its own before anything swaps or stores through it, and the field is left zero, as
+  an inline record already is. A plain `[u64; 2]` exchanged out of a field also no longer overwrites
+  that field (corpus case `move-array-field`).
+
 - **Item content's vocabulary and starter catalogue are ported.** `abundance/src/item_content.grl`
   carries `item_content_catalog.hpp`/`item_content_fwd.hpp` and the starter definition from
   `Private/item_content_catalog.cpp`: the ten ItemContentCategories with their labels (and the

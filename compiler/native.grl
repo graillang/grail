@@ -31918,8 +31918,36 @@ fn holder_drop<a>(c: (&a mut C), ty: u64) -> unit {
 // A value that is about to be owned or moved and is still an interior address gets a box of its
 // own holding a copy of the words, and the slot holds the box from here on.
 fn materialise<a>(c: (&a mut C), slot: u64, ty: u64) -> unit {
-    // An interior array is copied into storage of its own when it is bound or moved (move_value).
+    // An array is copied into storage of its own when it is bound or moved (move_value). One held
+    // inline in a record (an interior address) is copied here first, before anything swaps or
+    // stores through it: `exchange(&mut m.a, n.a)` swapped the words inside `n`, and `m.a = n.a`
+    // stored them after `move_out` had left them in place. The field's words are then left zero
+    // when its elements own something, as a record's are below, so the holder's in-place drop
+    // finds nothing there (`a := n.a` with `a: [string; 2]` freed both strings twice).
     if is_array(&mut c, ty) {
+        mut found = c.interior.len();
+        for i in c.interior.len() {
+            if c.interior[i] == slot {
+                found = i;
+            }
+        }
+        if found == c.interior.len() {
+            return ();
+        }
+        c.interior[found] = 18446744073709551615;
+        copy := array_fresh_copy(&mut c, slot, ty);
+        if array_owned(&mut c, ty) {
+            get(&mut c, slot, view("%rcx"));
+            for j in array_bytes(&mut c, ty) / 8 {
+                o(&mut c, view("movq $0,"));
+                on(&mut c, j * 8);
+                o(&mut c, view("(%rcx)\n"));
+            }
+        }
+        get(&mut c, copy, view("%rax"));
+        o(&mut c, view("movq %rax,"));
+        stack_slot(&mut c, slot);
+        c.out.push(10);
         return ();
     }
     if framed(&mut c, ty) {
