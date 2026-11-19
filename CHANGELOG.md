@@ -1,5 +1,6 @@
 ## Unreleased
 
+- **The book's sidebar drops its "Find a topic" subtitle;** the search box (labelled for screen readers) sits under the title.
 - **The languages overview chart reads plainly.** Its bars start at 1× (the fastest language's time)
   on one logarithmic scale shared by the release and development groups, each group lists the
   fastest first, the values are written as multiples (1.17×) with how often the language was the
