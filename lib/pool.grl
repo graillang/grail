@@ -6,7 +6,7 @@ module pool;
 // THE OWNERSHIP RULE, in one line: everything a job's closure touches it owns or borrows
 // exclusively. A job takes its inputs by value, builds an owned result, and the only shared memory
 // two jobs can see is what the language says they may: read-only data classified shareable. On top
-// of that stage 2 adds one primitive whose inputs are *constructed* disjoint - `split_mut` hands
+// of that stage 2 adds one primitive whose inputs are *constructed* disjoint - `par_chunks_mut` hands
 // each job an exclusive `&mut [T]` over its own region of the caller's slice - and a job handle,
 // `spawn`/`wait`, for the two-statement form. No reference ever crosses a job boundary.
 //
@@ -46,15 +46,95 @@ module pool;
 // on how many workers there are, so a reduction gives the same bits on any number of cores.
 //
 // A named `fn` passed where a `Fn` is expected needs the type arguments written out
-// (`pool::map<u64,u64>(items, work)`, `pool::spawn<u64>(work)`) - a `fn` value and an `Fn` signature
+// (`pool::spawn<u64>(work)`, `pool::run<u64>(n, work)`) - a `fn` value and an `Fn` signature
 // are different types to inference, which is a property of the language, not of this module. An
 // anonymous closure infers. The builtins (`parallel_map`, `parallel_split`, `parallel_spawn`)
 // accept either form directly.
 
-// One job per input element, results in input order. The closure captures are read-only on every
-// worker, so they must be plain data (see above).
-pub fn map<T:Send,U:Send+Owned>(items:T[],f:Fn<Share>(T)->U)->U[]{
-    return parallel_map(items,0,|item: T, unused: u64| -> U f(item));
+// The data-parallel forms are methods on the data, named after rayon's: `v.par_map(f)`,
+// `v.into_par_chunks(grain, f)`, `data.par_chunks_mut(grain, f)`, `data.par_chunks_mut_at(grain, f)`
+// and `data.par_chunks_reduce(grain, zero, leaf, merge)`. The index-range forms (`run`, `range`,
+// `reduce`), the multi-column `zip2`..`zip4` and the job handle stay functions of this module.
+
+impl<T: Send> T[] {
+    // One job per element, results in input order (rayon's `v.into_par_iter().map(f).collect()`).
+    // The closure captures are read-only on every worker, so they must be plain data (see above).
+    pub fn par_map<U: Send + Owned>(self, f: Fn<Share>(T) -> U) -> U[] {
+        return parallel_map(self, 0, |item: T, unused: u64| -> U f(item));
+    }
+}
+
+impl<T: Send + Owned> T[] {
+    // The owned, chunked shape: consume the vector, hand each job one contiguous, exclusively owned
+    // piece of at most `grain` elements, and return the results in piece order. Elements are moved
+    // into their piece, never copied, and no piece can see another. Moving every element into a
+    // piece is two passes over the data; `par_chunks_mut` hands out the caller's own elements
+    // instead.
+    pub fn into_par_chunks<U: Send + Owned>(self, grain: u64 where grain > 0, f: Fn<Share>(T[]) -> U) -> U[] {
+        n := self.len();
+        if n == 0 {
+            return U[];
+        }
+        // Reverse once so pieces come out in input order while elements are popped (moved), not
+        // copied.
+        mut source = self;
+        mut rev = T[];
+        while let Some(popped) = source.pop() {
+            rev.push(popped);
+        }
+        mut parts = T[][];
+        while rev.len() != 0 {
+            mut take = grain;
+            if rev.len() < take {
+                take = rev.len();
+            }
+            mut part = T[];
+            mut i = 0;
+            while i < take {
+                part.push(rev.pop()!);
+                i += 1;
+            }
+            parts.push(part);
+        }
+        return parallel_map(parts, 0, |part: T[], unused: u64| -> U f(part));
+    }
+}
+
+impl<T: Send> [T] {
+    // The in-place shape, and the one a frame's systems want: the compiler splits the exclusive
+    // slice into disjoint exclusive pieces of at most `grain` elements, and each job writes the
+    // caller's own elements - nothing is moved and nothing is copied. Piece k is
+    // [k*grain, min(n, (k+1)*grain)), a function of the length and the grain alone, so no element
+    // can belong to two jobs, no job can address another's region, and the pieces are the same on
+    // any machine.
+    //
+    // Inside the callback ordinary Grail rules apply, which is what makes the writes safe: the slice
+    // it holds has its own length, so an index past it is a bounds abort, and there is no way to
+    // name the caller's data again - the receiver is an exclusive loan of the whole thing, so any
+    // capture that could reach it (a move, a shared slice, an exclusive slice) is a borrow error at
+    // the call site.
+    pub fn par_chunks_mut(&mut self, grain: u64 where grain > 0, f: Fn<Share>((&mut [T])) -> unit) {
+        parallel_split(self, grain, f);
+    }
+
+    // par_chunks_mut with each piece's first index: f(base, piece), where piece[i] is
+    // data[base + i] - for reading a captured table at the same rows, or writing per-piece results
+    // into a vector indexed by base / grain (docs/design/simd-layout-parallel-loops.md 4.2). The
+    // pieces are par_chunks_mut's.
+    pub fn par_chunks_mut_at(&mut self, grain: u64 where grain > 0, f: Fn<Share>(u64, (&mut [T])) -> unit) {
+        parallel_split(self, grain, f);
+    }
+}
+
+impl<T: Share> [T] {
+    // A read-only reduction: `leaf` per piece of at most `grain` elements, the results folded by
+    // `merge` in index order from `zero` - merge(...merge(merge(zero, r0), r1)..., rk) (rayon's
+    // `par_chunks(grain).map(leaf).reduce(..)`, with a fixed fold order). The pieces and the fold
+    // depend on (length, grain) alone, so a floating-point sum is the same bits on any number of
+    // workers (decision D4).
+    pub fn par_chunks_reduce<R: Send + Owned>(&self, grain: u64 where grain > 0, zero: R, leaf: Fn<Share>((&[T])) -> R, merge: Fn<Share>(R, R) -> R) -> R {
+        return reduce<R>(self.len(), grain, zero, |lo: u64, hi: u64| -> R leaf(&self[lo: hi]), merge);
+    }
 }
 
 // `count` independent jobs, job `i` calling f(i); results in index order, so this is the parallel
@@ -63,57 +143,6 @@ pub fn run<U:Send+Owned>(count:u64,f:Fn<Share>(u64)->U)->U[]{
     mut index=u64[];
     for i in count{index.push(i);}
     return parallel_map(index,0,|i: u64, unused: u64| -> U f(i));
-}
-
-// The owned, chunked shape: consume the vector, hand each job one contiguous, exclusively owned
-// piece of at most `grain` elements, and return the results in piece order. Elements are moved into
-// their piece, never copied, and no piece can see another. Moving every element into a piece is two
-// passes over the data; `split_mut` hands out the caller's own elements instead.
-pub fn split<T:Send+Owned,U:Send+Owned>(data:T[],grain:u64 where grain > 0,f:Fn<Share>(T[])->U)->U[]{
-    n:=data.len();
-    if n==0{return U[];}
-    // Reverse once so pieces come out in input order while elements are popped (moved), not copied.
-    mut source=data;mut rev=T[];
-    while let Some(popped) = source.pop() { rev.push(popped); }
-    mut parts=T[][];
-    while rev.len()!=0{
-        mut take=grain;
-        if rev.len()<take{take=rev.len();}
-        mut part=T[];
-        mut i=0;
-        while i<take{part.push(rev.pop()!);i+=1;}
-        parts.push(part);
-    }
-    return parallel_map(parts,0,|part: T[], unused: u64| -> U f(part));
-}
-
-// The in-place shape, and the one a frame's systems want: the compiler splits the exclusive slice
-// into disjoint exclusive pieces of at most `grain` elements, and each job writes the caller's own
-// elements - nothing is moved and nothing is copied. Piece k is [k*grain, min(n, (k+1)*grain)),
-// a function of the length and the grain alone, so no element can belong to two jobs, no job can
-// address another's region, and the pieces are the same on any machine.
-//
-// Inside the callback ordinary Grail rules apply, which is what makes the writes safe: the slice it
-// holds has its own length, so an index past it is a bounds abort, and there is no way to name the
-// caller's data again - the argument is an exclusive loan of the whole thing, so any capture that
-// could reach it (a move, a shared slice, an exclusive slice) is a borrow error at the call site.
-pub fn split_mut<T:Send>(data: (&mut [T]), grain: u64 where grain > 0, f: Fn<Share>((&mut [T]))->unit) -> unit {
-    parallel_split(data, grain, f);
-}
-
-// split_mut with each piece's first index: f(base, piece), where piece[i] is data[base + i] - for
-// reading a captured table at the same rows, or writing per-piece results into a vector indexed by
-// base / grain (docs/design/simd-layout-parallel-loops.md 4.2). The pieces are split_mut's.
-pub fn chunks_mut_at<T:Send>(data: (&mut [T]), grain: u64 where grain > 0, f: Fn<Share>(u64, (&mut [T]))->unit) -> unit {
-    parallel_split(data, grain, f);
-}
-
-// A read-only reduction over a slice: `leaf` per piece of at most `grain` elements, the results
-// folded by `merge` in index order from `zero` - merge(...merge(merge(zero, r0), r1)..., rk). The
-// pieces and the fold depend on (length, grain) alone, so a floating-point sum is the same bits on
-// any number of workers (decision D4).
-pub fn reduce_chunks<T:Share, R:Send+Owned>(data: (&[T]), grain: u64 where grain > 0, zero: R, leaf: Fn<Share>((&[T]))->R, merge: Fn<Share>(R,R)->R) -> R {
-    return reduce<R>(data.len(), grain, zero, |lo: u64, hi: u64| -> R leaf(&data[lo: hi]), merge);
 }
 
 // Several columns in one split (docs/design/simd-layout-parallel-loops.md 4.2): every slice is cut at

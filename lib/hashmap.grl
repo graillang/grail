@@ -32,6 +32,8 @@ const LOW: u64 = 4294967295;
 pub fn with_seed<K: hash::Hash + hash::Equal, V>(seed0: u64, seed1: u64) -> [K: V] {
     return Map { codes: u64[], keys: K[], values: V[], slots: u64[], base: hash::table_hasher(seed0, seed1) };
 }
+// The free `map_*`, `key_at`, `value_at` and `entry_at` functions are what the compiler lowers map
+// syntax to by name (`m[k]`, `m[k] = v`, `for k, v in &m`); programs call the methods on `Map`.
 pub fn map_len<a, K: hash::Hash + hash::Equal, V>(map: (&a [K: V])) -> u64 {
     return map.codes.len();
 }
@@ -108,9 +110,6 @@ fn erase<a>(slots: (&a mut u64[]), pos: u64) {
         next = (next + 1) & mask;
     }
 }
-pub fn map_contains<a, b, K: hash::Hash + hash::Equal, V>(map: (&a [K: V]), key: (&b K)) -> bool {
-    return map.contains(key);
-}
 pub fn map_get<a, b, K: hash::Hash + hash::Equal, V>(map: (&a [K: V]), key: (&b K)) -> (&a V)? {
     return map.get(key);
 }
@@ -121,29 +120,12 @@ pub fn map_get_mut<a, b, K: hash::Hash
 pub fn map_insert<a, K: hash::Hash + hash::Equal, V>(map: (&a mut [K: V]), key: K, value: V) -> V? {
     return map.insert(key, value);
 }
-pub fn map_remove<a, b, K: hash::Hash + hash::Equal, V>(map: (&a mut [K: V]), key: (&b K)) -> V? {
-    return map.remove(key);
-}
-// The Entry view of an existing pair, or none. Holding it keeps the exclusive map borrow alive.
-pub fn map_entry<a, b, K: hash::Hash
-    + hash::Equal, V>(map: (&a mut [K: V]), key: (&b K)) -> Entry<a, K, V>? {
-    pos := locate(&map, &key, hash::hash_from(key, &map.base));
-    if pos >= map.slots.len() {
-        return None;
-    }
-    index := (map.slots[pos] & LOW) - 1;
-    return Some(Entry { key: &map.keys[index], value: &mut map.values[index] });
-}
 // Iteration by position: `for k, v in &m` lowers to these (`for i in map_len(&m) { k := key_at(&m, i); ... }`).
 pub fn key_at<a, K: hash::Hash + hash::Equal, V>(map: (&a [K: V]), index: u64) -> (&a K) {
     return &map.keys[index];
 }
 pub fn value_at<a, K: hash::Hash + hash::Equal, V>(map: (&a [K: V]), index: u64) -> (&a V) {
     return &map.values[index];
-}
-pub fn value_at_mut<a, K: hash::Hash
-    + hash::Equal, V>(map: (&a mut [K: V]), index: u64) -> (&a mut V) {
-    return &mut map.values[index];
 }
 // Both halves of one stored pair: the shared key and the exclusive value, like `entry`, so an
 // exclusive iteration can update values without losing the key it is walking.
@@ -220,8 +202,14 @@ impl<K: hash::Hash + hash::Equal, V> Map<K, V> {
         self.keys[index] = moved_key;
         return Some(exchange(&mut self.values[index], moved_value));
     }
+    // The Entry view of an existing pair, or none. Holding it keeps the exclusive map borrow alive.
     pub fn entry<a, b>(self: (&a mut Map<K, V>), key: (&b K)) -> Entry<a, K, V>? {
-        return hashmap::map_entry(self, key);
+        pos := hashmap::locate(&self, key, hash::hash_from(key, &self.base));
+        if pos >= self.slots.len() {
+            return None;
+        }
+        index := (self.slots[pos] & hashmap::LOW) - 1;
+        return Some(Entry { key: &self.keys[index], value: &mut self.values[index] });
     }
     pub fn key_at<a>(self: (&a Map<K, V>), index: u64) -> (&a K) {
         return hashmap::key_at(self, index);
@@ -266,7 +254,7 @@ impl<K: hash::Hash + hash::Equal, V> Map<K, V> {
         return hashmap::value_at(self, index);
     }
     pub fn value_at_mut<a>(self: (&a mut Map<K, V>), index: u64) -> (&a mut V) {
-        return hashmap::value_at_mut(self, index);
+        return &mut self.values[index];
     }
     pub fn entry_at<a>(self: (&a mut Map<K, V>), index: u64) -> Entry<a, K, V> {
         return hashmap::entry_at(self, index);

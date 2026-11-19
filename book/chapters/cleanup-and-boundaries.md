@@ -175,7 +175,7 @@ println("{}", b.get().retries);  // the value, borrowed from the handle
 
 `r.get()` hands out `&T`, borrowed for as long as the handle lives, and there is no way to write
 through it: shared mutation is `Arc<Mutex<T>>`, not interior mutability. The last handle to leave
-drops the value and frees the block; a `Weak<T>` (`rc::downgrade(&r)`) keeps the block without
+drops the value and frees the block; a `Weak<T>` (`r.downgrade()`) keeps the block without
 keeping the value alive, so `w.upgrade()` answers `None` once the last strong handle has gone.
 
 `Rc<T>` holds a raw pointer, so the language's own rule makes it thread-affine: it cannot cross to
@@ -210,10 +210,10 @@ is refused by name. `Arc` gives shared *ownership*, not shared *mutation* - that
 ```grl
 use arena;
 mut a = arena::new<Node>();
-root := arena::insert(&mut a, Node { weight: 1 });
-child := arena::insert(&mut a, Node { weight: 2 });
-println("{}", arena::get(&a, &root)!.weight);
-taken := arena::remove(&mut a, &child)!;   // the value comes back, still owned
+root := a.insert(Node { weight: 1 });
+child := a.insert(Node { weight: 2 });
+println("{}", a.get(&root)!.weight);
+taken := a.remove(&child)!;   // the value comes back, still owned
 ```
 
 `get`/`get_mut` borrow the value, `remove` returns it, and a key whose value is gone answers `None`:

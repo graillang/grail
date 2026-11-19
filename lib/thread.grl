@@ -12,7 +12,7 @@ use time;
 // call into `pool`.
 //
 // A thread is joined by default. `Thread<R>` is move-only and its drop joins, as a `pool::Job<R>`'s
-// drop waits; `thread::detach` is the one way to let a thread outlive its handle, and it is spelled.
+// drop waits; `t.detach()` is the one way to let a thread outlive its handle, and it is spelled.
 //
 // A check that fails on a spawned thread is contained the way a task's is: the thread's stack is
 // discarded whole (no destructor runs on it), the thread ends, and the failure is a value at
@@ -201,54 +201,56 @@ fn put_affinity(rec: u64, pinned: CpuSet?) -> unit {
     }
 }
 
-// Wait for the thread and take its result. A thread that failed re-raises its failure here: inside
-// a task or another spawned thread that failure is contained in turn, on the main thread it ends
-// the process.
-pub fn join<R: Send + Owned>(t: Thread<R>) -> R {
-    mut handle = t;
-    unsafe {
-        result := handle.result;
-        handle.result = ptr_from_addr(R, 0);
-        rec := result.addr() - 80;
-        if host::thread_wait(rec) != 0 {
-            host::thread_refail(rec);
-        }
-        r := result.read();
-        host::thread_release(rec);
-        return r;
-    }
-}
-
-// Wait for the thread; its failure, if it failed, is the value.
-pub fn try_join<R: Send + Owned>(t: Thread<R>) -> R |? TaskFailure {
-    mut handle = t;
-    unsafe {
-        result := handle.result;
-        handle.result = ptr_from_addr(R, 0);
-        rec := result.addr() - 80;
-        if host::thread_wait(rec) != 0 {
-            failure := host::thread_failure(rec);
-            host::thread_release(rec);
-            return failure;
-        }
-        r := result.read();
-        host::thread_release(rec);
-        return r;
-    }
-}
-
-// Let the thread run on without a handle. Its result is dropped on the thread when it ends, and a
-// failure on it is contained and forgotten. A thread still running when `main` returns does not
-// keep the process alive: the process exits without waiting, and the end-of-main leak check is not
-// made, because that thread's allocations are still its own.
-pub fn detach<R: Send + Owned>(t: Thread<R>) -> unit {
-    mut handle = t;
-    unsafe {
-        rec := handle.result.addr() - 80;
-        if host::thread_detach(rec) != 0 {
+impl<R: Send + Owned> Thread<R> {
+    // Wait for the thread and take its result. A thread that failed re-raises its failure here: inside
+    // a task or another spawned thread that failure is contained in turn, on the main thread it ends
+    // the process.
+    pub fn join(self: Thread<R>) -> R {
+        mut handle = self;
+        unsafe {
+            result := handle.result;
             handle.result = ptr_from_addr(R, 0);
+            rec := result.addr() - 80;
+            if host::thread_wait(rec) != 0 {
+                host::thread_refail(rec);
+            }
+            r := result.read();
+            host::thread_release(rec);
+            return r;
         }
-        // Otherwise it had already finished: the handle's drop joins it, which no longer waits.
+    }
+
+    // Wait for the thread; its failure, if it failed, is the value.
+    pub fn try_join(self: Thread<R>) -> R |? TaskFailure {
+        mut handle = self;
+        unsafe {
+            result := handle.result;
+            handle.result = ptr_from_addr(R, 0);
+            rec := result.addr() - 80;
+            if host::thread_wait(rec) != 0 {
+                failure := host::thread_failure(rec);
+                host::thread_release(rec);
+                return failure;
+            }
+            r := result.read();
+            host::thread_release(rec);
+            return r;
+        }
+    }
+
+    // Let the thread run on without a handle. Its result is dropped on the thread when it ends, and a
+    // failure on it is contained and forgotten. A thread still running when `main` returns does not
+    // keep the process alive: the process exits without waiting, and the end-of-main leak check is not
+    // made, because that thread's allocations are still its own.
+    pub fn detach(self: Thread<R>) -> unit {
+        mut handle = self;
+        unsafe {
+            rec := handle.result.addr() - 80;
+            if host::thread_detach(rec) != 0 {
+                handle.result = ptr_from_addr(R, 0);
+            }
+            // Otherwise it had already finished: the handle's drop joins it, which no longer waits.
+        }
     }
 }
 
@@ -436,7 +438,6 @@ pub fn scope<s, R: Owned>(body: FnMut<s>((&mut Threads<s>)) -> R) -> R {
 }
 // Wait for a scoped thread and take its result; a failure is raised here (and not again at the
 // scope's end).
-// (A method, because `thread::join` already names the join of a `Thread<R>`: no overloading.)
 impl<s, U> ScopedThread<s, U> {
     pub fn join(self: ScopedThread<s, U>) -> U {
         return join_scoped(self);

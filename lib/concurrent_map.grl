@@ -28,17 +28,17 @@ fn shard<a,b,K:hash::Hash+hash::Equal+Send+Share,V:Send+Share+Owned>(map:(&a Map
 }
 pub fn insert<a,K:hash::Hash+hash::Equal+Send+Share,V:Send+Share+Owned>(map:(&a Map<K,V>),key:K,value:V)->V?{
     index:=shard(&map,&key);target:=&map.shards[index];
-    return target.write_with(Insert{key:key,value:value},|m:(&mut [K: V]),job:Insert<K,V>|->V? hashmap::map_insert(m,job.key,job.value));
+    return target.write_with(Insert{key:key,value:value},|m:(&mut [K: V]),job:Insert<K,V>|->V? m.insert(job.key, job.value));
 }
 pub fn remove<a,b,K:hash::Hash+hash::Equal+Send+Share,V:Send+Share+Owned>(map:(&a Map<K,V>),key:(&b K))->V?{
     index:=shard(&map,key);target:=&map.shards[index];
-    return target.write_with(0,|m:(&mut [K: V]),unused:u64|->V? hashmap::map_remove(m,key));
+    return target.write_with(0,|m:(&mut [K: V]),unused:u64|->V? m.remove(key));
 }
 pub fn contains<a,b,K:hash::Hash+hash::Equal+Send+Share,V:Send+Share+Owned>(map:(&a Map<K,V>),key:(&b K))->bool{
     index:=shard(&map,key);target:=&map.shards[index];
-    return target.read_with(0,|m:(&[K: V]),unused:u64|->bool hashmap::map_contains(m,key));
+    return target.read_with(0,|m:(&[K: V]),unused:u64|->bool m.contains(key));
 }
 // Not a linearizable snapshot while other threads mutate: shards are counted one at a time.
 pub fn len<a,K:hash::Hash+hash::Equal+Send+Share,V:Send+Share+Owned>(map:(&a Map<K,V>))->u64{
-    mut total=0;for i in map.shards.len(){target:=&map.shards[i];total+=target.read_with(0,|m:(&[K: V]),unused:u64|->u64 hashmap::map_len(m));}return total;
+    mut total=0;for i in map.shards.len(){target:=&map.shards[i];total+=target.read_with(0,|m:(&[K: V]),unused:u64|->u64 m.len());}return total;
 }
