@@ -1,5 +1,10 @@
 ## Unreleased
 
+- Fixed: the BC7/BC6H encoder gate no longer skips against a pin. The ISPC kernels are products of the
+  engine build, which a pin built with `AB_BUILD_ENGINE=OFF` does not have, so the shim looked in one
+  place and gave up; it now takes `ABUNDANCE_ENGINE_BUILD`, then the reference root's build, then the
+  checkout's. `--only=bc_ispc` runs and matches against the pinned reference instead of reporting
+  "skipped", so the encode path is gated rather than assumed.
 - Fixed: a shim whose stamp is stale is removed before its builder runs, so the builder's own
   mtime-based check cannot decide "up to date" and stamp an out-of-date library as fresh — which was
   the failure the stamping exists to catch. Readiness is now computed after that removal.
