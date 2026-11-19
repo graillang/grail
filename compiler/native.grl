@@ -998,6 +998,9 @@ struct C {
     tail_mode: u64,
     arm_tail: u64,
     tail_now: u64,
+    // Optional narrowing (optional_narrow): pairs of local indices (1-based), a narrowed binding and
+    // the optional it narrows, while both are in scope.
+    narrowed: u64[],
     // `fn name(..)` inside a body: the token of the name while closure_literal reads the function,
     // and the name itself when the body calls it (a recursive local function).
     local_fn: u64,
@@ -31675,6 +31678,10 @@ fn pop_locals<a>(c: (&a mut C), mark: u64) -> unit {
     while mark < c.locals.len() {
         c.locals.pop()!;
     }
+    while (1 < c.narrowed.len()) && (mark < c.narrowed[c.narrowed.len() - 2]) {
+        c.narrowed.pop()!;
+        c.narrowed.pop()!;
+    }
     return ();
 }
 // Loads, addresses and stores record fields.
@@ -50720,6 +50727,12 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
         return call(&mut c, view(m), view(first));
     }
     mut l = find_local(&mut c, view(first));
+    if (l != 0) && (c.narrowed.len() != 0) {
+        origin := narrowed_origin(&mut c, l);
+        if (origin != 0) && narrowed_as_optional(&mut c, expected) {
+            l = origin;
+        }
+    }
     if l != 0 {
         id := local_id(&mut c, l - 1);
         ty := local_ty(&mut c, l - 1);
@@ -54331,7 +54344,7 @@ fn optional_narrow<a>(c: (&a mut C), mode: u64, at: u64) -> unit {
     mark := c.locals.len();
     exchange(&mut c.terminated, 0);
     if present {
-        narrow_bind(&mut c, name, xt, xty, pty);
+        narrow_bind(&mut c, name, xt, xty, pty, l);
     }
     exchange(&mut c.tail_mode, mode);
     block(&mut c);
@@ -54346,7 +54359,7 @@ fn optional_narrow<a>(c: (&a mut C), mode: u64, at: u64) -> unit {
     if had_else {
         else_mark := c.locals.len();
         if !present {
-            narrow_bind(&mut c, name, xt, xty, pty);
+            narrow_bind(&mut c, name, xt, xty, pty, l);
         }
         exchange(&mut c.tail_mode, mode);
         if is(&mut c, view("if")) {
@@ -54371,13 +54384,13 @@ fn optional_narrow<a>(c: (&a mut C), mode: u64, at: u64) -> unit {
     // `if a == None { <leaves> }` with no `else`: only the present optional reaches here, so the rest
     // of the enclosing block sees `a` as its value (the binding lasts until that block closes).
     if !present && !had_else && (yt != 0) {
-        narrow_bind(&mut c, name, xt, xty, pty);
+        narrow_bind(&mut c, name, xt, xty, pty, l);
     }
     return ();
 }
 // Binds `name` to the payload of the optional `xt`, known to be Some: a copy that carries the
 // optional's borrows (transfer_bonds adds them to the copy and leaves them on the optional).
-fn narrow_bind<a, b>(c: (&a mut C), name: &b [u8], xt: u64, xty: u64, pty: u64) -> unit {
+fn narrow_bind<a, b>(c: (&a mut C), name: &b [u8], xt: u64, xty: u64, pty: u64, optional: u64) -> unit {
     payload := payload_load(&mut c, xt, xty, pty);
     own(&mut c, payload, pty);
     if contains_borrow(&mut c, pty, 0) {
@@ -54385,7 +54398,52 @@ fn narrow_bind<a, b>(c: (&a mut C), name: &b [u8], xt: u64, xty: u64, pty: u64) 
     }
     stored_source(&mut c, payload, pty);
     bind(&mut c, copy_bytes(name), pty, payload, 0);
+    c.narrowed.push(c.locals.len());
+    c.narrowed.push(optional);
     return ();
+}
+// The optional a narrowed binding (`l`, 1-based) stands for, or 0 when `l` narrows nothing.
+fn narrowed_origin<a>(c: (&a mut C), l: u64) -> u64 {
+    mut i = c.narrowed.len();
+    while 1 < i {
+        i -= 2;
+        if c.narrowed[i] == l {
+            return c.narrowed[i + 1];
+        }
+    }
+    return 0;
+}
+// Whether the narrowed name just read (the token before c.pos) is used as the optional it narrows
+// rather than as its value: where an optional is expected (an argument, a binding or a result of
+// type `T?`), unwrapped again (`a!`, `a?`), tested against `None`, given an optional's method
+// (`a.is_some()`, `a.unwrap_or(..)`), or taken apart (`match a`, `if let Some(x) = a`). Code
+// written before narrowing uses the name only in these ways, and keeps compiling as it did.
+fn narrowed_as_optional<a>(c: (&a mut C), expected: u64) -> bool {
+    if (expected != NO_TYPE) && (expected != 0) && is_option_storage(&mut c, expected) {
+        return true;
+    }
+    p := c.pos;
+    if is(&mut c, view("!")) || is(&mut c, view("?")) {
+        return true;
+    }
+    if (is(&mut c, view("==")) || is(&mut c, view("!="))) && is_at(&mut c, p + 1, view("None")) {
+        return true;
+    }
+    if is(&mut c, view(".")) && is_at(&mut c, p + 2, view("(")) {
+        if is_at(&mut c, p + 1, view("is_some")) || is_at(&mut c, p + 1, view("is_none"))
+            || is_at(&mut c, p + 1, view("unwrap")) || is_at(&mut c, p + 1, view("unwrap_or"))
+            || is_at(&mut c, p + 1, view("map")) || is_at(&mut c, p + 1, view("ok_or"))
+            || is_at(&mut c, p + 1, view("to_result")) {
+            return true;
+        }
+    }
+    if (1 < p) && is_at(&mut c, p - 2, view("match")) {
+        return true;
+    }
+    if (1 < p) && is_at(&mut c, p - 2, view("=")) && is(&mut c, view("{")) {
+        return true;
+    }
+    return false;
 }
 // if let Variant(binding) = value { ... } else { ... }: consumes value like match; the else
 // branch drops it (so a different variant's payload is cleaned up).
@@ -64323,6 +64381,7 @@ pub fn main() -> u64 {
         tail_mode: 0,
         arm_tail: 0,
         tail_now: 0,
+        narrowed: u64[],
         local_fn: 0,
         local_self: u8[],
         sink: 0,
