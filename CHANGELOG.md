@@ -1,5 +1,28 @@
 ## Unreleased
 
+- **The multiplayer abuse gate is ported** (`abundance/src/multiplayer_abuse.grl`): the
+  transport-neutral check every client intent passes before its owning authority sees it - the
+  server-owned session frame, the rate window that charges every attempt, the command-sequence and
+  16-entry nonce replay windows that only a downstream commit consumes, every limit with its hard
+  maximum, the outright refusal of any client claim of authority over an outcome, the lifecycle
+  (disconnect, death, session rotation, rebirth) that makes a pending ticket stale, and the client
+  projection that has no member for secret state. Gated by `tests/parity/multiplayer_abuse.cpp`
+  compiling the engine's own `multiplayer_abuse_validation.cpp`: 115 reference lines, all matched
+  by `abundance/tests/multiplayer_abuse_test.grl`.
+
+- **The terrain chunk wire format's brick body and frame are ported**
+  (`abundance/src/world_chunk_wire.grl`): the PackBits coder, the varint palette count, one- and
+  two-byte cell indices, the int8 densities with their reserved `-128`, the `WorldBrick::from_cells`
+  format rules (density clamped to the air floor, saturated-air substitution, air never solid, the
+  uniform rule), and the chunk frame around them - version/flags, zigzag key, base identity,
+  revision, brick records with their repeat runs, and the placed-cell list. Gated by
+  `tests/parity/world_chunk_codec.cpp`, which compiles the engine's own `world_chunk_codec.cpp`
+  and `world_chunk.cpp` and builds every fixture through `WorldBrick::from_cells`: 119 reference
+  lines (eight brick fixtures with byte hashes and cell digests, five brick refusals, four chunk
+  frames with re-encode identity, three frame refusals), matched by
+  `abundance/tests/world_chunk_codec_test.grl`. The canonical-shape section, the server layers and
+  `voxel/world_voxel_save` are the next increment.
+
 - **The book's sidebar drops its "Find a topic" subtitle;** the search box (labelled for screen readers) sits under the title.
 - **The languages overview chart reads plainly.** Its bars start at 1× (the fastest language's time)
   on one logarithmic scale shared by the release and development groups, each group lists the
