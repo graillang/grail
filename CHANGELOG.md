@@ -19,6 +19,10 @@
   (`abundance/tests/libm_trig_test.grl`, 20 reference lines). glibc's `rem_pio2` branch
   (|x| >= 105414350) is not carried and the port answers NaN there rather than a wrong value.
 
+- Fixed: `frame_loop_test.grl`'s submit callback takes `&JobScheduler` (the scheduler's bodies became
+  references), and the harness no longer names `abundance/src/frame_loop.grl` twice — a module listed
+  twice on one command line was compiled twice, so its constants collided ("a constant named `frames`
+  is already declared"). The module list is now de-duplicated before every compile.
 - **The window's overlay hook is ported: `poll(hook)` feeds ImGui's SDL3 backend its events.** The
   SDL platform shim keeps a hook slot and calls it inside its poll, before decoding, because a text
   event's string is SDL's temporary memory; the imgui platform shim supplies
