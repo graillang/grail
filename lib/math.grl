@@ -763,110 +763,6 @@ fn powf_exp2(xd: f64, sign_bias: u64) -> f64 {
 }
 
 @no_block
-fn powf(x: f32, y: f32) -> f32 {
-    mut sign_bias = u64(0);
-    mut ix = f32_bits(x);
-    iy := f32_bits(y);
-    if (wrapping_sub(ix, 8388608) >= 2130706432) || powf_zeroinfnan(iy) {
-        // Either x < 2^-126 (so 0, subnormal, inf or nan) or y is 0, inf or nan.
-        if powf_zeroinfnan(iy) {
-            if dbl32(iy) == 0 {
-                // y is zero: 1 for every x, except that a signaling x is quieted by x + y.
-                if f32_signaling(x) {
-                    return x + y;
-                }
-                return 1.0;
-            }
-            if ix == 1065353216 {
-                if f32_signaling(y) {
-                    return x + y;
-                }
-                return 1.0;
-            }
-            if (dbl32(ix) > 4278190080) || (dbl32(iy) > 4278190080) {
-                return x + y;
-            }
-            if dbl32(ix) == 2130706432 {
-                return 1.0;
-            }
-            if (dbl32(ix) < 2130706432) == ((iy & 2147483648) == 0) {
-                // |x| < 1 with y == inf, or |x| > 1 with y == -inf.
-                return 0.0;
-            }
-            return y * y;
-        }
-        if powf_zeroinfnan(ix) {
-            mut x2 = x * x;
-            if ((ix & 2147483648) != 0) && (powf_checkint(iy) == 1) {
-                x2 = -x2;
-                sign_bias = 1;
-            }
-            if (dbl32(ix) == 0) && ((iy & 2147483648) != 0) {
-                // pow(+-0, negative): a signed infinity from glibc's __math_divzerof.
-                if sign_bias != 0 {
-                    return f32_from_bits(4286578688);
-                }
-                return f32_from_bits(2139095040);
-            }
-            if (iy & 2147483648) != 0 {
-                return 1.0 / x2;
-            }
-            return x2;
-        }
-        // x and y are finite and non-zero.
-        if (ix & 2147483648) != 0 {
-            yi := powf_checkint(iy);
-            if yi == 0 {
-                // A negative x to a non-integer power: glibc's __math_invalidf.
-                return f32_from_bits(2143289344);
-            }
-            if yi == 1 {
-                sign_bias = 65536;
-            }
-            ix = ix & 2147483647;
-        }
-        if ix < 8388608 {
-            // Normalize a subnormal x so its exponent becomes negative.
-            ix = f32_bits(x * f32_from_bits(1258291200)) & 2147483647;
-            ix = wrapping_sub(ix, 192937984);
-        }
-    }
-    ylogx := f64(y) * powf_log2(ix);
-    // |y*log2(x)| >= 126: the result cannot be computed by exp2 without a range check.
-    if ((bits(ylogx) >> 47) & 65535) >= 32959 {
-        if ylogx <= -150.0 {
-            // glibc's __math_uflowf: a signed zero.
-            if sign_bias != 0 {
-                return f32_from_bits(2147483648);
-            }
-            return 0.0;
-        }
-        if ylogx < -149.0 {
-            // glibc's __math_may_uflowf: (0x1.4p-75)^2 is the smallest float, signed.
-            z := f32_from_bits(438304768) * f32_from_bits(438304768);
-            if sign_bias != 0 {
-                return -z;
-            }
-            return z;
-        }
-        if ylogx > f64_from_bits(4638707616188585329) {
-            // |x^y| > 0x1.fffffffd1d571p+6: glibc's __math_oflowf, a signed infinity.
-            if sign_bias != 0 {
-                return f32_from_bits(4286578688);
-            }
-            return f32_from_bits(2139095040);
-        }
-        if ylogx > f64_from_bits(4638707616185559778) {
-            // 0x1.fffffffa3aae2p+6 and above: glibc asks whether rounding 1.0f + 0x1p-25f would
-            // move it away from 1 (in round-to-nearest it does not), and saturates otherwise.
-            if sign_bias != 0 {
-                return f32_from_bits(4286578687);
-            }
-            return f32_from_bits(2139095039);
-        }
-    }
-    return f32(powf_exp2(ylogx, sign_bias));
-}
 
 // The coefficient `i` of asinf's table whose base word is `tab` (0 b[], 16 C0, 28 C1).
 fn asinf_coef(tab: u64, i: u64) -> f64 {
@@ -1021,8 +917,115 @@ impl f32 {
     pub fn log2(self) -> f32 { return log2f(self); }
     @no_block
     pub fn log10(self) -> f32 { return f32(log10(f64(self))); }
+    // powf itself, written as the method: a signaling NaN must reach the special-value checks as it was
+    // passed, so there is no second call for it to cross.
     @no_block
-    pub fn pow(self, exponent: f32) -> f32 { return powf(self, exponent); }
+    pub fn pow(self, exponent: f32) -> f32 {
+        x := self;
+        y := exponent;
+        mut sign_bias = u64(0);
+        mut ix = f32_bits(x);
+        iy := f32_bits(y);
+        if (wrapping_sub(ix, 8388608) >= 2130706432) || powf_zeroinfnan(iy) {
+            // Either x < 2^-126 (so 0, subnormal, inf or nan) or y is 0, inf or nan.
+            if powf_zeroinfnan(iy) {
+                if dbl32(iy) == 0 {
+                    // y is zero: 1 for every x, except that a signaling x is quieted by x + y.
+                    if f32_signaling(x) {
+                        return x + y;
+                    }
+                    return 1.0;
+                }
+                if ix == 1065353216 {
+                    if f32_signaling(y) {
+                        return x + y;
+                    }
+                    return 1.0;
+                }
+                if (dbl32(ix) > 4278190080) || (dbl32(iy) > 4278190080) {
+                    return x + y;
+                }
+                if dbl32(ix) == 2130706432 {
+                    return 1.0;
+                }
+                if (dbl32(ix) < 2130706432) == ((iy & 2147483648) == 0) {
+                    // |x| < 1 with y == inf, or |x| > 1 with y == -inf.
+                    return 0.0;
+                }
+                return y * y;
+            }
+            if powf_zeroinfnan(ix) {
+                mut x2 = x * x;
+                if ((ix & 2147483648) != 0) && (powf_checkint(iy) == 1) {
+                    x2 = -x2;
+                    sign_bias = 1;
+                }
+                if (dbl32(ix) == 0) && ((iy & 2147483648) != 0) {
+                    // pow(+-0, negative): a signed infinity from glibc's __math_divzerof.
+                    if sign_bias != 0 {
+                        return f32_from_bits(4286578688);
+                    }
+                    return f32_from_bits(2139095040);
+                }
+                if (iy & 2147483648) != 0 {
+                    return 1.0 / x2;
+                }
+                return x2;
+            }
+            // x and y are finite and non-zero.
+            if (ix & 2147483648) != 0 {
+                yi := powf_checkint(iy);
+                if yi == 0 {
+                    // A negative x to a non-integer power: glibc's __math_invalidf.
+                    return f32_from_bits(2143289344);
+                }
+                if yi == 1 {
+                    sign_bias = 65536;
+                }
+                ix = ix & 2147483647;
+            }
+            if ix < 8388608 {
+                // Normalize a subnormal x so its exponent becomes negative.
+                ix = f32_bits(x * f32_from_bits(1258291200)) & 2147483647;
+                ix = wrapping_sub(ix, 192937984);
+            }
+        }
+        ylogx := f64(y) * powf_log2(ix);
+        // |y*log2(x)| >= 126: the result cannot be computed by exp2 without a range check.
+        if ((bits(ylogx) >> 47) & 65535) >= 32959 {
+            if ylogx <= -150.0 {
+                // glibc's __math_uflowf: a signed zero.
+                if sign_bias != 0 {
+                    return f32_from_bits(2147483648);
+                }
+                return 0.0;
+            }
+            if ylogx < -149.0 {
+                // glibc's __math_may_uflowf: (0x1.4p-75)^2 is the smallest float, signed.
+                z := f32_from_bits(438304768) * f32_from_bits(438304768);
+                if sign_bias != 0 {
+                    return -z;
+                }
+                return z;
+            }
+            if ylogx > f64_from_bits(4638707616188585329) {
+                // |x^y| > 0x1.fffffffd1d571p+6: glibc's __math_oflowf, a signed infinity.
+                if sign_bias != 0 {
+                    return f32_from_bits(4286578688);
+                }
+                return f32_from_bits(2139095040);
+            }
+            if ylogx > f64_from_bits(4638707616185559778) {
+                // 0x1.fffffffa3aae2p+6 and above: glibc asks whether rounding 1.0f + 0x1p-25f would
+                // move it away from 1 (in round-to-nearest it does not), and saturates otherwise.
+                if sign_bias != 0 {
+                    return f32_from_bits(4286578687);
+                }
+                return f32_from_bits(2139095039);
+            }
+        }
+        return f32(powf_exp2(ylogx, sign_bias));
+    }
     @no_block
     pub fn powi(self, exponent: i64) -> f32 { return f32(powi(f64(self), exponent)); }
     @no_block
