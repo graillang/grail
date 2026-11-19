@@ -111,8 +111,12 @@
   its world) decodes, traces and re-encodes byte for byte, with truncated and trailing refusals.
   `power.power_dispatch` became fully generic too once the reference included the private header
   that reflects its dispatch result, so 63 of the 65 registered tables are exact and 279 lines match.
-  Two tables remain a named boundary: `construction.facility_site` and `drones.fleet`, whose
-  grammars are only visible in .cpp files.
+  `construction.facility_site` is ported as well: its save writes one byte-blob per site (a vector of
+  vectors of bytes) and each blob is the site record - 21 fields whose fuel state holds plain nested
+  offer/receipt values rather than optionals (an `optional` model reads 8 bytes too many) - so the
+  port decodes the book, then every site, and refuses a zero or repeated site id as the engine's
+  insert() does; 282 lines match. One table remains a named boundary: `drones.fleet`, whose codec
+  (`DroneFleetRegistry::encode`, drone_fleet.cpp) is a catalog-driven persistence format of its own.
 
 - **The player field map's model is ported.** `abundance/src/field_map_presentation.grl` carries
   `ab::FieldMapPresentationModel` (Private/field_map_presentation.cpp), the root of the world map
