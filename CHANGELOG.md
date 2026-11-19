@@ -1,5 +1,16 @@
 ## Unreleased
 
+- **Abundance: the feature composition contract is ported and gated.** `src/feature_composition.grl`
+  carries `apply_feature_heights` (bounded add, then carve toward a target, then raise toward a
+  target, then the world's elevation clamp) and `compose_feature_layers` (the higher weight wins and
+  a tie goes to the later pass, vegetation takes the minimum, structure flags are OR-ed, erosion
+  resistance takes the maximum, records append in pass order), plus the pass and record records those
+  layers carry. Gated against Abundance's own `feature_composition.cpp` over two passes composed in
+  order: the second pass ties the first on feature and material weight, adds three times the
+  contracted height, carves against the first pass's valley and adds a record — heights and every
+  channel digest equal, 10 of 10 lines. The README's "written but ungated" note is gone; every ported
+  pass can now funnel through this contract.
+
 - **Abundance: the mesa coupling and marks are ported and bit-exact.** `src/coherent_mesa.grl` gains
   `mesa_stepped_sites` (the handover to the stepped-hills pass: one Mesa-style site per built region,
   carrying the caprock, the seed and the `masked` bit that says the Mesa mask already holds the
