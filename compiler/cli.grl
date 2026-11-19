@@ -1,5 +1,6 @@
 module cli;
 use host;
+use lexer;
 use docgen;
 use fmt;
 use explain;
@@ -3345,12 +3346,19 @@ fn info_of<a>(text: &a [u8], scan: bool) -> FileInfo {
             info.module = item(&names, 0);
         }
         info.uses = source_words(text, view("use"));
+        // `iter()` on a vector needs no `use` line, but the unit that calls it is built after `iter`.
+        if lexer::calls_iter(text) && !eq(view(info.module), view("iter")) {
+            info.uses.push(copy(view("iter")));
+        }
         info.embed = mentions_embed(text);
     }
     return info;
 }
 // The record: the path, the stamp, the digest, then `-` for a file read only for its digest, or the
-// module (`-` for none), the embed flag and the `use`d names.
+// module (`-` for none), the embed flag and the `use`d names, and the scan's format (fp_scan).
+fn fp_scan() -> string {
+    return "scan2";
+}
 fn fp_write<a, b, d, e>(c: (&a mut Cache), path: &b [u8], stamp: &d [u8], info: (&e FileInfo), scan: bool) -> unit {
     if (c.root.len() == 0) || (stamp.len() == 0) {
         return ();
@@ -3377,6 +3385,10 @@ fn fp_write<a, b, d, e>(c: (&a mut Cache), path: &b [u8], stamp: &d [u8], info: 
             body.push(32);
             push_bytes(&mut body, view(info.uses[u]));
         }
+        // The scan's format: a record from a scan that did not add the implicit `iter` dependency
+        // (info_of) lacks this line, and is scanned again rather than trusted.
+        body.push(10);
+        push_bytes(&mut body, view(fp_scan()));
     } else {
         body.push(45);
     }
@@ -3409,8 +3421,8 @@ fn cache_file_info<a, b>(c: (&a mut Cache), path: &b [u8], scan: bool) -> FileIn
             if !scan {
                 return FileInfo { digest: rows[2].copy(), module: u8[], uses: u8[][], embed: false };
             }
-            if rows.len() >= 5 {
-                // The fifth line is the embed flag, then the `use`d names.
+            if (rows.len() >= 6) && eq(view(rows[5]), view(fp_scan())) {
+                // The fifth line is the embed flag, then the `use`d names; the sixth the scan's format.
                 w := words(view(rows[4]));
                 mut info = FileInfo { digest: rows[2].copy(), module: rows[3].copy(), uses: u8[][], embed: false };
                 if eq(view(info.module), view("-")) {

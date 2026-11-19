@@ -19745,26 +19745,97 @@
   },
   {
     "name": "vec-iter-typed-slice-iterator",
-    "note": "`v.iter()` is a typed `iter::SliceIter`: `for` over it, `next`, and a map/filter/fold chain folded by a counted index loop (internal iteration); the vector stays borrowed meanwhile",
-    "source": "use vecs;\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() {\n    v := u64[1, 2, 3, 4, 5, 6];\n    mut t = 0;\n    for x in v.iter() { t += *x; }\n    println(t);\n    mut it = v.iter();\n    println(*it.next()!);\n    s := v.iter().map(|x: &u64| -> u64 *x * 2).filter(|x: &u64| -> bool *x % 3 == 0).fold(0, |a: u64, x: u64| -> u64 a + x);\n    println(s);\n    println(eat(v));\n}\n",
-    "stdout": "21\n1\n18\n6\n",
-    "modules": [
-      "lib/vecs.grl",
-      "lib/iter.grl",
-      "lib/core.grl"
-    ]
+    "note": "`v.iter()`, written with no `use` line, is a typed `iter::SliceIter`: `for` over it, `next`, and a map/filter/fold chain folded by a counted index loop (internal iteration); the vector stays borrowed meanwhile",
+    "source": "fn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() {\n    v := u64[1, 2, 3, 4, 5, 6];\n    mut t = 0;\n    for x in v.iter() { t += *x; }\n    println(t);\n    mut it = v.iter();\n    println(*it.next()!);\n    s := v.iter().map(|x: &u64| -> u64 *x * 2).filter(|x: &u64| -> bool *x % 3 == 0).fold(0, |a: u64, x: u64| -> u64 a + x);\n    println(s);\n    println(eat(v));\n}\n",
+    "stdout": "21\n1\n18\n6\n"
   },
   {
     "name": "vec-iter-keeps-borrow",
     "note": "...and the iterator keeps the vector borrowed",
-    "source": "use vecs;\nfn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() {\n    v := u64[1, 2, 3];\n    mut it = v.iter();\n    println(eat(v));\n    println(*it.next()!);\n}\n",
+    "source": "fn eat(v: u64[]) -> u64 { return v.len(); }\nfn main() {\n    v := u64[1, 2, 3];\n    mut it = v.iter();\n    println(eat(v));\n    println(*it.next()!);\n}\n",
     "reject": true,
-    "diagnostic": "move of unavailable or borrowed value",
-    "modules": [
-      "lib/vecs.grl",
-      "lib/iter.grl",
-      "lib/core.grl"
-    ]
+    "diagnostic": "move of unavailable or borrowed value"
+  },
+  {
+    "name": "vec-iter-builtin-adapters",
+    "note": "`v.iter()` is a method of every vector, view and slice that needs no `use` line (the compiler brings in `iter` for a source that calls it). Its items are `&T`, so `v` is only borrowed and stays usable; filter's predicate takes `&&T`. The typed chain has map, filter, take, enumerate, fold, collect, count, any, all and find; `collect` over `filter` keeps the references",
+    "source": "struct P { x: u64, name: string }\nfn total(xs: &u64[]) -> u64 {\n    return xs.iter().fold(0, |a, x| a + *x);\n}\nfn big(xs: &[u64]) -> u64 {\n    return xs.iter().filter(|n| **n > 4).count();\n}\nfn main() {\n    mut v = u64[1, 5, 7, 3, 9];\n    // filter then map then collect: owned results, `v` is still usable afterwards.\n    doubled := v.iter().filter(|n| **n > 4).map(|n| *n * 2).collect();\n    println(\"{} {} {}\", doubled.len(), doubled[0], doubled[2]);\n    // filter then collect keeps references into `v`.\n    picked := v.iter().filter(|n| **n % 2 == 1).collect();\n    println(\"{} {}\", picked.len(), *picked[4]);\n    println(v.iter().count());\n    println(v.iter().any(|n| *n == 7));\n    println(v.iter().all(|n| *n > 0));\n    println(v.iter().all(|n| *n > 1));\n    match v.iter().find(|n| **n > 6) {\n        Some(n) => { println(*n); },\n        None => { println(0); }\n    }\n    println(v.iter().find(|n| **n > 100).is_none());\n    for (i, x) in v.iter().enumerate() {\n        if i == 3 {\n            println(\"{} {}\", i, *x);\n        }\n    }\n    firsts := v.iter().take(2).map(|n| *n + 100).collect();\n    println(\"{} {}\", firsts[0], firsts[1]);\n    println(v.iter().enumerate().filter(|p| p.0 % 2 == 0).count());\n    println(total(&v));\n    println(big(v[1: 4]));\n    println(big(v[:]));\n    w := &v;\n    println(w.iter().count());\n    // `v` was only borrowed: it can grow now.\n    v.push(11);\n    println(v.iter().count());\n    people := P[P { x: 3, name: \"ann\".text() }, P { x: 8, name: \"bob\".text() }];\n    for p in people.iter().filter(|p| p.x > 4) {\n        println(p.name);\n    }\n    names := people.iter().map(|p| p.x).collect();\n    println(names[1]);\n    empty := u64[];\n    println(empty.iter().count());\n    println(empty.iter().collect().len());\n    println(empty.iter().any(|n| true));\n    println(empty.iter().all(|n| false));\n}\n",
+    "stdout": "3 10 18\n5 9\n5\ntrue\ntrue\nfalse\n7\ntrue\n3 3\n101 105\n3\n25\n2\n3\n5\n6\nbob\n8\n0\n0\nfalse\ntrue\n"
+  },
+  {
+    "name": "vec-iter-builtin-driver",
+    "driver": true,
+    "source": "pub fn main() -> u64 {\n    v := u64[4, 8, 15, 16, 23, 42];\n    evens := v.iter().filter(|n| **n % 2 == 0).map(|n| *n / 2).collect();\n    println(\"{} {}\", evens.len(), evens[3]);\n    println(v.len());\n    return 0;\n}\n",
+    "driverModules": [
+      "main",
+      "iter",
+      "core",
+      "result"
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "stdout": "4 21\n6\n",
+    "note": "the per-module build orders `iter` before a module that calls `.iter()` with no `use iter;` line (the driver's scan adds the dependency, as the compiler's module closure does)"
+  },
+  {
+    "name": "vec-iter-find-keeps-borrow",
+    "source": "fn main() {\n    mut v = u64[1, 5, 7];\n    x := v.iter().filter(|n| **n > 4).find(|n| **n > 6)!;\n    v.push(1);\n    println(*x);\n}\n",
+    "reject": true,
+    "diagnostic": "mutation conflicts with live borrow",
+    "note": "an item handed out through an adapter (`Filter<SliceIter>`'s `next`, an `I::Item`) is a reference into `v`, so it keeps `v` borrowed"
+  },
+  {
+    "name": "vec-iter-collected-refs-keep-borrow",
+    "source": "fn main() {\n    mut v = u64[1, 5, 7];\n    picked := v.iter().filter(|n| **n > 4).collect();\n    v.clear();\n    println(picked.len());\n}\n",
+    "reject": true,
+    "diagnostic": "mutation conflicts with live borrow",
+    "note": "`collect` of `v.iter()`'s items is a vector of references into `v`"
+  },
+  {
+    "name": "vec-iter-take-keeps-borrow",
+    "source": "fn main() {\n    mut v = u64[1, 5, 7];\n    t := v.iter().take(2).collect();\n    v.push(1);\n    println(*t[0]);\n}\n",
+    "reject": true,
+    "diagnostic": "mutation conflicts with live borrow",
+    "note": "...through `take` as well"
+  },
+  {
+    "name": "vec-iter-loop-cannot-grow-vector",
+    "source": "fn main() {\n    mut v = u64[1, 5, 7];\n    for (i, x) in v.iter().enumerate() {\n        v.push(*x);\n    }\n}\n",
+    "reject": true,
+    "diagnostic": "mutation conflicts with live borrow",
+    "note": "the loop's iterator borrows `v` for the whole loop, as Rust's does"
+  },
+  {
+    "name": "vec-iter-not-a-sequence",
+    "source": "fn main() {\n    x: u64 = 5;\n    y := x.iter();\n}\n",
+    "reject": true,
+    "diagnostic": "collection method requires collection/view",
+    "note": "`iter` is a method of vectors, views and slices only"
+  },
+  {
+    "name": "vec-iter-mut-slice-and-view",
+    "source": "fn bump(xs: &mut [u64]) -> u64 {\n    n := xs[:].iter().filter(|x| **x > 2).count();\n    xs[0] = n;\n    return n;\n}\nfn sum(xs: &u64[]) -> u64 {\n    return xs.iter().fold(0, |a, x| a + *x);\n}\nfn main() {\n    mut v = u64[1, 2, 3, 4, 5];\n    println(bump(&mut v[1: 5]));\n    println(sum(&v));\n    println(v[0: 2].iter().count());\n}\n",
+    "stdout": "3\n16\n2\n"
+  },
+  {
+    "name": "vec-iter-mut-slice-receiver",
+    "source": "fn bump(xs: &mut [u64]) -> u64 {\n    return xs.iter().count();\n}\nfn main() {\n    mut v = u64[1, 2, 3];\n    println(bump(&mut v[0: 3]));\n}\n",
+    "reject": true,
+    "diagnostic": "method takes a shared receiver but got a mutable reference",
+    "note": "a `&mut [T]` does not pass as the `&[T]` receiver `iter` takes (the slice receiver rule); `xs[:].iter()` reads it"
+  },
+  {
+    "name": "iter-filter-over-reference-items",
+    "source": "use iter;\nfn main() {\n    v := u64[1, 5, 7, 3, 9];\n    println(v.iter().filter(|n| **n > 4).fold(0, |a, x| a + *x));\n    mut t = 0;\n    for x in v.iter().filter(|n| **n > 4) {\n        t += *x;\n    }\n    println(t);\n    println(iter::over(v.copy()).filter(|n| *n > 4).fold(0, |a, x| a + x));\n    mut u = 0;\n    for x in iter::over(v).filter(|n| *n > 4) {\n        u += x;\n    }\n    println(u);\n}\n",
+    "stdout": "21\n21\n21\n21\n",
+    "note": "filter directly over reference items: its predicate takes `&&T`, and its fold and next hand the item to it through a function generic over the item type, because `&x` of a concrete reference reborrows it (to `&T`); owned items (`iter::over`) take the same path"
+  },
+  {
+    "name": "slice-field-copied-out-and-looped",
+    "source": "struct S<a, T> { v: (&a [T]), at: u64 }\nfn make<a, T>(x: &a [T]) -> S<a, T> {\n    return S { v: x, at: 1 };\n}\nfn sum<a>(s: S<a, u64>) -> u64 {\n    v := s.v;\n    mut i = s.at;\n    n := v.len();\n    mut t = 0;\n    while i < n {\n        t += v[i];\n        i += 1;\n    }\n    return t;\n}\nfn main() {\n    v := u64[1, 2, 3, 4];\n    println(sum(make(v[:])));\n}\n",
+    "stdout": "9\n",
+    "note": "a generic record holding a slice of a type parameter is built in a generic function (record_bytes asked a slice for a declaration), and a slice copied out of a record field is looped over: the copy's slot was written before its words, and the optimiser reads a slice's data and length where its slot is written"
   },
   {
     "name": "generic-closure-param-named-function",

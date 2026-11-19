@@ -15690,7 +15690,7 @@ fn callable_contract<a, b>(
             lk := ty_kind(&mut c, left);
             if ((lk == 5) || (lk == 7) || (lk == 27)) && (ty_kind(&mut c, right) == lk)
                 && (ty_mode(&mut c, left) == ty_mode(&mut c, right)) {
-                if callable_contract(&mut c, ty_arg(&mut c, left), ty_arg(&mut c, right), &mut map, depth + 1) {
+                if param_referent_fits(&mut c, ty_arg(&mut c, left), ty_arg(&mut c, right), &mut map, depth + 1) {
                     continue;
                 }
                 return false;
@@ -15714,6 +15714,24 @@ fn callable_contract<a, b>(
         }
     }
     return true;
+}
+// The referent of a closure's reference parameter, compared as a signature. The regions of the
+// references inside it are not compared: a generic substitution drops or renames them (`FnMut((&T))`
+// with `T` bound to `&a K` is `FnMut(&&K)`, while a closure built for `&&a K` names `a`), and, as for
+// the parameter's own reference, they are the loan pass's business, not the shape's -
+// `filter(|n| **n > 4)` over a vector's `iter()` is one signature either way.
+fn param_referent_fits<a, b>(c: (&a mut C), left: u64, right: u64, map: (&b mut u64[]), depth: u64) -> bool {
+    lk := ty_kind(&mut c, left);
+    if ((lk == 5) || (lk == 7) || (lk == 27)) && (ty_kind(&mut c, right) == lk) && (ty_mode(&mut c, left) == ty_mode(&mut c, right))
+        && (depth < 64) {
+        return param_referent_fits(&mut c, ty_arg(&mut c, left), ty_arg(&mut c, right), &mut map, depth + 1);
+    }
+    // A specialisation's alias inside the referent is the type it stands for (the bound is built
+    // from plain types, a closure written in the specialisation from its aliases).
+    if (ty_kind(&mut c, left) == 10) || (ty_kind(&mut c, right) == 10) {
+        return callable_contract(&mut c, base_type(&mut c, left), base_type(&mut c, right), &mut map, depth);
+    }
+    return callable_contract(&mut c, left, right, &mut map, depth);
 }
 fn same_type<a>(c: (&a mut C), x: u64, y: u64) -> u64 {
     a := ty_kind(&mut c, x);
@@ -16103,9 +16121,14 @@ fn require_type<a>(c: (&a mut C), actual: u64, expected: u64) -> unit {
     }
     // A specialisation's binding (an alias, kind 10) where its own base type is named: the
     // implementation reached through a bound takes `Self` as the concrete type the parameter is
-    // bound to here, and the two are one type in this specialisation.
-    if (ty_kind(&mut c, actual) == 10) && (ty_kind(&mut c, want) != 10) && (base_type(&mut c, actual) == want) {
-        return ();
+    // bound to here, and the two are one type in this specialisation. The base is compared as a
+    // type, not as an id: `Filter<SliceIter<a, T>, F>` reaches `SliceIter`'s `fold` with its `I`
+    // bound to a `SliceIter` interned apart from the one the method names.
+    if (ty_kind(&mut c, actual) == 10) && (ty_kind(&mut c, want) != 10) {
+        base := base_type(&mut c, actual);
+        if (base == want) || (same_type(&mut c, base, want) != 0) {
+            return ();
+        }
     }
     if (want == 0) & is_bool(&mut c, actual) {
         return ();
@@ -28059,6 +28082,17 @@ fn resolve_modules<a>(c: (&a mut C), offset: u64) -> unit {
         k += 1;
         text := host::read_file(view(file));
         h := header_of(view(text));
+        // `iter()` on a vector is a vector's, a view's and a slice's own method, written with no `use` line:
+        // its iterator type and the impls that give it live in `iter`, so a source that calls it
+        // brings that module in, as every program brings in `core`. Other programs do not pay for it.
+        if !mod_known(&c, view("iter")) && lexer::calls_iter(view(text)) {
+            found := mod_find(&c, view("iter"));
+            if found.len() != 0 {
+                c.mod_names.push(copy_bytes(view("iter")));
+                c.mod_files.push(found.copy());
+                queue.push(found);
+            }
+        }
         for j in h.uses.len() {
             name := h.uses[j];
             // `use host;` is a module's opt-in to the ambient host:: interface, not a file, and a
@@ -31873,6 +31907,14 @@ fn frame_copy<a>(c: (&a mut C), src: u64, ty: u64) -> u64 {
         o(&mut c, view("(%rcx),%rax\nmovq %rax,"));
         on(&mut c, k * 8);
         o(&mut c, view("(%rdx)\n"));
+    }
+    k := ty_kind(&mut c, base_type(&mut c, ty));
+    if (k == 5) || (k == 27) {
+        // A view's value is defined after its words are written: a binding adopts this slot, and
+        // the optimiser reads a slice descriptor's `data` and `len` once, where that slot is written
+        // (SEQ-STABLE), so the slot must not be written before the copy fills the words.
+        o(&mut c, view("movq %rdx,%rax\n"));
+        return save(&mut c);
     }
     return dst;
 }
@@ -36893,10 +36935,19 @@ fn captured_bonds<a, b, d, e, g>(c: (&a mut C), result: Val, map: (&b u64[]), so
                 continue;
             }
             // A reference argument is lent for the call only; what it points at is the caller's.
-                    if (ty_kind(&mut c, t) != 7) && contains_borrow(&mut c, t, 0) {
+            if (ty_kind(&mut c, t) != 7) && contains_borrow(&mut c, t, 0) {
                 source := place_of(&mut c, sources[i]);
                 if source != 0 {
                     return_bonds(&mut c, source, holder, u64(aggregate));
+                }
+            }
+            // ...but the borrows its referent holds may be handed out: `it.next()` on a
+            // `Filter<SliceIter<a, T>, F>` returns an `I::Item`, a reference into the vector `it`
+            // borrows. A result whose own type can hold a borrow keeps those loans (not `it`).
+            if (ty_kind(&mut c, t) == 7) && contains_borrow(&mut c, ty_arg(&mut c, t), 0) && contains_borrow(&mut c, result.ty, 0) {
+                storage := target_of(&mut c, sources[i]);
+                if storage != 0 {
+                    return_bonds(&mut c, storage, holder, u64(aggregate));
                 }
             }
         }
@@ -43338,6 +43389,18 @@ fn capture_written_at<a>(c: (&a mut C), i: u64, end: u64, ty: u64) -> bool {
             return true;
         }
     }
+    if kind_at(&mut c, i + 1) == 40 {
+        // `f(..)` on a captured `FnMut` - a closure that changes its own captures, or a parameter
+        // bound by one - changes `f`, so the environment holding it must be exclusive: a closure
+        // that calls one is itself `FnMut`.
+        mut callee = ty;
+        if ty_kind(&mut c, callee) != 20 {
+            callee = param_callable(&mut c, ty);
+        }
+        if (callee != NO_TYPE) && (ty_kind(&mut c, callee) == 20) && ((ty_mode(&mut c, callee) & CLOSURE_FNMUT) != 0) {
+            return true;
+        }
+    }
     if (kind_at(&mut c, i + 1) == 46) & (kind_at(&mut c, i + 3) == 40) {
         k := ty_kind(&mut c, ty);
         if ((k == 5) || (k == 7) || (k == 27)) & (ty_mode(&mut c, ty) == 0) {
@@ -47824,9 +47887,9 @@ fn record_bytes<a>(c: (&a mut C), alias: u64) -> u64 {
         return array_bytes(&mut c, alias);
     }
     ty := base_type(&mut c, closure_record(&mut c, alias));
-    d := ty_arg(&mut c, ty);
-    if c.decls[d].c_layout != 0 {
-        return ffi_record_size(&mut c, d);
+    // A view or slice held inline is its two words; only a record has a declaration to ask.
+    if (ty_kind(&mut c, ty) == 8) && (c.decls[ty_arg(&mut c, ty)].c_layout != 0) {
+        return ffi_record_size(&mut c, ty_arg(&mut c, ty));
     }
     if framable(&mut c, ty) {
         return value_bytes(&mut c, ty);
