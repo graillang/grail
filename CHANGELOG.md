@@ -1,5 +1,12 @@
 ## Unreleased
 
+- **The file-system primitives Abundance's content gc/heal need exist in the os layer.** `stat` now
+  reports the link count (`fs::Metadata::nlink`), `host::flock(fd, operation)` is the advisory lock
+  (LOCK_SH/LOCK_EX/LOCK_NB/LOCK_UN; 73 on x86-64 and 32 on the generic table), and
+  `host::alive(pid)` answers exists / gone / exists-but-unsignallable; `fs` wraps both as
+  `File::lock`/`unlock` and `fs::alive`. The abundance suite exercises them deterministically
+  (`fs_primitives_test.grl`).
+
 - Added: `^=` is a compound assignment, like `+=` and the rest: `x ^= 3` in a local, a record field
   (`a.n ^= 15`) and an indexed element (`v[i] ^= 3`), at the target's own integer width. It was
   "expected `=`" - the lexer's multibyte table had no `^=` token (kind 275) - and it is still refused

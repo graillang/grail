@@ -82,7 +82,9 @@ pub struct Metadata {
     accessed: time::Timestamp,
     owner: Owner,
     inode: u64,
-    device: u64
+    device: u64,
+    // Hard links to this inode; a file with one link frees its bytes when it is removed.
+    nlink: u64
 }
 
 pub fn kind_of(code: u64) -> Kind {
@@ -125,6 +127,10 @@ impl Metadata {
     pub fn is_readonly(self: (&Metadata)) -> bool {
         return (self.mode & 146) == 0;
     }
+    // Hard links to the inode (1 for an ordinary file).
+    pub fn nlink(self: (&Metadata)) -> u64 {
+        return self.nlink;
+    }
     pub fn is_executable(self: (&Metadata)) -> bool {
         return (self.mode & 73) != 0;
     }
@@ -156,7 +162,8 @@ fn metadata_at<a>(path: &a [u8], follow: bool) -> Metadata | Error {
         accessed: time::timestamp(core::as_i64(parts[6]), parts[7]),
         owner: Owner { uid: parts[8], gid: parts[9] },
         inode: parts[10],
-        device: parts[11]
+        device: parts[11],
+        nlink: parts[12]
     };
 }
 
@@ -168,6 +175,12 @@ pub fn metadata<a>(path: &a [u8]) -> Metadata | Error {
 pub fn symlink_metadata<a>(path: &a [u8]) -> Metadata | Error {
     return metadata_at(path, false);
 }
+// Whether the process `pid` exists and may be signalled (a process this user may not signal still
+// exists).
+pub fn alive(pid: u64) -> bool {
+    return host::alive(pid) != 1;
+}
+
 // Whether anything exists at `path`, of any kind. A dangling symbolic link exists.
 pub fn exists<a>(path: &a [u8]) -> bool {
     return host::exists(path) != 0;
@@ -656,6 +669,33 @@ impl File {
             }
         }
         return out;
+    }
+    // An advisory `flock` on the descriptor. `exclusive` takes LOCK_EX rather than LOCK_SH; without
+    // `nonblock` the call waits for a held lock. The answer is true when this call took the lock and
+    // false when a non-blocking request met one already held (EWOULDBLOCK).
+    pub fn lock(self: (&mut File), exclusive: bool, nonblock: bool) -> bool | Error {
+        mut operation = 1;
+        if exclusive {
+            operation = 2;
+        }
+        if nonblock {
+            operation = operation + 4;
+        }
+        code := host::flock(self.fd, operation);
+        if code == 0 {
+            return true;
+        }
+        if code == 11 {
+            return false;
+        }
+        return failed(self.path, code);
+    }
+    pub fn unlock(self: (&mut File)) -> unit | Error {
+        code := host::flock(self.fd, 8); // LOCK_UN
+        if code != 0 {
+            return failed(self.path, code);
+        }
+        return ();
     }
     // Every byte of `data`, or `ShortWrite` naming how many the platform accepted.
     pub fn write<a>(self: (&mut File), data: (&a [u8])) -> unit | Error {
