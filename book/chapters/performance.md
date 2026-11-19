@@ -279,11 +279,10 @@ no optimisation and full debug information, which is what Zig Debug, Rust's dev 
 `go build` do too (Grail's development build does not yet emit debug information), and a fast modern linker, as
 the others have (Go's and Zig's own, rustc's rust-lld, Grail's ld.lld), so neither the debug
 information nor the linker sets C apart. After a one-function edit, make recompiles the one
-translation unit and links it again. A build system is part of every column - cargo, `go build`'s
-cache, `zig build`'s cache, Grail's store and make each decide what to rebuild. The committed Zig
-figures were measured with `zig build-exe`, which compiles without its build system; the harness
-now builds Zig through `zig build`, and the next measurement replaces them. C has no project cache
-to empty for a cold build, and its standard libraries ship compiled, as the others' are warm.
+translation unit and links it again. Zig is built with `zig build-exe`, the cheapest way to build a one-file Zig program: `zig build`
+would add compiling its build runner (several seconds) to every project's first build, and Zig 0.14
+recompiles the whole program after an edit either way. C has no project cache to empty for a cold
+build, and its standard libraries ship compiled, as the others' are warm.
 
 The figure is the user-space instructions of the tool and every process it started, with every
 toolchain held to one process (`GRAIL_JOBS=1`, `GOMAXPROCS=1 -p=1`, `cargo -j1`; Zig's build-exe has

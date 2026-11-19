@@ -8,10 +8,11 @@
 //                   | zig build-exe -fno-emit-bin | cargo check
 //   check edited    the same after one function body changed
 //   build cold      grail build (the build store) | make (one translation unit, clang -O0 -g, lld) |
-//                   the same with clang++ | go build | zig build (a build.zig, Debug) | cargo build
+//                   the same with clang++ | go build | zig build-exe -O Debug | cargo build
 //   build edited    the same after the edit
-// Every build goes through the language's own build tool, which decides what to rebuild: Grail's
-// store, make, go build's cache, zig build's cache, cargo. A rebuild with nothing changed is not
+// Zig builds with zig build-exe, the cheapest way to build a one-file program: `zig build` would add
+// compiling its build runner to every project's first build (several seconds), and Zig 0.14
+// recompiles the whole program after an edit either way. A rebuild with nothing changed is not
 // measured: on a one-file project every tool answers it in milliseconds, so it times process
 // start-up, not the language.
 // "Cold" is a project's first build on a machine whose toolchain caches are warm: new source text
@@ -277,14 +278,6 @@ const twinEdit = {
   cpp: t => t.replace(/^int main\(\) \{/m, m => `${m}\n    (void)1;`),
 };
 
-// A Zig project's build file: one executable from main.zig, at the optimisation `zig build` is given.
-const zigBuildFile = `const std = @import("std");
-pub fn build(b: *std.Build) void {
-    const exe = b.addExecutable(.{ .name = "main", .root_source_file = b.path("main.zig"), .target = b.graph.host, .optimize = b.standardOptimizeOption(.{}) });
-    b.installArtifact(exe);
-}
-`;
-
 // Each language: how to lay out a project, and the commands.
 const languages = {
   grail: {
@@ -304,10 +297,8 @@ const languages = {
   zig: {
     file: 'main.zig', comment: '//', program: zigProgram, hello: zigHello,
     env: dir => ({ ZIG_LOCAL_CACHE_DIR: join(dir, 'zig-cache') }),
-    // Building goes through `zig build`, as a Zig project builds, so Zig's cache decides what to
-    // redo, as every other column's build tool does; `zig build-exe` alone recompiles every time.
-    fresh(dir) { writeFileSync(join(dir, 'build.zig'), zigBuildFile); },
-    check: ['zig', 'build-exe', '-fno-emit-bin', 'main.zig'], build: ['zig', 'build', '-Doptimize=Debug'], exe: 'zig-out/bin/main',
+    fresh() {},
+    check: ['zig', 'build-exe', '-fno-emit-bin', 'main.zig'], build: ['zig', 'build-exe', '-O', 'Debug', 'main.zig'], exe: 'main',
   },
   // C and C++: one translation unit and a one-target Makefile, built by make - the edit loop of a C
   // project, where make decides what to rebuild as cargo, go and Grail's store do for theirs. The
