@@ -207,3 +207,7 @@ land BRANCH:
 # The emulated legs of the newest landing on the build host: emulator version and each leg's verdict.
 land-status-remote:
     GRAIL_LAND_REMOTE=${GRAIL_LAND_REMOTE:-} bash tools/land.sh --remote-status
+
+# Build the playable Grail Abundance engine binary (.work/ab-engine-grail/ab-engine-grail).
+ab-engine *args:
+    bun abundance/tools/build-ab-engine.mjs "$@"
