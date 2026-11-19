@@ -89,6 +89,14 @@
   faces, prisms and cylinders from 2D profiles, n-gon pyramids) and all 21 shapes the dispatcher
   knows. `kit_test.grl` matches `parity/kit.txt`: 1968 values over three size sets and both windings.
 
+- **The HUD's interaction-card copy is ported.** `abundance/src/hud_prompt.grl` carries
+  `ab::hud_prompt` of `cmake/tx/hud.cmake`'s ABHUDPromptText.cpp: the aimed factory machine's prompt
+  (held input, electrical pole and generator verbs, the panel title, the Alt-E tool turn or held
+  output), the wire tool's prompt at a pole (observed reason, or the request verb), and the natural
+  harvest target's status line with rubber tapping's resting, early-cut, tapped and fresh states and
+  the latex-at-the-cup suffix; its `%.0f` numbers go through the exact fixed-decimal formatter.
+  `abundance/tests/parity/hud_prompt.cpp` compiles the engine's file and prints 34 byte-exact
+  strings; `abundance/tests/hud_prompt_test.grl` reproduces them.
 - **A loot site's life is ported.** `abundance/src/site_life.grl` carries `loot_sites/site_life.hpp`
   and `.cpp` from `cmake/tx/loot_sites.cmake`: the tuning with its per-field ranges and the
   cross-field consistency rules, the file's own draw (`mix`, the seeded `unit`, `exponential` and
