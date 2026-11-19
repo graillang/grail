@@ -221,16 +221,18 @@
   u64 respawn container), `survival.join` (string digest, u64 account, u64 character),
   `survival.wetness` (u64 character id, u32 life sequence, two f64s), `survival.habitation_water`
   (i32 x, i32 y, i64 owned quanta, f64 remainder), `gathering.harvesting` (one opaque
-  `vector<u8>`) and `gathering.tree_regrowth` (a vector of u64 seed + f64 remainder, then f64
-  last-advanced). Record tables are a u32 record count then the records' fields in AB_TX_FIELDS
-  order. Decoding is the field codec's: an object count at most 2^22 and at most one per remaining
+  `vector<u8>`), `gathering.tree_regrowth` (a vector of u64 seed + f64 remainder, then f64
+  last-advanced), `inventory.hotbar_selection` (u64 character, u32 slot, u64 sequence, bool),
+  `power.portable_charge` (an `optional` of seven u64s: one tag byte, refused above 1) and
+  `world.block_damage` (WorldCell's three i32, u16 damage, u8 face). Record tables are a u32 record
+  count then the records' fields in AB_TX_FIELDS order. Decoding is the field codec's: an object count at most 2^22 and at most one per remaining
   byte, a string a u32 length at most 65536, a `vector<u8>` bounded only by what remains (the
   harvesting book is deliberately not string-capped), exact consumption, and no key-order check
   (only put() sorts). The reference builds the tables through their own put(), saves them with the
   engine's World::encode_tables, prints every field with floats as bits and signed integers in two's
   complement, and replays sixteen mutated payloads through the engine's decode_tables, whose
   "payload does not load (table N name)" wording the port reproduces verbatim;
-  `abundance/tests/tx_tables_test.grl` matches all 43 lines and re-encodes each blob byte for byte.
+  `abundance/tests/tx_tables_test.grl` matches all 59 lines and re-encodes each blob byte for byte.
 
   checkpoint envelope with the survival record tables - `survival.life` (u64 character id, u64
   respawn container), `survival.join` (string digest, u64 account, u64 character) and
