@@ -16,8 +16,28 @@ Grail functions have fixed arity and any number of parameters; `extern "C"` decl
 the only variadic form (see [Cleanup and current boundaries](cleanup-and-boundaries.html)).
 `unit` is the no-value type,
 written `()` as a value; a function with no result annotation returns unit. Its closing brace supplies the normal
-return. There are no tail-expression returns: a function that produces a value uses `return`, and
-`return ();` is still available for an explicit early exit.
+return.
+
+The last expression of a block, written without a `;`, is the block's value - Rust's rule. A
+function's body is a block, so `fib` above ends in `fib(n - 1) + fib(n - 2)` and that is its result:
+the tail returns exactly as `return fib(n - 1) + fib(n - 2);` would, moving the value out to the
+caller. `return` is still the early exit (`fib`'s `return n;`), and still valid as the last
+statement. The same holds for a closure's block and for any block used as a value - an `if` or
+`match` arm, or a plain `{ ... }` (see [Branches and loops](control-flow.html)). A final `if` or
+`match` hands the tail on to its arms, so each arm's last expression is the result:
+
+```grl
+fn sign(n: i64) -> i64 {
+    if n < 0 { -1 } else if n == 0 { 0 } else { 1 }
+}
+```
+
+A function that returns a value and can reach its closing brace without one is refused, and the
+diagnostic names the type it owes; when the body ends in `expr;` of that type, it points at the `;`
+to remove. A tail in a block whose value nobody takes - a unit function's body, a loop's body - must
+itself be unit: `fn f() { a + 1 }` is refused with the help to end it with `;` or declare `-> u64`.
+`grail fmt` writes a body's final `return x;` as the tail `x`. Early returns, `return;`, `return ();`
+and a returned `if`/`match`/block (whose tail form returns from each arm instead) stay as written.
 
 ## Naming arguments, and letting the declaration fill them in
 

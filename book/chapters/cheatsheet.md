@@ -10,7 +10,7 @@ is checked to agree.
 | `let x = 5;` | `x := 5;` | Immutable by default in both. |
 | `let mut t = 0;` | `mut t = 0;` | |
 | `let x: u32 = 5;` | `x: u32 = 5;` | |
-| `fn f(a: u64) -> u64 { a }` | `fn f(a: u64) -> u64 { return a; }` | Grail always returns explicitly. |
+| `fn f(a: u64) -> u64 { a }` | `fn f(a: u64) -> u64 { a }` | The last expression of a block, without `;`, is its value; `return` exits early. |
 | `trait Shape { fn area(&self) -> u64; }` | `interface Shape { fn area(self: &Self) -> u64; }` | The receiver is an ordinary typed parameter. |
 | `impl Shape for Rect` | `impl Shape for Rect` | |
 | `fn largest<T: Shape>(items: &[T])` | `fn largest<T: Shape>(items: &T[])` | `T[]` is a vector, `&T[]` its view. |

@@ -1,5 +1,22 @@
 ## Unreleased
 
+- **Implicit returns: a block's last expression, written without `;`, is its value** (Rust's rule).
+  `fn f(a: u64) -> u64 { a }` returns `a`, compiled exactly as `return a;` is (the value moves out,
+  the body's locals drop). It holds for closure blocks (`|x: u64| { y := x * 2; y + 1 }`, whose
+  result type the tail now gives when nothing else does), for `if`/`match` arms used as values,
+  which may now hold statements before their value (`if c { t := f(); t + 1 } else { 0 }`), and for
+  a plain block expression (`area := { w := 3; w * w };`, also `unsafe { ...; v }`). A final
+  `if`/`match`/`{ }` in a body returns from each arm, so `if c { &p.x } else { &q.y }` ends a
+  function returning a reference, and `if let` works there too. `return` stays valid everywhere.
+  Refused with a diagnostic: a final `if` without `else` in a function that returns a value; a
+  body that can end without a value (now naming the type it owes, and pointing at the `;` to remove
+  when the last statement is `expr;` of that type); a non-unit tail in a unit body or in a
+  statement block (`while ... { ...; i }`), with the help to end it with `;`. `grail fmt` writes a
+  function's or closure's final `return x;` as `x` (early returns, `return;`, `return ();` and a
+  returned `if`/`match`/block stay), and lays out a brace that holds statements as a block wherever
+  it appears (a closure in an argument, an `if` arm). The book shows the tail form
+  (*Functions and recursion*, *Branches and loops*, the Rust cheatsheet) and its examples use it.
+
 - **The book's sidebar drops its "Find a topic" subtitle;** the search box (labelled for screen readers) sits under the title.
 - **The languages overview chart reads plainly.** Its bars start at 1× (the fastest language's time)
   on one logarithmic scale shared by the release and development groups, each group lists the
