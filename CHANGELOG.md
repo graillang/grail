@@ -1,5 +1,16 @@
 ## Unreleased
 
+- Fixed: LLVM builds for AArch64 and RISC-V passed the wrong values to functions of more than six
+  argument words when the call crossed between a lifted body and a native one, including functions
+  whose big result adds a hidden destination word. The thunks between the two conventions assumed
+  every argument was in x0..x5 (a0..a5), which stopped being true when call ABI S3 (fc27e6e2) moved
+  words past the sixth onto the stack. The word machine passes word 6 + k at 8k(sp), while LLVM
+  passes words 6 and 7 in x6/x7 (a6/a7) and the rest on the stack. Native code calling a lifted body
+  lost its seventh and later words (`more-than-six-parameters` printed 3015; `unboxed-big-results`
+  and `refinement-wrapper-dest-result` crashed). The thunks now move these words in both directions,
+  sized by the body's parameter count or the callee's signature. Covered by the new
+  `many-argument-words-cross-convention` case: 10- and 12-word calls in both directions.
+
 - **`--verify-facts` checks the loop-head hoist of loop-stable vectors.** The lifter now keeps
   FACT_LOOP_STABLE regions under --verify-facts (still not under --range-facts). The head checks the
   header it reads, and every fact-carrying access in the region, typed-sibling calls included,
