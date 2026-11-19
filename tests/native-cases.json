@@ -1898,6 +1898,26 @@
     ]
   },
   {
+    "name": "option-unwrap-method",
+    "source": "struct Rec { n: u64 }\nfn get(v: (&u64[]), i: u64) -> u64? {\n    if i < v.len() {\n        return Some(v[i]);\n    }\n    return None;\n}\nfn main() {\n    a := Some(Rec{n: 7});\n    println(a.unwrap().n);\n    v := u64[10, 20];\n    println(get(&v, 1).unwrap());\n    println(get(&v, 0).unwrap_or(99));\n}\n",
+    "modules": [
+      "lib/core.grl",
+      "lib/result.grl"
+    ],
+    "stdout": "7\n20\n10\n",
+    "note": "`Option` has `unwrap()`, on both the concise `T?` and the named spelling: the value, or the same trap `x!` raises on `None`. It sat next to `unwrap_or` but only the free `core.unwrap_option` function existed"
+  },
+  {
+    "name": "option-unwrap-on-none-traps",
+    "source": "fn main() {\n    x: u64? = None;\n    println(x.unwrap());\n}\n",
+    "modules": [
+      "lib/core.grl",
+      "lib/result.grl"
+    ],
+    "signal": "SIGABRT",
+    "note": "`unwrap()` on `None` is `x!`: the \"unwrap of None or Err\" trap, check kind `unwrap`"
+  },
+  {
     "name": "unwrap-then-equals-lexing",
     "source": "use core;fn main(){x:=Some(5);assert(x!==5);a:=3;assert(a!=4);println(42);}",
     "modules": [
@@ -2361,6 +2381,19 @@
     "source": "fn main() -> u64 {\n    mut y = 0.0044444444444444444;\n    y *= 2.03;\n    a := 0.0044444444444444444 * 2.03;\n    println(\"{} {}\", bits(y), bits(a));\n    mut z = 0.0044444444444444444;\n    z += 2.03;\n    b := 0.0044444444444444444 + 2.03;\n    println(\"{} {}\", bits(z), bits(b));\n    mut w: f32 = 0.0044444444444444444;\n    w *= 2.03;\n    c := f32(0.0044444444444444444) * 2.03;\n    println(\"{} {}\", f32_bits(w), f32_bits(c));\n    return 0;\n}\n",
     "stdout": "4576354578790724327 4576354578790724327\n4611763580420970395 4611763580420970395\n1007931889 1007931889\n",
     "note": "`y *= lit` on an f64 keeps the literal's double bits, as `y = y * lit` does: only an f32 context rounds a float literal from its text, so the compound form no longer multiplies by f32(2.03) widened back (the terrain lane's last bits). An f32 target still folds as binary32"
+  },
+  {
+    "name": "compound-xor-assignment",
+    "source": "struct Acc { n: u64 }\nfn main() {\n    mut x = 6;\n    x ^= 3;\n    println(x);\n    mut a = Acc{n: 240};\n    a.n ^= 15;\n    println(a.n);\n    mut v = u64[1, 2, 4];\n    i := 1;\n    v[i] ^= 3;\n    println(v[1]);\n    mut w = 255u8;\n    w ^= 15;\n    println(w);\n    mut y = 0u32;\n    y ^= 4294967295;\n    println(y);\n}\n",
+    "stdout": "5\n255\n1\n240\n4294967295\n",
+    "note": "`^=` is a compound assignment like the others: a local, a record field and an indexed element, at the target's own width (`u8`, `u32`, `u64`); it was \"expected `=`\" because the lexer had no `^=` token"
+  },
+  {
+    "name": "compound-xor-assignment-on-f64-rejected",
+    "source": "fn main() {\n    mut y = 1.5;\n    y ^= 2.0;\n}\n",
+    "reject": true,
+    "diagnostic": "operator not defined for floats",
+    "note": "`^=` follows the compound-assignment rules: it is not a float operator"
   },
   {
     "name": "compound-on-bool",
@@ -3044,6 +3077,12 @@
     "name": "char-from-surrogate-aborts",
     "source": "fn main() { n: u32 := 55296; println(char(n)); }\n",
     "signal": "SIGABRT"
+  },
+  {
+    "name": "index-field-assignment-self-read",
+    "source": "struct Tile { h: f64, tint: f32, name: string, deps: u64[] }\nfn main() {\n    mut v = Tile[];\n    v.push(Tile{h: 1.5, tint: 0.5, name: \"a\".text(), deps: u64[1, 2]});\n    i := 0;\n    v[i].h = v[i].h * 2.0;\n    println(v[0].h);\n    v[i].tint = 0.0044444444444444444;\n    println(f32_bits(v[0].tint));\n    v[i].name = format(\"{}-{}\", v[i].name, i);\n    println(v[0].name);\n    v[i].deps[1] = v[i].deps[0] + 41;\n    println(v[0].deps[1]);\n}\n",
+    "stdout": "3\n999400116\na-0\n42\n",
+    "note": "a field store through an index whose right side reads through the same index (`v[i].h = v[i].h * 2.0`, a call argument, another field of the element, an element of a vector field) is evaluated right side first, as `xs[i] = v` already was: the element loan a write target takes made the read \"`v` holds no value yet\". The right side is parsed with the field's own type, so an f32 field still takes its literal as f32"
   },
   {
     "name": "index-assignment",
@@ -4955,7 +4994,7 @@
     "args": [
       "../../../../tests/lib/clipper2"
     ],
-    "stdout": "52 cases, 0 failures\n",
+    "stdout": "59 cases, 0 failures\n",
     "note": "Clipper2 against the vendored C++: the boolean engine (Union/Intersection/Difference/Xor under all four fill rules to paths and PolyTrees, the double wrapper's precision and failure codes, PointInPolygon and area) and the offset engine (InflatePaths for every join and end type, the callers' round/round river buffers, inward and outward polygon offsets, single points, refusals), over real water-geometry caller polygons, vertex for vertex"
   },
   {
@@ -20338,5 +20377,37 @@
     "reject": true,
     "diagnostic": "type does not satisfy Send",
     "note": "The element bound of `par_map` is the impl's `T: Send`; a handle vector is refused naming the handle."
+  },
+  {
+    "name": "block-comments-nest-and-sit-inline",
+    "source": "/* outer /* inner */ still a comment */\nfn add(a: u64, /* left */ b: u64) -> u64 {\n    return a /* plus */ + b; /* trailing */\n}\nfn main() {\n    /* commented out:\n    println(\"never\");\n    /* even this */\n    */\n    s := \"/* not a comment */\";\n    println(\"{} {} {}\", add(2, 3), 10 / 2, s);\n}\n",
+    "stdout": "5 5 /* not a comment */\n",
+    "note": "Block comments nest, so a block that already holds one can be commented out whole; they may sit inside a line; `/*` in a string and `/` as division are not comments."
+  },
+  {
+    "name": "block-comment-unclosed",
+    "source": "fn main() {\n    println(\"a\");\n    /* never closed /* inner */\n}\n",
+    "reject": true,
+    "diagnostic": "unclosed block comment",
+    "note": "An unclosed block comment is reported at its opening `/*`; the inner `*/` closes only the inner one."
+  },
+  {
+    "name": "optional-narrowing-by-test",
+    "source": "struct Entity { id: u64, hp: u64 }\nfn show(a: (&Entity)?) -> u64 {\n    if a != None {\n        return a.id + a.hp;\n    }\n    return 0;\n}\nfn guard(a: (&Entity)?) -> u64 {\n    if a == None { return 99; }\n    b := a;\n    return a.id + b.hp;\n}\nfn both(a: u64?) -> u64 {\n    if a == None { return 1; } else { return a * 10; }\n}\nfn main() {\n    e := Entity { id: 7, hp: 3 };\n    println(\"{} {}\", show(Some(&e)), show(None));\n    println(\"{} {}\", guard(Some(&e)), guard(None));\n    println(\"{} {}\", both(Some(4)), both(None));\n    x: u64? := Some(5);\n    if x != None { println(\"x is {}\", x); }\n    println(\"still an optional: {}\", x != None);\n}\n",
+    "stdout": "10 0\n10 99\n40 1\nx is 5\nstill an optional: true\n",
+    "note": "An optional of a value that owns nothing, bound without mut, is its value where a test against None proves it present: inside `!=`, in the else of `==`, and after a guard that leaves. The optional itself is untouched."
+  },
+  {
+    "name": "optional-narrowing-keeps-the-borrow",
+    "source": "struct Entity { id: u64, hp: u64 }\nfn main() {\n    mut e = Entity { id: 7, hp: 3 };\n    a := Some(&e);\n    if a != None {\n        e.hp = 1;\n        println(\"{}\", a.id);\n    }\n}\n",
+    "reject": true,
+    "diagnostic": "conflicts with live borrow",
+    "note": "The narrowed name carries the optional's borrow: writing what it borrows while it is still used is refused."
+  },
+  {
+    "name": "optional-narrowing-not-for-owned-or-mut",
+    "source": "fn f(a: string?) -> u64 {\n    if a != None { return a.len(); }\n    return 0;\n}\nfn main() { println(\"{}\", f(Some(\"hi\".copy()))); }\n",
+    "reject": true,
+    "note": "An optional that owns its value is not narrowed (that would copy an owner); `if let Some(a) = a` takes it apart."
   }
 ]

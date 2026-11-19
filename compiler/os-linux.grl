@@ -130,6 +130,10 @@ fn rt_syscall(n: u64, a: u64, b: u64, c: u64) -> u64 {
     if n == 62 {
         return raw_syscall(129, a, b, c);
     }
+    // flock(2): 73 on x86-64, 32 on the generic table (aarch64 and riscv64).
+    if n == 73 {
+        return raw_syscall(32, a, b, c);
+    }
     // A dedicated thread's attributes: prctl, sched_setaffinity, sched_setscheduler, setpriority.
     if n == 157 {
         return raw_syscall(167, a, b, c);
@@ -1061,9 +1065,9 @@ fn rt_stat_kind(mode: u64) -> u64 {
 }
 
 // newfstatat(2) on `path` (a NUL-terminated string): the link itself when `follow` is 0, what it
-// names otherwise. `fields` receives eleven numbers - kind, size, mode, mtime seconds and
-// nanoseconds, atime seconds and nanoseconds, uid, gid, inode, device - and the result is 0 or a
-// positive errno. The x86-64 and generic `struct stat` layouts differ, so the offsets are next to
+// names otherwise. `fields` receives twelve numbers - kind, size, mode, mtime seconds and
+// nanoseconds, atime seconds and nanoseconds, uid, gid, inode, device, link count - and the result is
+// 0 or a positive errno. The x86-64 and generic `struct stat` layouts differ, so the offsets are next to
 // the syscall that fills them.
 fn rt_stat(path: u64, follow: u64, fields: u64) -> u64 {
     buf := rt_alloc(160);
@@ -1103,7 +1107,22 @@ fn rt_stat(path: u64, follow: u64, fields: u64) -> u64 {
     rt_push(fields, gid);
     rt_push(fields, raw_load(buf + 8));
     rt_push(fields, raw_load(buf));
+    if raw_target() == 0 {
+        rt_push(fields, raw_load(buf + 16)); // st_nlink, x86-64: 8 bytes after dev and ino
+    } else {
+        rt_push(fields, raw_load(buf + 20) & 4294967295); // st_nlink, generic: 4 bytes after mode
+    }
     rt_free(buf);
+    return 0;
+}
+
+// flock(2) on an open descriptor: LOCK_SH 1, LOCK_EX 2, LOCK_NB 4 (the caller owns the choice).
+// 0 or a positive errno; under LOCK_NB a held lock is EWOULDBLOCK (11).
+fn rt_flock(fd: u64, operation: u64) -> u64 {
+    r := rt_syscall(73, fd, operation, 0);
+    if rt_error(r) {
+        return wrapping_sub(0, r);
+    }
     return 0;
 }
 

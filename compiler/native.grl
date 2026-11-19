@@ -12782,9 +12782,9 @@ fn file_path<a>(c: (&a mut C), index: u64) -> u8[] {
     return out;
 }
 // A literal the lexer could not finish arrives as a token (kind 998 a character literal, 996 an
-// unclosed string, 995 a string holding a raw control byte) because the lexer has no diagnostic
-// channel; this is where those tokens become errors. Before this, the lexer aborted on them and the
-// reader saw "assertion failed" and a compiler source line.
+// unclosed string, 995 a string holding a raw control byte, 994 an unclosed block comment) because
+// the lexer has no diagnostic channel; this is where those tokens become errors. Before this, the
+// lexer aborted on them and the reader saw "assertion failed" and a compiler source line.
 fn fail_literal<a>(c: (&a mut C), at: u64, kind: u64) -> unit {
     exchange(&mut c.pos, at);
     text := tok_text(&mut c, at);
@@ -12810,6 +12810,10 @@ fn fail_literal<a>(c: (&a mut C), at: u64, kind: u64) -> unit {
     }
     if kind == 996 {
         fail(&mut c, view("unclosed string literal: add the closing `\"`"));
+    }
+    if kind == 994 {
+        diag_help(&mut c, view("block comments nest: every `/*` inside one needs its own `*/`"));
+        fail(&mut c, view("unclosed block comment: add the closing `*/`"));
     }
     // 995: a raw control byte inside a string literal.
     mut seen = 0;
@@ -12922,7 +12926,7 @@ fn load_file<a>(c: (&a mut C), index: u64) -> unit {
     exchange(&mut c.pos, 0);
     for i in c.toks.len() {
         k := c.toks[i].kind;
-        if (k == 999) || (k == 995) || (k == 996) || (k == 997) || (k == 998) {
+        if (k == 999) || (k == 994) || (k == 995) || (k == 996) || (k == 997) || (k == 998) {
             exchange(&mut c.pos, i);
             exchange(&mut c.file, index);
             if k != 999 {
@@ -43604,7 +43608,7 @@ fn capture_field_type<a>(c: (&a mut C), ty: u64) -> u64 {
 }
 // `=`, `+=`, `-=`, `*=`, `/=`, `%=` or `**=`.
 fn is_assign_kind(k: u64) -> bool {
-    return (k == 61) || ((261 < k) && (k < 267)) || (k == 268);
+    return (k == 61) || ((261 < k) && (k < 267)) || (k == 268) || (k == 275);
 }
 // Whether a place rooted just past `j` (`.field` and `[index]` steps) is assigned to: the body
 // stores into the capture itself, a field of it, or an element of it.
@@ -52091,6 +52095,9 @@ fn compound_operator(k: u64) -> u64 {
     if k == 266 {
         return 37;
     }
+    if k == 275 {
+        return 94;
+    }
     return 267;
 }
 // `xs[i] = v;`, `s.items[i] += v;`, `buf[i] = b;`: the operator token position, or 0.
@@ -52145,7 +52152,7 @@ fn assign_chain<a>(c: (&a mut C)) -> u64[] {
         break;
     }
     k := kind_at(&mut c, e);
-    if (groups != 0) && ((k == 61) || ((261 < k) && (k < 267)) || (k == 268)) {
+    if (groups != 0) && ((k == 61) || ((261 < k) && (k < 267)) || (k == 268) || (k == 275)) {
         return u64[e, last, groups, field];
     }
     return none;
@@ -52544,9 +52551,97 @@ fn chain_walk_mode<a>(c: (&a mut C), base: Val, stop: u64, write: u64) -> Val {
     }
     return v;
 }
+// The type the field at the end of an assignment target `name([..] | .f)*` will have, read from the
+// head binding's type without taking a borrow of it. NO_TYPE when the walk cannot follow the chain
+// (a method-call head, a map, a type it does not know).
+fn chain_field_type<a>(c: (&a mut C), start: u64, op: u64) -> u64 {
+    l := find_local(&mut c, view(tok_text(&mut c, start)));
+    if l == 0 {
+        return NO_TYPE;
+    }
+    mut ty = local_ty(&mut c, l - 1);
+    mut p = start + 1;
+    while p < op {
+        while ty_kind(&mut c, ty) == 7 {
+            ty = ty_arg(&mut c, ty);
+        }
+        if kind_at(&mut c, p) == 46 {
+            if ty_kind(&mut c, ty) != 8 {
+                return NO_TYPE;
+            }
+            d := ty_arg(&mut c, ty);
+            field := field_index(&mut c, d, view(tok_text(&mut c, p + 1)));
+            if field == 0 {
+                return NO_TYPE;
+            }
+            ty = field_type(&mut c, ty, field - 1);
+            p += 2;
+            continue;
+        }
+        if kind_at(&mut c, p) != 91 {
+            return NO_TYPE;
+        }
+        if is_array(&mut c, ty) {
+            ty = array_elem(&mut c, ty);
+        } else if (ty_kind(&mut c, ty) == 6) || (ty_kind(&mut c, ty) == 27) {
+            ty = ty_arg(&mut c, ty);
+        } else {
+            return NO_TYPE;
+        }
+        mut depth = 0;
+        while p < op {
+            kk := kind_at(&mut c, p);
+            if kk == 91 {
+                depth += 1;
+            }
+            if kk == 93 {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            p += 1;
+        }
+        p += 1;
+    }
+    while ty_kind(&mut c, ty) == 7 {
+        ty = ty_arg(&mut c, ty);
+    }
+    return ty;
+}
+// Whether the right side of the statement at the operator `op` names the target's head binding:
+// `v[i].f = v[i].f * 2` reads what it overwrites.
+fn chain_head_mentioned<a>(c: (&a mut C), start: u64, op: u64) -> bool {
+    name := tok_text(&mut c, start);
+    mut p = op + 1;
+    mut depth = 0;
+    while true {
+        k := kind_at(&mut c, p);
+        if k == 0 {
+            return false;
+        }
+        if (k == 59) & (depth == 0) {
+            return false;
+        }
+        // Any mention counts, including one inside a call's arguments (`format("{}", v[i].f)`):
+        // that is a read of the head while the write target's loan would be live.
+        if (k == 1) & same(view(tok_text(&mut c, p)), view(name)) {
+            return true;
+        }
+        if (k == 40) || (k == 91) || (k == 123) {
+            depth += 1;
+        }
+        if (k == 41) || (k == 93) || (k == 125) {
+            depth -= 1;
+        }
+        p += 1;
+    }
+    return false;
+}
 // `v[i].f = x` / `v[i][j].f.g += x`: the indexed prefix is borrowed mutably, then the final field
 // run is assigned exactly like `binding.f = x`.
 fn chained_field_assignment<a>(c: (&a mut C)) -> unit {
+    chain_start := c.pos;
     chain := assign_chain(&mut c);
     oppos := chain[0];
     // The final field run starts at the first `.` after the last bracket group.
@@ -52573,6 +52668,31 @@ fn chained_field_assignment<a>(c: (&a mut C)) -> unit {
             continue;
         }
         q = q + 2;
+    }
+    // The right side is evaluated before the target's mutable loan is taken, as `xs[i] = v` does:
+    // `v[i].f = v[i].f * 2` reads the field it is about to overwrite, and the element loan a write
+    // target takes would make that read a conflict on `v`. Only a plain store whose right side names
+    // the head is reordered; every other target keeps the order it had.
+    mut preparse = 0;
+    mut rhs = val(0, 0);
+    mut rhs_start = 0;
+    mut rhs_end = 0;
+    if (kind_at(&mut c, oppos) == 61) && chain_head_mentioned(&mut c, chain_start, oppos) {
+        want := chain_field_type(&mut c, chain_start, oppos);
+        if want != NO_TYPE {
+            exchange(&mut c.pos, oppos + 1);
+            rhs_start = c.pos;
+            rhs_mark := c.resources.len();
+            rhs = expr_expected(&mut c, 0, want);
+            rhs_end = c.pos;
+            if c.raw == 0 && !contains_borrow(&mut c, rhs.ty, 0) {
+                release_temporaries(&mut c, rhs_mark, rhs.t);
+                close_loans(&mut c);
+            }
+            expect(&mut c, view(";"));
+            exchange(&mut c.pos, chain_start);
+            preparse = 1;
+        }
     }
     head := place(&mut c, 1, 0);
     base := chain_walk(&mut c, head, final_run);
@@ -52607,7 +52727,7 @@ fn chained_field_assignment<a>(c: (&a mut C)) -> unit {
     a := assign_field_path(&mut c, base.t, base.ty);
     target := a.t;
     fieldty := ty_arg(&mut c, a.ty);
-    assignment_tail(&mut c, 0, base.t, base.ty, target, u64[1, fieldty, c.ref_assign_d, c.ref_assign_k, c.ref_assign_base, c.ref_assign_rty], view(fname), record_ty);
+    assignment_tail(&mut c, 0, base.t, base.ty, target, u64[1, fieldty, c.ref_assign_d, c.ref_assign_k, c.ref_assign_base, c.ref_assign_rty], view(fname), record_ty, preparse, rhs.t, rhs.ty, rhs_start, rhs_end);
     return ();
 }
 // Writing or mutably borrowing a string's bytes. A string literal is a `string` (read-only,
@@ -52904,7 +53024,7 @@ fn assignment_ahead<a>(c: (&a mut C)) -> bool {
         e = e + 2;
     }
     k := kind_at(&mut c, e);
-    return k == 61 || (261 < k && k < 267) || k == 268;
+    return k == 61 || (261 < k && k < 267) || k == 268 || k == 275;
 }
 // Evaluates one argument to its dereferenced value.
 fn operand<a>(c: (&a mut C)) -> Val {
@@ -52964,6 +53084,127 @@ fn write_statement<a>(c: (&a mut C)) -> unit {
     require_write(&mut c, first);
     invoke(&mut c, view("rt_write"), args);
     cleanup(&mut c, temps);
+    return ();
+}
+// The test optional_narrow takes: `name != None` or `name == None` and then the block, where `name`
+// is a binding that is not `mut` and holds an optional of a value that owns nothing - a number, a
+// bool, a reference. Anything else is an ordinary comparison.
+fn narrowable<a>(c: (&a mut C)) -> bool {
+    p := c.pos;
+    if kind_at(&mut c, p) != 1 {
+        return false;
+    }
+    if !(is_at(&mut c, p + 1, view("!=")) || is_at(&mut c, p + 1, view("=="))) {
+        return false;
+    }
+    if !is_at(&mut c, p + 2, view("None")) || !is_at(&mut c, p + 3, view("{")) {
+        return false;
+    }
+    name := tok_text(&mut c, p);
+    l := find_local(&mut c, view(name));
+    if l == 0 {
+        return false;
+    }
+    mut local = &c.locals[l - 1];
+    if local.mutable != 0 {
+        return false;
+    }
+    ty := local.ty;
+    if !is_option_storage(&mut c, ty) {
+        return false;
+    }
+    d := ty_arg(&mut c, ty);
+    pty := field_type(&mut c, ty, find_field(&mut c, d, view("Some")));
+    return !needs_drop(&mut c, pty);
+}
+// Narrowing an optional by testing it against `None`, without taking it apart: where the test proved
+// it present, its name is its value - a copy, since the value owns nothing (narrowable), carrying the
+// optional's borrows, as `if let Some(name) = name` would bind it, but leaving the optional itself
+// as it was.
+//   if a != None { a.x } else { .. }    `a` is the value in the first block
+//   if a == None { .. } else { a.x }    and in the `else`
+//   if a == None { return 0; }  a.x     a guard that leaves: the value for the rest of the block
+fn optional_narrow<a>(c: (&a mut C)) -> unit {
+    name := ident(&mut c);
+    present := eat(&mut c, view("!="));
+    if !present {
+        expect(&mut c, view("=="));
+    }
+    expect(&mut c, view("None"));
+    l := find_local(&mut c, view(name));
+    xty := local_ty(&mut c, l - 1);
+    xt := local_id(&mut c, l - 1);
+    d := ty_arg(&mut c, xty);
+    k := find_field(&mut c, d, view("Some"));
+    pty := field_type(&mut c, xty, k);
+    tag := rec_load(&mut c, xt, 0, 0);
+    before := ownership::snapshot(&c.check);
+    other := label(&mut c);
+    end := label(&mut c);
+    get(&mut c, tag, view("%rax"));
+    o(&mut c, view("cmpq $"));
+    on(&mut c, k);
+    o(&mut c, view(",%rax\n"));
+    // The first block runs where the test holds: `!=` jumps away when the tag is not Some, `==` when
+    // it is.
+    if present {
+        jump(&mut c, view("jne"), other);
+    } else {
+        jump(&mut c, view("je"), other);
+    }
+    mark := c.locals.len();
+    exchange(&mut c.terminated, 0);
+    if present {
+        narrow_bind(&mut c, name, xt, xty, pty);
+    }
+    block(&mut c);
+    pop_locals(&mut c, mark);
+    yes := ownership::snapshot(&c.check);
+    yt := c.terminated;
+    jump(&mut c, view("jmp"), end);
+    mark(&mut c, other);
+    ownership::restore(&mut c.check, &before);
+    exchange(&mut c.terminated, 0);
+    had_else := eat(&mut c, view("else"));
+    if had_else {
+        else_mark := c.locals.len();
+        if !present {
+            narrow_bind(&mut c, name, xt, xty, pty);
+        }
+        if is(&mut c, view("if")) {
+            statement(&mut c);
+        } else {
+            block(&mut c);
+        }
+        pop_locals(&mut c, else_mark);
+    }
+    nt := c.terminated;
+    if yt == 0 {
+        if nt != 0 {
+            ownership::restore(&mut c.check, &yes);
+        } else {
+            ownership::merge(&mut c.check, &yes);
+        }
+    }
+    exchange(&mut c.terminated, yt & nt);
+    mark(&mut c, end);
+    // `if a == None { <leaves> }` with no `else`: only the present optional reaches here, so the rest
+    // of the enclosing block sees `a` as its value (the binding lasts until that block closes).
+    if !present && !had_else && (yt != 0) {
+        narrow_bind(&mut c, name, xt, xty, pty);
+    }
+    return ();
+}
+// Binds `name` to the payload of the optional `xt`, known to be Some: a copy that carries the
+// optional's borrows (transfer_bonds adds them to the copy and leaves them on the optional).
+fn narrow_bind<a, b>(c: (&a mut C), name: &b [u8], xt: u64, xty: u64, pty: u64) -> unit {
+    payload := payload_load(&mut c, xt, xty, pty);
+    own(&mut c, payload, pty);
+    if contains_borrow(&mut c, pty, 0) {
+        transfer_bonds(&mut c, place_of(&mut c, xt), place_of(&mut c, payload));
+    }
+    stored_source(&mut c, payload, pty);
+    bind(&mut c, copy_bytes(name), pty, payload, 0);
     return ();
 }
 // if let Variant(binding) = value { ... } else { ... }: consumes value like match; the else
@@ -53123,7 +53364,7 @@ fn arm_body<a>(c: (&a mut C)) -> unit {
             view("an arm body is one expression, not a statement: write `Pat => { x = 1; }`")
         );
     }
-    if (261 < kind(&mut c)) & (kind(&mut c) < 267) {
+    if ((261 < kind(&mut c)) & (kind(&mut c) < 267)) | (kind(&mut c) == 275) {
         fail(
             &mut c,
             view("an arm body is one expression, not a statement: write `Pat => { x += 1; }`")
@@ -53351,7 +53592,7 @@ fn if_arm<a>(c: (&a mut C), hint: u64, hint_at: u64, slot: u64) -> u64 {
     owners := c.resources.len();
     value_at := c.pos;
     mut v = expr_expected(&mut c, 0, hint);
-    if (kind(&mut c) == 61) || ((261 < kind(&mut c)) & (kind(&mut c) < 267)) {
+    if (kind(&mut c) == 61) || ((261 < kind(&mut c)) & (kind(&mut c) < 267)) || (kind(&mut c) == 275) {
         diag_help(&mut c, view("write `{ value }` for the arm and the write outside the `if`"));
         fail_at(
             &mut c,
@@ -54975,6 +55216,10 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
             if_let(&mut c);
             return ();
         }
+        if narrowable(&mut c) {
+            optional_narrow(&mut c);
+            return ();
+        }
         tests := c.resources.len();
         cond_at := c.pos;
         mut v = expr(&mut c, 0);
@@ -55156,7 +55401,7 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
                     target := a.t;
                     fieldty := ty_arg(&mut c, a.ty);
                     mut none = u8[];
-                    assignment_tail(&mut c, 0, head.t, head.ty, target, u64[1, fieldty, c.ref_assign_d, c.ref_assign_k, c.ref_assign_base, c.ref_assign_rty], view(none), 0);
+                    assignment_tail(&mut c, 0, head.t, head.ty, target, u64[1, fieldty, c.ref_assign_d, c.ref_assign_k, c.ref_assign_base, c.ref_assign_rty], view(none), 0, 0, 0, 0, 0, 0);
                     return ();
                 }
                 capture_assignment(&mut c, view(name));
@@ -55222,7 +55467,7 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
             record_ty = shape;
         }
         op_at := c.pos;
-        assignment_tail(&mut c, l, id, ty, target, u64[through, fieldty, assigned_d, assigned_k, assigned_base, assigned_rty], view(field_name), record_ty);
+        assignment_tail(&mut c, l, id, ty, target, u64[through, fieldty, assigned_d, assigned_k, assigned_base, assigned_rty], view(field_name), record_ty, 0, 0, 0, 0, 0);
         // `x = e` writes the binding; `x.f = e` writes a field of what `x` owns, which is not a fact
         // about `x`'s own value.
         if through != 0 {
@@ -55288,7 +55533,7 @@ fn discard_value<a>(c: (&a mut C), v: Val) -> unit {
 }
 // The rest of an assignment once its target is known: `target` is the binding slot (through =
 // 0, `l` its local) or a field reference (through = 1, `fieldty` the field type).
-fn assignment_tail<a, b>(c: (&a mut C), l: u64, id: u64, ty: u64, target: u64, through_fieldty: u64[], fname: &b [u8], rtype: u64) -> unit {
+fn assignment_tail<a, b>(c: (&a mut C), l: u64, id: u64, ty: u64, target: u64, through_fieldty: u64[], fname: &b [u8], rtype: u64, preparsed: u64, rhs_t: u64, rhs_ty: u64, rhs_start: u64, rhs_end: u64) -> unit {
     through := through_fieldty[0];
     fieldty := through_fieldty[1];
     // The field the path ends at, when the target was read by `assign_field_path`.
@@ -55355,9 +55600,21 @@ fn assignment_tail<a, b>(c: (&a mut C), l: u64, id: u64, ty: u64, target: u64, t
     if operator != 61 {
         reservation = reserve_compound(&mut c, target, through);
     }
-    vstart := c.pos;
-    mut v = expr_expected(&mut c, 0, expected);
-    vend := c.pos;
+    mut vstart = c.pos;
+    mut v = val(0, 0);
+    mut vend = c.pos;
+    if preparsed != 0 {
+        // The right side was evaluated before this target borrowed its storage (see
+        // chained_field_assignment): its value and span come from there, and the statement resumes
+        // at the `;` that follows them.
+        v = val(rhs_t, rhs_ty);
+        vstart = rhs_start;
+        vend = rhs_end;
+        exchange(&mut c.pos, rhs_end);
+    } else {
+        v = expr_expected(&mut c, 0, expected);
+        vend = c.pos;
+    }
     expect(&mut c, view(";"));
     if (through == 0) & (c.raw == 0) {
         expected = settle_flex(&mut c, l - 1, v.ty);
@@ -56170,6 +56427,15 @@ fn host_fn<a, b>(c: (&a mut C), name: &b [u8], ret: u64) -> unit {
     }
     if same(view(name), view("stat")) || same(view(name), view("chmod")) {
         c.params.push(4);
+        c.params.push(0);
+    }
+    // flock(fd, operation): an open descriptor and flock(2)'s own operation word.
+    if same(view(name), view("flock")) {
+        c.params.push(0);
+        c.params.push(0);
+    }
+    // alive(pid): a process id.
+    if same(view(name), view("alive")) {
         c.params.push(0);
     }
     if same(view(name), view("spawn")) {
@@ -62955,6 +63221,11 @@ pub fn main() -> u64 {
     host_fn(&mut c, view("backtrace"), 2);
     numbers_array := intern(&mut c, 6, 0);
     host_fn(&mut c, view("stat"), numbers_array);
+    // `host::flock(fd, operation)`: an advisory lock on an open descriptor, 0 or a positive errno -
+    // the file-system half content.py's gc/heal need (advisory locks and link counts).
+    host_fn(&mut c, view("flock"), 0);
+    // `host::alive(pid)`: 0 exists, 1 nothing has that id, 2 exists but unsignallable by this user.
+    host_fn(&mut c, view("alive"), 0);
     host_fn(&mut c, view("rename"), 0);
     host_fn(&mut c, view("symlink"), 0);
     // `host::chmod(path, mode)`: the permission bits of a file, 0 or a positive errno (Windows has

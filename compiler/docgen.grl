@@ -293,6 +293,9 @@ fn match_brace<a>(text: &a [u8], open: u64) -> u64 {
                 }
                 i += 1;
             }
+        } else if (ch == 47) && (i + 1 < text.len()) && (text[i + 1] == 42) {
+            i = block_comment_end(view(text), i, text.len());
+            continue;
         } else if (ch == 47) && (i + 1 < text.len()) && (text[i + 1] == 47) {
             while (i < text.len()) && (text[i] != 10) {
                 i += 1;
@@ -309,6 +312,27 @@ fn match_brace<a>(text: &a [u8], open: u64) -> u64 {
         i += 1;
     }
     return text.len();
+}
+// The index after the block comment opening at `i` (`/* ... */`, nesting), or `to` when it is not
+// closed (the compiler reports that; here the rest is simply comment).
+fn block_comment_end<a>(text: &a [u8], at: u64, to: u64) -> u64 {
+    mut i = at;
+    mut depth: u64 = 0;
+    while i < to {
+        if (text[i] == 47) && (i + 1 < to) && (text[i + 1] == 42) {
+            depth += 1;
+            i += 2;
+        } else if (text[i] == 42) && (i + 1 < to) && (text[i + 1] == 47) {
+            depth -= 1;
+            i += 2;
+            if depth == 0 {
+                return i;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    return to;
 }
 // Where a declaration's signature ends and its body begins: the first `{` or `;` at parenthesis
 // depth 0, outside strings and comments.
@@ -329,6 +353,9 @@ fn scan_signature<a>(text: &a [u8], start: u64) -> Scan {
                 }
                 i += 1;
             }
+        } else if (ch == 47) && (i + 1 < text.len()) && (text[i + 1] == 42) {
+            i = block_comment_end(view(text), i, text.len());
+            continue;
         } else if (ch == 47) && (i + 1 < text.len()) && (text[i + 1] == 47) {
             while (i < text.len()) && (text[i] != 10) {
                 i += 1;
@@ -591,6 +618,9 @@ fn impl_methods<a, b>(text: &a [u8], from: u64, to: u64, head: &b [u8], starts: 
                 }
                 i += 1;
             }
+        } else if (ch == 47) && (i + 1 < to) && (text[i + 1] == 42) {
+            i = block_comment_end(view(text), i, to);
+            continue;
         } else if (ch == 47) && (i + 1 < to) && (text[i + 1] == 47) {
             while (i < to) && (text[i] != 10) {
                 i += 1;
@@ -668,6 +698,9 @@ fn member_fields<a>(text: &a [u8], from: u64, to: u64, kind: u64, decl_line: u64
                 }
                 i += 1;
             }
+        } else if (ch == 47) && (i + 1 < to) && (text[i + 1] == 42) {
+            i = block_comment_end(view(text), i, to);
+            continue;
         } else if (ch == 47) && (i + 1 < to) && (text[i + 1] == 47) {
             while (i < to) && (text[i] != 10) {
                 i += 1;

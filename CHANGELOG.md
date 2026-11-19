@@ -1,5 +1,98 @@
 ## Unreleased
 
+- **Testing an optional against `None` narrows it.** Where `a != None` (or the `else` of
+  `a == None`, or the rest of a block after `if a == None { return ...; }`) proves it present, `a` is
+  its value, with no unwrapping: `if target == None { return 0; } return target.hp;`. It applies to
+  a binding that is not `mut` holding an optional of a value that owns nothing (numbers, bools,
+  references); the narrowed name carries the optional's borrows, and the optional is left as it was.
+  An owned optional is still taken apart with `if let Some(s) = s`.
+- **Block comments, and they nest.** `/* ... */` may span lines or sit inside one, and each `/*`
+  inside a block comment needs its own `*/`, so code that already holds a comment can be commented
+  out whole. An unclosed one is reported at its opening `/*`. `grail fmt` keeps block comments where
+  they were written (inline or on their own lines); `grail doc`, the book's highlighter and the VS
+  Code grammar know them too.
+- **A loot site's life is ported.** `abundance/src/site_life.grl` carries `loot_sites/site_life.hpp`
+  and `.cpp` from `cmake/tx/loot_sites.cmake`: the tuning with its per-field ranges and the
+  cross-field consistency rules, the file's own draw (`mix`, the seeded `unit`, `exponential` and
+  the per-decision `key`), `contest` (distinct players in the window, nearby owners, capped combat,
+  `1 - exp(-raw/scale)`), `restock_interval_s`, `farm_locked`, the visit/combat records with their
+  coalescing and pruning, the solo-looter streak, `plan_refill` (share and fill draws per kind, the
+  partial Fisher-Yates over the slots, sorted picks, the streak's fill factor and tier drop),
+  `next_event`/`apply_event` (resupply, retake or move-in after a clearing, the abandoned party's
+  move-in/stash/pass-by, derelict salvage), `note_cleared`, `crew_start`, `unwatched` and
+  `occupancy_decay`. `abundance/tests/site_life_test.grl` prints 334 lines that match a reference
+  linking the engine's own `site_life.cpp` — the 31 tuning fields are driven through the engine's
+  JSON parser, so its ranges, consistency rules and wording are the oracle.
+
+- **The file-system primitives Abundance's content gc/heal need exist in the os layer.** `stat` now
+  reports the link count (`fs::Metadata::nlink`), `host::flock(fd, operation)` is the advisory lock
+  (LOCK_SH/LOCK_EX/LOCK_NB/LOCK_UN; 73 on x86-64 and 32 on the generic table), and
+  `host::alive(pid)` answers exists / gone / exists-but-unsignallable; `fs` wraps both as
+  `File::lock`/`unlock` and `fs::alive`. The abundance suite exercises them deterministically
+  (`fs_primitives_test.grl`).
+
+- Added: `^=` is a compound assignment, like `+=` and the rest: `x ^= 3` in a local, a record field
+  (`a.n ^= 15`) and an indexed element (`v[i] ^= 3`), at the target's own integer width. It was
+  "expected `=`" - the lexer's multibyte table had no `^=` token (kind 275) - and it is still refused
+  on floats ("operator not defined for floats"), as the other compound forms are. Cases
+  `compound-xor-assignment` and `compound-xor-assignment-on-f64-rejected`.
+- **The server-side yield maps and the watershed query are ported, bit for bit.**
+  `abundance/src/worldgen_yields.grl` carries `generate_server_yields` (the secret fingerprint and
+  the four grade/inventory rasters), `sample_yield` (a cell's secret grade times the subsurface
+  probe's indicators) and `simulate_water_diversion` (captured discharge and power, then the walk
+  down the D8 receiver with the pm exp distance decay). `yields_test.grl` matches
+  `parity/yields.txt`: 585 values over three worlds, three secrets, three depths and three
+  diversion fractions. The ABFE fixture moves to version 3, carrying the D8 receiver the walk reads.
+- **The platform window parity covers the gamepad's hotplug edges.** Two cases join
+  `tests/parity/platform_window.cpp` and `tests/platform_window_test.grl`: a `GAMEPAD_REMOVED` for an
+  instance the window does not hold (window.cpp's handler compares the event's id with the pad it
+  has, so the open pad and its held button must survive), and a second virtual pad arriving after the
+  first is detached (the `GAMEPAD_ADDED` reopens it, and the sampling reads the new pad's axis -
+  then it is gone again and the axis reads zero). 100/100 lines match, up from 96. The shim gains
+  `gr_sdl_push_gamepad_removed`, which names the instance a removal event is about.
+
+- **`lib-clipper2` covers the offset branches the owner fixtures could not reach.** The first 52
+  cases exercised every join and end type on well-behaved geometry, but six branches inside them
+  stayed dark: the miter join's fall-back to a square join once the corner exceeds the miter limit,
+  the `miter_limit <= 1` branch that uses the C++'s `temp_lim = 2`, the two-point path whose
+  `EndType::Joined` becomes a square (or round) end, a 180-degree reversal where the join sees
+  `cos_a` near -1, and a negative delta on an open path (where the engine takes `abs` for every
+  non-polygon end) and on a closed polygon with bevel joins. Seven fixtures now pin those and match
+  the vendored C++ vertex for vertex; the case is 59.
+
+- Added: `Option` has `unwrap()` (`lib/result.grl`), on the concise `T?` and the named spelling alike:
+  the value, or the same trap `x!` raises on `None` - check kind `unwrap`, so a `--report-checks`
+  build counts it where it stands. Only `unwrap_or` and the free `core.unwrap_option` function existed,
+  so a ported line like `v.get(k).unwrap()` had to be rewritten. Cases `option-unwrap-method` and
+  `option-unwrap-on-none-traps`.
+- **Job bodies take the scheduler by reference.** `submit`, `submit_deps`, `post` and
+  `executor_submit` take `Fn<Share, Owned>((&JobScheduler), u64, u64) -> u64`, so a body asks
+  `job_cancelled`, `job_preempt_requested` and `job_yield` through the scheduler it is lent. The
+  `rc::Arc` handle the bodies took while a struct field's reference parameter was refused is gone.
+- **The player character's decision rules are ported (first group).** `abundance/src/character_rules.grl`
+  carries cmake/tx/character's header-only rules: interaction targeting, hit zones for bone names and
+  capsules, the dig hold's refusal/end/still facts and swing schedule, the hotbar selection intent with
+  the deferred primary press, and the tool-cache offer handshake. 140 values match a reference
+  compiling the five headers at the pin.
+- **The terrain streaming layer's demand accounting is ported.** `abundance/src/render_policy_terrain.grl`
+  carries `abundance/terrain_stream`'s budgets (one generator product, samples per field-build turn),
+  `stage_v3.hpp` with its implementation (which drainage level and field-raster resolution a page of
+  a given LOD level reads), `gpu_kernel_schedule.hpp` (the catch-up budget's still-loading
+  predicate: a short complete radius or a near ring short of full depth), `lod_camera_hold.hpp` (the
+  LOD camera's stationary hysteresis, so a still player re-uploads nothing) and `input_coverage.hpp`'s
+  two stand-ins with the page-ready rule they share. 262 reference lines. The page pool's own
+  bookkeeping (`page_book.hpp`, `node_set.hpp`) and the residency manager's selection are their own
+  increments.
+- **The render graph plan now carries what the RHI executor asked for.** `Dispatch` names the
+  pipeline bound when the group was issued (`Dispatch.pipeline`, a caller-defined id the executor maps
+  to its own object; `abundance_render_graph::bind(g, pass, id)` reads like the engine's pass body),
+  and `Pass.pipeline` carries the last bind even when nothing is dispatched; `CreateInfo` is keyed by
+  resource index and stays per placed resource; each colour attachment carries its `mip` and `aspect`;
+  and `submit_waits(plan, segment)` applies the empty-submit rule, dropping waits naming a queue with
+  no segment this frame (`device_check().dropped_waits` counts them). The parity reference captures
+  vkCmdBindPipeline before each vkCmdDispatch and resolves create names back to resource indices, so
+  all four are gated: 3004 lines match.
+
 - **`v.iter()` is every vector's, view's and slice's own method, with no `use` line.** It borrows
   `v` and yields `&T`, as Rust's `iter()` does, so `v` is still usable afterwards and stays borrowed
   while the chain or an item from it lives (`iter::of(v)` and `v.into_iter()` remain the consuming

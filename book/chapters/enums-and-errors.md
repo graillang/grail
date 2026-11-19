@@ -6,7 +6,24 @@ enum and hands the active payload to its arm. Cover every variant.
 {{example:enums}}
 
 `T?` is the concise spelling of `result::Option<T>`: `Some(value)` holds a value and `None` holds
-nothing. A structural union such as `T | U` holds a value of either member type: return a member
+nothing. There is no null: a value that may be absent is a `T?`, and the type says so.
+
+Testing an optional against `None` narrows it. Where the test proves it present, its name is its
+value, with no unwrapping:
+
+```grl
+fn hp(target: (&Entity)?) -> u64 {
+    if target == None { return 0; }   // after a guard that leaves, `target` is the `&Entity`
+    return target.hp;
+}
+```
+
+`if a != None { ... }` narrows `a` inside its block, `if a == None { ... } else { ... }` inside the
+`else`, and a guard whose block always leaves narrows it for the rest of the enclosing block. The
+optional itself is untouched, so it can still be tested or passed on afterwards. Narrowing applies
+to a binding that is not `mut` and holds an optional of a value that owns nothing: a number, a
+`bool`, a reference. An optional that owns its value (`string?`) is taken apart with
+`if let Some(s) = s`, which moves the value out. A structural union such as `T | U` holds a value of either member type: return a member
 directly and match it by type. Matches must cover every member, or use a final `_` arm.
 
 A result `S |? F` separates success alternatives from failure alternatives. Postfix `?` returns a

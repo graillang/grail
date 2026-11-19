@@ -5,7 +5,8 @@ module fmt;
 // literals when they fit, and at most one blank line. Comments are preserved. A line over
 // 100 columns is broken at a match arm, a postfix chain, a bracket list or a binary
 // operator, in that order, using tokens only so the program is never reparsed or changed.
-// Token kinds: 1 word, 2 number, 3 string, 4 punctuation (byte or lexer multi-byte code), 5 comment.
+// Token kinds: 1 word, 2 number, 3 string, 4 punctuation (byte or lexer multi-byte code), 5 comment
+// to the end of the line, 6 block comment (`/* ... */`, nesting; kept as written, inline or not).
 struct F {
     kind: u64[],
     start: u64[],
@@ -117,6 +118,26 @@ fn scan<a, b>(f: (&a mut F), s: &b [u8]) {
                     end -= 1;
                 }
                 token(&mut f, 5, start, end, nl, 0);
+                nl = 0;
+                continue;
+            }
+            if s[i + 1] == 42 {
+                mut depth = 0;
+                while i < n {
+                    if (s[i] == 47) & (i + 1 < n) && (s[i + 1] == 42) {
+                        depth += 1;
+                        i += 2;
+                    } else if (s[i] == 42) & (i + 1 < n) && (s[i + 1] == 47) {
+                        depth -= 1;
+                        i += 2;
+                        if depth == 0 {
+                            break;
+                        }
+                    } else {
+                        i += 1;
+                    }
+                }
+                token(&mut f, 6, start, i, nl, 0);
                 nl = 0;
                 continue;
             }
@@ -436,7 +457,7 @@ fn space<a, b>(f: (&a F), s: &b [u8], p: u64, i: u64, inline: u64) -> bool {
     k := f.kind[i];
     pc := f.code[p];
     c := f.code[i];
-    if k == 5 {
+    if k == 5 || k == 6 || pk == 6 {
         return true;
     }
     if (k == 4) & (c == 91) & (pk == 1) & (f.end[p] < f.start[i]) {
@@ -637,6 +658,16 @@ fn layout<a, b>(f: (&a mut F), s: &b [u8]) {
             pending = 1;
             continue;
         }
+        // A block comment on the line of the token before it stays there; the line breaks after it
+        // only where the source broke it.
+        if (k == 6) & (f.nl[i] == 0) & (pending != 0) & (0 < i) {
+            emit(&mut f, i, 1);
+            pending = 0;
+            if (i + 1 < f.kind.len()) && (f.nl[i + 1] != 0) {
+                pending = 1;
+            }
+            continue;
+        }
         if pending != 0 {
             if 1 < f.nl[i] && lines != 0 && !closes {
                 if !punct(&f, i - 1, 123) {
@@ -682,11 +713,17 @@ fn layout<a, b>(f: (&a mut F), s: &b [u8]) {
                 start = 0;
             }
         }
-        if start != 0 && k != 1 && k != 5 {
+        if start != 0 && k != 1 && k != 5 && k != 6 {
             start = 0;
         }
         if k == 5 {
             pending = 1;
+            continue;
+        }
+        if k == 6 {
+            if (i + 1 < f.kind.len()) && (f.nl[i + 1] != 0) {
+                pending = 1;
+            }
             continue;
         }
         if k != 4 {

@@ -10277,10 +10277,10 @@ fn f_host_create_dir(path: u64) -> u64 {
     return 0;
 }
 
-// `stat(path, follow)` answers twelve numbers: the errno (0 on success, positive otherwise and the
-// remaining eleven entries zero), then kind (0 other, 1 regular file, 2 directory, 3 symbolic link),
+// `stat(path, follow)` answers thirteen numbers: the errno (0 on success, positive otherwise and the
+// remaining twelve entries zero), then kind (0 other, 1 regular file, 2 directory, 3 symbolic link),
 // size, mode (type and permission bits), modified seconds, modified nanoseconds, accessed seconds,
-// accessed nanoseconds, owner uid, group gid, inode and device. Times are seconds since the Unix
+// accessed nanoseconds, owner uid, group gid, inode, device and link count. Times are seconds since the Unix
 // epoch as a word: a date before 1970 reads back through i64(). A platform without a field reports
 // 0 for it (Windows has no POSIX mode, owner or inode).
 fn f_host_stat(path: u64, follow: u64) -> u64 {
@@ -10293,10 +10293,10 @@ fn f_host_stat(path: u64, follow: u64) -> u64 {
         rt_free(name);
     }
     if code != 0 {
-        // The platform pushed nothing: answer the errno and eleven zeroes.
+        // The platform pushed nothing: answer the errno and twelve zeroes.
         rt_push(out, code);
         mut i = 0;
-        while i < 11 {
+        while i < 12 {
             rt_push(out, 0);
             i = i + 1;
         }
@@ -10322,6 +10322,24 @@ fn f_host_rename(from: u64, to: u64) -> u64 {
         rt_free(b);
     }
     return code;
+}
+// `flock(fd, operation)` on an open descriptor: 0 when the lock is held, EWOULDBLOCK (11) under a
+// non-blocking request the kernel refused, another positive errno otherwise. The operation word is
+// flock(2)'s own: LOCK_SH 1, LOCK_EX 2, LOCK_NB 4.
+fn f_host_flock(fd: u64, operation: u64) -> u64 {
+    return rt_flock(fd, operation);
+}
+// `alive(pid)`: 0 when the process exists and may be signalled, 1 when nothing has that id (ESRCH),
+// 2 when it exists but this user may not signal it (EPERM) - which is still alive.
+fn f_host_alive(pid: u64) -> u64 {
+    r := rt_syscall(62, pid, 0, 0);
+    if r == 0 {
+        return 0;
+    }
+    if wrapping_sub(0, r) == 3 {
+        return 1;
+    }
+    return 2;
 }
 // Starts `args` (a vector of byte strings, the program first) without a shell and without waiting.
 // `env` is the child's whole environment or 0 to inherit this process's. The child's stdout is

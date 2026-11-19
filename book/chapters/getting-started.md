@@ -9,6 +9,10 @@ visibility modifier, return annotation, or manual byte view is needed.
 The omitted result type is `unit`, and reaching the closing brace returns normally with status 0.
 There is no automatic numeric output.
 
+Comments are `// ...` to the end of the line, or `/* ... */`, which may span lines or sit inside one
+(`add(a, /* left */ b)`). Block comments nest: every `/*` inside one needs its own `*/`, so a stretch
+of code that already holds a comment can be commented out whole.
+
 ## Run it
 
 From the repository root:
