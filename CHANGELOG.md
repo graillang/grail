@@ -1,5 +1,14 @@
 ## Unreleased
 
+- **`lib-clipper2` covers the offset branches the owner fixtures could not reach.** The first 52
+  cases exercised every join and end type on well-behaved geometry, but six branches inside them
+  stayed dark: the miter join's fall-back to a square join once the corner exceeds the miter limit,
+  the `miter_limit <= 1` branch that uses the C++'s `temp_lim = 2`, the two-point path whose
+  `EndType::Joined` becomes a square (or round) end, a 180-degree reversal where the join sees
+  `cos_a` near -1, and a negative delta on an open path (where the engine takes `abs` for every
+  non-polygon end) and on a closed polygon with bevel joins. Seven fixtures now pin those and match
+  the vendored C++ vertex for vertex; the case is 59.
+
 - Added: `^=` is a compound assignment, like `+=` and the rest: `x ^= 3` in a local, a record field
   (`a.n ^= 15`) and an indexed element (`v[i] ^= 3`), at the target's own integer width. It was
   "expected `=`" - the lexer's multibyte table had no `^=` token (kind 275) - and it is still refused

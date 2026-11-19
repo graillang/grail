@@ -579,6 +579,26 @@ int main(int argc, char** argv) {
         emit_inflate_d("inflate-miter", JoinType::Miter, EndType::Round, 3, 2.0, 0.20, 6.0, corner);
         emit_inflate_d("inflate-bevel", JoinType::Bevel, EndType::Round, 3, 2.0, 0.20, 6.0, corner);
         emit_inflate_d("inflate-squarejoin", JoinType::Square, EndType::Round, 3, 2.0, 0.20, 6.0, corner);
+        // Branches the first fixtures do not reach. A miter join whose corner exceeds the miter
+        // limit falls back to a square join, and a limit at or below 1 takes the C++'s
+        // temp_lim = 2 branch.
+        emit_inflate_d("inflate-miter-limited", JoinType::Miter, EndType::Round, 3, 1.2, 0.20, 10.0, corner);
+        emit_inflate_d("inflate-miter-lowlimit", JoinType::Miter, EndType::Round, 3, 0.5, 0.20, 10.0, corner);
+        // A two-point path with Joined ends becomes a square (or round under a round join) end.
+        {
+            std::vector<PathD> two{PathD{{0.0, 0.0}, {40.0, 10.0}}};
+            emit_inflate_d("inflate-joined-2pt", JoinType::Miter, EndType::Joined, 3, 2.0, 0.20, 3.0, two);
+            emit_inflate_d("inflate-joined-2pt-round", JoinType::Round, EndType::Joined, 3, 2.0, 0.20, 3.0, two);
+        }
+        // A 180-degree reversal in an open centreline: the join sees cos_a near -1.
+        {
+            std::vector<PathD> spike{PathD{{0.0, 0.0}, {40.0, 0.0}, {20.0, 0.5}, {40.0, 0.0}, {80.0, 0.0}}};
+            emit_inflate_d("inflate-spike", JoinType::Round, EndType::Round, 3, 2.0, 0.20, 4.0, spike);
+        }
+        // Negative deltas: an open path (the engine takes abs for every non-polygon end) and a
+        // closed polygon with bevel joins shrinking inward.
+        emit_inflate_d("inflate-open-negative", JoinType::Round, EndType::Round, 3, 2.0, 0.20, -1.5, open_line);
+        emit_inflate_d("inflate-polygon-bevel-in", JoinType::Bevel, EndType::Polygon, 3, 2.0, 0.20, -3.0, blob);
         // Precision 2 and 0 (coarser grids), and the two refusals.
         emit_inflate_d("inflate-prec2", JoinType::Round, EndType::Round, 2, 2.0, 0.20, 2.5, centreline);
         emit_inflate_d("inflate-prec0", JoinType::Round, EndType::Round, 0, 2.0, 0.20, 2.5, centreline);
