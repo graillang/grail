@@ -16,6 +16,11 @@
   redundant Grail-side count arguments are gone.
 
 
+- Diagnostics: `[Record{..}; N]` says why it is refused. Both repeat forms (`[x; N]` for an array,
+  `T[x; N]` for a vector) now explain that a repeat writes N byte copies of one value, so an element
+  that holds storage - a record is a frame of its own - would be shared by every element and dropped
+  once per element, and name the alternative (give the elements, or push each one in a loop). Cases
+  `array-repeat-record-rejected` and `vector-repeat-record-rejected`.
 - **A loot site's life is ported.** `abundance/src/site_life.grl` carries `loot_sites/site_life.hpp`
   and `.cpp` from `cmake/tx/loot_sites.cmake`: the tuning with its per-field ranges and the
   cross-field consistency rules, the file's own draw (`mix`, the seeded `unit`, `exponential` and
