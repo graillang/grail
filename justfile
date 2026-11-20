@@ -211,3 +211,9 @@ land-status-remote:
 # Build the playable Grail Abundance engine binary (.work/ab-engine-grail/ab-engine-grail).
 ab-engine *args:
     bun abundance/tools/build-ab-engine.mjs "$@"
+
+# Build and play the Grail Abundance engine (the `just dev` equivalent): windowed, from the checkout (shaders and LUTs
+# resolve relative to it). Extra arguments go to the engine, e.g. `just ab-dev --seed 386677 --width 1920 --height 1080`.
+ab-dev *args:
+    bun abundance/tools/build-ab-engine.mjs
+    .work/ab-engine-grail/ab-engine-grail "$@"
