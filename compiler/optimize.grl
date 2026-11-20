@@ -7860,6 +7860,138 @@ fn through_slot_base<b>(s: &b [u8], a: u64, e: u64) -> u64 {
     }
     return d;
 }
+fn label_char(c: u8) -> bool {
+    return ((48 <= c) && (c <= 57)) || ((65 <= c) && (c <= 90)) || ((97 <= c) && (c <= 122)) || (c == 95);
+}
+fn push_decimal(out: (&mut u8[]), v: u64) {
+    if v >= 10 {
+        push_decimal(out, v / 10);
+    }
+    out.push(u8(48 + v % 10));
+}
+// A copy's labels carry its site suffix (`.L..._i<prefix>_<site>`, `.Lret_i...`), which the optimiser
+// does not read as a label number, so a jump to one has no known target and every register is live
+// there. Before a round optimises a body with copies in it, each such label is renamed into the
+// body's own numbering - the `.L<prefix>_<scope>_<n>` its own labels have, with numbers past its
+// highest - so the next round reads one function.
+fn number_copy_labels<a>(text: &a [u8]) -> u8[] {
+    mut out = u8[];
+    n := text.len();
+    mut bs = 0;
+    while bs < n {
+        // A body runs from a `.type` line to the next one.
+        mut be = bs + 1;
+        while (be < n) && !((text[be - 1] == 10) && ir::at(view(text), be, view(".type "))) {
+            be += 1;
+        }
+        if be > n {
+            be = n;
+        }
+        // The body's own numbering (from its first `.L<prefix>_<scope>_<n>`), its highest number,
+        // and its copy labels.
+        mut pa = 0;
+        mut pe = 0;
+        mut top = 0;
+        mut names = u8[][];
+        mut i = bs;
+        while i + 2 < be {
+            if (text[i] == 46) && (text[i + 1] == 76) && ((i == bs) || !label_char(text[i - 1])) {
+                mut e = i + 2;
+                while (e < be) && label_char(text[e]) {
+                    e += 1;
+                }
+                mut copy = false;
+                for k in e - i - 1 {
+                    if (text[i + k] == 95) && (text[i + k + 1] == 105) {
+                        copy = true;
+                    }
+                }
+                if copy {
+                    mut known = false;
+                    for x in names.len() {
+                        if (names[x].len() == e - i) && ir::same_range(view(text), i, e, view(names[x])) {
+                            known = true;
+                        }
+                    }
+                    if !known {
+                        names.push(text[i..e].copy());
+                    }
+                } else {
+                    // `_<digits>_<digits>` at the end: everything before the last `_` is the
+                    // numbering, the digits after it the number.
+                    mut d2 = e;
+                    while (d2 > i + 2) && (48 <= text[d2 - 1]) && (text[d2 - 1] <= 57) {
+                        d2 -= 1;
+                    }
+                    mut d1 = d2 - 1;
+                    while (d1 > i + 2) && (48 <= text[d1 - 1]) && (text[d1 - 1] <= 57) {
+                        d1 -= 1;
+                    }
+                    if (d2 < e) && (text[d2 - 1] == 95) && (d1 < d2 - 1) && (text[d1 - 1] == 95) && (d1 - 1 > i + 2) {
+                        if pe == 0 {
+                            pa = i;
+                            pe = d2 - 1;
+                        }
+                        if (d2 - 1 - i == pe - pa) && ir::same_range(view(text), i, d2 - 1, text[pa..pe]) {
+                            mut v = 0;
+                            for k in e - d2 {
+                                v = v * 10 + u64(text[d2 + k] - 48);
+                            }
+                            if top < v {
+                                top = v;
+                            }
+                        }
+                    }
+                }
+                i = e;
+            } else {
+                i += 1;
+            }
+        }
+        if names.len() == 0 {
+            out.append(text[bs..be]);
+        } else {
+            // A body with no numbering of its own keeps its copy labels, marked `_r` so the next
+            // round's copies (whose site numbers start again) cannot take the same names.
+            mut prefix = u8[];
+            if pe != 0 {
+                prefix = text[pa..pe].copy();
+            }
+            mut j = bs;
+            mut pend = bs;
+            while j + 2 < be {
+                if (text[j] == 46) && (text[j + 1] == 76) && ((j == bs) || !label_char(text[j - 1])) {
+                    mut e = j + 2;
+                    while (e < be) && label_char(text[e]) {
+                        e += 1;
+                    }
+                    for x in names.len() {
+                        if (names[x].len() == e - j) && ir::same_range(view(text), j, e, view(names[x])) {
+                            out.append(text[pend..j]);
+                            pend = e;
+                            if pe != 0 {
+                                out.append(view(prefix));
+                                out.push(95);
+                                push_decimal(&mut out, top + 1 + x);
+                            } else {
+                                out.append(text[j..e]);
+                                out.push(95);
+                                out.push(114);
+                            }
+                            break;
+                        }
+                    }
+                    j = e;
+                } else {
+                    j += 1;
+                }
+            }
+            out.append(text[pend..be]);
+        }
+        bs = be;
+    }
+    return out;
+}
 fn name_hash<b>(s: &b [u8], a: u64, e: u64) -> u64 {
     mut h = 0;
     for i in e - a {
@@ -8782,6 +8914,19 @@ pub fn optimize<b, c, d, m, q, r, t>(s: &b [u8], facts: (&c llvm::Facts), want_i
 // line, a part's marker, a function's `.gbase` - so it does not scan the stream for them. Possibly
 // stale (the emitter takes text back on a retry) and in no particular order; empty means scan.
 pub fn optimize_parts<b, c, d, e, m, q, r, t>(s: &b [u8], split: u64, marks: (&mut u64[]), names: (&mut u8[][]), facts: (&c llvm::Facts), want_ir: u64, ir_text: (&mut u8[]), call_syms: (&mut u8[][]), call_counts: (&mut u64[]), memo_dir: &m [u8], memo_id: &m [u8], starts: (&q u64[]), known: (&r ir::Known), shared: (&t mut Shared)) -> u8[] {
+    want := host::env(view("GRAIL_OPT_ROUNDS"));
+    mut rounds = 1;
+    if (want.len() == 1) && (48 < want[0]) && (want[0] < 58) {
+        rounds = u64(want[0] - 48);
+    }
+    return optimize_round(s, split, marks, names, facts, want_ir, ir_text, call_syms, call_counts, memo_dir, memo_id, starts, known, shared, rounds);
+}
+// One optimiser run; with `rounds` above 1, the copies this run would splice are spliced into the
+// emitter's own text instead (markers kept), and that text is optimised again from the start: every
+// caller is then optimised with its callees' copies in place, where a run splices them only after
+// every body is done (dyn-and-callable-bounds.md 7, item 1). What a body becomes still depends only
+// on its own lines and the candidates the previous round found, not on where the stream is cut.
+fn optimize_round<b, c, d, e, m, q, r, t>(s: &b [u8], split: u64, marks: (&mut u64[]), names: (&mut u8[][]), facts: (&c llvm::Facts), want_ir: u64, ir_text: (&mut u8[]), call_syms: (&mut u8[][]), call_counts: (&mut u64[]), memo_dir: &m [u8], memo_id: &m [u8], starts: (&q u64[]), known: (&r ir::Known), shared: (&t mut Shared), rounds: u64) -> u8[] {
     // The type facts, indexed by body symbol once: the table is complete before any body is walked.
     ix := ir::index_facts(facts);
     mut o = ir::new_body();
@@ -8831,6 +8976,22 @@ pub fn optimize_parts<b, c, d, e, m, q, r, t>(s: &b [u8], split: u64, marks: (&m
     jobs::phase(view("optimiser-workers"));
     own := o.inl_names.len();
     import_bodies(&mut o, &shared);
+    if (rounds > 1) && (o.inl_names.len() != 0) {
+        // The next round reads the emitter's text with this round's copies in it.
+        exchange(&mut o.out, s.copy());
+        mut again = u64[];
+        lines_of_interest(view(o.out), 0, &mut again);
+        mut kept = u64[];
+        inline_calls(&mut o, 1, &mut kept, &again);
+        spliced := number_copy_labels(view(exchange(&mut o.out, u8[])));
+        no_starts := u64[];
+        // The call records (the effect checker's cross-check) and the IR dump are this round's,
+        // made from the emitter's text: a later round's bodies have calls replaced by copies.
+        mut syms = u8[][];
+        mut counts = u64[];
+        mut ir = u8[];
+        return optimize_round(view(spliced), split, marks, names, facts, 0, &mut ir, &mut syms, &mut counts, memo_dir, memo_id, &no_starts, known, shared, rounds - 1);
+    }
     if (o.inl_names.len() != 0) || (o.marked != 0) {
         inline_calls(&mut o, split, marks, &lines);
     }
