@@ -390,7 +390,8 @@ pool::zip2(&mut pos[0: n], &vel[0: n], 4096,
   of `{data, width}` pairs. A grain is rounded up to whole cache lines where the element size divides 64 (3.1).
 
 *As built (2026-11-17, /root/fixed_arrays).* `parallel_zip_builtin` (native.grl, builtin id 67)
-takes the grain, the callback and one to four slices, checks each slice's mode and element
+takes the grain, the callback and one to six slices (five when the callback is a closure, whose
+environment takes the first argument register; 2026-11-20), checks each slice's mode and element
 (`require_capability_named`: transferable for `&mut`, shareable for `&`), the callback's arity and
 that each parameter is the argument's slice (kind, mode, element; lifetimes not compared - a callable
 bound is higher-ranked in them), and looks through a generic callable (`param_callable`). The frame

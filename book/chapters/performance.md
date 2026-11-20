@@ -20,13 +20,12 @@ charted:
   (4.83x), Rust (5.14x) and C++ (13.12x).
 - **Release builds:** Over the 18 programs where every language has a comparable implementation
   (`chan` is kept in the Engine chart below because C, C++ and Zig lack a stdlib channel), Zig
-  (1.18x, 9/18), C (1.19x, 6/18) and C++ (1.21x, 2/18) lead, with Grail (1.28x, 2/18: `xform_f32`
-  and `xform_f64`) level with Rust (1.29x) and well ahead of Go (2.41x). Grail's main drag is
-  `ecs_par` at 8 workers (6.60x C's OpenMP, where `parallel_for_zip` stays scalar) and `sort`
-  (1.72x C++'s `std::merge`, 1.06x C's).
-- **Development builds:** Go's is ahead (1.18x against Grail-native's 1.45x over the 18 programs;
+  (1.18x, 10/18), C (1.19x, 4/18) and Grail (1.19x, 4/18: `hashmap`, `xform_f64` and `ecs_par` at
+  1 and 4 workers) lead, ahead of C++ (1.21x), Rust (1.29x) and Go (2.41x). Grail's largest gaps
+  are `ecs_par` at 8 workers (2.14x C's OpenMP) and `sort` (1.72x C++'s `std::merge`, 1.06x C's).
+- **Development builds:** Go's is ahead (1.19x against Grail-native's 1.45x over the 18 programs;
   Grail is faster than Go on `ecs` and `ecs_par`). Grail's is faster than Rust's dev profile
-  (7.30x) on all 18 (and 19/19 with `chan`) and faster than Zig Debug (3.58x) on 17 of 18 (all
+  (7.28x) on all 18 (and 19/19 with `chan`) and faster than Zig Debug (3.59x) on 17 of 18 (all
   except `ffi_call`).
 - **Scheduler:** oneTBB is ahead (1.22x against Grail's 1.39x and rayon's 2.35x across the 12
   scheduler rows, excluding the serial `fib(32)` baseline). Grail is fastest on `join` from main
@@ -222,8 +221,8 @@ C at 0.212 s), and `strings` is 1.19x C++ (0.084 s, faster than Zig, Rust, C and
 ## Parallel loops
 
 The `ecs` program above, run on several cores: the same million entities and 600 frames, the update
-split across workers each frame, at 1, 4 and 8 workers. Grail uses `parallel_for_zip` over each
-axis's velocity and position columns, one call per axis, in pieces of 16,384 entities; C uses OpenMP
+split across workers each frame, at 1, 4 and 8 workers. Grail uses one `parallel_for_zip` over all six
+columns per frame, in pieces of 16,384 entities; C uses OpenMP
 (`parallel for schedule(static)`), C++ uses a persistent `std::jthread` pool synchronised with
 `std::barrier`, Rust uses rayon (`par_iter_mut().zip(..)` over all six columns), Go spawns one
 goroutine per worker each frame, and Zig uses a persistent `std.Thread` pool with a reusable
@@ -232,21 +231,17 @@ goroutines). Each entity's arithmetic is independent and the final sum is serial
 prints the exact serial checksum at any worker count, and the tool verifies that it does.
 
 A parallel loop is about wall time, so this chart is wall time, best of nine runs, with every
-runtime told the same number of threads. Two concrete issues explain why Grail's release build trails
-C and C++ here (0.464 s at 1 worker, 0.242 s at 4, 0.292 s at 8, against C's 0.245 s / 0.074 s /
-0.044 s and C++'s 0.221 s / 0.070 s / 0.050 s):
-
-- **The `parallel_for_zip` closure stays scalar.** Look at the instruction table below: Grail-LLVM
-  executes 20.0 billion instructions at 1 worker where C, C++, Rust and Zig all execute 4.3 billion
-  (4.7x fewer), because LLVM vectorises serial `ecs` (which is 1.09x C) but does not yet prove the
-  zipped `&mut [f32]` slices disjoint inside the parallel callback.
-- **Three barrier passes per frame instead of one.** The other twins fuse all six columns into one
-  parallel loop; Grail's standard library currently zips at most two mutable slices per
-  `parallel_for_zip` call, paying three fork-join barriers and three passes over memory per frame,
-  and work stealing does not yet pin slices to the same core across frames.
+runtime told the same number of threads. Grail's release build is the fastest of the six at 1 worker
+(0.114 s against Zig's 0.208 s and C's 0.233 s) and at 4 (0.072 s against C++'s 0.074 s and C's
+0.083 s); at 8 it is 2.14x C's OpenMP (0.093 s against 0.044 s). It executes 4.8 billion
+instructions where C, C++, Rust and Zig execute 4.3 billion: the callback's loops are vectorised,
+since every element access in a release build is now marked as unable to alias a slice header, so
+LLVM reads each slice's data pointer once per loop. At 8 workers each worker's share of a frame is
+small enough that the fork-join cost of Grail's work-stealing pool (a wake per piece, then a join)
+outweighs the work, where OpenMP's static schedule hands each thread one fixed range.
 
 In development builds, Grail-native is faster than Go, Zig Debug and Rust dev at every worker count
-(0.54x to 0.69x Go).
+(0.57x to 0.63x Go).
 
 {{perf:parallel#release}}
 

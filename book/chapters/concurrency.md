@@ -59,7 +59,7 @@ as the call runs: `parallel_for_zip: slice argument 2 has length 4, which is not
 slice's`); the exclusive ones are written, the shared ones read by every worker, and as with
 `split_mut` the pieces depend only on the length and the grain. Each argument takes its loan at the
 call, so the same vector cannot be passed twice with one `&mut`, and the callback cannot capture any
-of them. The builtin underneath, `parallel_for_zip(grain, f, s1, .., sn)`, takes one to four slices.
+of them. The builtin underneath, `parallel_for_zip(grain, f, s1, .., sn)`, takes one to six slices (five when the callback is a closure).
 
 ```grl
 pool::zip3(&mut pos[

@@ -18565,6 +18565,26 @@
     "stdout": "59988 10000\n"
   },
   {
+    "name": "parallel-for-zip-six-slices",
+    "note": "parallel_for_zip takes up to six slices through a named function (one per argument register on every target): one fused pass over six columns, exclusive and shared mixed, the same pieces every call",
+    "source": "fn step(a: &mut [u64], b: &mut [u64], c: &mut [u64], d: &[u64], e: &[u64], f: &mut [u64]) {\n    if b.len() < a.len() { return (); }\n    if c.len() < a.len() { return (); }\n    if d.len() < a.len() { return (); }\n    if e.len() < a.len() { return (); }\n    if f.len() < a.len() { return (); }\n    for i in a.len() {\n        a[i] = a[i] + d[i];\n        b[i] = b[i] + e[i];\n        c[i] = a[i] * b[i];\n        f[i] = f[i] + 1;\n    }\n}\nfn main() {\n    n := 1000;\n    mut a = u64[0; n];\n    mut b = u64[0; n];\n    mut c = u64[0; n];\n    mut d = u64[0; n];\n    mut e = u64[0; n];\n    mut f = u64[0; n];\n    for i in n {\n        d[i] = i;\n        e[i] = 2;\n    }\n    parallel_for_zip(64, step, &mut a[0: n], &mut b[0: n], &mut c[0: n], &d[0: n], &e[0: n], &mut f[0: n]);\n    parallel_for_zip(100, step, &mut a[0: n], &mut b[0: n], &mut c[0: n], &d[0: n], &e[0: n], &mut f[0: n]);\n    mut sc = 0;\n    mut sf = 0;\n    for i in n {\n        sc += c[i];\n        sf += f[i];\n    }\n    println(\"{} {}\", sc, sf);\n}\n",
+    "stdout": "3996000 2000\n"
+  },
+  {
+    "name": "reject-parallel-for-zip-closure-six",
+    "reject": true,
+    "note": "a closure callback passes its environment in the first argument register, so it takes at most five slices",
+    "source": "fn main() {\n    mut a = u64[0; 8];\n    mut b = u64[0; 8];\n    mut c = u64[0; 8];\n    mut d = u64[0; 8];\n    mut e = u64[0; 8];\n    mut f = u64[0; 8];\n    parallel_for_zip(2, |a: &mut [u64], b: &mut [u64], c: &mut [u64], d: &mut [u64], e: &mut [u64], f: &mut [u64]| -> unit { a[0] = 1; }, &mut a[0: 8], &mut b[0: 8], &mut c[0: 8], &mut d[0: 8], &mut e[0: 8], &mut f[0: 8]);\n}\n",
+    "diagnostic": "at most five slices with a closure callback"
+  },
+  {
+    "name": "reject-parallel-for-zip-seven",
+    "reject": true,
+    "note": "",
+    "source": "fn main() {\n    mut a = u64[0; 8];\n    mut b = u64[0; 8];\n    mut c = u64[0; 8];\n    mut d = u64[0; 8];\n    mut e = u64[0; 8];\n    mut f = u64[0; 8];\n    mut g = u64[0; 8];\n    parallel_for_zip(2, main, &mut a[0: 8], &mut b[0: 8], &mut c[0: 8], &mut d[0: 8], &mut e[0: 8], &mut f[0: 8], &mut g[0: 8]);\n}\n",
+    "diagnostic": "parallel_for_zip takes one to six slices"
+  },
+  {
     "name": "pool-zip-wrappers",
     "note": "pool::zip2/zip3 with generic callable bounds over a frame of systems: positions integrated from velocities, counters run down, then a second zip the other way round",
     "source": "use pool;\nfn main() {\n    n := 5000;\n    mut pos = f32[0.0; n];\n    mut vel = f32[1.0; n];\n    mut life = u32[3; n];\n    dt: f32 = 0.5;\n    for frame in 4 {\n        pool::zip3(&mut pos[0: n], &vel[0: n], &mut life[0: n], 512, |p: &mut [f32], v: &[f32], l: &mut [u32]| -> unit {\n            for i in p.len() {\n                p[i] = p[i] + v[i] * dt;\n                if l[i] > 0 {\n                    l[i] = l[i] - 1;\n                }\n            }\n        });\n    }\n    pool::zip2(&mut vel[0: n], &pos[0: n], 700, |v: &mut [f32], p: &[f32]| -> unit {\n        for i in v.len() {\n            v[i] = p[i] * 2.0;\n        }\n    });\n    mut sp: f32 = 0.0;\n    mut sl = 0;\n    for i in n {\n        sp = sp + vel[i];\n        sl += u64(life[i]);\n    }\n    println(\"{} {}\", sp, sl);\n}\n",
