@@ -226,16 +226,16 @@ export function summary(files) {
 // row is averaged over the rows it has, and its bar says which it lacks. Nothing is measured here.
 const languageNames = { c: 'C', cpp: 'C++', rust: 'Rust', go: 'Go', zig: 'Zig', grail: 'Grail' };
 export const overviewPanels = [
-  { id: 'compile-build', label: 'Compile speed - build', files: ['compile'], table: 'compile-wall', only: /^syn\d+ build (cold|edited)$/, figure: 'wall time at four jobs (20-unit scaling projects, runnable debug executables)', rows: 'measurements', missing: 'no figure for',
+  { id: 'compile-build', label: 'Compile speed - build', files: ['compile'], table: 'compile-wall', only: /^syn\d+ build (cold|edited)$/, figure: '4-job wall time (20-unit scaling builds)', rows: 'measurements', missing: 'no figure for',
     languages: [['c', 'C', 'c'], ['cpp', 'C++', 'cpp'], ['rust', 'Rust', 'rust'], ['go', 'Go', 'go'], ['zig', 'Zig', 'zig'], ['grail', 'Grail', 'grail']] },
-  { id: 'compile-check', label: 'Compile speed - check', files: ['compile'], table: 'compile-wall', only: /^syn\d+ check (cold|edited)$/, figure: 'wall time at four jobs (20-unit scaling projects, type-check only)', rows: 'measurements', missing: 'no figure for', why: 'Go has no check-only command (go vet runs full compilation + static analysis; shown in detail below)',
+  { id: 'compile-check', label: 'Compile speed - check', files: ['compile'], table: 'compile-wall', only: /^syn\d+ check (cold|edited)$/, figure: '4-job wall time (20-unit scaling checks)', rows: 'measurements', missing: 'no figure for', why: 'no check-only mode',
     languages: [['c', 'C', 'c'], ['cpp', 'C++', 'cpp'], ['rust', 'Rust', 'rust'], ['zig', 'Zig', 'zig'], ['grail', 'Grail', 'grail']] },
-  { id: 'release', label: 'Release builds - run time', files: ['bench-rivals', 'engine', 'parallel'], table: 'release', skip: /^chan$/, figure: 'CPU time (wall time for the parallel ECS; chan is in the Engine chart below as C, C++ and Zig have no stdlib channel)', rows: 'programs', missing: 'no twin of',
+  { id: 'release', label: 'Release builds - run time', files: ['bench-rivals', 'engine', 'parallel'], table: 'release', skip: /^chan$/, figure: 'CPU time (wall for parallel ECS; excl. chan)', rows: 'programs', missing: 'no twin of',
     languages: [['c', 'C', 'c'], ['cpp', 'C++', 'cpp'], ['rust-release', 'Rust', 'rust'], ['go', 'Go', 'go'], ['zig-fast', 'Zig', 'zig'], ['grail-llvm', 'Grail', 'grail']] },
-  { id: 'dev', label: 'Development builds - run time', files: ['bench-rivals', 'engine', 'parallel'], table: 'dev', skip: /^chan$/, figure: 'CPU time (wall time for the parallel ECS; chan is in the Engine chart below)', rows: 'programs', missing: 'no twin of', why: 'their development builds are not measured',
+  { id: 'dev', label: 'Development builds - run time', files: ['bench-rivals', 'engine', 'parallel'], table: 'dev', skip: /^chan$/, figure: 'CPU time (wall for parallel ECS; excl. chan)', rows: 'programs', missing: 'no twin of', why: 'dev builds not measured',
     languages: [['go', 'Go', 'go'], ['rust-dev', 'Rust dev', 'rust'], ['zig-debug', 'Zig Debug', 'zig'], ['grail-native', 'Grail-native', 'grail']] },
-  { id: 'scheduler', label: 'Scheduler', files: ['sched-rivals'], table: 'scheduler', skip: /serial/, figure: "wall time; importer rounds inverted, as more is better there (serial fib(32) baseline excluded from mean)", rows: 'measurements', missing: 'no figure for', why: 'they have no scheduler twin',
-    note: "Grail is its release (LLVM) build, Rust is rayon, C++ is oneTBB",
+  { id: 'scheduler', label: 'Scheduler', files: ['sched-rivals'], table: 'scheduler', skip: /serial/, figure: "wall time (excl. serial fib; importer inverted)", rows: 'measurements', missing: 'no figure for', why: 'no scheduler twin',
+    note: "Grail LLVM, Rust rayon, C++ oneTBB",
     languages: [['onetbb', 'C++', 'cpp'], ['rayon', 'Rust', 'rust'], ['grail-llvm', 'Grail', 'grail']] },
 ];
 
@@ -292,7 +292,8 @@ export function overviewSource(panel) {
   if (panel.absent.length) lacks.push(`No ${listOf(panel.absent)}: ${panel.why ?? 'not measured'}`);
   if (panel.unmeasured.length) lacks.push(`No ${listOf(panel.unmeasured)}: not measured in this file`);
   if (panel.dropped?.length) lacks.push(`Not counted, as some language here has no figure: ${panel.dropped.join(', ')}`);
-  return [`${panel.files.map(f => `bench/results/${f}.json`).join(', ')}; ${panel.figure}`, panel.note, ...lacks].filter(Boolean).join('. ') + '.';
+  const filesLabel = panel.files.length === 1 ? `bench/results/${panel.files[0]}.json` : `bench/results/{${panel.files.join(',')}}.json`;
+  return [`${filesLabel}; ${panel.figure}`, panel.note, ...lacks].filter(Boolean).join('. ') + '.';
 }
 
 export function overview(files) {
@@ -347,7 +348,7 @@ export function overview(files) {
   const sources = used.map(f => `${f} ${String(files[f].commit).slice(0, 8)} ${String(files[f].date ?? '').slice(0, 10)}`).join('; ');
   parts.push(`<text x="0" y="${y - 4}" class="perf-axis perf-source">${escape(`Measured: ${sources}.`)}</text>`);
   const height = y + 4;
-  const svg = `<figure class="perf-chart" id="chart-overview"><svg viewBox="0 0 ${total.toFixed(0)} ${height}" width="100%" role="img" aria-label="The languages at a glance: run time of release and development builds, compile speed and the scheduler, each language against the fastest on each row, geometric mean over the rows" xmlns="http://www.w3.org/2000/svg">${parts.join('')}</svg><figcaption>The languages at a glance: in each panel, each language's figure on each row divided by the fastest language's (the fastest's over the language's where more is better), then the geometric mean over the rows. 1× would be the fastest on every row. Release and development builds: the programs of the run-time, engine and parallel charts (the parallel one at its most workers); compile speed: every program and scenario of the compile chart; scheduler: every row of the scheduler chart.</figcaption></figure>`;
+  const svg = `<figure class="perf-chart" id="chart-overview"><svg viewBox="0 0 ${total.toFixed(0)} ${height}" width="100%" role="img" aria-label="The languages at a glance: run time of release and development builds, compile speed and the scheduler, each language against the fastest on each row, geometric mean over the rows" xmlns="http://www.w3.org/2000/svg">${parts.join('')}</svg><figcaption>Geometric mean vs the fastest language per row (1× = fastest on every row; higher-is-better rows inverted). Compile panels: 20-unit scaling projects at 4 jobs. Runtime panels: 18 comparable programs (excl. chan). Scheduler: 12 wall-time rows (excl. serial fib).</figcaption></figure>`;
   const body = panels.map(panel => panel.languages.filter(l => Number.isFinite(l.mean)).map(l => `<tr><td>${escape(panel.label)}</td><td${l.grail ? ' class="perf-grail-col"' : ''}>${escape(l.label)}</td><td>${l.mean.toFixed(2)}x</td><td>${l.count} of ${panel.programs.length}${l.missing.length ? ` (${escape(panel.missing)} ${escape(l.missing.join(', '))})` : ''}</td><td>${l.fastest}</td></tr>`).join('')).join('');
   const table = `<div class="perf-table"><table><caption>Each language's figure as a multiple of the fastest on each row, geometric mean; the rows it was measured on and how many it was the fastest on. ${escape(panels.map(p => `${p.label}: ${overviewSource(p)}`).join(' '))}</caption><thead><tr><th>panel</th><th>language</th><th>geometric mean vs the fastest</th><th>rows</th><th>fastest on</th></tr></thead><tbody>${body}</tbody></table></div>`;
   return `<section class="perf-results perf-overview">${svg}${table}</section>`.replace(/\n/g, ' ');

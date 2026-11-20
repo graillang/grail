@@ -201,11 +201,11 @@ test('the languages overview: compile speed and scheduler panels, a language wit
   const html = overview(files);
   expect(html).toContain('Compile speed - build - 1 measurements');
   expect(html).toContain('Compile speed - check - 1 measurements');
-  expect(html).toContain('bench/results/compile.json; wall time at four jobs');
+  expect(html).toContain('bench/results/compile.json; 4-job wall time');
   expect(html).toContain('No C or C++: not measured in this file');
   expect(html).toContain('bench/results/sched-rivals.json; wall time');
-  expect(html).toContain('Grail is its release (LLVM) build, Rust is rayon, C++ is oneTBB');
-  expect(html).toContain('No C, Go or Zig: they have no scheduler twin');
+  expect(html).toContain('Grail LLVM, Rust rayon, C++ oneTBB');
+  expect(html).toContain('No C, Go or Zig: no scheduler twin');
   expect(html).toContain('Not counted, as some language here has no figure: join, on a worker');
   expect(html).not.toContain('Release builds'); // a panel without data is left out
   expect(html).not.toContain('\n');
