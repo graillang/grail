@@ -8,6 +8,8 @@
     slices, culled (`geo_page_cull`) and drawn into the visibility buffer (`geo_page_hw` mesh shader), coastlines,
     lakes and layered ground included. `AB_TERRAIN=cull` runs the cull alone (diagnostic).
   - **Water:** the FFT ocean, caustics, the water clipmap and the displaced water surface drawn over the scene.
+  - **Grass:** the sward carpet (`geo_sward_blocks` + `geo_sward`): the baked patch meshes of the five communities from
+    the asset cache, written as instances over the drawn terrain blocks within 90 m each frame.
   - **Trees:** the canopy (`geo_veg_canopy`) planted from the pages' decision records around the camera, growing
     tile by tile as it moves; near trees expand into their real part meshes (`geo_assembly_*`); `.abgeo` meshes
     stream their pages on demand with LRU eviction (`AB_GEO_POOL_MB` caps the pool).
