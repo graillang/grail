@@ -1,4 +1,4 @@
-// x[i] = x[i] * a + y[i] over one million double, 200 passes; prints the sum of the result.
+// x[i] = x[i] * a + y[i] over one million double, 1000 passes; prints the sum of the result.
 #include <stdio.h>
 #include <stdlib.h>
 __attribute__((noinline)) static void scale_add(double *restrict x, const double *restrict y, double a, size_t n) {
@@ -14,7 +14,7 @@ int main(void) {
         yv = yv + (double)0.25; if ((double)1.0 < yv) yv = 0;
     }
     double a = (double)0.999;
-    for (int pass = 0; pass < 200; pass++) {
+    for (int pass = 0; pass < 1000; pass++) {
         scale_add(x, y, a, n);
         a = (double)0.999 - x[pass] * (double)0.000000001; // the next pass depends on this one
     }

@@ -12,14 +12,14 @@ operation on it needs an `unsafe` block, and each one is refused by name outside
 fn main() {
     mut x: u64 = 41;
     unsafe {
-        p := ptr_of(&mut x);     // *mut u64: the address a reference already carries
+        p := ptr_of(&mut x); // *mut u64: the address a reference already carries
         *p += 1;
-        q := alloc(u64, 4);      // *mut u64 over four zeroed elements
-        *q.add(1) = 9;           // steps by the element width
+        q := alloc(u64, 4); // *mut u64 over four zeroed elements
+        *q.add(1) = 9; // steps by the element width
         println(*q.add(1));
         free(q);
     }
-    println(x);                  // 42
+    println(x); // 42
 }
 ```
 
@@ -53,7 +53,7 @@ the lifetime the borrow gets:
 
 ```grl
 unsafe fn value_of<a>(p: *mut u64, anchor: &a u64) -> &a u64 {
-    return p.as_ref();
+    p.as_ref()
 }
 ```
 
@@ -69,14 +69,16 @@ down, so it needs no inner `unsafe` block, and every call from safe code must be
 
 ```grl
 unsafe fn bump(p: *mut u64) -> u64 {
-    q := *p + 1;            // no inner `unsafe` needed
+    q := *p + 1; // no inner `unsafe` needed
     *p = q;
-    return q;
+    q
 }
 
 fn main() {
     mut x: u64 = 41;
-    unsafe { println(bump(ptr_of(&mut x))); }   // 42
+    unsafe {
+        println(bump(ptr_of(&mut x)));
+    } // 42
 }
 ```
 
@@ -122,14 +124,14 @@ struct Session {
     tags: string
 }
 impl Drop for Session {
-    fn drop(self: &mut Session) {
+    fn drop(&mut self) {
         println("closing session {} ({})", self.id, self.tags);
     }
 }
 ```
 
 `Drop` is a built-in interface, like `Send` and `Share`: the name is reserved, nothing imports it, and
-`fn drop(self: &mut Self)` is its only method. An implementation that does not have that shape is
+`fn drop(&mut self)` is its only method. An implementation that does not have that shape is
 refused at the `impl`, and so is one for a type declared in another module.
 
 The method runs at the head of the cleanup the compiler generates anyway, before the fields are
@@ -140,7 +142,7 @@ fixed:
 fn main() {
     s := Session { id: 7, tags: "beta" };
     println("work");
-    drop(s);                 // ends the storage now, not at the end of the scope
+    drop(s); // ends the storage now, not at the end of the scope
     println("done");
 }
 ```
@@ -172,9 +174,9 @@ without a tree of references.
 ```grl
 use rc;
 a := rc::new(load_config());
-b := a.clone();                 // strong count 2
+b := a.clone(); // strong count 2
 println("{}", a.strong_count()); // 2
-println("{}", b.get().retries);  // the value, borrowed from the handle
+println("{}", b.get().retries); // the value, borrowed from the handle
 ```
 
 `r.get()` hands out `&T`, borrowed for as long as the handle lives, and there is no way to write
@@ -194,12 +196,14 @@ the concrete value through its vtable, so an `impl Drop` runs once:
 
 ```grl
 use rc;
-interface Shape { fn area(self: &Self) -> u64; }
+interface Shape {
+    fn area(&self) -> u64;
+}
 o: dyn Shape = Rect { w: 3, h: 4 };
 r: rc::Rc<dyn Shape> = rc::new(o);
-b := r.clone();                            // strong count 2
-println("{}", b.get().area());             // the method through the object
-drop(r);                                   // the value stays alive in b
+b := r.clone(); // strong count 2
+println("{}", b.get().area()); // the method through the object
+drop(r); // the value stays alive in b
 ```
 
 A `dyn` object's concrete type is not known where it would cross a thread, so it is neither
@@ -217,7 +221,7 @@ mut a = arena::new<Node>();
 root := a.insert(Node { weight: 1 });
 child := a.insert(Node { weight: 2 });
 println("{}", a.get(&root)!.weight);
-taken := a.remove(&child)!;   // the value comes back, still owned
+taken := a.remove(&child)!; // the value comes back, still owned
 ```
 
 `get`/`get_mut` borrow the value, `remove` returns it, and a key whose value is gone answers `None`:
@@ -234,9 +238,7 @@ block:
 ```grl
 handle Instance;
 
-extern "C" record Vec2 { x: f64, y: f64 }
-
-extern "C" fn c_length(vector: byval Vec2) -> f64;
+extern "C" record Vec2 { x: f64, y: f64 } extern "C" fn c_length(vector: byval Vec2) -> f64;
 extern "C" fn c_create(slot: &mut Instance) -> i32;
 
 fn main() -> u64 {
@@ -245,7 +247,7 @@ fn main() -> u64 {
         length = c_length(Vec2 { x: 3.0, y: 4.0 });
     }
     println(length);
-    return 0;
+    0
 }
 ```
 

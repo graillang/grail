@@ -28,7 +28,7 @@ func main() {
 		vz[i] = float32(int64((x>>50)%100)) * 0.01
 	}
 	var dt, damping, gravity float32 = 0.016, 0.999, 0.0981
-	for frame := 0; frame < 100; frame++ {
+	for frame := 0; frame < 600; frame++ {
 		for i := 0; i < n; i++ {
 			vx[i] = vx[i] * damping
 			vy[i] = vy[i]*damping - gravity*dt

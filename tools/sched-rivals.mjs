@@ -60,8 +60,9 @@ if (have.rust) {
     exe.rayon = { sched: [rayon, 'sched'], frame: [rayon, 'frame'] };
   } else console.log(`note: the rayon twin did not build offline (no rayon in cargo's registry?), so rayon is not measured\n${(built.stderr ?? '').trim().split('\n').slice(-3).join('\n')}`);
 }
+const tbbCxx = have.cpp ? 'clang++' : 'g++';
 if (have.tbb) {
-  run(['g++', '-O2', '-std=c++20', join(root, 'bench/rivals/sched_tbb.cpp'), '-o', join(work, 'sched_tbb'), '-ltbb']);
+  run([tbbCxx, '-O2', '-std=c++20', join(root, 'bench/rivals/sched_tbb.cpp'), '-o', join(work, 'sched_tbb'), '-ltbb']);
   exe.onetbb = { sched: [join(work, 'sched_tbb'), 'sched'], frame: [join(work, 'sched_tbb'), 'frame'] };
 }
 // rayon and oneTBB start one thread per CPU by default (rayon: that many workers beside the main
@@ -106,7 +107,7 @@ const median = values => values ? [...values].sort((a, b) => a - b)[values.lengt
 // ---- one table. Rows name what is compared; a rival's figure is the closest thing it has.
 const rows = [
   ['join, from the main thread (ns)', 'sched.join', 'sched.join_main'],
-  ['join, on a worker (ns)', null, 'sched.join'],
+  ['join, on a worker (ns)', 'sched.join_on_worker', 'sched.join'],
   ['spawn a job and wait (ns)', 'sched.job_spawn_wait', 'sched.job_spawn_wait'],
   ['task spawn+join, one at a time (ns)', 'sched.task_spawn_join', null],
   ['burst of 100k spawns, per spawn (ns)', 'sched.task_burst', 'sched.task_burst'],
@@ -148,7 +149,7 @@ if (seenChecksums.size !== 1) {
 }
 if (jsonPath) writeResults(jsonPath, {
   tool: 'sched-rivals', title: 'The scheduler against rayon and oneTBB', commit, versions: v, load,
-  commands: [`bun tools/sched-rivals.mjs --rounds ${rounds}`, 'Grail-native: grail build --no-cache', 'Grail-LLVM: --backend=llvm --overflow=wrap, clang -O2', `LLVM w=${threads}: the same with GRAIL_WORKERS=${threads}`, 'rayon: cargo build --release (bench/rivals/sched-rayon)', 'oneTBB: g++ -O2 -std=c++20 sched_tbb.cpp -ltbb'],
+  commands: [`bun tools/sched-rivals.mjs --rounds ${rounds}`, 'Grail-native: grail build --no-cache', 'Grail-LLVM: --backend=llvm --overflow=wrap, clang -O2', `LLVM w=${threads}: the same with GRAIL_WORKERS=${threads}`, 'rayon: cargo build --release (bench/rivals/sched-rayon)', `oneTBB: ${tbbCxx} -O2 -std=c++20 sched_tbb.cpp -ltbb`],
   tables: [{
     id: 'scheduler', title: 'The scheduler: join, spawn, nested join and a frame loop', chart: true, threshold: 1, primary: 'grail-llvm', direction: 'lower',
     note: `Wall time measured inside each program, median of ${rounds} rounds. The bar: match or beat rayon and oneTBB.`,

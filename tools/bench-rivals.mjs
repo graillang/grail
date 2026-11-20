@@ -85,6 +85,16 @@ const names = argv.length ? argv
     // ffi_call is this tree's when it has one, else the scheduler tree's (GRAIL_SCHED_TREE).
     .concat(!existsSync(join(root, 'bench/ffi_call.grl')) && schedTree && existsSync(join(schedTree, 'bench/ffi_call.grl')) ? ['ffi_call'] : []);
 
+function ensureFfiTarget(tree) {
+  const archive = join(tree, '.work/libffi_target.a');
+  const obj = join(tree, '.work/ffi_target.o');
+  mkdirSync(join(tree, '.work'), { recursive: true });
+  run(['clang', '-O2', '-c', join(tree, 'bench/ffi_target.c'), '-o', obj]);
+  rmSync(archive, { force: true });
+  run(['ar', 'rcs', archive, obj]);
+  return archive;
+}
+
 function build(name) {
   const tree = name === 'ffi_call' && !existsSync(join(root, 'bench/ffi_call.grl')) ? schedTree : root;
   const dir = join(work, name);
@@ -92,7 +102,11 @@ function build(name) {
   const ctext = readFileSync(join(tree, 'bench', `${name}.c`), 'utf8');
   const cflags = (ctext.match(/^\/\/ bench-cflags: (.*)$/m)?.[1] ?? '').split(' ').filter(Boolean);
   const rivals = join(root, 'bench/rivals');
-  const libc = name === 'ffi_call' ? ['-lc', '-fno-builtin'] : [];
+  const ffiLib = name === 'ffi_call' ? ensureFfiTarget(tree) : null;
+  const cLink = ffiLib ? [ffiLib] : [];
+  const rustLink = ffiLib ? ['-L', `native=${join(tree, '.work')}`, '-l', 'static=ffi_target'] : [];
+  const goEnv = ffiLib ? { ...env, CGO_LDFLAGS: ffiLib } : env;
+  const zigLink = ffiLib ? ['-lc', ffiLib] : [];
   const compiler = tree === root ? grail : grailOf(tree);
   // The program from this tree (or the scheduler tree); its runtime and core from the measured
   // compiler's tree.
@@ -103,15 +117,15 @@ function build(name) {
   const exe = {};
   exe['grail-native'] = compileProgram(compiler, grailInputs, join(dir, 'native'), { ...grailOptions, backend: 'native', overflow: 'checked' });
   exe['grail-llvm'] = compileProgram(compiler, grailInputs, join(dir, 'llvm'), { ...grailOptions, backend: 'llvm', overflow: 'wrap' });
-  run(['clang', '-O2', '-ffp-contract=off', ...cflags, join(tree, 'bench', `${name}.c`), '-o', exe.c = join(dir, 'c'), '-lm']);
-  run(['clang', '-O2', '-march=native', '-ffp-contract=off', ...cflags, join(tree, 'bench', `${name}.c`), '-o', exe['c-native'] = join(dir, 'c-native'), '-lm']);
+  run(['clang', '-O2', '-ffp-contract=off', ...cflags, join(tree, 'bench', `${name}.c`), ...cLink, '-o', exe.c = join(dir, 'c'), '-lm']);
+  run(['clang', '-O2', '-march=native', '-ffp-contract=off', ...cflags, join(tree, 'bench', `${name}.c`), ...cLink, '-o', exe['c-native'] = join(dir, 'c-native'), '-lm']);
   // The C++ twin, when the program has one (bench/rivals/NAME.cpp); its own bench-cflags line, and
   // -pthread when it uses <thread>.
   const cpp = join(rivals, `${name}.cpp`);
   if (have.cpp && existsSync(cpp)) {
     const text = readFileSync(cpp, 'utf8');
     const flags = [...(text.match(/^\/\/ bench-cflags: (.*)$/m)?.[1] ?? '').split(' ').filter(Boolean), ...(/#include <thread>/.test(text) ? ['-pthread'] : [])];
-    run(['clang++', '-std=c++20', '-O2', '-ffp-contract=off', ...[...new Set(flags)], cpp, '-o', exe.cpp = join(dir, 'cpp')]);
+    run(['clang++', '-std=c++20', '-O2', '-ffp-contract=off', ...[...new Set(flags)], cpp, ...cLink, '-o', exe.cpp = join(dir, 'cpp')]);
   }
   // A twin that needs a crate (json: serde_json) is a cargo project, bench/rivals/NAME-rs, built
   // from the offline registry with cargo's release and dev profiles; the rest are one file for rustc.
@@ -125,21 +139,21 @@ function build(name) {
     exe['rust-dev'] = cargo('dev', 'cargo-dev');
     exe['rust-native'] = cargo('release', 'cargo-native', '-C target-cpu=native');
   } else if (have.rust) {
-    run(['rustc', '--edition', '2021', '-C', 'opt-level=3', '-C', 'target-cpu=native', join(rivals, `${name}.rs`), '-o', exe['rust-native'] = join(dir, 'rust-native')]);
-    run(['rustc', '--edition', '2021', '-C', 'opt-level=3', join(rivals, `${name}.rs`), '-o', exe['rust-release'] = join(dir, 'rust-release')]);
-    run(['rustc', '--edition', '2021', '-C', 'opt-level=0', '-g', join(rivals, `${name}.rs`), '-o', exe['rust-dev'] = join(dir, 'rust-dev')]);
+    run(['rustc', '--edition', '2021', '-C', 'opt-level=3', '-C', 'target-cpu=native', join(rivals, `${name}.rs`), ...rustLink, '-o', exe['rust-native'] = join(dir, 'rust-native')]);
+    run(['rustc', '--edition', '2021', '-C', 'opt-level=3', join(rivals, `${name}.rs`), ...rustLink, '-o', exe['rust-release'] = join(dir, 'rust-release')]);
+    run(['rustc', '--edition', '2021', '-C', 'opt-level=0', '-g', join(rivals, `${name}.rs`), ...rustLink, '-o', exe['rust-dev'] = join(dir, 'rust-dev')]);
   }
   // `go build FILE.go` builds one file as package main; cgo needs it in a directory of its own.
   if (have.go) {
     mkdirSync(join(dir, 'go'), { recursive: true });
     cpSync(join(rivals, `${name}.go`), join(dir, 'go', `${name}.go`));
-    run(['go', 'build', '-o', exe.go = join(dir, 'go-bin'), `${name}.go`], { cwd: join(dir, 'go'), env: { ...env, GOAMD64: 'v1' } });
-    run(['go', 'build', '-o', exe['go-v3'] = join(dir, 'go-v3'), `${name}.go`], { cwd: join(dir, 'go'), env: { ...env, GOAMD64: 'v3' } });
+    run(['go', 'build', '-o', exe.go = join(dir, 'go-bin'), `${name}.go`], { cwd: join(dir, 'go'), env: { ...goEnv, GOAMD64: 'v1' } });
+    run(['go', 'build', '-o', exe['go-v3'] = join(dir, 'go-v3'), `${name}.go`], { cwd: join(dir, 'go'), env: { ...goEnv, GOAMD64: 'v3' } });
   }
   if (!have.zig) return exe;
-  run(['zig', 'build-exe', '-O', 'ReleaseFast', '-mcpu=native', ...libc, join(rivals, `${name}.zig`), `-femit-bin=${exe['zig-native'] = join(dir, 'zig-native')}`], { cwd: dir, env });
-  run(['zig', 'build-exe', '-O', 'ReleaseFast', '-mcpu=baseline', ...libc, join(rivals, `${name}.zig`), `-femit-bin=${exe['zig-fast'] = join(dir, 'zig-fast')}`], { cwd: dir, env });
-  run(['zig', 'build-exe', '-O', 'Debug', '-mcpu=baseline', ...libc, join(rivals, `${name}.zig`), `-femit-bin=${exe['zig-debug'] = join(dir, 'zig-debug')}`], { cwd: dir, env });
+  run(['zig', 'build-exe', '-O', 'ReleaseFast', '-mcpu=native', join(rivals, `${name}.zig`), ...zigLink, `-femit-bin=${exe['zig-native'] = join(dir, 'zig-native')}`], { cwd: dir, env });
+  run(['zig', 'build-exe', '-O', 'ReleaseFast', '-mcpu=baseline', join(rivals, `${name}.zig`), ...zigLink, `-femit-bin=${exe['zig-fast'] = join(dir, 'zig-fast')}`], { cwd: dir, env });
+  run(['zig', 'build-exe', '-O', 'Debug', '-mcpu=baseline', join(rivals, `${name}.zig`), ...zigLink, `-femit-bin=${exe['zig-debug'] = join(dir, 'zig-debug')}`], { cwd: dir, env });
   return exe;
 }
 
@@ -201,7 +215,8 @@ const references = [['nbody_heap', 'nbody'], ['matmul_heap', 'matmul'], ['ffi_fn
 if (references.length) console.log(`\nreferences (C -O2 written another way)        figure    C twin    Grail-LLVM   Grail-LLVM / it`);
 for (const [ref, of] of references) {
   const exe = join(work, of, ref);
-  run(['clang', '-O2', '-ffp-contract=off', join(root, 'bench/rivals', `${ref}.c`), '-o', exe, '-lm']);
+  const refLink = ref === 'ffi_fnptr' ? [ensureFfiTarget(root)] : [];
+  run(['clang', '-O2', '-ffp-contract=off', join(root, 'bench/rivals', `${ref}.c`), ...refLink, '-o', exe, '-lm']);
   let best = Infinity, out = '';
   for (let i = 0; i < runs; i++) {
     const r = measure([exe]);

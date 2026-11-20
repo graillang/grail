@@ -1,4 +1,4 @@
-// x[i] = x[i] * a + y[i] over one million float, 200 passes; prints the sum of the result.
+// x[i] = x[i] * a + y[i] over one million float, 2000 passes; prints the sum of the result.
 #include <stdio.h>
 #include <stdlib.h>
 __attribute__((noinline)) static void scale_add(float *restrict x, const float *restrict y, float a, size_t n) {
@@ -14,7 +14,7 @@ int main(void) {
         yv = yv + (float)0.25; if ((float)1.0 < yv) yv = 0;
     }
     float a = (float)0.999;
-    for (int pass = 0; pass < 200; pass++) {
+    for (int pass = 0; pass < 2000; pass++) {
         scale_add(x, y, a, n);
         a = (float)0.999 - x[pass] * (float)0.000000001; // the next pass depends on this one
     }

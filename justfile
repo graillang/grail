@@ -28,7 +28,7 @@ bench-results:
     bun tools/bench-rivals.mjs --metric wall --runs 9 --workers 1,4,8 --json bench/results/parallel.json ecs_par
     bun tools/sched-rivals.mjs --json bench/results/sched-rivals.json
     bun tools/compile-rivals.mjs --json bench/results/compile.json
-    bun tools/abundance-perf.mjs --json bench/results/abundance.json
+    bun tools/abundance-perf.mjs --json bench/results/abundance.json abgeo abtex audio_procedural audio_vocal cache coherent_coasts coherent_mesa coherent_stepped_hills combat_world job
 
 # Verify Grail examples without compiling the optional Rust comparisons.
 book-check-grail:

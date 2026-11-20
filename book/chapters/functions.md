@@ -47,7 +47,13 @@ statement. The same holds for a closure's block and for any block used as a valu
 
 ```grl
 fn sign(n: i64) -> i64 {
-    if n < 0 { -1 } else if n == 0 { 0 } else { 1 }
+    if n < 0 {
+        -1
+    } else if n == 0 {
+        0
+    } else {
+        1
+    }
 }
 ```
 
@@ -65,7 +71,7 @@ named one every argument is named, so the argument list reads as a set of slots 
 sequence a reader has to count:
 
 ```grail
-println(rect(1, height: 2, width: 5));   // 1 is `area`; the other two say which they are
+println(rect(1, height: 2, width: 5)); // 1 is `area`; the other two say which they are
 ```
 
 A parameter may also carry a default - `fn scaled(value: u64, by: u64 = 2, plus: u64 = 0)` - and a

@@ -1,9 +1,10 @@
-// The cost of a foreign call: 10M calls of libc's `labs` through cgo, best of five rounds (twin of
-// the gaps12-sched bench/ffi_call.c). Times to stderr, the checksum to stdout.
+// The cost of a foreign call: 10M calls of the separately compiled C function grail_bench_abs
+// (bench/ffi_target.c -> .work/libffi_target.a) through cgo, best of five rounds.
 package main
 
 /*
-#include <stdlib.h>
+#include <stdint.h>
+extern int64_t grail_bench_abs(int64_t x);
 */
 import "C"
 
@@ -20,7 +21,7 @@ func main() {
 	for round := 0; round < 5; round++ {
 		t0 := time.Now()
 		for i := int64(0); i < n; i++ {
-			acc += int64(C.labs(C.long(i - 5000000)))
+			acc += int64(C.grail_bench_abs(C.int64_t(i - 5000000)))
 		}
 		best = min(best, time.Since(t0))
 	}

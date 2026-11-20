@@ -53,7 +53,9 @@ When it grows, or a second call wants it, it gets a name where it is used:
 
 ```grl
 fn report(prices: &u64[]) -> u64 {
-    fn with_tax(p: u64) -> u64 { p + p / 5 }
+    fn with_tax(p: u64) -> u64 {
+        p + p / 5
+    }
     sum_by(prices, with_tax)
 }
 ```
@@ -61,7 +63,9 @@ fn report(prices: &u64[]) -> u64 {
 and when other functions want it, the same text moves to the top level:
 
 ```grl
-fn with_tax(p: u64) -> u64 { p + p / 5 }
+fn with_tax(p: u64) -> u64 {
+    p + p / 5
+}
 fn report(prices: &u64[]) -> u64 {
     sum_by(prices, with_tax)
 }
@@ -78,9 +82,11 @@ closure that captures nothing is a function, so it converts to `fn(..)` where on
 argument, a binding, a record field, a result:
 
 ```grl
-fn twice(f: fn(u64) -> u64, x: u64) -> u64 { f(f(x)) }
-twice(|x| x + 1, 5);                     // 7
-table := (fn(u64) -> u64)[fn(x: u64) -> u64 { x * 2 }, |x: u64| x + 1];
+fn twice(f: fn(u64) -> u64, x: u64) -> u64 {
+    f(f(x))
+}
+twice(|x|x + 1, 5); // 7
+table := (fn(u64) -> u64)[fn(x: u64) -> u64 { x * 2 }, |x: u64|x + 1];
 ```
 
 A closure that captures cannot: the pointer has nowhere to keep what it captured. The refusal names
@@ -130,7 +136,7 @@ caller's closure exclusively takes `&mut FnMut(...)` and calls it through that r
 
 ```grl
 fn apply_once<a>(step: (&a mut FnMut(u64) -> u64), start: u64) -> u64 {
-    return step(start);
+    step(start)
 }
 ```
 
@@ -144,10 +150,10 @@ reach, is rejected.
 
 ```grl
 groups := &b.groups;
-order.sort_by(|x: &u64, y: &u64| -> bool {
+order.sort_by(|x, y| {
     gx := &groups[*x];
     gy := &groups[*y];
-    return gx.depth > gy.depth;
+    gx.depth > gy.depth
 });
 ```
 
@@ -175,7 +181,10 @@ number is the closure's own copy:
 ```grl
 mut compares = 0;
 counter := &mut compares;
-items.sort_by(|a, b| { *counter += 1; return a < b; });
+items.sort_by(|a, b| {
+    *counter += 1;
+    a < b
+});
 println(compares);
 ```
 
@@ -212,8 +221,12 @@ then on. A bare `Fn(..)` states none of them: it is not `Send` or `Share`, so a 
 asks for `Fn<Send>`:
 
 ```grl
-struct Work { run: Fn<Send>() -> u64 }      // a Work may now be sent to a worker
-fn start<R: Send + Owned>(f: FnMut<Send, Owned>() -> R) -> Job<R> { return parallel_spawn(f); }
+struct Work {
+    run: Fn<Send>() -> u64
+} // a Work may now be sent to a worker
+fn start<R: Send + Owned>(f: FnMut<Send, Owned>() -> R) -> Job<R> {
+    parallel_spawn(f)
+}
 ```
 
 A type that says more is accepted where less is asked; the reverse is refused, because the value no
@@ -243,10 +256,10 @@ type, and its result from that type or its body, as in Rust: `iter::of(v).map(|x
 A closure called immediately takes them from the call's arguments:
 
 ```grl
-println((|x| x + 1)(41));          // x is u64
+println((|x|x + 1)(41)); // x is u64
 n: u32 = 20;
-println((|x| x + 1)(n));           // x is u32
-println((|p| p.x)(Point { x: 2, y: 3 }));
+println((|x|x + 1)(n)); // x is u32
+println((|p|p.x)(Point { x: 2, y: 3 }));
 ```
 
 An argument that is itself a closure, and an argument borrowed (`&buf`) whose parameter would then
@@ -260,7 +273,9 @@ where the bar form does: `fn(x) { x + 1 }` passed to a typed parameter, or calle
 A generic function can take a closure by its own type instead of an erased `Fn(..)`:
 
 ```grl
-fn apply<F: Fn(u64) -> u64>(f: F, x: u64) -> u64 { return f(x); }
+fn apply<F: Fn(u64) -> u64>(f: F, x: u64) -> u64 {
+    f(x)
+}
 ```
 
 `F` is the type of the closure given at each call, so every call site gets its own copy of `apply`
@@ -275,7 +290,10 @@ closure or function given for `F` must not tie that parameter's lifetime to anyt
 reach - another parameter, its result, or something it captured:
 
 ```grl
-fn leak<a, b>(v: (&a mut u64[]), out: (&b mut Out<a>)) -> u64 { out.slot.push(v); return 0; }
-with_lock(&mut m, &mut out, leak);   // refused: parameter 1 is fresh on every call, but `leak`
-                                     // ties it to `out`, so it could be kept past the call
+fn leak<a, b>(v: (&a mut u64[]), out: (&b mut Out<a>)) -> u64 {
+    out.slot.push(v);
+    0
+}
+with_lock(&mut m, &mut out, leak); // refused: parameter 1 is fresh on every call, but `leak`
+// ties it to `out`, so it could be kept past the call
 ```

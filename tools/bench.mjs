@@ -10,7 +10,7 @@
 //       not a favourable outlier. N should be odd and at least 5 to say anything about a gap of a
 //       few percent.
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { root } from './platforms.mjs';
@@ -76,12 +76,21 @@ try {
     ? `benchmark      C -O2      Grail (${process.env.GRAIL_BACKEND ?? 'native'})      ratio   (median of ${rounds} paired, spread C/G)`
     : `benchmark      C -O2      Grail (${process.env.GRAIL_BACKEND ?? 'native'})      ratio`);
   for (const name of names) {
+    let ffiArchive = null;
+    if (name === 'ffi_call') {
+      ffiArchive = join(root, '.work/libffi_target.a');
+      const ffiObj = join(root, '.work/ffi_target.o');
+      mkdirSync(join(root, '.work'), { recursive: true });
+      run(['clang', '-O2', '-c', join(root, 'bench/ffi_target.c'), '-o', ffiObj]);
+      rmSync(ffiArchive, { force: true });
+      run(['ar', 'rcs', ffiArchive, ffiObj]);
+    }
     const exe = compileProgram(grail, [join(root, 'bench', `${name}.grl`), join(root, 'lib/core.grl')], join(work, name)), cexe = join(work, `${name}-c`);
     // A twin may ask for flags of its own on a `// bench-cflags:` line (ffi_call needs -fno-builtin,
     // or clang inlines the very call it measures).
     const ctext = readFileSync(join(root, 'bench', `${name}.c`), 'utf8');
     const extra = (ctext.match(/^\/\/ bench-cflags: (.*)$/m)?.[1] ?? '').split(' ').filter(Boolean);
-    run(['clang', '-O2', '-ffp-contract=off', ...extra, join(root, 'bench', `${name}.c`), '-o', cexe, '-lm']);
+    run(['clang', '-O2', '-ffp-contract=off', ...extra, join(root, 'bench', `${name}.c`), ...(ffiArchive ? [ffiArchive] : []), '-o', cexe, '-lm']);
     let g, c, spread = '';
     if (rounds) {
       const gs = [], cs = [];

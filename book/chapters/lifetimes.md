@@ -11,8 +11,12 @@ the sole input reference. When more than one input could flow to the result, wri
 out:
 
 ```grl
-fn relay(value: &[u8]) -> &[u8] { return value; }             // sole input supplies the output
-fn choose(left: &a [u8], right: &b [u8]) -> &a [u8] { return left; } // two groups, one output
+fn relay(value: &[u8]) -> &[u8] {
+    value
+} // sole input supplies the output
+fn choose(left: &a [u8], right: &b [u8]) -> &a [u8] {
+    left
+} // two groups, one output
 ```
 
 {{example:lifetimes}}

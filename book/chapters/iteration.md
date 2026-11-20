@@ -1,7 +1,7 @@
 # Iteration
 
 `for x in v` walks a vector, `for k, v in &m` a map, and `for i in 0..n` a range. Any other type
-becomes iterable by having one method: `fn next(self: &mut Self) -> T?`. `for x in it` calls `next`
+becomes iterable by having one method: `fn next(&mut self) -> T?`. `for x in it` calls `next`
 until it returns `None`, binding each `Some` value to `x`.
 
 {{example:iterators}}
@@ -31,7 +31,7 @@ The `iter` module chains work lazily over an `Iter<T>` - a closure that yields t
 
 `upto(lo, hi)` counts, `of(v)` moves the elements out of a vector, and `map`, `filter`, `take`,
 `enumerate` and `zip` wrap one iterator in another; `collect` pulls everything into a vector.
-`Iter<T>` is itself an iterator by the protocol above, so any adapter chain can sit in a `for`. `iter::Iterator` is the interface behind them (`type Item; fn next(self: &mut Self) -> Self::Item?`):
+`Iter<T>` is itself an iterator by the protocol above, so any adapter chain can sit in a `for`. `iter::Iterator` is the interface behind them (`type Item; fn next(&mut self) -> Self::Item?`):
 implement it for your own type and generic code takes `I: iter::Iterator` and names `I::Item`.
 Each adapter is also a method, so a chain reads left to right:
 `iter::of(v).filter(|x| x > 1).map(|x| x * 2).collect()`; `count()` and
@@ -53,14 +53,14 @@ of references, and after a `map` to values a vector of values:
 for x in v.iter().filter(|x| **x % 2 == 1) {
     total = total + *x;
 }
-doubled := v.iter().filter(|x| x > 4).map(|x| *x * 2).collect();
+doubled := v.iter().filter(|x|x > 4).map(|x| *x * 2).collect();
 ```
 
 `iter::of(v)` (also `v.into_iter()`) is the consuming form: it moves the elements out, and `v` is
 gone. `refs(&v)` is the same borrowing walk as an erased `Iter<&T>`, for code that keeps an iterator
 in a field or needs `zip`, `skip` or `chain`.
 
-`map` from reference items to owned ones works too: `iter::refs(&v).map(|x: &u64| -> u64 *x * 2)`
+`map` from reference items to owned ones works too: `v.iter().map(|x| *x * 2)`
 is an `Iter<u64>` that still reads `v`, so `v` stays borrowed until it is done - as in Rust, a
 generic function's result keeps the borrows of its arguments' type parameters. The same
 holds for any closure whose type returns a reference: `Fn() -> &a T` keeps what it captured

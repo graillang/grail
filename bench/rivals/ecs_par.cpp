@@ -1,9 +1,8 @@
-// C++ twin of bench/ecs_par.grl: bench/ecs.c's update split into one static slice per thread each
-// frame, std::jthread started and joined per frame (C++ has no parallel-for of its own short of
-// the parallel algorithms, which need a TBB back end with libstdc++). CPP_THREADS sets the workers
-// (default: std::thread::hardware_concurrency()); each entity's arithmetic is independent and the
-// final sum is serial, so the checksum is the serial one at any thread count.
+// C++ twin of bench/ecs_par.grl: 1M entities, 600 frames split across a persistent pool of
+// CPP_THREADS workers synchronized with std::barrier (so threads are created once, matching OpenMP,
+// rayon and Grail's pool rather than spawning per frame).
 #include <algorithm>
+#include <barrier>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -26,6 +25,7 @@ struct Columns {
 };
 int main() {
     const std::size_t n = 1000000;
+    const int frames = 600;
     Columns c(n);
     std::uint64_t x = 88172645463325252ull;
     for (std::size_t i = 0; i < n; i++) {
@@ -40,11 +40,27 @@ int main() {
     const char *env = std::getenv("CPP_THREADS");
     const std::size_t workers = std::max<std::size_t>(1, env ? std::strtoul(env, nullptr, 10) : std::thread::hardware_concurrency());
     const std::size_t chunk = (n + workers - 1) / workers;
-    for (int frame = 0; frame < 100; frame++) {
-        std::vector<std::jthread> threads;
-        for (std::size_t w = 0; w < workers; w++)
-            threads.emplace_back([&c, lo = w * chunk, hi = std::min((w + 1) * chunk, n)] { c.update(lo, hi); });
-    } // the jthreads join here, at the end of each frame
+    if (workers == 1) {
+        for (int frame = 0; frame < frames; frame++) c.update(0, n);
+    } else {
+        std::barrier sync(static_cast<std::ptrdiff_t>(workers));
+        std::vector<std::jthread> pool;
+        pool.reserve(workers - 1);
+        for (std::size_t w = 1; w < workers; w++) {
+            const std::size_t lo = w * chunk, hi = std::min((w + 1) * chunk, n);
+            pool.emplace_back([&c, &sync, lo, hi, frames] {
+                for (int frame = 0; frame < frames; frame++) {
+                    c.update(lo, hi);
+                    sync.arrive_and_wait();
+                }
+            });
+        }
+        const std::size_t hi0 = std::min(chunk, n);
+        for (int frame = 0; frame < frames; frame++) {
+            c.update(0, hi0);
+            sync.arrive_and_wait();
+        }
+    }
     double sum = 0;
     for (std::size_t i = 0; i < n; i++) sum = sum + double(c.px[i]) + double(c.py[i]) + double(c.pz[i]);
     std::printf("%.17g\n", sum);

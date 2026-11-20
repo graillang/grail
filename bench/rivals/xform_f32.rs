@@ -1,4 +1,4 @@
-// x[i] = x[i] * a + y[i] over one million f32, 200 passes; prints the sum (twin of bench/xform_f32.c).
+// x[i] = x[i] * a + y[i] over one million f32, 2000 passes; prints the sum (twin of bench/xform_f32.c).
 #[inline(never)]
 fn scale_add(x: &mut [f32], y: &[f32], a: f32) {
     for (xi, yi) in x.iter_mut().zip(y) {
@@ -19,7 +19,7 @@ fn main() {
         if 1.0 < yv { yv = 0.0; }
     }
     let mut a: f32 = 0.999;
-    for pass in 0..200 {
+    for pass in 0..2000 {
         scale_add(&mut x, &y, a);
         a = 0.999 - x[pass] * 0.000000001;
     }

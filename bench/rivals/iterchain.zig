@@ -1,5 +1,4 @@
-// Zig twin of bench/iterchain.grl. Zig's standard library has no map/filter iterator adapters, so
-// the chain is the loop.
+// Zig twin of bench/iterchain.grl: 20 rounds over ten million u64.
 const std = @import("std");
 
 pub fn main() !void {
@@ -9,9 +8,12 @@ pub fn main() !void {
     defer allocator.free(v);
     for (v, 0..) |*slot, i| slot.* = i;
     var s: u64 = 0;
-    for (v) |x| {
-        const y = x * 2;
-        if (y % 3 == 0) s +%= y;
+    for (0..20) |round| {
+        const r: u64 = @intCast(round);
+        for (v) |x| {
+            const y = (x + r) * 2;
+            if (y % 3 == 0) s +%= y;
+        }
     }
     try std.io.getStdOut().writer().print("{d}\n", .{s});
 }

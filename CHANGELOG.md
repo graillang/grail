@@ -1,5 +1,12 @@
 ## Unreleased
 
+- **Peer-review benchmark cleanup, refreshed charts & updated book**:
+  - `ffi_call` now calls a separately compiled non-builtin C function (`bench/ffi_target.c` → `.work/libffi_target.a`) across all six languages so LLVM cannot inline libc `labs` in `Grail-LLVM` (now 1.00 ns across Grail-LLVM/C/C++/Rust/Zig).
+  - `tools/compile-rivals.mjs` splits `syn1000` and `syn4000` into 20 Grail modules / Go packages / Rust Cargo workspace crates / C and C++ translation units so every toolchain gets parallel builds and real incremental edits; the book overview chart now puts **Compile speed** (4-job wall time on those 8 scaling rows) first.
+  - Scaled sub-50 ms benchmarks (`iterchain` ×20 rounds, `xform_f32` 2,000 passes, `xform_f64` 1,000 passes, `ecs`/`ecs_par` 600 frames), aligned `sieve.cpp` to `std::vector<uint8_t>`, and gave `ecs_par.cpp`/`.zig` persistent worker pools.
+  - `tools/sched-rivals.mjs` wires up Grail's `join_on_worker`, builds `sched_tbb.cpp` with `clang++ -O2` (matching LLVM across all three twins), and excludes pure-serial `fib(32)` from the Scheduler overview mean.
+  - `just bench-results` now runs a curated 10-program Abundance workload suite (skipping sub-millisecond unit tests).
+  - Re-measured all six `bench/results/*.json` suites, updated `book/chapters/performance.md` prose to match, and modernized/formatted all 77 `book/examples/*.grl` files and chapter `grl`/`grail` snippets with `grail fmt` (`&self`/`&mut self`, implicit tail returns, inferred closure types, `v.iter()`).
 - **Benchmarks & book charts refreshed on `0ffc12e4`**: re-ran all six `bench/results/*.json` suites (`bench-rivals`, `engine`, `parallel`, `sched-rivals`, `compile`, and `abundance` on the original 10 programs). `tools/abundance-perf.mjs` now accepts optional positional `[NAME...]` arguments to filter which Abundance programs to measure.
 - **Abundance: `ab-engine-grail` runs the real engine runtime on upstream's compiled shaders.** The toy
   `play_shaders/` sky/terrain/water path is gone; every pass is Abundance's own SPIR-V (vendored from upstream

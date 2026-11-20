@@ -25,15 +25,19 @@ fn main() {
     text := "Grail by example".text();
     assert(text.starts_with(view("Grail")));
     assert(text.ends_with(view("example")));
-    start := text.find(view(" by "))!;                    // Some(index); ! aborts on None
+    start := text.find(view(" by "))!; // Some(index); ! aborts on None
     replaced := text.replace(view("example"), view("code"));
     println(replaced);
-    println(start.to_string());                           // an integer method
+    println(start.to_string()); // an integer method
     minus: i64 = -42;
     println(minus.to_string());
     match view("18446744073709551615").parse_u64() {
-        Some(value) => { println(value); },
-        None => { println("not a number"); }
+        Some(value) => {
+            println(value);
+        },
+        None => {
+            println("not a number");
+        }
     }
 }
 ```
@@ -90,15 +94,15 @@ use socket;
 
 fn main() {
     everything := ip::parse(view("::"))!;
-    listener := socket::bind(&everything, 0, false)!;   // dual-stack: :: plus mapped IPv4
-    println(listener.family());                          // 6
-    println(listener.port() > 0);                        // the kernel picked a port
+    listener := socket::bind(&everything, 0, false)!; // dual-stack: :: plus mapped IPv4
+    println(listener.family()); // 6
+    println(listener.port() > 0); // the kernel picked a port
     listener.close();
     match ip::parse_ipv6(view("fe80::1%2")) {
         Some(link) => {
             kind := link.scope();
-            println(kind.name());                       // link-local
-            println(ip::format_ipv6(&link));            // fe80::1%2
+            println(kind.name()); // link-local
+            println(ip::format_ipv6(&link)); // fe80::1%2
         },
         None => {
             println("not an address");
@@ -178,7 +182,7 @@ fn client(port: u64, unused: u64) -> u64 {
     mut stream = net::connect("127.0.0.1", port)!;
     stream.write_all(view("hello"));
     stream.close();
-    return 1;
+    1
 }
 
 fn serve<s>(scope: (&s Scope<u64>), unused: u64) -> u64 {
@@ -190,7 +194,7 @@ fn serve<s>(scope: (&s Scope<u64>), unused: u64) -> u64 {
     listener.close();
     assert(join(peer) == 1);
     println(data.text());
-    return 0;
+    0
 }
 
 fn main() {
@@ -226,8 +230,8 @@ fn main() -> u64 {
             // The address is a dotted quad: the runtime has no name lookup. The third argument is
             // the name the certificate must carry, and it is what SNI sends.
             mut s = client.connect("93.184.216.34", 443, "example.com")!;
-            println(s.version());       // TLSv1.3
-            println(s.alpn());          // h2
+            println(s.version()); // TLSv1.3
+            println(s.alpn()); // h2
             mut request: string = "GET / HTTP/1.0\r\nHost: example.com\r\n\r\n";
             s.write_all(view(request))!;
             body := s.read_all()!;
@@ -238,7 +242,7 @@ fn main() -> u64 {
             println(error.show());
         }
     }
-    return 0;
+    0
 }
 ```
 
@@ -275,7 +279,7 @@ use fs;
 fn main() {
     fs::create_dir_all(view("out/reports"))!;
     fs::write_atomic(view("out/reports/today.txt"), view("42 sales"))!;
-    text := fs::read_text(view("out/reports/today.txt"))!;   // UTF-8 is checked
+    text := fs::read_text(view("out/reports/today.txt"))!; // UTF-8 is checked
     md := fs::metadata(view("out/reports/today.txt"))!;
     println(text);
     println(md.size());
@@ -315,16 +319,16 @@ fn main() {
     argv.push("/bin/sh".copy());
     argv.push("-c".copy());
     argv.push("echo out; echo err 1>&2; exit 3".copy());
-    captured := process::run(&argv)!;          // stdout and stderr, separately, capped
-    println(captured.code());                  // 3
-    println(captured.out());                   // out
-    println(captured.err());                   // err
+    captured := process::run(&argv)!; // stdout and stderr, separately, capped
+    println(captured.code()); // 3
+    println(captured.out()); // out
+    println(captured.err()); // err
     mut victim = u8[][];
     victim.push("/bin/sh".copy());
     victim.push("-c".copy());
     victim.push("kill -9 $$".copy());
     killed := process::run(&victim)!;
-    println(killed.show_status());             // killed by signal 9 (SIGKILL)
+    println(killed.show_status()); // killed by signal 9 (SIGKILL)
 }
 ```
 
@@ -352,15 +356,22 @@ use tz;
 use time;
 
 fn main() {
-    zone := tz::available(view("Europe/Berlin"))!;      // ! aborts when the machine has no tzdata
-    println(zone.offset_at(1767222000));                // 3600, CET
-    println(zone.abbreviation_at(1780000000));          // CEST
-    println(zone.to_local(1780000000).show());          // the wall clock there
-    twice := tz::local(2026, 10, 25, 2, 30, 0);         // the hour that happens twice
+    zone := tz::available(view("Europe/Berlin"))!; // ! aborts when the machine has no tzdata
+    println(zone.offset_at(1767222000)); // 3600, CET
+    println(zone.abbreviation_at(1780000000)); // CEST
+    println(zone.to_local(1780000000).show()); // the wall clock there
+    twice := tz::local(2026, 10, 25, 2, 30, 0); // the hour that happens twice
     match zone.from_local(&twice) {
-        Ambiguous(pair) => { println(pair.earlier()); println(pair.later()); },
-        Unique(instant) => { println(instant); },
-        Skipped(gap) => { println(gap.seconds()); }
+        Ambiguous(pair) => {
+            println(pair.earlier());
+            println(pair.later());
+        },
+        Unique(instant) => {
+            println(instant);
+        },
+        Skipped(gap) => {
+            println(gap.seconds());
+        }
     }
 }
 ```
@@ -384,13 +395,13 @@ those bytes back as a view with no copy in between.
 use utf8;
 
 fn main() {
-    text := utf8::from_bytes(view("caf\\u{e9} \\u{4e16}\\u{754c}"))!;   // or the offset that refused
+    text := utf8::from_bytes(view("caf\\u{e9} \\u{4e16}\\u{754c}"))!; // or the offset that refused
     println(text.char_count());
-    left := text.slice_chars(0, 4)!;                  // character boundaries, checked
+    left := text.slice_chars(0, 4)!; // character boundaries, checked
     println(left.concat(&text).show());
-    println(text.as_bytes().len());                   // the bytes, without a copy
+    println(text.as_bytes().len()); // the bytes, without a copy
     for c in text.chars() {
-        println(c);                                   // every sequence decodes: no U+FFFD
+        println(c); // every sequence decodes: no U+FFFD
     }
 }
 ```

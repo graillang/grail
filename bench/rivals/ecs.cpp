@@ -25,7 +25,7 @@ int main() {
         w.vz[i] = (float)(int64_t)((x >> 50) % 100) * 0.01f;
     }
     const float dt = 0.016f, damping = 0.999f, gravity = 0.0981f;
-    for (int frame = 0; frame < 100; frame++)
+    for (int frame = 0; frame < 600; frame++)
         for (size_t i = 0; i < w.size(); i++) {
             w.vx[i] = w.vx[i] * damping;
             w.vy[i] = w.vy[i] * damping - gravity * dt;

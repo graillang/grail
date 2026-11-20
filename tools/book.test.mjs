@@ -142,7 +142,7 @@ test('the languages overview: geometric mean of each language over the fastest p
     'bench-rivals': { commit: 'abc', tables: [table('release', [['a', { c: 1, cpp: 2, 'rust-release': 4, go: 8, 'zig-fast': 1, 'grail-llvm': 2 }], ['b', { c: 4, 'rust-release': 1, go: 2, 'zig-fast': 4, 'grail-llvm': null }]])] },
     parallel: { commit: 'abc', tables: [table('release', [['p x1', { c: 1, cpp: 100, 'grail-llvm': 1 }], ['p x8', { c: 2, cpp: 1, 'rust-release': 2, go: 4, 'zig-fast': 2, 'grail-llvm': 4 }]])] },
   };
-  const [release, dev] = overviewRows(files);
+  const [, release, dev] = overviewRows(files);
   // The parallel file at its most workers only; b has no C++ twin and a null (a wrong answer) for
   // Grail, so it is left out of every language's mean and named.
   expect(release.programs.map(p => p.name)).toEqual(['a', 'p x8']);
@@ -164,7 +164,7 @@ test('the languages overview: compile speed and scheduler panels, a language wit
   const { overviewRows, overview } = await import('./perf-charts.mjs');
   const table = (id, rows, direction = 'lower') => ({ id, direction, rows: rows.map(([name, values, dir]) => ({ name, values, ...(dir ? { direction: dir } : {}) })) });
   const files = {
-    compile: { commit: 'abc', tables: [table('compile', [['hello check cold', { grail: 1, go: 4, zig: 8, rust: 2 }], ['hello build no-op', { grail: 1, go: 2, zig: 2, rust: 4, 'go-build': 0.5 }], ['syn build cold', { grail: 2, go: 4, zig: 8, rust: 4 }]])] },
+    compile: { commit: 'abc', tables: [table('compile-wall', [['hello check cold', { grail: 1, go: 4, zig: 8, rust: 2 }], ['syn1000 check cold', { grail: 1, go: 4, zig: 8, rust: 2 }], ['syn1000 build no-op', { grail: 1, go: 2, zig: 2, rust: 4, 'go-build': 0.5 }], ['syn4000 build cold', { grail: 2, go: 4, zig: 8, rust: 4 }]])] },
     'sched-rivals': { commit: 'abc', tables: [table('scheduler', [
       ['join', { 'grail-native': 1, 'grail-llvm': 2, rayon: 4, onetbb: 1 }],
       ['join, on a worker', { rayon: 2, onetbb: 1 }],
@@ -175,7 +175,7 @@ test('the languages overview: compile speed and scheduler panels, a language wit
   const panels = overviewRows(files);
   const compile = panels.find(p => p.id === 'compile'), sched = panels.find(p => p.id === 'scheduler');
   const lang = (panel, key) => panel.languages.find(l => l.key === key);
-  expect(compile.programs.map(p => p.name)).toEqual(['hello check cold', 'syn build cold']); // a rebuild with nothing changed is not counted
+  expect(compile.programs.map(p => p.name)).toEqual(['syn1000 check cold', 'syn4000 build cold']); // tiny hello and no-op rows are excluded from the overview mean
   expect(lang(compile, 'grail').mean).toBe(1);
   expect(lang(compile, 'rust').mean).toBeCloseTo(Math.sqrt(2 * 2));
   expect(compile.languages.map(l => l.key)).not.toContain('go-build'); // Go's other check is not a language
@@ -196,7 +196,7 @@ test('the languages overview: compile speed and scheduler panels, a language wit
   expect(lang(sched, 'rayon').fastest).toBe(1);
   const html = overview(files);
   expect(html).toContain('Compile speed - 2 measurements');
-  expect(html).toContain('bench/results/compile.json; user-space instructions');
+  expect(html).toContain('bench/results/compile.json; wall time at four jobs');
   expect(html).toContain('No C or C++: not measured in this file');
   expect(html).toContain('bench/results/sched-rivals.json; wall time');
   expect(html).toContain('Grail is its release (LLVM) build, Rust is rayon, C++ is oneTBB');

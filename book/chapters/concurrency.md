@@ -62,13 +62,15 @@ call, so the same vector cannot be passed twice with one `&mut`, and the callbac
 of them. The builtin underneath, `parallel_for_zip(grain, f, s1, .., sn)`, takes one to four slices.
 
 ```grl
-pool::zip3(&mut pos[0: n], &vel[0: n], &mut life[0: n], 4096,
-    |p: &mut [f32], v: &[f32], l: &mut [u32]| -> unit {
-        for i in p.len() {
-            p[i] = p[i] + v[i] * dt;
-            l[i] = l[i] - 1;
-        }
-    });
+pool::zip3(&mut pos[
+    0: n
+], &vel[
+    0: n
+], &mut life[0: n], 4096, |p: &mut [f32], v: &[f32], l: &mut [u32]| -> unit { for i in p.len() {
+    p[i] = p[i] + v[i] * dt;
+    l[i] = l[i] - 1;
+}
+});
 ```
 
 `xs.par_chunks_mut_at(grain, |base: u64, s: &mut [T]| -> unit { .. })` is `par_chunks_mut`

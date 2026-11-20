@@ -49,11 +49,11 @@ pub struct Circle {
 }
 
 pub fn area(c: &Circle) -> u64 {
-    return 3 * square(c.r);
+    3 * square(c.r)
 }
 
 fn square(x: u64) -> u64 {
-    return x * x;
+    x * x
 }
 ```
 

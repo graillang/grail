@@ -1,4 +1,4 @@
-// x[i] = x[i] * a + y[i] over one million float32, 200 passes; prints the sum (twin of bench/xform_f32.c).
+// x[i] = x[i] * a + y[i] over one million float32, 2000 passes; prints the sum (twin of bench/xform_f32.c).
 package main
 
 import "fmt"
@@ -28,7 +28,7 @@ func main() {
 		}
 	}
 	var a float32 = 0.999
-	for pass := 0; pass < 200; pass++ {
+	for pass := 0; pass < 2000; pass++ {
 		scaleAdd(x, y, a)
 		a = 0.999 - x[pass]*0.000000001
 	}

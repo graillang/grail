@@ -56,20 +56,20 @@ computes a width be `@no_panic`.
 
 ```grl
 fn get(v: &u64[], i: u64 where i < v.len()) -> u64 {
-    return v[i];                      // no bounds check: the entry said i < v.len()
+    v[i] // no bounds check: the entry said i < v.len()
 }
 
 fn second(v: &u64[], j: u64 where j < v.len()) -> u64 {
-    k := j;                           // k == j
-    return get(v, k);                 // and j < v.len(), so k < v.len()
+    k := j; // k == j
+    get(v, k) // and j < v.len(), so k < v.len()
 }
 
 fn total(v: &u64[]) -> u64 {
     mut sum = 0;
-    for i in v.len() {                // the loop states i < v.len()
-        sum += get(v, i);             // so this call is proved too
+    for i in v.len() { // the loop states i < v.len()
+        sum += get(v, i); // so this call is proved too
     }
-    return sum;
+    sum
 }
 ```
 
@@ -79,8 +79,8 @@ and nowhere else:
 ```grl
 fn pick(n: u64) -> u64 {
     match n {
-        16 => take(n),            // proved: this arm is the one about 16
-        _ => take(n),             // checked: the 16-arm's fact is not this arm's
+        16 => take(n), // proved: this arm is the one about 16
+        _ => take(n), // checked: the 16-arm's fact is not this arm's
     }
 }
 ```
@@ -100,11 +100,14 @@ length. It is owed at every store into the field - the literal, `r.n = v`, `r.n 
 mutable borrow of a refined field is refused, because a write through it would skip the check:
 
 ```grl
-struct Batch { size: u64 where size > 0, items: u64[] where items.len() <= 64 }
+struct Batch {
+    size: u64 where size > 0,
+    items: u64[] where items.len() <= 64
+}
 
 fn grow(b: &mut Batch) {
-    b.size += 1;          // checked: size > 0
-    b.items.push(7);      // error: cannot borrow the refined field `Batch.items` mutably
+    b.size += 1; // checked: size > 0
+    b.items.push(7); // error: cannot borrow the refined field `Batch.items` mutably
 }
 ```
 
@@ -113,7 +116,10 @@ field predicates: `fn half(b: &Batch)` may pass `b.size` where `size > 0` is req
 A predicate may relate fields of the same record:
 
 ```grl
-struct Span { lo: u64, hi: u64 where lo <= hi }
+struct Span {
+    lo: u64,
+    hi: u64 where lo <= hi
+}
 ```
 
 It is owed once a literal has every field, and at every write of either field; a mutable borrow of
@@ -132,15 +138,15 @@ fn walk(v: &u64[]) -> u64 {
     mut sum = 0;
     for i in v.len() {
         if i > 0 {
-            sum += get(v, i - 1);     // 0 < i: `i - 1` cannot wrap, and i - 1 < v.len() follows
+            sum += get(v, i - 1); // 0 < i: `i - 1` cannot wrap, and i - 1 < v.len() follows
         }
     }
     mut j = 0;
     while j + 1 < v.len() {
-        sum += get(v, j + 1);         // the guard and the argument name the same value, `j + 1`
+        sum += get(v, j + 1); // the guard and the argument name the same value, `j + 1`
         j += 1;
     }
-    return sum;
+    sum
 }
 ```
 

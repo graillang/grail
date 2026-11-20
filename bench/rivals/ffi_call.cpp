@@ -1,11 +1,10 @@
-// bench-cflags: -fno-builtin
-// C++ twin of bench/ffi_call.c: the same 10M calls of the C library's `labs` (std::labs is that
-// extern "C" function), best of five rounds, timed with std::chrono. Built with -fno-builtin, as
-// the C twin is, so `labs` is a real call through the PLT, not an inlined abs.
+// C++ twin of bench/ffi_call.c: 10M calls of the separately compiled extern "C" function
+// grail_bench_abs (bench/ffi_target.c -> .work/libffi_target.a), best of five rounds.
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
-#include <cstdlib>
+extern "C" std::int64_t grail_bench_abs(std::int64_t x);
 using clk = std::chrono::steady_clock;
 static unsigned long long us(clk::time_point t0) { return std::chrono::duration_cast<std::chrono::microseconds>(clk::now() - t0).count(); }
 int main() {
@@ -14,7 +13,7 @@ int main() {
     unsigned long long best = ~0ull;
     for (int round = 0; round < 5; round++) {
         auto t0 = clk::now();
-        for (long long i = 0; i < 10000000; i++) acc = acc + std::labs(i - 5000000);
+        for (long long i = 0; i < 10000000; i++) acc = acc + grail_bench_abs(i - 5000000);
         best = std::min(best, us(t0));
     }
     // The same loop without the call (volatile keeps it a loop): what is left is the call.

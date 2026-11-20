@@ -1,9 +1,31 @@
-// Zig twin of bench/ecs_par.grl: bench/rivals/ecs.zig's update split into one static chunk per
-// thread each frame, std.Thread spawned and joined - Zig's standard library has no parallel-for.
-// ZIG_THREADS sets the workers (default: the CPU count); the sum is serial.
+// Zig twin of bench/ecs_par.grl: 1M entities, 600 frames split across a persistent pool of
+// ZIG_THREADS workers synchronized with a reusable barrier (threads spawned once before the loop,
+// matching OpenMP, rayon and Grail's pool).
 const std = @import("std");
 
 const Cols = struct { px: []f32, py: []f32, pz: []f32, vx: []f32, vy: []f32, vz: []f32 };
+
+const Barrier = struct {
+    total: usize,
+    arrived: usize = 0,
+    gen: usize = 0,
+    mutex: std.Thread.Mutex = .{},
+    cond: std.Thread.Condition = .{},
+
+    fn wait(self: *Barrier) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const g = self.gen;
+        self.arrived += 1;
+        if (self.arrived == self.total) {
+            self.arrived = 0;
+            self.gen +%= 1;
+            self.cond.broadcast();
+        } else {
+            while (self.gen == g) self.cond.wait(&self.mutex);
+        }
+    }
+};
 
 fn xs(x0: u64) u64 {
     var x = x0;
@@ -28,9 +50,17 @@ fn update(c: Cols, lo: usize, hi: usize) void {
     }
 }
 
+fn workerLoop(c: Cols, lo: usize, hi: usize, frames: usize, barrier: *Barrier) void {
+    for (0..frames) |_| {
+        update(c, lo, hi);
+        barrier.wait();
+    }
+}
+
 pub fn main() !void {
-    const n: usize = 1000000;
     const allocator = std.heap.page_allocator;
+    const n: usize = 1000000;
+    const frames: usize = 600;
     const c = Cols{
         .px = try allocator.alloc(f32, n), .py = try allocator.alloc(f32, n), .pz = try allocator.alloc(f32, n),
         .vx = try allocator.alloc(f32, n), .vy = try allocator.alloc(f32, n), .vz = try allocator.alloc(f32, n),
@@ -45,14 +75,24 @@ pub fn main() !void {
         c.vy[i] = @as(f32, @floatFromInt(@as(i64, @intCast((x >> 40) % 100)))) * 0.01;
         c.vz[i] = @as(f32, @floatFromInt(@as(i64, @intCast((x >> 50) % 100)))) * 0.01;
     }
-    const workers: usize = blk: {
+    const workers: usize = @max(1, blk: {
         const v = std.process.getEnvVarOwned(allocator, "ZIG_THREADS") catch break :blk try std.Thread.getCpuCount();
         break :blk std.fmt.parseInt(usize, v, 10) catch try std.Thread.getCpuCount();
-    };
+    });
     const chunk = (n + workers - 1) / workers;
-    const threads = try allocator.alloc(std.Thread, workers);
-    for (0..100) |_| {
-        for (threads, 0..) |*t, w| t.* = try std.Thread.spawn(.{}, update, .{ c, w * chunk, @min((w + 1) * chunk, n) });
+    if (workers == 1) {
+        for (0..frames) |_| update(c, 0, n);
+    } else {
+        var barrier = Barrier{ .total = workers };
+        const threads = try allocator.alloc(std.Thread, workers - 1);
+        for (1..workers) |w| {
+            threads[w - 1] = try std.Thread.spawn(.{}, workerLoop, .{ c, w * chunk, @min((w + 1) * chunk, n), frames, &barrier });
+        }
+        const hi0 = @min(chunk, n);
+        for (0..frames) |_| {
+            update(c, 0, hi0);
+            barrier.wait();
+        }
         for (threads) |t| t.join();
     }
     var sum: f64 = 0;

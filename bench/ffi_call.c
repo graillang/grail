@@ -1,9 +1,10 @@
-// bench-cflags: -fno-builtin
-// The C twin of bench/ffi_call.grl: the same 10M calls of libc's `labs`, best of five rounds. Built
-// with -fno-builtin so `labs` is a real call through the PLT, as Grail's is, not an inlined abs.
+// The C twin of bench/ffi_call.grl: 10M calls of a separately compiled C function
+// (bench/ffi_target.c -> .work/libffi_target.a), best of five rounds, so every compiler actually
+// crosses a real C ABI call boundary without libcall builtin inlining.
+#include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <time.h>
+extern int64_t grail_bench_abs(int64_t x);
 static unsigned long long now_us(void) {
     struct timespec t;
     clock_gettime(CLOCK_MONOTONIC, &t);
@@ -15,7 +16,7 @@ int main(void) {
     unsigned long long best = ~0ull;
     for (int round = 0; round < 5; round++) {
         unsigned long long t0 = now_us();
-        for (long long i = 0; i < 10000000; i++) acc = acc + labs(i - 5000000);
+        for (long long i = 0; i < 10000000; i++) acc = acc + grail_bench_abs(i - 5000000);
         unsigned long long t = now_us() - t0;
         if (t < best) best = t;
     }

@@ -32,14 +32,14 @@ interface Percent {
 
 impl Percent for u64 {
     fn percent_of(&self, whole: u64) -> u64 {
-        return *self * 100 / whole;
+        *self * 100 / whole
     }
 }
 
 fn main() {
     done: u64 = 3;
-    println(done.percent_of(12));    // 25
-    println(done.pow(2).max(5));     // 9: integer methods every program has
+    println(done.percent_of(12)); // 25
+    println(done.pow(2).max(5)); // 9: integer methods every program has
 }
 ```
 
@@ -95,7 +95,7 @@ source each `@derive` generated:
 $ grail build --show-derives program.grl
 // @derive on Point (program.grl)
 impl ops::Eq for Point {
-    fn eq(self: &Self, other: &Self) -> bool {
+    fn eq(&self, other: &Self) -> bool {
         mut equal = true;
         @for f in fields(Self) {
             if !(self.@f == other.@f) { equal = false; }

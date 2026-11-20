@@ -20,7 +20,7 @@ int main(void) {
         vz[i] = (float)(int64_t)((x >> 50) % 100) * 0.01f;
     }
     const float dt = 0.016f, damping = 0.999f, gravity = 0.0981f;
-    for (int frame = 0; frame < 100; frame++) {
+    for (int frame = 0; frame < 600; frame++) {
 #pragma omp parallel for schedule(static)
         for (int64_t i = 0; i < n; i++) {
             vx[i] = vx[i] * damping;

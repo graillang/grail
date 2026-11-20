@@ -78,18 +78,18 @@ fn main() {
     pages.insert("beta".text(), 2);
     pages.insert("alpha".text(), 1);
     pages.insert("gamma".text(), 3);
-    for pair in pages.iter() {          // key order: alpha, beta, gamma
+    for pair in pages.iter() { // key order: alpha, beta, gamma
         println("{} {}", pair.0, pair.1);
     }
     lo := "b".text();
     hi := "g".text();
-    for pair in pages.range(&lo, &hi) {  // b <= key < g
+    for pair in pages.range(&lo, &hi) { // b <= key < g
         println(pair.0);
     }
-    if let Some(first) = pages.first() {   // the smallest key
+    if let Some(first) = pages.first() { // the smallest key
         println(first.0);
     }
-    if let Some(last) = pages.last() {     // the largest
+    if let Some(last) = pages.last() { // the largest
         println(last.0);
     }
 }

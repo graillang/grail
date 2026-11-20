@@ -1,4 +1,4 @@
-// x[i] = x[i] * a + y[i] over one million f32, 200 passes; prints the sum (twin of bench/xform_f32.c).
+// x[i] = x[i] * a + y[i] over one million f32, 2000 passes; prints the sum (twin of bench/xform_f32.c).
 const std = @import("std");
 
 noinline fn scaleAdd(noalias x: []f32, noalias y: []const f32, a: f32) void {
@@ -21,7 +21,7 @@ pub fn main() !void {
         if (1.0 < yv) yv = 0;
     }
     var a: f32 = 0.999;
-    for (0..200) |pass| {
+    for (0..2000) |pass| {
         scaleAdd(x, y, a);
         a = 0.999 - x[pass] * 0.000000001;
     }

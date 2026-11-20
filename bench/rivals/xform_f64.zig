@@ -1,4 +1,4 @@
-// x[i] = x[i] * a + y[i] over one million f64, 200 passes; prints the sum (twin of bench/xform_f64.c).
+// x[i] = x[i] * a + y[i] over one million f64, 1000 passes; prints the sum (twin of bench/xform_f64.c).
 const std = @import("std");
 
 noinline fn scaleAdd(noalias x: []f64, noalias y: []const f64, a: f64) void {
@@ -21,7 +21,7 @@ pub fn main() !void {
         if (1.0 < yv) yv = 0;
     }
     var a: f64 = 0.999;
-    for (0..200) |pass| {
+    for (0..1000) |pass| {
         scaleAdd(x, y, a);
         a = 0.999 - x[pass] * 0.000000001;
     }

@@ -13,8 +13,10 @@ value, with no unwrapping:
 
 ```grl
 fn hp(target: (&Entity)?) -> u64 {
-    if target == None { return 0; }   // after a guard that leaves, `target` is the `&Entity`
-    return target.hp;
+    if target == None {
+        return 0;
+    } // after a guard that leaves, `target` is the `&Entity`
+    target.hp
 }
 ```
 
@@ -53,14 +55,18 @@ needed when a union is an element type or the referent of a reference: `&T`, `&a
 `&a mut T`. An enum payload may itself be a union.
 
 ```grl
-struct ParseError { message: string }
+struct ParseError {
+    message: string
+}
 fn parse(flag: u64) -> u64 |? ParseError {
-    if flag == 0 { return ParseError { message: "missing" }; }
-    return 42;
+    if flag == 0 {
+        return ParseError { message: "missing" };
+    }
+    42
 }
 fn forward(flag: u64) -> bool | u64 |? ParseError {
     value := parse(flag)?; // Returns ParseError early; success continues as u64.
-    return value;
+    value
 }
 ```
 
@@ -85,13 +91,17 @@ inventing an enum per module:
 use result;
 
 pub fn halve(n: u64) -> result::Result<u64, string> {
-    if n % 2 != 0 { return result::Result::Err("odd".text()); }
-    return result::Result::Ok(n / 2);
+    if n % 2 != 0 {
+        return result::Result::Err("odd".text());
+    }
+    result::Result::Ok(n / 2)
 }
 
-pub fn maybe(n: u64) -> u64? {          // The same as result::Option<u64>.
-    if n > 3 { return None; }
-    return Some(n);
+pub fn maybe(n: u64) -> u64? { // The same as result::Option<u64>.
+    if n > 3 {
+        return None;
+    }
+    Some(n)
 }
 ```
 
@@ -144,7 +154,10 @@ An arm body is one expression, or a block of statements in braces:
 ```grl
 match n {
     0 => println("zero"),
-    1 => { println("one"); println("only one"); },
+    1 => {
+        println("one");
+        println("only one");
+    },
     _ => println("many"),
 }
 ```

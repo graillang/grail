@@ -1,6 +1,4 @@
-// Go twin of bench/iterchain.grl. Go's standard library has no map/filter adapters (iter.Seq has
-// none), so the chain is written as range-over-func iterators composed by hand, the way Go 1.23+
-// code spells it.
+// Go twin of bench/iterchain.grl: 20 rounds over ten million u64 using Go 1.23+ iter.Seq adapters.
 package main
 
 import (
@@ -36,8 +34,11 @@ func main() {
 		v[i] = uint64(i)
 	}
 	var s uint64
-	for y := range filterSeq(mapSeq(slices.Values(v), func(x uint64) uint64 { return x * 2 }), func(x uint64) bool { return x%3 == 0 }) {
-		s += y
+	for round := uint64(0); round < 20; round++ {
+		r := round
+		for y := range filterSeq(mapSeq(slices.Values(v), func(x uint64) uint64 { return (x + r) * 2 }), func(x uint64) bool { return x%3 == 0 }) {
+			s += y
+		}
 	}
 	fmt.Println(s)
 }

@@ -21,15 +21,15 @@ Every integer type has Rust's everyday methods, with no `use` line: `min`, `max`
 ```grl
 fn main() {
     small: u8 = 250;
-    println(small.checked_add(10).is_none());   // true: 260 does not fit
-    println(small.saturating_add(10));          // 255
-    println(small.wrapping_add(10));            // 4
+    println(small.checked_add(10).is_none()); // true: 260 does not fit
+    println(small.saturating_add(10)); // 255
+    println(small.wrapping_add(10)); // 4
     delta: i32 = -7;
-    println(delta.abs().pow(2));                // 49
+    println(delta.abs().pow(2)); // 49
     flags: u64 = 40;
-    println(flags.count_ones());                // 2
-    println(flags.trailing_zeros());            // 3
-    println(flags.to_string().len());           // 2
+    println(flags.count_ones()); // 2
+    println(flags.trailing_zeros()); // 3
+    println(flags.to_string().len()); // 2
 }
 ```
 
@@ -74,10 +74,10 @@ use math;
 
 fn main() {
     angle := math::PI / 6.0;
-    println(angle.sin());              // 0.49999999999999994
-    println(3.0.hypot(4.0));           // 5
-    println(2.0.powi(10));             // 1024
-    println(1.0.atan2(1.0) * 4.0);     // 3.141592653589793
+    println(angle.sin()); // 0.49999999999999994
+    println(3.0.hypot(4.0)); // 5
+    println(2.0.powi(10)); // 1024
+    println(1.0.atan2(1.0) * 4.0); // 3.141592653589793
 }
 ```
 
@@ -115,7 +115,7 @@ fn dot<a>(x: (&a [f32]), y: (&a [f32])) -> f32 {
         acc = acc + f32x4::load(x, i) * f32x4::load(y, i);
         i += 4;
     }
-    return acc.sum();
+    acc.sum()
 }
 ```
 

@@ -41,15 +41,15 @@ private helpers of the interface's module.
 
 ```grl
 interface Shape {
-    fn area(self: &Self) -> u64;
-    fn name(self: &Self) -> string {
-        return "shape";
+    fn area(&self) -> u64;
+    fn name(&self) -> string {
+        "shape"
     }
 }
 
 impl Shape for Circle {
-    fn area(self: &Self) -> u64 {
-        return 3 * self.r * self.r;
+    fn area(&self) -> u64 {
+        3 * self.r * self.r
     }
 }
 
@@ -72,7 +72,7 @@ methods too. List several with `+`: `interface Store: Read + Write`.
 ## Generic interface methods
 
 An interface method can have type parameters of its own, after `Self`:
-`fn wrap<U>(self: &Self, u: U) -> U[];`. Each implementation writes the same parameters, and each
+`fn wrap<U>(&self, u: U) -> U[];`. Each implementation writes the same parameters, and each
 call is compiled for the types it uses. As in Rust, such a method has no single entry in a `dyn`
 vtable, so an interface with one cannot be used as `dyn`.
 
@@ -83,8 +83,8 @@ An implementation can be generic itself: `impl<T: Show> Show for Box<T>` makes e
 
 ```grl
 impl<T: Show> Show for Box<T> {
-    fn show(self: &Self) -> u64 {
-        return self.v.show() + 100;
+    fn show(&self) -> u64 {
+        self.v.show() + 100
     }
 }
 ```
@@ -109,7 +109,7 @@ struct ValuedPoint {
 }
 impl interface_contracts::Value for ValuedPoint {
     fn value<a>(self: (&a Self)) -> u64 {
-        return self.p.x;
+        self.p.x
     }
 }
 ```
@@ -130,7 +130,7 @@ records and the built-in numbers alike.
 ```grl
 impl ops::Add for V {
     fn add(self: Self, other: Self) -> Self {
-        return V { x: self.x + other.x, y: self.y + other.y };
+        V { x: self.x + other.x, y: self.y + other.y }
     }
 }
 ```
@@ -144,12 +144,12 @@ before its methods. A generic function names it through its parameter's bound, `
 ```grl
 interface Source {
     type Item;
-    fn pull(self: &mut Self) -> Self::Item?;
+    fn pull(&mut self) -> Self::Item?;
 }
 
 impl Source for Counter {
     type Item = u64;
-    fn pull(self: &mut Self) -> u64? { ... }
+    fn pull(&mut self) -> u64? { ... }
 }
 
 fn drain<T: Source>(src: &mut T) -> T::Item[] {
@@ -187,7 +187,7 @@ for s in &shapes {
 A value becomes a `dyn Shape` wherever one is expected - a typed binding, an argument, a pushed
 element - and is moved into it. `&dyn Shape` and `&mut dyn Shape` borrow one like any value, and
 dropping a `dyn Shape` drops what it holds. An interface can be used this way when every method
-takes `self: &Self` or `self: &mut Self` first and mentions `Self` nowhere else, and it has no
+takes `&self` or `&mut self` (`self: &Self` or `self: &mut Self`) first and mentions `Self` nowhere else, and it has no
 associated types unless the `dyn` type fixes them (`dyn I<Item = u64>`) (Rust's object safety); a `dyn` value cannot hold borrowed data.
 
 ### Borrowing an object
@@ -199,17 +199,24 @@ borrow it instead. `&dyn Shape` and `&mut dyn Shape` are *borrowed interface obj
 return - when the value's type implements the interface.
 
 ```grl
-fn area_of(s: &dyn Shape) -> u64 { return s.area(); }
-fn grow_twice(s: &mut dyn Shape) { s.grow(1); s.grow(1); }
+fn area_of(s: &dyn Shape) -> u64 {
+    s.area()
+}
+fn grow_twice(s: &mut dyn Shape) {
+    s.grow(1);
+    s.grow(1);
+}
 
 mut q = Square { side: 3 };
-println("{}", area_of(&q));      // 9
-grow_twice(&mut q);              // the mutation reaches q
-println("{}", q.side);           // 5
+println("{}", area_of(&q)); // 9
+grow_twice(&mut q); // the mutation reaches q
+println("{}", q.side); // 5
 
 mut shapes = (&dyn Shape)[];
-shapes.push(&q);                 // a vector of borrowed objects
-for i in shapes.len() { println("{}", shapes[i].area()); }
+shapes.push(&q); // a vector of borrowed objects
+for i in shapes.len() {
+    println("{}", shapes[i].area());
+}
 ```
 
 A borrowed object is a pair of words - where the value is, and the table of its methods - kept in

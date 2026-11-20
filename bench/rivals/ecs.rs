@@ -20,7 +20,7 @@ fn main() {
         vz.push(((x >> 50) % 100) as i64 as f32 * 0.01);
     }
     let (dt, damping, gravity): (f32, f32, f32) = (0.016, 0.999, 0.0981);
-    for _ in 0..100 {
+    for _ in 0..600 {
         for i in 0..n {
             vx[i] = vx[i] * damping;
             vy[i] = vy[i] * damping - gravity * dt;

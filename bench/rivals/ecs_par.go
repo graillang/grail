@@ -34,7 +34,7 @@ func main() {
 	var dt, damping, gravity float32 = 0.016, 0.999, 0.0981
 	workers := runtime.GOMAXPROCS(0)
 	chunk := (n + workers - 1) / workers
-	for frame := 0; frame < 100; frame++ {
+	for frame := 0; frame < 600; frame++ {
 		var wg sync.WaitGroup
 		for w := 0; w < workers; w++ {
 			lo, hi := w*chunk, min((w+1)*chunk, n)

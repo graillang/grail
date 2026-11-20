@@ -33,15 +33,17 @@ A range that travels - to a helper, into a comparison, across a boundary - is a 
 
 ```grl
 use span;
-fn opens_with<b, c>(r: span::Span<c>, w: &b [u8]) -> bool { return r.same_as(w); }
+fn opens_with<b, c>(r: span::Span<c>, w: &b [u8]) -> bool {
+    r.same_as(w)
+}
 fn main() {
     stored := u8[1, 2, 3, 4];
     name := u8[2, 3];
-    r := span::span_of(&stored, 1, 3);   // the range, and the slice it was made from
+    r := span::span_of(&stored, 1, 3); // the range, and the slice it was made from
     assert(r.len() == 2);
     assert(r.same_as(&name));
     assert(opens_with(&r, &name));
-    over := span::span_of(&stored, 2, 9);   // refused here: `stored` has no index 9
+    over := span::span_of(&stored, 2, 9); // refused here: `stored` has no index 9
     assert(over.len() == 0);
 }
 ```

@@ -226,13 +226,13 @@ export function summary(files) {
 // row is averaged over the rows it has, and its bar says which it lacks. Nothing is measured here.
 const languageNames = { c: 'C', cpp: 'C++', rust: 'Rust', go: 'Go', zig: 'Zig', grail: 'Grail' };
 export const overviewPanels = [
+  { id: 'compile', label: 'Compile speed', files: ['compile'], table: 'compile-wall', only: /^syn/, skip: /build no-op$/, figure: 'wall time at four jobs (20-unit scaling projects only; single-process instructions and tiny startup rows are in the detail tables below)', rows: 'measurements', missing: 'no figure for',
+    languages: [['c', 'C', 'c'], ['cpp', 'C++', 'cpp'], ['rust', 'Rust', 'rust'], ['go', 'Go', 'go'], ['zig', 'Zig', 'zig'], ['grail', 'Grail', 'grail']] },
   { id: 'release', label: 'Release builds - run time', files: ['bench-rivals', 'engine', 'parallel'], table: 'release', figure: 'CPU time (wall time for the parallel ECS)', rows: 'programs', missing: 'no twin of',
     languages: [['c', 'C', 'c'], ['cpp', 'C++', 'cpp'], ['rust-release', 'Rust', 'rust'], ['go', 'Go', 'go'], ['zig-fast', 'Zig', 'zig'], ['grail-llvm', 'Grail', 'grail']] },
   { id: 'dev', label: 'Development builds - run time', files: ['bench-rivals', 'engine', 'parallel'], table: 'dev', figure: 'CPU time (wall time for the parallel ECS)', rows: 'programs', missing: 'no twin of', why: 'their development builds are not measured',
     languages: [['go', 'Go', 'go'], ['rust-dev', 'Rust dev', 'rust'], ['zig-debug', 'Zig Debug', 'zig'], ['grail-native', 'Grail-native', 'grail']] },
-  { id: 'compile', label: 'Compile speed', files: ['compile'], table: 'compile', skip: /build no-op$/, figure: 'user-space instructions', rows: 'measurements', missing: 'no figure for',
-    languages: [['c', 'C', 'c'], ['cpp', 'C++', 'cpp'], ['rust', 'Rust', 'rust'], ['go', 'Go', 'go'], ['zig', 'Zig', 'zig'], ['grail', 'Grail', 'grail']] },
-  { id: 'scheduler', label: 'Scheduler', files: ['sched-rivals'], table: 'scheduler', figure: "wall time; importer rounds inverted, as more is better there", rows: 'measurements', missing: 'no figure for', why: 'they have no scheduler twin',
+  { id: 'scheduler', label: 'Scheduler', files: ['sched-rivals'], table: 'scheduler', skip: /serial/, figure: "wall time; importer rounds inverted, as more is better there (serial fib(32) baseline excluded from mean)", rows: 'measurements', missing: 'no figure for', why: 'they have no scheduler twin',
     note: "Grail is its release (LLVM) build, Rust is rayon, C++ is oneTBB",
     languages: [['onetbb', 'C++', 'cpp'], ['rayon', 'Rust', 'rust'], ['grail-llvm', 'Grail', 'grail']] },
 ];
@@ -252,6 +252,7 @@ export function overviewRows(files) {
         const higher = (row.direction ?? table.direction) === 'higher';
         const values = Object.fromEntries(panel.languages.map(([key]) => [key, row.values[key]]).filter(([, v]) => Number.isFinite(v) && v > 0));
         if (Object.keys(values).length < 2) continue; // nothing to compare against
+        if (panel.only && !panel.only.test(row.name)) continue;
         if (panel.skip?.test(row.name)) continue;
         const best = higher ? Math.max(...Object.values(values)) : Math.min(...Object.values(values));
         programs.push({ name: row.name, file, higher, ratios: Object.fromEntries(Object.entries(values).map(([k, v]) => [k, higher ? best / v : v / best])) });

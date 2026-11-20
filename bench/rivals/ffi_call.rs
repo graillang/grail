@@ -1,12 +1,10 @@
-// The cost of a foreign call: 10M calls of libc's `labs`, best of five rounds (twin of the
-// gaps12-sched bench/ffi_call.c). Times to stderr, the checksum to stdout. `no_builtins` is the
-// C twin's -fno-builtin: without it LLVM knows `labs` and inlines an abs, and nothing is called.
-#![no_builtins]
+// The cost of a foreign call: 10M calls of the separately compiled C function grail_bench_abs
+// (bench/ffi_target.c -> .work/libffi_target.a), best of five rounds.
 use std::hint::black_box;
 use std::time::Instant;
 
 unsafe extern "C" {
-    fn labs(x: i64) -> i64;
+    fn grail_bench_abs(x: i64) -> i64;
 }
 
 fn main() {
@@ -16,7 +14,7 @@ fn main() {
     for _ in 0..5 {
         let t0 = Instant::now();
         for i in 0..n {
-            acc = acc.wrapping_add(unsafe { labs(i - 5000000) });
+            acc = acc.wrapping_add(unsafe { grail_bench_abs(i - 5000000) });
         }
         best = best.min(t0.elapsed().as_micros());
     }

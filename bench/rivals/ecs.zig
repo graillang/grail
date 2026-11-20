@@ -31,7 +31,7 @@ pub fn main() !void {
     const dt: f32 = 0.016;
     const damping: f32 = 0.999;
     const gravity: f32 = 0.0981;
-    for (0..100) |_| {
+    for (0..600) |_| {
         for (0..n) |i| {
             vx[i] = vx[i] * damping;
             vy[i] = vy[i] * damping - gravity * dt;

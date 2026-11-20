@@ -26,9 +26,9 @@ is adjusted to that parameter automatically, and a literal can also be passed as
 
 ```grl
 fn length(label: &[u8]) -> u64 {
-    return label.len();
+    label.len()
 }
-println(length("hello"));  // owned string adjusted to the view
+println(length("hello")); // owned string adjusted to the view
 println(length(&"hello")); // explicit view
 ```
 
