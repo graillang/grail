@@ -272,6 +272,28 @@ The LLVM path lifts this same assembly, so each step is checked on both backends
 see the spliced copies as ordinary code, not as calls). Estimated several days; it is held for a
 decision (it is not in progress).
 
+### 7.2 Item 2 and a constant test, 2026-11-20
+
+Three steps, each useful on its own in one optimiser round:
+
+- **Filter's `fold` steps through `filter_step` as a tail call** (lib/iter.grl), so the existing
+  copier expands it: bench/iterchain natively 27.6G -> 21.7G instructions, 1.52 s -> 0.97 s.
+- **`lea_slot_operands`** (item 2): while a register is known to hold a slot's address (a `leaq` of
+  the slot and register copies of it, in straight-line code), a memory operand `D(%r)` through it is
+  the slot `-(N-D)(%rbp)`, so it is rewritten, and dead_defs drops the `leaq` when nothing else
+  reads it. It fires across the stdlib: stores of a two-word value through its address become slot
+  stores (bench/json's text is 293 lines shorter, sort's 79).
+- **`testq %r,%r` of a known constant folds** like `cmpq $0,%r` (const_branches): the divisor-zero
+  check of a division by a constant goes, and with it the cold `call rt_trap` that kept the
+  argument registers live (iterchain 21.65G -> 21.25G).
+
+What is still missing is item 1. The copy of the predicate lands in `filter_step` only when calls are
+spliced, after every body is optimised, so the call's argument setup (`leaq`, `movq %rax,%rsi`)
+stays and `filter_step` is not a leaf. Running the whole optimiser again over its own output was
+tried and is not the way: the second run lacks the first's unit markers and context, and removes
+nothing more. Item 1 needs the splice before a caller is optimised, with its callees' copies known
+in an order that does not depend on how the stream is cut for the forked workers.
+
 ### 7.1 Two copy-quality steps taken (branch gap-iterchain)
 
 Before any of the four steps above, two smaller costs went: bench/iterchain natively is 1100M ->

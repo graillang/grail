@@ -2562,6 +2562,7 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
     }
     bool_threads(&mut o, view(s), last);
     forward(&mut o, &mut f, view(s), first, last);
+    lea_slot_operands(&mut o, view(s), last);
     dead_stores(&mut o, &mut f, first, last);
     dead_defs(&mut o, view(s), first, last);
     array_imms(&mut o, view(s), last);
@@ -6787,16 +6788,25 @@ fn const_branches<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
             }
             continue;
         }
-        if (op != 6) || (o.k0[i] != 3) || (o.k1[i] != 1) {
+        // `testq %r,%r` of a register holding a known constant is `cmpq $0,%r` (a division by a
+        // constant's zero check, for one): only the equal/not-equal jumps read it.
+        selftest := (op == 7) && (o.k0[i] == 1) && (o.k1[i] == 1) && (o.v0[i] == o.v1[i]);
+        if !selftest && ((op != 6) || (o.k0[i] != 3) || (o.k1[i] != 1)) {
             continue;
         }
         j := next_live(&o, i, last);
         if (j >= last) || !((16 < o.op[j]) && (o.op[j] < 25)) || (o.k0[j] != 4) {
             continue;
         }
+        if selftest && !((16 < o.op[j]) && (o.op[j] < 21)) {
+            continue;
+        }
         w := imm_writer(&o, view(s), i, o.v1[i]);
-        b := imm_value(&o, view(s), i);
-        if (w == 0) || (b == 0) {
+        mut b = 1;
+        if !selftest {
+            b = imm_value(&o, view(s), i);
+        }
+        if (w == 0) || (b == 0) || (imm_value(&o, view(s), w - 1) == 0) {
             continue;
         }
         av := imm_value(&o, view(s), w - 1) - 1;
@@ -7769,6 +7779,86 @@ fn late_slots<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64, keep: (&u64[]))
             kill(&mut o, i);
         }
     }
+}
+// A slot whose address is only ever read back through: `leaq -N(%rbp),%r`, its copies into other
+// registers, and memory operands `(%r)` or `d(%r)` on them, all in straight-line code. While a
+// register is known to hold the slot's address, a memory operand through it names the slot itself
+// (the same bytes, whoever else may hold the address), so it is rewritten to `-(N-d)(%rbp)`; the
+// `leaq` and the copies are then left to dead_defs. A predicate called as `keep(&x)` and copied in
+// leaves exactly this shape, and once the address is gone the slot can be promoted and the body
+// inlined (docs/design/dyn-and-callable-bounds.md 7, item 2). The run stops at a label, a jump, a
+// call or an instruction the optimiser does not know.
+fn lea_slot_operands<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
+    for i in last {
+        if (o.del[i] != 0) || (o.op[i] != 3) || (o.k0[i] != 2) || (o.k1[i] != 1) {
+            continue;
+        }
+        slot := o.v0[i];
+        mut held: u64 = ir::bit(o.v1[i]);
+        mut j = i + 1;
+        while (j < last) && (held != 0) {
+            if o.del[j] != 0 {
+                j += 1;
+                continue;
+            }
+            op := o.op[j];
+            if (o.lab[j] != 0) || (op == 0) || (op == 100) || (op == 15) || ir::is_jump(op) {
+                break;
+            }
+            if op == 101 {
+                j += 1;
+                continue;
+            }
+            for side in 2 {
+                mut k = o.k0[j];
+                mut a = o.s0[j];
+                mut e = o.e0[j];
+                mut m = o.m0[j];
+                if side != 0 {
+                    k = o.k1[j];
+                    a = o.s1[j];
+                    e = o.e1[j];
+                    m = o.m1[j];
+                }
+                if (k == 4) && ((m & held) == m) && (m != 0) {
+                    d := through_slot_base(view(s), a, e);
+                    if (d < slot) && ((slot - d) % 8 == 0) {
+                        set_operand(&mut o, j, side, 2, slot - d);
+                    }
+                }
+            }
+            copied := (op == 1) && (o.k0[j] == 1) && (o.k1[j] == 1) && ((held & ir::bit(o.v0[j])) != 0);
+            held = held & (18446744073709551615 ^ ir::writes(&o, j));
+            if copied {
+                held = held | ir::bit(o.v1[j]);
+            }
+            j += 1;
+        }
+    }
+}
+// The displacement of a memory operand spelled `(%reg)` or `D(%reg)` (decimal D), or a value no
+// slot can be below (`u64::MAX`) for any other spelling.
+fn through_slot_base<b>(s: &b [u8], a: u64, e: u64) -> u64 {
+    none: u64 = 18446744073709551615;
+    if (e - a < 4) || (s[e - 1] != 41) {
+        return none;
+    }
+    mut p = a;
+    mut d = 0;
+    while (p < e) && (48 <= s[p]) && (s[p] <= 57) {
+        d = d * 10 + s[p] - 48;
+        p += 1;
+    }
+    if (p + 2 >= e) || (s[p] != 40) || (s[p + 1] != 37) {
+        return none;
+    }
+    for x in e - 1 - (p + 2) {
+        c := s[p + 2 + x];
+        if (c == 44) || (c == 40) {
+            return none;
+        }
+    }
+    return d;
 }
 fn name_hash<b>(s: &b [u8], a: u64, e: u64) -> u64 {
     mut h = 0;
