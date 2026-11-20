@@ -8,12 +8,12 @@ scheduler that matches Rust's rayon and C++'s oneTBB. They are targets, not resu
 charted:
 
 - **Compile speed:** On the 20-unit scaling projects (`syn1000` and `syn4000`, 8 measurements at
-  4 jobs), Grail has the lowest wall-time geometric mean (1.08x, fastest on 6 of 8), ahead of C
-  (1.47x), Go (2.89x, fastest on both cold builds: 0.26 s and 0.72 s), Rust (4.05x, 20-crate
-  workspace), C++ (8.30x) and Zig (8.68x). On the 104,000-line project, Grail has the fastest cold
-  check (0.19 s), edited check (0.03 s) and edited build (0.10 s against C's 0.15 s, Rust's
-  0.33 s and Go's 0.42 s). Grail's development build writes line tables and function ranges, not
-  yet variable/type DWARF.
+  4 jobs), Grail has the lowest wall-time geometric mean (1.09x, fastest on 6 of 8), ahead of C
+  (1.46x), Go (2.74x, fastest on both cold builds: 0.25 s and 0.73 s), Rust (3.78x, 20-crate
+  workspace), Zig (5.49x, self-hosted x86-64 backend) and C++ (8.27x). On the 104,000-line project,
+  Grail has the fastest cold check (0.20 s), edited check (0.03 s) and edited build (0.11 s against
+  C's 0.16 s, Rust's 0.30 s and Go's 0.42 s). Grail's development build writes line tables and
+  function ranges, not yet variable/type DWARF.
 - **Release builds:** Grail's LLVM build has the lowest geometric mean of the six languages (1.28x
   the fastest per program, against 1.32x to 2.30x for the others), fastest on 2 of the 19 programs
   (`xform_f32` and `xform_f64`), with its worst gap on `ecs_par` at 8 workers (6.60x C's OpenMP,
@@ -306,7 +306,10 @@ inside module `m10`:
   with `cargo check --offline -q` and built with `cargo build --offline -q`, so Cargo gets
   cross-crate `-j4` parallelism and skips the 19 untouched crates on an edit.
 - **Zig:** `main.zig` importing `m0.zig`..`m19.zig`, checked with `zig build-exe -fno-emit-bin` and
-  built with `zig build-exe -O Debug`.
+  built with `zig build-exe -O Debug -fno-llvm -fno-lld` (Zig's self-hosted x86-64 backend, which
+  Zig 0.15+ makes the default for Debug builds and is 2.4–3.6x faster than 0.14's LLVM debug path).
+  One-shot CLI invocations still recompile from scratch on an edit because Zig's incremental
+  compilation keeps state in a persistent `zig build --watch` daemon rather than on-disk caches.
 
 Single-file `hello` and the seven engine twins are also measured and shown in the detail tables
 below, while the overview panel averages only the 8 multi-module scaling rows (`syn1000` and
@@ -321,19 +324,19 @@ below, while the overview panel averages only the 8 multi-module scaling rows (`
 **Where Grail stands.** On the 20-unit 104,000-line project (`syn4000`):
 
 - **Incremental edits (one function body in `m10` changed):** Grail leads every language on both
-  instructions and 4-job wall time for builds (**0.61 G / 0.10 s** against C's 0.84 G / 0.15 s,
-  Rust's 2.44 G / 0.33 s, Go's 6.39 G / 0.42 s, C++'s 2.87 G / 0.46 s and Zig's 34.92 G /
-  4.03 s). On edited check, Grail (**0.25 G / 0.03 s**) and C (**0.19 G / 0.04 s**) are virtually
-  tied, ahead of Go (2.58 G / 0.16 s), Rust (1.16 G / 0.17 s), C++ (1.60 G / 0.26 s) and Zig
-  (2.55 G / 0.28 s).
-- **Cold checks:** Grail (**4.57 G / 0.19 s**), C (4.10 G / 0.23 s) and Zig (3.33 G / 0.29 s) are
-  all under 0.3 s in 4-job wall time, ahead of Go's `go vet ./...` (34.59 G / 0.56 s, which runs
-  full static analysis on top of type-checking), Rust (20.28 G / 0.91 s across 20 crates) and C++
-  (34.25 G / 1.58 s, re-parsing STL headers in every translation unit).
-- **Cold builds:** C uses the fewest instructions (16.20 G / 0.79 s) and **Go has the fastest
-  4-job wall time (32.37 G / 0.72 s)** across the 20 packages; Grail is third in wall time
-  (37.95 G / 1.24 s), ahead of Rust (43.98 G / 1.92 s), C++ (57.13 G / 2.64 s) and Zig (35.71 G /
-  4.06 s).
+  instructions and 4-job wall time for builds (**0.61 G / 0.11 s** against C's 0.84 G / 0.16 s,
+  Rust's 2.44 G / 0.30 s, Go's 6.45 G / 0.42 s, C++'s 2.87 G / 0.46 s and Zig's 16.72 G /
+  1.69 s, since one-shot `zig build-exe` does not persist incremental state between runs). On edited
+  check, Grail (**0.25 G / 0.03 s**) and C (**0.19 G / 0.04 s**) are virtually tied, ahead of Rust
+  (1.16 G / 0.14 s), Go (2.58 G / 0.17 s), C++ (1.60 G / 0.26 s) and Zig (2.55 G / 0.27 s).
+- **Cold checks:** Grail (**4.57 G / 0.20 s**), C (4.10 G / 0.23 s) and Zig (3.32 G / 0.29 s) are
+  all under 0.3 s in 4-job wall time, ahead of Go's `go vet ./...` (34.31 G / 0.56 s, which runs
+  full static analysis on top of type-checking), Rust (20.28 G / 0.81 s across 20 crates) and C++
+  (34.25 G / 1.59 s, re-parsing STL headers in every translation unit).
+- **Cold builds:** C uses the fewest instructions (16.21 G / 0.79 s), closely followed by Zig's
+  self-hosted backend (17.49 G / 1.69 s), and **Go has the fastest 4-job wall time (32.62 G /
+  0.73 s)** across the 20 packages; Grail is third in wall time (37.95 G / 1.23 s), ahead of Zig
+  (1.69 s), Rust (43.98 G / 1.83 s) and C++ (57.15 G / 2.68 s).
 - **Caveat:** Grail's development build writes line tables and function ranges, not yet full
   variable and type DWARF as C, C++, Go, Zig Debug and Rust dev do; adding full variable/type DWARF
   will add some work to Grail's build rows.

@@ -271,7 +271,7 @@ const languages = {
     env: dir => ({ ZIG_LOCAL_CACHE_DIR: join(dir, 'zig-cache') }),
     fresh() {},
     check: () => ['zig', 'build-exe', '-fno-emit-bin', 'main.zig'],
-    build: () => ['zig', 'build-exe', '-O', 'Debug', 'main.zig'],
+    build: () => ['zig', 'build-exe', '-O', 'Debug', '-fno-llvm', '-fno-lld', 'main.zig'],
     exe: 'main',
   },
   c: {
@@ -456,7 +456,7 @@ if (jsonPath) {
       'Grail: check `grail check`, build `grail build` (grail.toml project with 20 modules under src/)',
       'C/C++: multi-TU Makefile (`clang -O0 -g -fuse-ld=lld`, `clang++ -std=c++20 -O0 -g -fuse-ld=lld`); check runs `-fsyntax-only` per changed TU',
       'Go: check `go vet ./...`, build `go build -o syn .` (20 packages under module `syn`)',
-      'Zig: check `zig build-exe -fno-emit-bin main.zig`, build `zig build-exe -O Debug main.zig` (20 imported modules)',
+      'Zig: check `zig build-exe -fno-emit-bin main.zig`, build `zig build-exe -O Debug -fno-llvm -fno-lld main.zig` (self-hosted x86_64 backend, 20 imported modules)',
       'Rust: check `cargo check --offline -q`, build `cargo build --offline -q` (20-crate Cargo workspace)',
       'edit: one constant in one function body inside module m10 changes; a twin gets one statement added to main'],
     tables: [

@@ -1,5 +1,6 @@
 ## Unreleased
 
+- **Compile-speed benchmark: Zig self-hosted x86-64 debug backend (`-fno-llvm -fno-lld`)**: switched Zig's debug build in `tools/compile-rivals.mjs` to Zig's self-hosted backend (matching Zig 0.15+'s default, cutting `syn4000` cold build from 4.06 s / 35.7 G to 1.69 s / 17.5 G and moving Zig from 8.68x to 5.49x in the overview), refreshed `bench/results/compile.json`, and updated `book/chapters/performance.md`.
 - **Peer-review benchmark cleanup, refreshed charts & updated book**:
   - `ffi_call` now calls a separately compiled non-builtin C function (`bench/ffi_target.c` → `.work/libffi_target.a`) across all six languages so LLVM cannot inline libc `labs` in `Grail-LLVM` (now 1.00 ns across Grail-LLVM/C/C++/Rust/Zig).
   - `tools/compile-rivals.mjs` splits `syn1000` and `syn4000` into 20 Grail modules / Go packages / Rust Cargo workspace crates / C and C++ translation units so every toolchain gets parallel builds and real incremental edits; the book overview chart now puts **Compile speed** (4-job wall time on those 8 scaling rows) first.
