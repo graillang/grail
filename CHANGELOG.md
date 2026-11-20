@@ -1,5 +1,17 @@
 ## Unreleased
 
+- **Abundance: `ab-engine-grail` runs the real engine runtime on upstream's compiled shaders.** The toy
+  `play_shaders/` sky/terrain/water path is gone; every pass is Abundance's own SPIR-V (vendored from upstream
+  `5194b42dc4` by `vendor-shaders.mjs`, built by `build-shaders.mjs`) on real assets:
+  - **Terrain:** the world generator's pages around the spawn generated on the GPU, culled (`geo_page_cull`) and
+    drawn into the visibility buffer (`geo_page_hw` mesh shader), with collision from the same heights.
+    `AB_TERRAIN=cull` runs the cull alone (diagnostic).
+  - **Trees:** the canopy (`geo_veg_canopy`) planted from the pages' decision records around the camera, growing
+    tile by tile as it moves; near trees expand into their real part meshes (`geo_assembly_*`); `.abgeo` meshes
+    stream their pages on demand with LRU eviction (`AB_GEO_POOL_MB` caps the pool).
+  - **Sky, materials, lighting:** Hillaire LUTs, volumetric clouds and the composite; `.abtex` virtual textures and
+    the material resolve chain; direct light, virtual shadow maps, AO, GI and reflections.
+  - `--drift VX VY` flies a headless camera in a straight line.
 - **Abundance: playable core engine and game loop in Grail (`ab-engine-grail`).** Wires the ported
   Grail subsystems into a single buildable, interactive and headless-testable executable
   (`just ab-engine` / `bun abundance/tools/build-ab-engine.mjs`):
