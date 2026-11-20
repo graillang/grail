@@ -226,11 +226,13 @@ export function summary(files) {
 // row is averaged over the rows it has, and its bar says which it lacks. Nothing is measured here.
 const languageNames = { c: 'C', cpp: 'C++', rust: 'Rust', go: 'Go', zig: 'Zig', grail: 'Grail' };
 export const overviewPanels = [
-  { id: 'compile', label: 'Compile speed', files: ['compile'], table: 'compile-wall', only: /^syn/, skip: /build no-op$/, figure: 'wall time at four jobs (20-unit scaling projects only; single-process instructions and tiny startup rows are in the detail tables below)', rows: 'measurements', missing: 'no figure for',
+  { id: 'compile-build', label: 'Compile speed - build', files: ['compile'], table: 'compile-wall', only: /^syn\d+ build (cold|edited)$/, figure: 'wall time at four jobs (20-unit scaling projects, runnable debug executables)', rows: 'measurements', missing: 'no figure for',
     languages: [['c', 'C', 'c'], ['cpp', 'C++', 'cpp'], ['rust', 'Rust', 'rust'], ['go', 'Go', 'go'], ['zig', 'Zig', 'zig'], ['grail', 'Grail', 'grail']] },
-  { id: 'release', label: 'Release builds - run time', files: ['bench-rivals', 'engine', 'parallel'], table: 'release', figure: 'CPU time (wall time for the parallel ECS)', rows: 'programs', missing: 'no twin of',
+  { id: 'compile-check', label: 'Compile speed - check', files: ['compile'], table: 'compile-wall', only: /^syn\d+ check (cold|edited)$/, figure: 'wall time at four jobs (20-unit scaling projects, type-check only)', rows: 'measurements', missing: 'no figure for', why: 'Go has no check-only command (go vet runs full compilation + static analysis; shown in detail below)',
+    languages: [['c', 'C', 'c'], ['cpp', 'C++', 'cpp'], ['rust', 'Rust', 'rust'], ['zig', 'Zig', 'zig'], ['grail', 'Grail', 'grail']] },
+  { id: 'release', label: 'Release builds - run time', files: ['bench-rivals', 'engine', 'parallel'], table: 'release', skip: /^chan$/, figure: 'CPU time (wall time for the parallel ECS; chan is in the Engine chart below as C, C++ and Zig have no stdlib channel)', rows: 'programs', missing: 'no twin of',
     languages: [['c', 'C', 'c'], ['cpp', 'C++', 'cpp'], ['rust-release', 'Rust', 'rust'], ['go', 'Go', 'go'], ['zig-fast', 'Zig', 'zig'], ['grail-llvm', 'Grail', 'grail']] },
-  { id: 'dev', label: 'Development builds - run time', files: ['bench-rivals', 'engine', 'parallel'], table: 'dev', figure: 'CPU time (wall time for the parallel ECS)', rows: 'programs', missing: 'no twin of', why: 'their development builds are not measured',
+  { id: 'dev', label: 'Development builds - run time', files: ['bench-rivals', 'engine', 'parallel'], table: 'dev', skip: /^chan$/, figure: 'CPU time (wall time for the parallel ECS; chan is in the Engine chart below)', rows: 'programs', missing: 'no twin of', why: 'their development builds are not measured',
     languages: [['go', 'Go', 'go'], ['rust-dev', 'Rust dev', 'rust'], ['zig-debug', 'Zig Debug', 'zig'], ['grail-native', 'Grail-native', 'grail']] },
   { id: 'scheduler', label: 'Scheduler', files: ['sched-rivals'], table: 'scheduler', skip: /serial/, figure: "wall time; importer rounds inverted, as more is better there (serial fib(32) baseline excluded from mean)", rows: 'measurements', missing: 'no figure for', why: 'they have no scheduler twin',
     note: "Grail is its release (LLVM) build, Rust is rayon, C++ is oneTBB",
