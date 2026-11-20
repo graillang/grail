@@ -287,12 +287,31 @@ Three steps, each useful on its own in one optimiser round:
   check of a division by a constant goes, and with it the cold `call rt_trap` that kept the
   argument registers live (iterchain 21.65G -> 21.25G).
 
-What is still missing is item 1. The copy of the predicate lands in `filter_step` only when calls are
-spliced, after every body is optimised, so the call's argument setup (`leaq`, `movq %rax,%rsi`)
-stays and `filter_step` is not a leaf. Running the whole optimiser again over its own output was
-tried and is not the way: the second run lacks the first's unit markers and context, and removes
-nothing more. Item 1 needs the splice before a caller is optimised, with its callees' copies known
-in an order that does not depend on how the stream is cut for the forked workers.
+Item 1 was then built and measured (branch `xinline-rounds`, `GRAIL_OPT_ROUNDS=N`). A round
+splices its copies into the *emitter's* text (markers kept) and optimises that again, so each
+caller is optimised with its callees' copies in place, and what a body becomes does not depend on
+where the stream is cut. Three things had to be right for it to work: the effect checker's call
+records and the IR dump are the first round's (later bodies have fewer calls); a copy's labels
+(`.L..._i<prefix>_<site>`, `.Lret_i...`) are renamed into the body's own `.L<prefix>_<scope>_<n>`
+numbering, since an unnumbered jump target makes every register live there; and copy labels in a
+body with no numbering are suffixed so the next round's copies cannot reuse them. With that,
+`filter_step` sheds its argument setup and is copied into Filter's closure.
+
+Measured, native, user-space instructions, one round against two:
+
+| | 1 round | 2 rounds |
+|---|---|---|
+| bench/iterchain | 21.25G (0.99 s) | **20.19G (0.84 s)** |
+| bench/json | 4.81G | 4.97G |
+| bench/hashmap | 1.20G | 1.46G |
+| bench/strings | 5.57G | 6.52G |
+
+A third round adds nothing. It is not on: the chain gains 5% and the other programs lose up to 22%,
+because a copy spliced before optimisation enlarges its caller and the optimiser does not recover
+it - items 3 (a size cap that counts what a copy costs after promotion, not lines) and 4 (promotion
+of the slots of a loop holding copies as one body) are what would make the rounds pay. Map's
+closure still calls Filter's after two rounds: Filter's, with the predicate and `filter_step`
+inside, is over the 32-instruction cap.
 
 ### 7.1 Two copy-quality steps taken (branch gap-iterchain)
 
