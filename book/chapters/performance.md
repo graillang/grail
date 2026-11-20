@@ -19,13 +19,13 @@ charted:
   leads all 4 rows (1.00x: 0.20 s cold, 0.03 s edited on `syn4000`), ahead of C (1.61x), Zig
   (4.83x), Rust (5.14x) and C++ (13.12x).
 - **Release builds:** Over the 18 programs where every language has a comparable implementation
-  (`chan` is kept in the Engine chart below because C, C++ and Zig lack a stdlib channel), Zig
-  (1.18x, 10/18), C (1.19x, 4/18) and Grail (1.19x, 4/18: `hashmap`, `xform_f64` and `ecs_par` at
-  1 and 4 workers) lead, ahead of C++ (1.21x), Rust (1.29x) and Go (2.41x). Grail's largest gaps
+  (`chan` is kept in the Engine chart below because C, C++ and Zig lack a stdlib channel), Grail
+  (1.17x, 3/18: `iterchain` and `ecs_par` at 1 and 4 workers), C (1.17x, 5/18) and Zig (1.18x,
+  8/18) lead, ahead of C++ (1.19x), Rust (1.27x) and Go (2.37x). Grail's largest gaps
   are `ecs_par` at 8 workers (2.14x C's OpenMP) and `sort` (1.72x C++'s `std::merge`, 1.06x C's).
-- **Development builds:** Go's is ahead (1.19x against Grail-native's 1.45x over the 18 programs;
+- **Development builds:** Go's is ahead (1.19x against Grail-native's 1.39x over the 18 programs;
   Grail is faster than Go on `ecs` and `ecs_par`). Grail's is faster than Rust's dev profile
-  (7.28x) on all 18 (and 19/19 with `chan`) and faster than Zig Debug (3.59x) on 17 of 18 (all
+  (7.11x) on all 18 (and 19/19 with `chan`) and faster than Zig Debug (3.52x) on 17 of 18 (all
   except `ffi_call`).
 - **Scheduler:** oneTBB is ahead (1.22x against Grail's 1.39x and rayon's 2.35x across the 12
   scheduler rows, excluding the serial `fib(32)` baseline). Grail is fastest on `join` from main
@@ -147,7 +147,7 @@ quickly, as Go's compiler and Zig's debug backend do. Go has one build mode and 
 on all 19 programs and than Zig Debug on 18 of 19 (Zig Debug is ahead only on `ffi_call`, 2.00 ns
 against 2.39 ns). Against Go it is ahead on `ecs` (0.81x) and `ecs_par` (0.54x to 0.69x) and within
 1.2x on `dot_f64`, `fnv`, `matmul`, `sort`, `hashmap`, `strings` and `json`, while trailing furthest
-on `iterchain` (12.71x Go) and `chan` (2.21x Go). A vector or slice a loop does not change keeps its
+on `iterchain` (6.74x Go) and `chan` (3.84x Go). A vector or slice a loop does not change keeps its
 data pointer and length in registers for the whole loop; an `f32` parameter is rounded once at entry
 and the loop stays in single precision; a merge loop branches directly on its conditions. What
 remains in the native backend's code:
@@ -156,9 +156,11 @@ remains in the native backend's code:
   where Go's are laid out tight;
 - `nbody` (1.80x Go) keeps its bodies in a record and moves `f64` values between general and SSE
   registers on every step;
-- the native optimiser judges each function for inlining once, before its own calls are inlined, so
-  a chain of small closures (`iterchain`, 20 rounds over 10M values, 1.52 s against Go's 0.12 s) is
-  not flattened in development builds.
+- the native optimiser copies a function into its callers only when it makes no call (or only a
+  tail call), and decides that before its own callees are copied in, so a chain of small closures
+  (`iterchain`, 20 rounds over 10M values, 0.97 s against Go's 0.14 s) keeps two calls per
+  element: Map's step and Filter's, whose predicate copy arrives too late for the call's argument
+  setup to be cleaned away (docs/design/dyn-and-callable-bounds.md 7.2).
 
 {{perf:bench-rivals#instructions|cpu}}
 
@@ -193,8 +195,8 @@ Go and Zig, written the way each language is usually written:
 
 **Where Grail stands**, read from the code of the commit charted. In release builds, `hashmap` is
 1.05x C (0.064 s against 0.061 s; C++'s node-based `std::unordered_map` takes 0.193 s, 3x C), `ecs`
-is 1.09x C (0.218 s against 0.200 s), `iterchain` is 1.13x C (0.095 s against 0.084 s, faster than
-C++ ranges at 0.112 s), `json` is 1.14x Zig (0.155 s, faster than Rust's `serde_json` at 0.174 s and
+is 1.09x C (0.218 s against 0.200 s), `iterchain` is the fastest of the six (0.105 s against C's and Rust's
+0.109 s), `json` is 1.14x Zig (0.155 s, faster than Rust's `serde_json` at 0.174 s and
 C at 0.212 s), and `strings` is 1.19x C++ (0.084 s, faster than Zig, Rust, C and Go). What remains:
 
 - **`chan` (0.138 s against Go's 0.100 s, 1.37x; 2.4x faster than Rust's crossbeam-channel at
@@ -208,8 +210,8 @@ C at 0.212 s), and `strings` is 1.19x C++ (0.084 s, faster than Zig, Rust, C and
   order in a dense vector beside the probe table, like Python's `dict` and Zig's `ArrayHashMap`, so
   a lookup reads the slot and then the key, where C's open-addressed table keeps keys in the slots.
 - **`iterchain`:** in release builds the chain folds internally (`Map` and `Filter` override `fold`)
-  into one loop with no calls (1.13x C), though it stays scalar where C's native-CPU build
-  vectorises further.
+  into one loop with no calls, the fastest of the six at baseline x86-64, though it stays scalar where
+  C's native-CPU build vectorises further (0.057 s).
 - **`dyncall` (1.48x Zig, 1.23x C)** is bound by the indirect interface call.
 
 {{perf:engine#dev}}
