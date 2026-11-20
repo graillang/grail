@@ -11,6 +11,8 @@
   - **Water:** the FFT ocean, caustics, the water clipmap and the displaced water surface drawn over the scene.
   - **Tree anchoring:** every planted tree stands on the drawn terrain each frame (`geo_vegetation_anchor`), on the
     lowest ground under its root flare, keeping its planted offset.
+  - **Ground cover:** ferns, flowers, reeds, dry scrub, jungle broadleaf and ground cover from Abundance's near-field
+    catalogue (`geo_veg_place`), placed per planted tile and stood on the drawn terrain.
   - **Grass:** the sward carpet (`geo_sward_blocks` + `geo_sward`): the baked patch meshes of the five communities from
     the asset cache, written as instances over the drawn terrain blocks within 90 m each frame.
   - **Trees:** the canopy (`geo_veg_canopy`) planted from the pages' decision records around the camera, growing
