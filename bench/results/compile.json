@@ -1,20 +1,21 @@
 {
  "schema": 1,
  "tool": "compile-rivals",
- "title": "Compile speed against Go, Zig and rustc",
- "commit": "bcf78e5a80d5 (--compiler /home/shulgin/grail-w-landsvc4/.work/native/d5c1a56121eccd5a21f62575/grail-release)",
- "date": "2026-11-18T06:37:47.623Z",
+ "title": "Compile speed against C, C++, Go, Zig and rustc",
+ "commit": "0ffc12e45443+changes",
+ "date": "2026-11-20T16:54:40.256Z",
  "machine": {
   "cpu": "AMD Ryzen 9 7900X 12-Core Processor",
   "cpus": 24,
   "kernel": "Linux 7.2.14-arch1-1"
  },
  "load": [
-  "16.49 25.79 24.17",
-  "3.42 11.25 18.22"
+  "19.31 18.36 15.59",
+  "13.58 14.19 14.48"
  ],
  "versions": {
   "clang": "clang version 23.1.4",
+  "clang++": "clang version 23.1.4",
   "g++": "g++ (GCC) 16.2.1 20260810",
   "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
   "cargo": "cargo 1.98.0 (797e8a9bc 2026-08-05)",
@@ -24,11 +25,14 @@
  "commands": [
   "bun tools/compile-rivals.mjs --runs 2 --sizes 1000,4000 --twins hashmap,bintrees,strings,json,dyncall,iterchain,ecs",
   "Grail's store before each cold run: grail cache warm (every standard module); Go's GOCACHE holds its standard library, Zig's cache its compiler_rt, and cargo uses the offline registry, so the standard library is warm for every toolchain",
-  "one process: GRAIL_JOBS=1, GOMAXPROCS=1 GOFLAGS=-p=1, CARGO_BUILD_JOBS=1; four jobs: the same at 4",
+  "one process: GRAIL_JOBS=1, GOMAXPROCS=1 GOFLAGS=-p=1, CARGO_BUILD_JOBS=1 (make builds one translation unit, so one job); four jobs: the same at 4",
   "Grail: check `grail check main.grl`, build `grail build main.grl`",
   "Go: check `go vet .`, build `go build -o syn .`",
   "Zig: check `zig build-exe -fno-emit-bin main.zig`, build `zig build-exe -O Debug main.zig`",
+  "C: check `clang -fsyntax-only main.c`, build `make -s`",
+  "C++: check `clang++ -std=c++20 -fsyntax-only main.cpp`, build `make -s`",
   "Rust: check `cargo check --offline -q`, build `cargo build --offline -q`",
+  "C and C++: one translation unit per program and a one-target Makefile (CFLAGS -O0 -g, CXXFLAGS -std=c++20 -O0 -g, LDFLAGS -fuse-ld=lld); nothing changed is make finding the target up to date",
   "edit: the generated programs change one constant in one function body; a twin gets one statement added to main"
  ],
  "tables": [
@@ -36,7 +40,7 @@
    "id": "compile",
    "title": "Compile speed: instructions, in one process",
    "chart": true,
-   "note": "User-space instructions of the tool and every process it started, every toolchain in one process, fewest of 2. The bar: the fastest of Go, Zig and rustc.",
+   "note": "User-space instructions of the tool and every process it started, every toolchain in one process, fewest of 2. The bar: the fastest of the others.",
    "threshold": 1,
    "primary": "grail",
    "direction": "lower",
@@ -57,6 +61,16 @@
      "grail": false
     },
     {
+     "key": "c",
+     "label": "C",
+     "grail": false
+    },
+    {
+     "key": "cpp",
+     "label": "C++",
+     "grail": false
+    },
+    {
      "key": "rust",
      "label": "Rust",
      "grail": false
@@ -67,400 +81,480 @@
      "name": "hello check cold",
      "unit": "G instructions",
      "values": {
-      "grail": 0.011959912,
-      "go": 0.256915772,
-      "zig": 1.030731173,
-      "rust": 0.117462982
+      "grail": 0.023737147,
+      "go": 0.212415857,
+      "zig": 1.030596545,
+      "c": 0.052137462,
+      "cpp": 1.483555989,
+      "rust": 0.117414216
      }
     },
     {
      "name": "hello check edited",
      "unit": "G instructions",
      "values": {
-      "grail": 0.010741735,
-      "go": 0.211270618,
-      "zig": 1.030687371,
-      "rust": 0.089888421
+      "grail": 0.02207436,
+      "go": 0.210536236,
+      "zig": 1.030748958,
+      "c": 0.052119764,
+      "cpp": 1.483608395,
+      "rust": 0.08985386
      }
     },
     {
      "name": "hello build cold",
      "unit": "G instructions",
      "values": {
-      "grail": 0.063741456,
-      "go": 0.859054418,
-      "zig": 7.623870837,
-      "rust": 0.23630353
+      "grail": 0.08213272,
+      "go": 0.977648058,
+      "zig": 7.623048698,
+      "c": 0.140167283,
+      "cpp": 1.638256599,
+      "rust": 0.23626914
      }
     },
     {
      "name": "hello build edited",
      "unit": "G instructions",
      "values": {
-      "grail": 0.060676059,
-      "go": 0.857179423,
-      "zig": 7.6183512,
-      "rust": 0.192265216
+      "grail": 0.078240798,
+      "go": 0.981710452,
+      "zig": 7.618522652,
+      "c": 0.14022584,
+      "cpp": 1.638755036,
+      "rust": 0.192171694
      }
     },
     {
      "name": "syn1000 check cold",
      "unit": "G instructions",
      "values": {
-      "grail": 0.772594055,
-      "go": 1.58272091,
-      "zig": 1.594508374,
-      "rust": 4.807691857
+      "grail": 0.802623162,
+      "go": 1.580197862,
+      "zig": 1.594672252,
+      "c": 0.727185061,
+      "cpp": 2.995762098,
+      "rust": 4.807313481
      }
     },
     {
      "name": "syn1000 check edited",
      "unit": "G instructions",
      "values": {
-      "grail": 0.242925012,
-      "go": 1.616255249,
-      "zig": 1.594388891,
-      "rust": 1.411006032
+      "grail": 0.259798056,
+      "go": 1.735249682,
+      "zig": 1.594571756,
+      "c": 0.727574753,
+      "cpp": 2.994251251,
+      "rust": 1.41093154
      }
     },
     {
      "name": "syn1000 build cold",
      "unit": "G instructions",
      "values": {
-      "grail": 5.847639619,
-      "go": 8.358437577,
-      "zig": 14.604443818,
-      "rust": 10.363379521
+      "grail": 6.71069133,
+      "go": 8.624555222,
+      "zig": 14.595871213,
+      "c": 3.757296541,
+      "cpp": 8.310360903,
+      "rust": 10.366006315
      }
     },
     {
      "name": "syn1000 build edited",
      "unit": "G instructions",
      "values": {
-      "grail": 1.326042222,
-      "go": 8.457938316,
-      "zig": 14.588025023,
-      "rust": 5.778392127
+      "grail": 1.398562213,
+      "go": 8.63195977,
+      "zig": 14.604857851,
+      "c": 3.755816854,
+      "cpp": 8.306536339,
+      "rust": 5.752122954
      }
     },
     {
      "name": "syn4000 check cold",
      "unit": "G instructions",
      "values": {
-      "grail": 3.049480137,
-      "go": 5.534563929,
-      "zig": 3.28075754,
-      "rust": 19.264114743
+      "grail": 3.136414209,
+      "go": 5.729897177,
+      "zig": 3.280470184,
+      "c": 2.740572315,
+      "cpp": 6.72464078,
+      "rust": 19.263839062
      }
     },
     {
      "name": "syn4000 check edited",
      "unit": "G instructions",
      "values": {
-      "grail": 0.934044216,
-      "go": 5.766690133,
-      "zig": 3.280740905,
-      "rust": 5.349150932
+      "grail": 0.971199067,
+      "go": 5.61986505,
+      "zig": 3.280590693,
+      "c": 2.731629875,
+      "cpp": 6.774450823,
+      "rust": 5.349134424
      }
     },
     {
      "name": "syn4000 build cold",
      "unit": "G instructions",
      "values": {
-      "grail": 23.390530226,
-      "go": 31.573049629,
-      "zig": 35.670817629,
-      "rust": 40.798015249
+      "grail": 26.757949389,
+      "go": 32.38738028,
+      "zig": 35.676507844,
+      "c": 14.753723385,
+      "cpp": 27.260943054,
+      "rust": 40.754406975
      }
     },
     {
      "name": "syn4000 build edited",
      "unit": "G instructions",
      "values": {
-      "grail": 5.092679737,
-      "go": 32.238704797,
-      "zig": 35.67049393,
-      "rust": 22.371206028
+      "grail": 5.341555955,
+      "go": 31.940024628,
+      "zig": 35.682508382,
+      "c": 14.767941111,
+      "cpp": 27.277446387,
+      "rust": 22.348008398
      }
     },
     {
      "name": "hashmap check cold",
      "unit": "G instructions",
      "values": {
-      "grail": 0.051989273,
-      "go": 0.215139205,
-      "zig": 1.049646866,
-      "rust": 0.1439826
+      "grail": 0.084648885,
+      "go": 0.267044706,
+      "zig": 1.049369883,
+      "c": 0.068949692,
+      "cpp": 1.123629859,
+      "rust": 0.143940521
      }
     },
     {
      "name": "hashmap check edited",
      "unit": "G instructions",
      "values": {
-      "grail": 0.040871863,
-      "go": 0.209248993,
-      "zig": 1.049807777,
-      "rust": 0.114527998
+      "grail": 0.065126941,
+      "go": 0.210738472,
+      "zig": 1.049605276,
+      "c": 0.06901822,
+      "cpp": 1.123210681,
+      "rust": 0.114495071
      }
     },
     {
      "name": "hashmap build cold",
      "unit": "G instructions",
      "values": {
-      "grail": 0.145356811,
-      "go": 0.856536572,
-      "zig": 7.829946383,
-      "rust": 0.752632968
+      "grail": 0.196057952,
+      "go": 0.968648664,
+      "zig": 7.829884112,
+      "c": 0.169223066,
+      "cpp": 1.466726608,
+      "rust": 0.752637335
      }
     },
     {
      "name": "hashmap build edited",
      "unit": "G instructions",
      "values": {
-      "grail": 0.106489392,
-      "go": 0.866619705,
-      "zig": 7.835864041,
-      "rust": 0.274156971
+      "grail": 0.142122296,
+      "go": 1.013383133,
+      "zig": 7.841410809,
+      "c": 0.16937609,
+      "cpp": 1.468035241,
+      "rust": 0.274055676
      }
     },
     {
      "name": "bintrees check cold",
      "unit": "G instructions",
      "values": {
-      "grail": 0.013962661,
-      "go": 0.213198692,
-      "zig": 1.039188155,
-      "rust": 0.149175699
+      "grail": 0.025729396,
+      "go": 0.267665535,
+      "zig": 1.03920873,
+      "c": 0.067038117,
+      "cpp": 1.680262633,
+      "rust": 0.149124036
      }
     },
     {
      "name": "bintrees check edited",
      "unit": "G instructions",
      "values": {
-      "grail": 0.012369546,
-      "go": 0.208206074,
-      "zig": 1.039194261,
-      "rust": 0.120317334
+      "grail": 0.023688993,
+      "go": 0.211636571,
+      "zig": 1.039165435,
+      "c": 0.066945562,
+      "cpp": 1.682668322,
+      "rust": 0.120286507
      }
     },
     {
      "name": "bintrees build cold",
      "unit": "G instructions",
      "values": {
-      "grail": 0.078429662,
-      "go": 0.859412443,
-      "zig": 7.711962928,
-      "rust": 0.353258414
+      "grail": 0.10020568,
+      "go": 0.982938026,
+      "zig": 7.706935282,
+      "c": 0.159231867,
+      "cpp": 1.879961086,
+      "rust": 0.353157827
      }
     },
     {
      "name": "bintrees build edited",
      "unit": "G instructions",
      "values": {
-      "grail": 0.067653649,
-      "go": 0.857644868,
-      "zig": 7.705602676,
-      "rust": 0.246595974
+      "grail": 0.086328623,
+      "go": 0.993231355,
+      "zig": 7.700792187,
+      "c": 0.159318095,
+      "cpp": 1.880785974,
+      "rust": 0.246536044
      }
     },
     {
      "name": "strings check cold",
      "unit": "G instructions",
      "values": {
-      "grail": 0.035133326,
-      "go": 0.274571898,
-      "zig": 1.160224801,
-      "rust": 0.149612275
+      "grail": 0.067439469,
+      "go": 0.262215975,
+      "zig": 1.160541256,
+      "c": 0.073793569,
+      "cpp": 1.235645984,
+      "rust": 0.14956419
      }
     },
     {
      "name": "strings check edited",
      "unit": "G instructions",
      "values": {
-      "grail": 0.027461742,
-      "go": 0.218850411,
-      "zig": 1.160413664,
-      "rust": 0.121234566
+      "grail": 0.052059994,
+      "go": 0.219503399,
+      "zig": 1.160278167,
+      "c": 0.073881127,
+      "cpp": 1.23774803,
+      "rust": 0.121216575
      }
     },
     {
      "name": "strings build cold",
      "unit": "G instructions",
      "values": {
-      "grail": 0.111636826,
-      "go": 0.896309907,
-      "zig": 8.461923211,
-      "rust": 0.559131011
+      "grail": 0.163236492,
+      "go": 0.957439933,
+      "zig": 8.448844047,
+      "c": 0.169212929,
+      "cpp": 1.507906947,
+      "rust": 0.558886532
      }
     },
     {
      "name": "strings build edited",
      "unit": "G instructions",
      "values": {
-      "grail": 0.096920655,
-      "go": 0.897101676,
-      "zig": 8.452026473,
-      "rust": 0.275825677
+      "grail": 0.136635617,
+      "go": 1.019554997,
+      "zig": 8.453139641,
+      "c": 0.169257454,
+      "cpp": 1.507513602,
+      "rust": 0.275633429
      }
     },
     {
      "name": "json check cold",
      "unit": "G instructions",
      "values": {
-      "grail": 0.048916306,
-      "go": 0.310079188,
-      "zig": 1.245138662,
-      "rust": 9.400652169
+      "grail": 0.082716455,
+      "go": 0.303071625,
+      "zig": 1.245345983,
+      "c": 0.07861795,
+      "cpp": 1.864089013,
+      "rust": 9.400138592
      }
     },
     {
      "name": "json check edited",
      "unit": "G instructions",
      "values": {
-      "grail": 0.037124859,
-      "go": 0.310421608,
-      "zig": 1.245088284,
-      "rust": 0.132352242
+      "grail": 0.062425063,
+      "go": 0.305183508,
+      "zig": 1.244893381,
+      "c": 0.078571903,
+      "cpp": 1.866381717,
+      "rust": 0.132305272
      }
     },
     {
      "name": "json build cold",
      "unit": "G instructions",
      "values": {
-      "grail": 0.128622842,
-      "go": 1.185283052,
-      "zig": 9.587086192,
-      "rust": 13.953262059
+      "grail": 0.180099338,
+      "go": 1.348486621,
+      "zig": 9.588616789,
+      "c": 0.194689246,
+      "cpp": 2.617660108,
+      "rust": 13.952724445
      }
     },
     {
      "name": "json build edited",
      "unit": "G instructions",
      "values": {
-      "grail": 0.106259548,
-      "go": 1.167896397,
-      "zig": 9.588015419,
-      "rust": 0.332944083
+      "grail": 0.144519323,
+      "go": 1.332224813,
+      "zig": 9.58911389,
+      "c": 0.19481824,
+      "cpp": 2.617408452,
+      "rust": 0.332888663
      }
     },
     {
      "name": "dyncall check cold",
      "unit": "G instructions",
      "values": {
-      "grail": 0.013940062,
-      "go": 0.208739594,
-      "zig": 1.040947114,
-      "rust": 0.142119409
+      "grail": 0.025751734,
+      "go": 0.208938594,
+      "zig": 1.040521048,
+      "c": 0.067601041,
+      "cpp": 2.046069763,
+      "rust": 0.142034712
      }
     },
     {
      "name": "dyncall check edited",
      "unit": "G instructions",
      "values": {
-      "grail": 0.012395375,
-      "go": 0.210773431,
-      "zig": 1.040998643,
-      "rust": 0.111578156
+      "grail": 0.023755086,
+      "go": 0.267623157,
+      "zig": 1.040803092,
+      "c": 0.067559717,
+      "cpp": 2.046553316,
+      "rust": 0.111537067
      }
     },
     {
      "name": "dyncall build cold",
      "unit": "G instructions",
      "values": {
-      "grail": 0.077831999,
-      "go": 0.854698387,
-      "zig": 7.753403999,
-      "rust": 0.374058283
+      "grail": 0.099880209,
+      "go": 1.004022212,
+      "zig": 7.748829953,
+      "c": 0.161319569,
+      "cpp": 2.399247773,
+      "rust": 0.373880266
      }
     },
     {
      "name": "dyncall build edited",
      "unit": "G instructions",
      "values": {
-      "grail": 0.071994991,
-      "go": 0.855821675,
-      "zig": 7.746886939,
-      "rust": 0.239814246
+      "grail": 0.092536233,
+      "go": 1.016323941,
+      "zig": 7.748238327,
+      "c": 0.161301237,
+      "cpp": 2.396621915,
+      "rust": 0.23970349
      }
     },
     {
      "name": "iterchain check cold",
      "unit": "G instructions",
      "values": {
-      "grail": 0.06054003,
-      "go": 0.215742893,
-      "zig": 1.032188505,
-      "rust": 0.133144355
+      "grail": 0.089214868,
+      "go": 0.212606746,
+      "zig": 1.032134242,
+      "c": 0.066223035,
+      "cpp": 2.992853125,
+      "rust": 0.133102381
      }
     },
     {
      "name": "iterchain check edited",
      "unit": "G instructions",
      "values": {
-      "grail": 0.043339914,
-      "go": 0.252853903,
-      "zig": 1.032176283,
-      "rust": 0.106287878
+      "grail": 0.062455167,
+      "go": 0.271377706,
+      "zig": 1.032210762,
+      "c": 0.066219214,
+      "cpp": 2.992770515,
+      "rust": 0.106262189
      }
     },
     {
      "name": "iterchain build cold",
      "unit": "G instructions",
      "values": {
-      "grail": 0.14600694,
-      "go": 0.894275293,
-      "zig": 7.636475247,
-      "rust": 0.396251185
+      "grail": 0.194396481,
+      "go": 1.042763122,
+      "zig": 7.639496518,
+      "c": 0.155710186,
+      "cpp": 3.297696165,
+      "rust": 0.396133826
      }
     },
     {
      "name": "iterchain build edited",
      "unit": "G instructions",
      "values": {
-      "grail": 0.118067325,
-      "go": 0.904321636,
-      "zig": 7.644063197,
-      "rust": 0.235470081
+      "grail": 0.152272191,
+      "go": 1.032593496,
+      "zig": 7.639521243,
+      "c": 0.155622456,
+      "cpp": 3.298781435,
+      "rust": 0.235381521
      }
     },
     {
      "name": "ecs check cold",
      "unit": "G instructions",
      "values": {
-      "grail": 0.015835814,
-      "go": 0.209856348,
-      "zig": 1.052414906,
-      "rust": 0.145518848
+      "grail": 0.027799102,
+      "go": 0.260545493,
+      "zig": 1.052222017,
+      "c": 0.06751808,
+      "cpp": 0.873418924,
+      "rust": 0.145474368
      }
     },
     {
      "name": "ecs check edited",
      "unit": "G instructions",
      "values": {
-      "grail": 0.01517074,
-      "go": 0.210035739,
-      "zig": 1.052386791,
-      "rust": 0.117037537
+      "grail": 0.026758495,
+      "go": 0.238092029,
+      "zig": 1.052270614,
+      "c": 0.067535149,
+      "cpp": 0.875098172,
+      "rust": 0.117011065
      }
     },
     {
      "name": "ecs build cold",
      "unit": "G instructions",
      "values": {
-      "grail": 0.086185723,
-      "go": 0.871226613,
-      "zig": 7.862032735,
-      "rust": 0.359310531
+      "grail": 0.117280087,
+      "go": 1.00787992,
+      "zig": 7.876154225,
+      "c": 0.161527985,
+      "cpp": 1.059434587,
+      "rust": 0.359203491
      }
     },
     {
      "name": "ecs build edited",
      "unit": "G instructions",
      "values": {
-      "grail": 0.083739725,
-      "go": 0.870923464,
-      "zig": 7.888600421,
-      "rust": 0.25302494
+      "grail": 0.11410446,
+      "go": 0.994491688,
+      "zig": 7.871259179,
+      "c": 0.161571842,
+      "cpp": 1.057500489,
+      "rust": 0.25294487
      }
     }
    ]
@@ -490,6 +584,16 @@
      "grail": false
     },
     {
+     "key": "c",
+     "label": "C",
+     "grail": false
+    },
+    {
+     "key": "cpp",
+     "label": "C++",
+     "grail": false
+    },
+    {
      "key": "rust",
      "label": "Rust",
      "grail": false
@@ -500,400 +604,480 @@
      "name": "hello check cold",
      "unit": "s wall",
      "values": {
-      "grail": 0.00565,
-      "go": 0.031391,
-      "zig": 0.142051,
-      "rust": 0.052521
+      "grail": 0.012355,
+      "go": 0.041542,
+      "zig": 0.180187,
+      "c": 0.022366,
+      "cpp": 0.287683,
+      "rust": 0.062928
      }
     },
     {
      "name": "hello check edited",
      "unit": "s wall",
      "values": {
-      "grail": 0.004659,
-      "go": 0.031576,
-      "zig": 0.144096,
-      "rust": 0.03232
+      "grail": 0.009458,
+      "go": 0.042565,
+      "zig": 0.182099,
+      "c": 0.02015,
+      "cpp": 0.283188,
+      "rust": 0.038222
      }
     },
     {
      "name": "hello build cold",
      "unit": "s wall",
      "values": {
-      "grail": 0.024316,
-      "go": 0.081731,
-      "zig": 0.992834,
-      "rust": 0.083507
+      "grail": 0.047763,
+      "go": 0.132855,
+      "zig": 1.241701,
+      "c": 0.050059,
+      "cpp": 0.340293,
+      "rust": 0.100633
      }
     },
     {
      "name": "hello build edited",
      "unit": "s wall",
      "values": {
-      "grail": 0.024303,
-      "go": 0.083588,
-      "zig": 0.982508,
-      "rust": 0.056947
+      "grail": 0.029478,
+      "go": 0.115151,
+      "zig": 1.231157,
+      "c": 0.060235,
+      "cpp": 0.341788,
+      "rust": 0.063465
      }
     },
     {
      "name": "syn1000 check cold",
      "unit": "s wall",
      "values": {
-      "grail": 0.096778,
-      "go": 0.157282,
-      "zig": 0.191609,
-      "rust": 0.687697
+      "grail": 0.099512,
+      "go": 0.098102,
+      "zig": 0.184886,
+      "c": 0.128975,
+      "cpp": 0.576576,
+      "rust": 0.629298
      }
     },
     {
      "name": "syn1000 check edited",
      "unit": "s wall",
      "values": {
-      "grail": 0.037634,
-      "go": 0.183296,
-      "zig": 0.19614,
-      "rust": 0.259804
+      "grail": 0.033046,
+      "go": 0.106537,
+      "zig": 0.180915,
+      "c": 0.131688,
+      "cpp": 0.575551,
+      "rust": 0.174913
      }
     },
     {
      "name": "syn1000 build cold",
      "unit": "s wall",
      "values": {
-      "grail": 0.477387,
-      "go": 0.468627,
-      "zig": 1.847582,
-      "rust": 1.334189
+      "grail": 0.443392,
+      "go": 0.429695,
+      "zig": 1.768568,
+      "c": 0.600475,
+      "cpp": 1.429817,
+      "rust": 1.262504
      }
     },
     {
      "name": "syn1000 build edited",
      "unit": "s wall",
      "values": {
-      "grail": 0.263589,
-      "go": 0.476184,
-      "zig": 1.803313,
-      "rust": 0.74259
+      "grail": 0.229814,
+      "go": 0.451271,
+      "zig": 1.803273,
+      "c": 0.606043,
+      "cpp": 1.380343,
+      "rust": 0.745424
      }
     },
     {
      "name": "syn4000 check cold",
      "unit": "s wall",
      "values": {
-      "grail": 0.30569,
-      "go": 0.474232,
-      "zig": 0.331388,
-      "rust": 2.638822
+      "grail": 0.30232,
+      "go": 0.484228,
+      "zig": 0.411193,
+      "c": 0.51815,
+      "cpp": 1.400436,
+      "rust": 2.646747
      }
     },
     {
      "name": "syn4000 check edited",
      "unit": "s wall",
      "values": {
-      "grail": 0.119229,
-      "go": 0.490732,
-      "zig": 0.326421,
-      "rust": 0.858404
+      "grail": 0.109503,
+      "go": 0.476941,
+      "zig": 0.412561,
+      "c": 0.488254,
+      "cpp": 1.477577,
+      "rust": 0.961993
      }
     },
     {
      "name": "syn4000 build cold",
      "unit": "s wall",
      "values": {
-      "grail": 1.493084,
-      "go": 1.732383,
-      "zig": 4.106337,
-      "rust": 4.964791
+      "grail": 1.600547,
+      "go": 1.907342,
+      "zig": 4.266756,
+      "c": 2.35796,
+      "cpp": 4.927469,
+      "rust": 5.223923
      }
     },
     {
      "name": "syn4000 build edited",
      "unit": "s wall",
      "values": {
-      "grail": 0.905018,
-      "go": 1.710096,
-      "zig": 4.157174,
-      "rust": 2.812094
+      "grail": 0.903213,
+      "go": 2.108342,
+      "zig": 4.641858,
+      "c": 2.332146,
+      "cpp": 4.672421,
+      "rust": 2.995667
      }
     },
     {
      "name": "hashmap check cold",
      "unit": "s wall",
      "values": {
-      "grail": 0.011268,
-      "go": 0.032116,
-      "zig": 0.135286,
-      "rust": 0.060613
+      "grail": 0.014131,
+      "go": 0.030899,
+      "zig": 0.136792,
+      "c": 0.020906,
+      "cpp": 0.177351,
+      "rust": 0.058599
      }
     },
     {
      "name": "hashmap check edited",
      "unit": "s wall",
      "values": {
-      "grail": 0.008614,
-      "go": 0.032253,
-      "zig": 0.13387,
-      "rust": 0.037016
+      "grail": 0.010308,
+      "go": 0.031571,
+      "zig": 0.136768,
+      "c": 0.018704,
+      "cpp": 0.176529,
+      "rust": 0.036477
      }
     },
     {
      "name": "hashmap build cold",
      "unit": "s wall",
      "values": {
-      "grail": 0.036013,
-      "go": 0.087906,
-      "zig": 0.950464,
-      "rust": 0.140671
+      "grail": 0.042172,
+      "go": 0.096131,
+      "zig": 0.957632,
+      "c": 0.047214,
+      "cpp": 0.239402,
+      "rust": 0.13826
      }
     },
     {
      "name": "hashmap build edited",
      "unit": "s wall",
      "values": {
-      "grail": 0.031759,
-      "go": 0.087786,
-      "zig": 0.960382,
-      "rust": 0.077716
+      "grail": 0.035641,
+      "go": 0.095984,
+      "zig": 0.958672,
+      "c": 0.047448,
+      "cpp": 0.238802,
+      "rust": 0.077618
      }
     },
     {
      "name": "bintrees check cold",
      "unit": "s wall",
      "values": {
-      "grail": 0.005656,
-      "go": 0.035773,
-      "zig": 0.135667,
-      "rust": 0.055578
+      "grail": 0.007748,
+      "go": 0.03155,
+      "zig": 0.143817,
+      "c": 0.022273,
+      "cpp": 0.289409,
+      "rust": 0.054083
      }
     },
     {
      "name": "bintrees check edited",
      "unit": "s wall",
      "values": {
-      "grail": 0.004777,
-      "go": 0.033027,
-      "zig": 0.134577,
-      "rust": 0.035336
+      "grail": 0.006458,
+      "go": 0.029725,
+      "zig": 0.141075,
+      "c": 0.023553,
+      "cpp": 0.28707,
+      "rust": 0.035126
      }
     },
     {
      "name": "bintrees build cold",
      "unit": "s wall",
      "values": {
-      "grail": 0.026462,
-      "go": 0.086646,
-      "zig": 0.942887,
-      "rust": 0.096566
+      "grail": 0.032516,
+      "go": 0.090359,
+      "zig": 1.015688,
+      "c": 0.04964,
+      "cpp": 0.335598,
+      "rust": 0.095681
      }
     },
     {
      "name": "bintrees build edited",
      "unit": "s wall",
      "values": {
-      "grail": 0.024283,
-      "go": 0.087055,
-      "zig": 0.933898,
-      "rust": 0.064445
+      "grail": 0.028274,
+      "go": 0.083904,
+      "zig": 0.988325,
+      "c": 0.052323,
+      "cpp": 0.339061,
+      "rust": 0.067824
      }
     },
     {
      "name": "strings check cold",
      "unit": "s wall",
      "values": {
-      "grail": 0.009697,
-      "go": 0.031472,
-      "zig": 0.145712,
-      "rust": 0.061158
+      "grail": 0.013942,
+      "go": 0.054187,
+      "zig": 0.208809,
+      "c": 0.027882,
+      "cpp": 0.247152,
+      "rust": 0.066667
      }
     },
     {
      "name": "strings check edited",
      "unit": "s wall",
      "values": {
-      "grail": 0.007432,
-      "go": 0.028949,
-      "zig": 0.149024,
-      "rust": 0.035464
+      "grail": 0.010345,
+      "go": 0.034064,
+      "zig": 0.204203,
+      "c": 0.024229,
+      "cpp": 0.245475,
+      "rust": 0.040534
      }
     },
     {
      "name": "strings build cold",
      "unit": "s wall",
      "values": {
-      "grail": 0.03225,
-      "go": 0.084833,
-      "zig": 1.019341,
-      "rust": 0.111414
+      "grail": 0.05223,
+      "go": 0.129027,
+      "zig": 1.393606,
+      "c": 0.052437,
+      "cpp": 0.30226,
+      "rust": 0.135295
      }
     },
     {
      "name": "strings build edited",
      "unit": "s wall",
      "values": {
-      "grail": 0.02953,
-      "go": 0.07655,
-      "zig": 1.02501,
-      "rust": 0.074057
+      "grail": 0.053087,
+      "go": 0.126032,
+      "zig": 1.305066,
+      "c": 0.058419,
+      "cpp": 0.324695,
+      "rust": 0.102664
      }
     },
     {
      "name": "json check cold",
      "unit": "s wall",
      "values": {
-      "grail": 0.011403,
-      "go": 0.033668,
-      "zig": 0.155039,
-      "rust": 1.020702
+      "grail": 0.021753,
+      "go": 0.045363,
+      "zig": 0.220776,
+      "c": 0.023717,
+      "cpp": 0.331122,
+      "rust": 1.092916
      }
     },
     {
      "name": "json check edited",
      "unit": "s wall",
      "values": {
-      "grail": 0.009317,
-      "go": 0.034809,
-      "zig": 0.153176,
-      "rust": 0.039541
+      "grail": 0.012727,
+      "go": 0.04105,
+      "zig": 0.194708,
+      "c": 0.021164,
+      "cpp": 0.312998,
+      "rust": 0.046502
      }
     },
     {
      "name": "json build cold",
      "unit": "s wall",
      "values": {
-      "grail": 0.036258,
-      "go": 0.098632,
-      "zig": 1.141296,
-      "rust": 1.310041
+      "grail": 0.059075,
+      "go": 0.149507,
+      "zig": 1.486925,
+      "c": 0.059465,
+      "cpp": 0.446166,
+      "rust": 1.404986
      }
     },
     {
      "name": "json build edited",
      "unit": "s wall",
      "values": {
-      "grail": 0.033578,
-      "go": 0.102671,
-      "zig": 1.159089,
-      "rust": 0.080239
+      "grail": 0.046046,
+      "go": 0.151136,
+      "zig": 1.474588,
+      "c": 0.058551,
+      "cpp": 0.434791,
+      "rust": 0.084503
      }
     },
     {
      "name": "dyncall check cold",
      "unit": "s wall",
      "values": {
-      "grail": 0.005892,
-      "go": 0.029829,
-      "zig": 0.132774,
-      "rust": 0.060597
+      "grail": 0.009301,
+      "go": 0.033696,
+      "zig": 0.139194,
+      "c": 0.022116,
+      "cpp": 0.371688,
+      "rust": 0.060126
      }
     },
     {
      "name": "dyncall check edited",
      "unit": "s wall",
      "values": {
-      "grail": 0.005449,
-      "go": 0.031881,
-      "zig": 0.134252,
-      "rust": 0.03607
+      "grail": 0.006688,
+      "go": 0.033181,
+      "zig": 0.1366,
+      "c": 0.019962,
+      "cpp": 0.395591,
+      "rust": 0.042913
      }
     },
     {
      "name": "dyncall build cold",
      "unit": "s wall",
      "values": {
-      "grail": 0.026757,
-      "go": 0.0926,
-      "zig": 0.929506,
-      "rust": 0.101735
+      "grail": 0.034791,
+      "go": 0.095024,
+      "zig": 0.956114,
+      "c": 0.049621,
+      "cpp": 0.438894,
+      "rust": 0.10406
      }
     },
     {
      "name": "dyncall build edited",
      "unit": "s wall",
      "values": {
-      "grail": 0.024701,
-      "go": 0.090194,
-      "zig": 0.934736,
-      "rust": 0.068974
+      "grail": 0.028553,
+      "go": 0.099442,
+      "zig": 0.971193,
+      "c": 0.050983,
+      "cpp": 0.404849,
+      "rust": 0.092633
      }
     },
     {
      "name": "iterchain check cold",
      "unit": "s wall",
      "values": {
-      "grail": 0.011912,
-      "go": 0.034788,
-      "zig": 0.134795,
-      "rust": 0.056876
+      "grail": 0.01616,
+      "go": 0.030994,
+      "zig": 0.140912,
+      "c": 0.020966,
+      "cpp": 0.432161,
+      "rust": 0.056165
      }
     },
     {
      "name": "iterchain check edited",
      "unit": "s wall",
      "values": {
-      "grail": 0.00877,
-      "go": 0.034268,
-      "zig": 0.134938,
-      "rust": 0.037388
+      "grail": 0.01088,
+      "go": 0.032305,
+      "zig": 0.139516,
+      "c": 0.019918,
+      "cpp": 0.424894,
+      "rust": 0.034804
      }
     },
     {
      "name": "iterchain build cold",
      "unit": "s wall",
      "values": {
-      "grail": 0.037355,
-      "go": 0.095927,
-      "zig": 0.936863,
-      "rust": 0.103765
+      "grail": 0.043207,
+      "go": 0.089788,
+      "zig": 0.968387,
+      "c": 0.048491,
+      "cpp": 0.504649,
+      "rust": 0.103708
      }
     },
     {
      "name": "iterchain build edited",
      "unit": "s wall",
      "values": {
-      "grail": 0.034277,
-      "go": 0.093057,
-      "zig": 0.941628,
-      "rust": 0.067591
+      "grail": 0.039961,
+      "go": 0.091564,
+      "zig": 0.954034,
+      "c": 0.048402,
+      "cpp": 0.494512,
+      "rust": 0.065897
      }
     },
     {
      "name": "ecs check cold",
      "unit": "s wall",
      "values": {
-      "grail": 0.006219,
-      "go": 0.035062,
-      "zig": 0.138531,
-      "rust": 0.058879
+      "grail": 0.007496,
+      "go": 0.035895,
+      "zig": 0.137892,
+      "c": 0.021179,
+      "cpp": 0.137427,
+      "rust": 0.054623
      }
     },
     {
      "name": "ecs check edited",
      "unit": "s wall",
      "values": {
-      "grail": 0.00507,
-      "go": 0.03654,
-      "zig": 0.133295,
-      "rust": 0.036171
+      "grail": 0.005777,
+      "go": 0.0323,
+      "zig": 0.140855,
+      "c": 0.018536,
+      "cpp": 0.136347,
+      "rust": 0.035322
      }
     },
     {
      "name": "ecs build cold",
      "unit": "s wall",
      "values": {
-      "grail": 0.026979,
-      "go": 0.086836,
-      "zig": 0.962642,
-      "rust": 0.097891
+      "grail": 0.030901,
+      "go": 0.105159,
+      "zig": 0.960813,
+      "c": 0.046463,
+      "cpp": 0.176674,
+      "rust": 0.094594
      }
     },
     {
      "name": "ecs build edited",
      "unit": "s wall",
      "values": {
-      "grail": 0.025627,
-      "go": 0.088907,
-      "zig": 0.962653,
-      "rust": 0.07004
+      "grail": 0.027603,
+      "go": 0.09807,
+      "zig": 0.972461,
+      "c": 0.046955,
+      "cpp": 0.179155,
+      "rust": 0.066896
      }
     }
    ]
@@ -923,6 +1107,16 @@
      "grail": false
     },
     {
+     "key": "c",
+     "label": "C",
+     "grail": false
+    },
+    {
+     "key": "cpp",
+     "label": "C++",
+     "grail": false
+    },
+    {
      "key": "rust",
      "label": "Rust",
      "grail": false
@@ -933,400 +1127,480 @@
      "name": "hello check cold",
      "unit": "s CPU",
      "values": {
-      "grail": 0.005327,
-      "go": 0.057692,
-      "zig": 0.165677,
-      "rust": 0.053634
+      "grail": 0.007363,
+      "go": 0.049968,
+      "zig": 0.165216,
+      "c": 0.023511,
+      "cpp": 0.289257,
+      "rust": 0.058274
      }
     },
     {
      "name": "hello check edited",
      "unit": "s CPU",
      "values": {
-      "grail": 0.0048850000000000005,
-      "go": 0.053627,
-      "zig": 0.171697,
-      "rust": 0.032209
+      "grail": 0.00632,
+      "go": 0.050533,
+      "zig": 0.16463,
+      "c": 0.021713999999999997,
+      "cpp": 0.273828,
+      "rust": 0.038719
      }
     },
     {
      "name": "hello build cold",
      "unit": "s CPU",
      "values": {
-      "grail": 0.025550999999999997,
-      "go": 0.118483,
-      "zig": 1.012624,
-      "rust": 0.10005700000000001
+      "grail": 0.029012999999999997,
+      "go": 0.130247,
+      "zig": 1.3032970000000001,
+      "c": 0.056237999999999996,
+      "cpp": 0.34485299999999997,
+      "rust": 0.10733100000000001
      }
     },
     {
      "name": "hello build edited",
      "unit": "s CPU",
      "values": {
-      "grail": 0.024503,
-      "go": 0.120781,
-      "zig": 1.019789,
-      "rust": 0.069263
+      "grail": 0.030631000000000002,
+      "go": 0.132417,
+      "zig": 1.27073,
+      "c": 0.060781,
+      "cpp": 0.32843599999999995,
+      "rust": 0.078472
      }
     },
     {
      "name": "syn1000 check cold",
      "unit": "s CPU",
      "values": {
-      "grail": 0.084503,
-      "go": 0.225485,
-      "zig": 0.25595,
-      "rust": 0.755322
+      "grail": 0.09632399999999999,
+      "go": 0.208043,
+      "zig": 0.218657,
+      "c": 0.132638,
+      "cpp": 0.553093,
+      "rust": 0.6267389999999999
      }
     },
     {
      "name": "syn1000 check edited",
      "unit": "s CPU",
      "values": {
-      "grail": 0.033467,
-      "go": 0.228996,
-      "zig": 0.237793,
-      "rust": 0.263848
+      "grail": 0.041769,
+      "go": 0.21074400000000001,
+      "zig": 0.21494999999999997,
+      "c": 0.126933,
+      "cpp": 0.560818,
+      "rust": 0.228327
      }
     },
     {
      "name": "syn1000 build cold",
      "unit": "s CPU",
      "values": {
-      "grail": 0.667562,
-      "go": 0.9271159999999999,
-      "zig": 1.948583,
-      "rust": 1.5012519999999998
+      "grail": 0.7539420000000001,
+      "go": 0.837324,
+      "zig": 1.9634969999999998,
+      "c": 0.596485,
+      "cpp": 1.428973,
+      "rust": 1.3968159999999998
      }
     },
     {
      "name": "syn1000 build edited",
      "unit": "s CPU",
      "values": {
-      "grail": 0.27031499999999997,
-      "go": 1.006515,
-      "zig": 2.143398,
-      "rust": 0.819717
+      "grail": 0.22623,
+      "go": 0.8375220000000001,
+      "zig": 1.788852,
+      "c": 0.603123,
+      "cpp": 1.4477190000000002,
+      "rust": 0.7147159999999999
      }
     },
     {
      "name": "syn4000 check cold",
      "unit": "s CPU",
      "values": {
-      "grail": 0.291332,
-      "go": 0.723351,
-      "zig": 0.371969,
-      "rust": 2.628412
+      "grail": 0.317089,
+      "go": 0.747144,
+      "zig": 0.377351,
+      "c": 0.447452,
+      "cpp": 1.357888,
+      "rust": 2.601775
      }
     },
     {
      "name": "syn4000 check edited",
      "unit": "s CPU",
      "values": {
-      "grail": 0.106686,
-      "go": 0.742864,
-      "zig": 0.356252,
-      "rust": 0.8956689999999999
+      "grail": 0.130464,
+      "go": 0.7548239999999999,
+      "zig": 0.365958,
+      "c": 0.448987,
+      "cpp": 1.3779560000000002,
+      "rust": 0.841441
      }
     },
     {
      "name": "syn4000 build cold",
      "unit": "s CPU",
      "values": {
-      "grail": 2.189436,
-      "go": 3.495519,
-      "zig": 4.181073,
-      "rust": 5.312217
+      "grail": 2.587949,
+      "go": 3.8220419999999997,
+      "zig": 4.616391,
+      "c": 2.241384,
+      "cpp": 4.637355,
+      "rust": 5.304333
      }
     },
     {
      "name": "syn4000 build edited",
      "unit": "s CPU",
      "values": {
-      "grail": 0.829993,
-      "go": 3.565622,
-      "zig": 4.178554,
-      "rust": 2.995476
+      "grail": 0.837859,
+      "go": 3.575608,
+      "zig": 4.213538,
+      "c": 2.256391,
+      "cpp": 4.510796,
+      "rust": 3.009833
      }
     },
     {
      "name": "hashmap check cold",
      "unit": "s CPU",
      "values": {
-      "grail": 0.010772,
-      "go": 0.047907000000000005,
-      "zig": 0.16261699999999998,
-      "rust": 0.062724
+      "grail": 0.013014999999999999,
+      "go": 0.050034999999999996,
+      "zig": 0.168892,
+      "c": 0.021238,
+      "cpp": 0.17614700000000003,
+      "rust": 0.058475
      }
     },
     {
      "name": "hashmap check edited",
      "unit": "s CPU",
      "values": {
-      "grail": 0.007929,
-      "go": 0.048749,
-      "zig": 0.16566,
-      "rust": 0.036887
+      "grail": 0.009982000000000001,
+      "go": 0.052385,
+      "zig": 0.167153,
+      "c": 0.019458,
+      "cpp": 0.176143,
+      "rust": 0.035712999999999995
      }
     },
     {
      "name": "hashmap build cold",
      "unit": "s CPU",
      "values": {
-      "grail": 0.036490999999999996,
-      "go": 0.10852700000000001,
-      "zig": 0.9907809999999999,
-      "rust": 0.208398
+      "grail": 0.042322,
+      "go": 0.12504,
+      "zig": 1.025018,
+      "c": 0.04937999999999999,
+      "cpp": 0.246875,
+      "rust": 0.202424
      }
     },
     {
      "name": "hashmap build edited",
      "unit": "s CPU",
      "values": {
-      "grail": 0.031084,
-      "go": 0.106013,
-      "zig": 0.9850319999999999,
-      "rust": 0.10086400000000001
+      "grail": 0.035849,
+      "go": 0.130203,
+      "zig": 1.002932,
+      "c": 0.049975,
+      "cpp": 0.248675,
+      "rust": 0.098062
      }
     },
     {
      "name": "bintrees check cold",
      "unit": "s CPU",
      "values": {
-      "grail": 0.006005,
-      "go": 0.052459,
-      "zig": 0.164779,
-      "rust": 0.060218999999999995
+      "grail": 0.006994,
+      "go": 0.052367000000000004,
+      "zig": 0.166236,
+      "c": 0.022505,
+      "cpp": 0.27629,
+      "rust": 0.062571
      }
     },
     {
      "name": "bintrees check edited",
      "unit": "s CPU",
      "values": {
-      "grail": 0.005159,
-      "go": 0.053262000000000004,
-      "zig": 0.165582,
-      "rust": 0.037403000000000006
+      "grail": 0.006272,
+      "go": 0.048895,
+      "zig": 0.164312,
+      "c": 0.019734,
+      "cpp": 0.270695,
+      "rust": 0.040936
      }
     },
     {
      "name": "bintrees build cold",
      "unit": "s CPU",
      "values": {
-      "grail": 0.027659000000000003,
-      "go": 0.12004100000000001,
-      "zig": 0.978323,
-      "rust": 0.128512
+      "grail": 0.030223,
+      "go": 0.117081,
+      "zig": 0.999549,
+      "c": 0.04886,
+      "cpp": 0.32312,
+      "rust": 0.120699
      }
     },
     {
      "name": "bintrees build edited",
      "unit": "s CPU",
      "values": {
-      "grail": 0.025782,
-      "go": 0.115999,
-      "zig": 0.986067,
-      "rust": 0.07996800000000001
+      "grail": 0.027257999999999998,
+      "go": 0.118129,
+      "zig": 0.980656,
+      "c": 0.047281000000000004,
+      "cpp": 0.328615,
+      "rust": 0.08538000000000001
      }
     },
     {
      "name": "strings check cold",
      "unit": "s CPU",
      "values": {
-      "grail": 0.008439,
-      "go": 0.050748,
-      "zig": 0.175337,
-      "rust": 0.062959
+      "grail": 0.013135,
+      "go": 0.051682,
+      "zig": 0.175792,
+      "c": 0.023552,
+      "cpp": 0.200391,
+      "rust": 0.062464
      }
     },
     {
      "name": "strings check edited",
      "unit": "s CPU",
      "values": {
-      "grail": 0.0070339999999999995,
-      "go": 0.049972,
-      "zig": 0.175503,
-      "rust": 0.036914
+      "grail": 0.009468,
+      "go": 0.051144999999999996,
+      "zig": 0.175539,
+      "c": 0.021925,
+      "cpp": 0.202968,
+      "rust": 0.038919
      }
     },
     {
      "name": "strings build cold",
      "unit": "s CPU",
      "values": {
-      "grail": 0.033506,
-      "go": 0.11108299999999999,
-      "zig": 1.080252,
-      "rust": 0.168777
+      "grail": 0.042284,
+      "go": 0.12207799999999999,
+      "zig": 1.262561,
+      "c": 0.05103,
+      "cpp": 0.273998,
+      "rust": 0.174399
      }
     },
     {
      "name": "strings build edited",
      "unit": "s CPU",
      "values": {
-      "grail": 0.03151,
-      "go": 0.105957,
-      "zig": 1.0854759999999999,
-      "rust": 0.090295
+      "grail": 0.039778999999999995,
+      "go": 0.1225,
+      "zig": 1.1534659999999999,
+      "c": 0.054679000000000005,
+      "cpp": 0.27037500000000003,
+      "rust": 0.094905
      }
     },
     {
      "name": "json check cold",
      "unit": "s CPU",
      "values": {
-      "grail": 0.009995,
-      "go": 0.055648,
-      "zig": 0.17963400000000002,
-      "rust": 1.458951
+      "grail": 0.018563,
+      "go": 0.070577,
+      "zig": 0.23062500000000002,
+      "c": 0.023669,
+      "cpp": 0.29469900000000004,
+      "rust": 1.436325
      }
     },
     {
      "name": "json check edited",
      "unit": "s CPU",
      "values": {
-      "grail": 0.008598999999999999,
-      "go": 0.053917999999999994,
-      "zig": 0.179428,
-      "rust": 0.042174
+      "grail": 0.011009999999999999,
+      "go": 0.069411,
+      "zig": 0.221953,
+      "c": 0.01978,
+      "cpp": 0.300493,
+      "rust": 0.041493
      }
     },
     {
      "name": "json build cold",
      "unit": "s CPU",
      "values": {
-      "grail": 0.036739,
-      "go": 0.135054,
-      "zig": 1.1916870000000002,
-      "rust": 2.079581
+      "grail": 0.052007,
+      "go": 0.194466,
+      "zig": 1.419489,
+      "c": 0.055858000000000005,
+      "cpp": 0.43627799999999994,
+      "rust": 2.3883289999999997
      }
     },
     {
      "name": "json build edited",
      "unit": "s CPU",
      "values": {
-      "grail": 0.032522999999999996,
-      "go": 0.13867000000000002,
-      "zig": 1.19273,
-      "rust": 0.10816200000000001
+      "grail": 0.046926999999999996,
+      "go": 0.18055,
+      "zig": 1.280407,
+      "c": 0.05214,
+      "cpp": 0.433909,
+      "rust": 0.13462000000000002
      }
     },
     {
      "name": "dyncall check cold",
      "unit": "s CPU",
      "values": {
-      "grail": 0.005845,
-      "go": 0.047928,
-      "zig": 0.164474,
-      "rust": 0.058513
+      "grail": 0.0064150000000000006,
+      "go": 0.048362,
+      "zig": 0.20004500000000003,
+      "c": 0.021863,
+      "cpp": 0.416895,
+      "rust": 0.070006
      }
     },
     {
      "name": "dyncall check edited",
      "unit": "s CPU",
      "values": {
-      "grail": 0.004756,
-      "go": 0.049509,
-      "zig": 0.159277,
-      "rust": 0.038048
+      "grail": 0.005644,
+      "go": 0.04919,
+      "zig": 0.211589,
+      "c": 0.01812,
+      "cpp": 0.421595,
+      "rust": 0.044196
      }
     },
     {
      "name": "dyncall build cold",
      "unit": "s CPU",
      "values": {
-      "grail": 0.027349,
-      "go": 0.105089,
-      "zig": 0.9884,
-      "rust": 0.136565
+      "grail": 0.031895,
+      "go": 0.138159,
+      "zig": 1.284856,
+      "c": 0.061198999999999996,
+      "cpp": 0.51581,
+      "rust": 0.153643
      }
     },
     {
      "name": "dyncall build edited",
      "unit": "s CPU",
      "values": {
-      "grail": 0.025332999999999998,
-      "go": 0.101046,
-      "zig": 0.978082,
-      "rust": 0.086717
+      "grail": 0.03135,
+      "go": 0.164885,
+      "zig": 1.293115,
+      "c": 0.062782,
+      "cpp": 0.504704,
+      "rust": 0.09813
      }
     },
     {
      "name": "iterchain check cold",
      "unit": "s CPU",
      "values": {
-      "grail": 0.011368,
-      "go": 0.054546,
-      "zig": 0.166418,
-      "rust": 0.060743
+      "grail": 0.01948,
+      "go": 0.067692,
+      "zig": 0.194212,
+      "c": 0.026337,
+      "cpp": 0.510675,
+      "rust": 0.063694
      }
     },
     {
      "name": "iterchain check edited",
      "unit": "s CPU",
      "values": {
-      "grail": 0.009406999999999999,
-      "go": 0.053185,
-      "zig": 0.163725,
-      "rust": 0.036838
+      "grail": 0.012771000000000001,
+      "go": 0.072686,
+      "zig": 0.211756,
+      "c": 0.023726999999999998,
+      "cpp": 0.502398,
+      "rust": 0.04238
      }
     },
     {
      "name": "iterchain build cold",
      "unit": "s CPU",
      "values": {
-      "grail": 0.037563,
-      "go": 0.122777,
-      "zig": 0.984009,
-      "rust": 0.143832
+      "grail": 0.056376,
+      "go": 0.17007499999999998,
+      "zig": 1.268634,
+      "c": 0.058886,
+      "cpp": 0.598182,
+      "rust": 0.16099000000000002
      }
     },
     {
      "name": "iterchain build edited",
      "unit": "s CPU",
      "values": {
-      "grail": 0.031385,
-      "go": 0.123255,
-      "zig": 0.97626,
-      "rust": 0.088372
+      "grail": 0.04476,
+      "go": 0.172783,
+      "zig": 1.238594,
+      "c": 0.055165,
+      "cpp": 0.565364,
+      "rust": 0.099404
      }
     },
     {
      "name": "ecs check cold",
      "unit": "s CPU",
      "values": {
-      "grail": 0.005438,
-      "go": 0.052917,
-      "zig": 0.16494999999999999,
-      "rust": 0.061571
+      "grail": 0.006901,
+      "go": 0.05278,
+      "zig": 0.17097800000000002,
+      "c": 0.020691,
+      "cpp": 0.142534,
+      "rust": 0.059441
      }
     },
     {
      "name": "ecs check edited",
      "unit": "s CPU",
      "values": {
-      "grail": 0.004849,
-      "go": 0.051842,
-      "zig": 0.164876,
-      "rust": 0.036965
+      "grail": 0.006038,
+      "go": 0.049062,
+      "zig": 0.16340100000000002,
+      "c": 0.02264,
+      "cpp": 0.145041,
+      "rust": 0.037925
      }
     },
     {
      "name": "ecs build cold",
      "unit": "s CPU",
      "values": {
-      "grail": 0.026475000000000002,
-      "go": 0.119206,
-      "zig": 0.9901409999999999,
-      "rust": 0.12964399999999998
+      "grail": 0.031523999999999996,
+      "go": 0.131414,
+      "zig": 1.087416,
+      "c": 0.050209000000000004,
+      "cpp": 0.19496400000000003,
+      "rust": 0.11893200000000001
      }
     },
     {
      "name": "ecs build edited",
      "unit": "s CPU",
      "values": {
-      "grail": 0.025925,
-      "go": 0.118159,
-      "zig": 0.998771,
-      "rust": 0.087583
+      "grail": 0.030502,
+      "go": 0.127995,
+      "zig": 1.098264,
+      "c": 0.052124000000000004,
+      "cpp": 0.190511,
+      "rust": 0.08670900000000001
      }
     }
    ]
@@ -1361,180 +1635,180 @@
      "name": "hello check cold",
      "unit": "G instructions",
      "values": {
-      "grail": 0.011959912,
-      "go": 0.256915772,
-      "go-build": 0.853894712
+      "grail": 0.023737147,
+      "go": 0.212415857,
+      "go-build": 0.999292339
      }
     },
     {
      "name": "hello check edited",
      "unit": "G instructions",
      "values": {
-      "grail": 0.010741735,
-      "go": 0.211270618,
-      "go-build": 0.8400829
+      "grail": 0.02207436,
+      "go": 0.210536236,
+      "go-build": 0.987630286
      }
     },
     {
      "name": "syn1000 check cold",
      "unit": "G instructions",
      "values": {
-      "grail": 0.772594055,
-      "go": 1.58272091,
-      "go-build": 8.476282877
+      "grail": 0.802623162,
+      "go": 1.580197862,
+      "go-build": 8.583856357
      }
     },
     {
      "name": "syn1000 check edited",
      "unit": "G instructions",
      "values": {
-      "grail": 0.242925012,
-      "go": 1.616255249,
-      "go-build": 8.479718566
+      "grail": 0.259798056,
+      "go": 1.735249682,
+      "go-build": 8.524925029
      }
     },
     {
      "name": "syn4000 check cold",
      "unit": "G instructions",
      "values": {
-      "grail": 3.049480137,
-      "go": 5.534563929,
-      "go-build": 31.92238776
+      "grail": 3.136414209,
+      "go": 5.729897177,
+      "go-build": 33.123168374
      }
     },
     {
      "name": "syn4000 check edited",
      "unit": "G instructions",
      "values": {
-      "grail": 0.934044216,
-      "go": 5.766690133,
-      "go-build": 32.050038797
+      "grail": 0.971199067,
+      "go": 5.61986505,
+      "go-build": 31.888300891
      }
     },
     {
      "name": "hashmap check cold",
      "unit": "G instructions",
      "values": {
-      "grail": 0.051989273,
-      "go": 0.215139205,
-      "go-build": 0.855313481
+      "grail": 0.084648885,
+      "go": 0.267044706,
+      "go-build": 1.011563865
      }
     },
     {
      "name": "hashmap check edited",
      "unit": "G instructions",
      "values": {
-      "grail": 0.040871863,
-      "go": 0.209248993,
-      "go-build": 0.854633743
+      "grail": 0.065126941,
+      "go": 0.210738472,
+      "go-build": 1.008868435
      }
     },
     {
      "name": "bintrees check cold",
      "unit": "G instructions",
      "values": {
-      "grail": 0.013962661,
-      "go": 0.213198692,
-      "go-build": 0.84120305
+      "grail": 0.025729396,
+      "go": 0.267665535,
+      "go-build": 0.993584032
      }
     },
     {
      "name": "bintrees check edited",
      "unit": "G instructions",
      "values": {
-      "grail": 0.012369546,
-      "go": 0.208206074,
-      "go-build": 0.858017317
+      "grail": 0.023688993,
+      "go": 0.211636571,
+      "go-build": 0.985187104
      }
     },
     {
      "name": "strings check cold",
      "unit": "G instructions",
      "values": {
-      "grail": 0.035133326,
-      "go": 0.274571898,
-      "go-build": 0.89665136
+      "grail": 0.067439469,
+      "go": 0.262215975,
+      "go-build": 1.023563187
      }
     },
     {
      "name": "strings check edited",
      "unit": "G instructions",
      "values": {
-      "grail": 0.027461742,
-      "go": 0.218850411,
-      "go-build": 0.897203216
+      "grail": 0.052059994,
+      "go": 0.219503399,
+      "go-build": 1.041339764
      }
     },
     {
      "name": "json check cold",
      "unit": "G instructions",
      "values": {
-      "grail": 0.048916306,
-      "go": 0.310079188,
-      "go-build": 1.136718742
+      "grail": 0.082716455,
+      "go": 0.303071625,
+      "go-build": 1.346039253
      }
     },
     {
      "name": "json check edited",
      "unit": "G instructions",
      "values": {
-      "grail": 0.037124859,
-      "go": 0.310421608,
-      "go-build": 1.134860208
+      "grail": 0.062425063,
+      "go": 0.305183508,
+      "go-build": 1.293464956
      }
     },
     {
      "name": "dyncall check cold",
      "unit": "G instructions",
      "values": {
-      "grail": 0.013940062,
-      "go": 0.208739594,
-      "go-build": 0.856847892
+      "grail": 0.025751734,
+      "go": 0.208938594,
+      "go-build": 1.003123613
      }
     },
     {
      "name": "dyncall check edited",
      "unit": "G instructions",
      "values": {
-      "grail": 0.012395375,
-      "go": 0.210773431,
-      "go-build": 0.854478384
+      "grail": 0.023755086,
+      "go": 0.267623157,
+      "go-build": 1.007955096
      }
     },
     {
      "name": "iterchain check cold",
      "unit": "G instructions",
      "values": {
-      "grail": 0.06054003,
-      "go": 0.215742893,
-      "go-build": 0.896972076
+      "grail": 0.089214868,
+      "go": 0.212606746,
+      "go-build": 1.038764463
      }
     },
     {
      "name": "iterchain check edited",
      "unit": "G instructions",
      "values": {
-      "grail": 0.043339914,
-      "go": 0.252853903,
-      "go-build": 0.855549136
+      "grail": 0.062455167,
+      "go": 0.271377706,
+      "go-build": 1.035455037
      }
     },
     {
      "name": "ecs check cold",
      "unit": "G instructions",
      "values": {
-      "grail": 0.015835814,
-      "go": 0.209856348,
-      "go-build": 0.863476904
+      "grail": 0.027799102,
+      "go": 0.260545493,
+      "go-build": 0.998934691
      }
     },
     {
      "name": "ecs check edited",
      "unit": "G instructions",
      "values": {
-      "grail": 0.01517074,
-      "go": 0.210035739,
-      "go-build": 0.868588532
+      "grail": 0.026758495,
+      "go": 0.238092029,
+      "go-build": 0.987050816
      }
     }
    ]

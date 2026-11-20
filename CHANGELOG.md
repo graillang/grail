@@ -1,5 +1,6 @@
 ## Unreleased
 
+- **Benchmarks & book charts refreshed on `0ffc12e4`**: re-ran all six `bench/results/*.json` suites (`bench-rivals`, `engine`, `parallel`, `sched-rivals`, `compile`, and `abundance` on the original 10 programs). `tools/abundance-perf.mjs` now accepts optional positional `[NAME...]` arguments to filter which Abundance programs to measure.
 - **Abundance: `ab-engine-grail` runs the real engine runtime on upstream's compiled shaders.** The toy
   `play_shaders/` sky/terrain/water path is gone; every pass is Abundance's own SPIR-V (vendored from upstream
   `5194b42dc4` by `vendor-shaders.mjs`, built by `build-shaders.mjs`) on real assets:
