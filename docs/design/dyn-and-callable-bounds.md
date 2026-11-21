@@ -287,46 +287,37 @@ Three steps, each useful on its own in one optimiser round:
   check of a division by a constant goes, and with it the cold `call rt_trap` that kept the
   argument registers live (iterchain 21.65G -> 21.25G).
 
-Item 1 is built: `GRAIL_OPT_ROUNDS=N` (default 1). A round splices its copies into the *emitter's*
-text (markers kept) and optimises that again, so each caller is optimised with its callees' copies
-in place, and what a body becomes still does not depend on where the stream is cut. What it takes:
+Items 1–4 are now complete and **on by default** (up to 4 targeted rounds, `GRAIL_OPT_ROUNDS=1` to
+disable):
 
-- the effect checker's call records and the IR dump are the first round's (a later round's bodies
-  have fewer calls);
-- a copy's labels (`.L..._i<prefix>_<site>`, `.Lret_i...`, recognised by the unit prefixes of the
-  `.grail_part` markers) are renamed into the body's own `.L<prefix>_<scope>_<n>` numbering, since an
-  unnumbered jump target makes every register live; in a body with no numbering they are suffixed
-  `_r<round>` so the next round's copies cannot reuse them;
-- a copy's `jmp` to its own end is dropped;
-- a bounds check the site table knows by its shape (`cmpq 8(%rdi),%rsi`, `jb`, `call rt_abort`) is
-  marked `.gkind 1` before the next round, which may spell its registers otherwise, so its report
-  still names the index;
-- new label numbers count from the highest of their numbering in the whole text, since an extern
-  callback's trampoline numbers its labels with its body's before that body's `.type` line;
-- the runtime's bodies are not spliced in a round: its accessors (`rt_at`, `rt_slot`, ...) are
-  pseudo-instructions the next round expands with their checks fused, which a copy of their general
-  body loses (bench/hashmap went 1.20G -> 1.46G until this).
+- **Targeted per-body rounds (`targeted_rounds`):** only bodies that actually call a newly
+  discovered non-runtime inline candidate are spliced and re-optimised, using zero-copy slices of
+  the emitter text and an O(1) hashed `.L...:` label-top table (computed lazily only when a body
+  matches, and deterministic split-independent `.Lopt` ordinals `rb_ord * 1048576 + round * 16384`).
+  Untouched bodies pay nothing (0% overhead on `syn4000`, +4.3% to +9.8% single-process compile
+  time on `strings`/`iterchain`/`json`). `mark_bounds_checks` runs only when the stream carries
+  `.gbase`/`.gpos` site markers so `--no-sites` self-host builds stay clean, and `copy_label`
+  handles empty-prefix `_i_<site>` labels in single-file builds.
+- **Slot-address propagation through frame slots (`lea_slot_operands`):** tracks `leaq -N(%rbp),%r`
+  through non-escaped holder slots (`movq %r,-M(%rbp)` -> `movq -M(%rbp),%r2`) and across
+  transparent `rt_abort` overflow checks (`o.tr`), eliminating the captured-closure stack copy
+  and `leaq` in `Map::fold` once `Filter` is copied in.
+- **Exact liveness interference & `zkeep` spans in `inline_candidate`:** passes `zkeep` from
+  `slots_live_in` so unconditionally-written slots start at their first write (not line 0) and omit
+  redundant zeroing; for loop-free bodies, computes per-line backward register liveness so slots
+  reuse any scratch register that is dead across their span (instead of requiring global non-use),
+  with `INLINE_COST = 48` post-promotion.
+- **`rt_print_number` added to `ir::call_args`** (2 args: `%rdi`, `%rsi`), so dead setup before
+  `println` is dropped.
 
-Items 3 and 4 as built: the cap counts the copy once its slots are registers and the moves and
-stores left behind are gone (`INLINE_COST`, 32; the line count before promotion is a loose bound of
-96), and two slots whose spans (first to last mention, from the start for a cleared slot) do not
-overlap share a scratch register in a body with no backward jump.
-
-Measured, native, user-space instructions:
-
-| | 1 round | 2 rounds |
-|---|---|---|
-| bench/iterchain | 21.25G | **18.45G** |
-| bench/json | 4.81G | 4.80G |
-| bench/hashmap | 1.196G | 1.198G |
-| bench/strings | 5.57G | 5.56G |
-| bench/bintrees, sort, dyncall, ecs | 9.69G, 9.48G, 1.13G, 21.17G | the same |
-
-A third round adds nothing. Compiling costs about half again (single process: json 1.14 s -> 1.78 s,
-iterchain 0.87 s -> 1.28 s), so the default stays one round. Items 3 and 4 change none of these
-figures: what stops the chain flattening further is item 2 - Map's closure passes the address of
-its stack copy of Filter's closure, an address-taken slot, so it is never a copy - and Filter's
-closure, with `filter_step` and the predicate inside, still costs over 32 after promotion.
+Result: `Map::fold`, `Filter::fold`, `filter_step`, and all three user closures flatten completely
+into a **single call-free `while i < n` loop inside `SliceIter::fold`** in development builds.
+`bench/iterchain` natively drops from **27.6 G / 1.52 s (12.71x Go)** to **8.12 G / 0.290 s (2.19x
+Go)** — beating Zig Debug (0.400 s) and 7.8x faster than Rust dev (2.264 s) — while `json` (0.88x
+Go), `strings` (0.95x Go), and `hashmap` (1.14 G) also improve, bringing Grail-native's 18-program
+overview mean to **1.30x** (within 9% of Go's 1.19x). Verified against full native (2,327/2,327),
+LLVM (2,051/2,051), `split-test.mjs` (43-part self-hosted compiler + x86_64/aarch64/riscv64), and
+`cache-test.mjs`.
 
 ### 7.1 Two copy-quality steps taken (branch gap-iterchain)
 

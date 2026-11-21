@@ -3290,7 +3290,7 @@ fn function<a, b>(o: (&a mut ir::Body), s: &b [u8], desc: (&u64[])) {
     // view parameter, unboxed-values.md), or with constants loaded before a loop (cpre), is not a
     // copy of the lines after the prologue: it stays a call.
     if (prologue != 0) & (xchosen.len() == 0) & (o.zline != 0) & (o.zbig == 0) & (dregs.len() == 0) & (cpre.len() == 0) {
-        inline_candidate(&mut o, view(s), prologue, &chosen, &zchosen);
+        inline_candidate(&mut o, view(s), prologue, &chosen, &zchosen, &zkeep);
     }
 }
 // ---- shrink-wrapping (call ABI S5) ----
@@ -7789,15 +7789,26 @@ fn late_slots<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64, keep: (&u64[]))
 // inlined (docs/design/dyn-and-callable-bounds.md 7, item 2). The run stops at a label, a jump, a
 // call or an instruction the optimiser does not know.
 fn lea_slot_operands<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
+    ns := o.maxslot / 8 + 1;
+    // Slots whose own address is taken anywhere in the body cannot safely carry another slot's
+    // address across arbitrary memory stores.
+    mut addr_taken = u64[0; ns + 1];
+    for i in last {
+        if (o.del[i] == 0) && (o.op[i] == 3) && (o.k0[i] == 2) && (o.v0[i] / 8 < addr_taken.len()) {
+            ir::put(&mut addr_taken, o.v0[i] / 8, 1);
+        }
+    }
     for i in last {
         if (o.del[i] != 0) || (o.op[i] != 3) || (o.k0[i] != 2) || (o.k1[i] != 1) {
             continue;
         }
         slot := o.v0[i];
         mut held: u64 = ir::bit(o.v1[i]);
+        mut held_slot = u64[0; ns + 1];
+        mut held_slots = 0;
         mut j = i + 1;
-        while (j < last) && (held != 0) {
-            if o.del[j] != 0 {
+        while (j < last) && ((held != 0) || (held_slots != 0)) {
+            if (o.del[j] != 0) || (o.tr[j] != 0) {
                 j += 1;
                 continue;
             }
@@ -7827,9 +7838,23 @@ fn lea_slot_operands<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
                     }
                 }
             }
-            copied := (op == 1) && (o.k0[j] == 1) && (o.k1[j] == 1) && ((held & ir::bit(o.v0[j])) != 0);
+            copied_reg := (op == 1) && (o.k0[j] == 1) && (o.k1[j] == 1) && ((held & ir::bit(o.v0[j])) != 0);
+            loaded_slot := (op == 1) && (o.k0[j] == 2) && (o.k1[j] == 1) && (o.v0[j] / 8 < held_slot.len()) && (held_slot[o.v0[j] / 8] != 0);
+            stored_slot := (op == 1) && (o.k0[j] == 1) && (o.k1[j] == 2) && ((held & ir::bit(o.v0[j])) != 0) && (o.v1[j] != slot) && (o.v1[j] / 8 < addr_taken.len()) && (addr_taken[o.v1[j] / 8] == 0);
+            if (o.k1[j] == 2) && (o.v1[j] / 8 < held_slot.len()) {
+                idx := o.v1[j] / 8;
+                if stored_slot {
+                    if held_slot[idx] == 0 {
+                        ir::put(&mut held_slot, idx, 1);
+                        held_slots += 1;
+                    }
+                } else if held_slot[idx] != 0 {
+                    ir::put(&mut held_slot, idx, 0);
+                    held_slots -= 1;
+                }
+            }
             held = held & (18446744073709551615 ^ ir::writes(&o, j));
-            if copied {
+            if copied_reg || loaded_slot {
                 held = held | ir::bit(o.v1[j]);
             }
             j += 1;
@@ -7877,6 +7902,9 @@ fn copy_label<a, b>(text: &a [u8], a: u64, e: u64, prefixes: &b u8[][]) -> bool 
     }
     if (d == e) || (d < a + 4) || (text[d - 1] != 95) {
         return false;
+    }
+    if (d >= a + 3) && (text[d - 2] == 105) && (text[d - 3] == 95) {
+        return true;
     }
     for k in prefixes.len() {
         pl := prefixes[k].len();
@@ -7944,183 +7972,482 @@ fn mark_bounds_checks<a>(text: &a [u8]) -> u8[] {
     }
     return out;
 }
-// A copy's labels carry its site suffix (`.L..._i<prefix>_<site>`, `.Lret_i...`), which the optimiser
-// does not read as a label number, so a jump to one has no known target and every register is live
-// there. Before a round optimises a body with copies in it, each such label is renamed into the
-// body's own numbering - the `.L<prefix>_<scope>_<n>` its own labels have, with numbers past its
-// highest - so the next round reads one function.
-fn number_copy_labels<a>(text: &a [u8], round: u64) -> u8[] {
-    mut out = u8[];
-    n := text.len();
-    // The unit prefixes (`.grail_part UNIT PREFIX`): a copy's labels end `_i<prefix>_<site>`.
-    mut prefixes = u8[][];
-    mut at = 0;
-    while at < n {
-        mut e = at;
-        while (e < n) && (text[e] != 10) {
-            e += 1;
-        }
-        if (e - at > 12) && ir::at(view(text), at, view(".grail_part ")) {
-            mut x = at + 12;
-            while (x < e) && (text[x] != 32) {
-                x += 1;
-            }
-            if x + 1 < e {
-                prefixes.push(text[x + 1..e].copy());
-            }
-        }
-        at = e + 1;
-    }
-    // The highest number of every numbering in the whole text: a numbering is not only one body's
-    // (an extern callback's trampoline numbers its labels with its body's, before that body's
-    // `.type`), so new names count from here and move it on.
-    mut nums = u8[][];
-    mut tops = u64[];
-    mut q = 0;
-    while q + 2 < n {
-        if (text[q] == 46) && (text[q + 1] == 76) && ((q == 0) || !label_char(text[q - 1])) {
-            mut e = q + 2;
-            while (e < n) && label_char(text[e]) {
+// Rename copy labels (`.L..._i<prefix>_<site>`, `.Lret_i...`) in a single body into that body's
+// own `.L<prefix>_<scope>_<n>` numbering (falling back to `subq $.F<prefix>_<scope>_1,%rsp` when
+// the body has no `.L` labels of its own), advancing global `nums`/`tops` so no numbering collides
+// across bodies or extern callback trampolines.
+fn number_copy_labels_one<a, b>(text: &a [u8], prefixes: &b u8[][], nums: (&mut u8[][]), tops: (&mut u64[]), nhead: (&mut u64[]), nnext: (&mut u64[]), round: u64) -> u8[] {
+    be := text.len();
+    mut pa = 0;
+    mut pe = 0;
+    mut top = 0;
+    mut names = u8[][];
+    mut i = 0;
+    while i + 2 < be {
+        if (text[i] == 46) && (text[i + 1] == 76) && ((i == 0) || !label_char(text[i - 1])) {
+            mut e = i + 2;
+            while (e < be) && label_char(text[e]) {
                 e += 1;
             }
-            mut v = 0;
-            pe := own_label(view(text), q, e, &mut v);
-            if (pe != 0) && !copy_label(view(text), q, e, &prefixes) {
-                mut at = nums.len();
-                for x in nums.len() {
-                    if (nums[x].len() == pe - q) && ir::same_range(view(text), q, pe, view(nums[x])) {
-                        at = x;
+            if copy_label(view(text), i, e, prefixes) {
+                mut known = false;
+                for x in names.len() {
+                    if (names[x].len() == e - i) && ir::same_range(view(text), i, e, view(names[x])) {
+                        known = true;
                     }
                 }
-                if at == nums.len() {
-                    nums.push(text[q..pe].copy());
-                    tops.push(v);
-                } else if tops[at] < v {
-                    ir::put(&mut tops, at, v);
+                if !known {
+                    names.push(text[i..e].copy());
                 }
-            }
-            q = e;
-        } else {
-            q += 1;
-        }
-    }
-    mut bs = 0;
-    while bs < n {
-        // A body runs from a `.type` line to the next one.
-        mut be = bs + 1;
-        while (be < n) && !((text[be - 1] == 10) && ir::at(view(text), be, view(".type "))) {
-            be += 1;
-        }
-        if be > n {
-            be = n;
-        }
-        // The body's own numbering (from its first `.L<prefix>_<scope>_<n>`), its highest number,
-        // and its copy labels.
-        mut pa = 0;
-        mut pe = 0;
-        mut top = 0;
-        mut names = u8[][];
-        mut i = bs;
-        while i + 2 < be {
-            if (text[i] == 46) && (text[i + 1] == 76) && ((i == bs) || !label_char(text[i - 1])) {
-                mut e = i + 2;
-                while (e < be) && label_char(text[e]) {
-                    e += 1;
-                }
-                copy := copy_label(view(text), i, e, &prefixes);
-                if copy {
-                    mut known = false;
-                    for x in names.len() {
-                        if (names[x].len() == e - i) && ir::same_range(view(text), i, e, view(names[x])) {
-                            known = true;
-                        }
-                    }
-                    if !known {
-                        names.push(text[i..e].copy());
-                    }
-                } else {
-                    // `_<digits>_<digits>` at the end: everything before the last `_` is the
-                    // numbering, the digits after it the number.
-                    mut d2 = e;
-                    while (d2 > i + 2) && (48 <= text[d2 - 1]) && (text[d2 - 1] <= 57) {
-                        d2 -= 1;
-                    }
-                    mut d1 = d2 - 1;
-                    while (d1 > i + 2) && (48 <= text[d1 - 1]) && (text[d1 - 1] <= 57) {
-                        d1 -= 1;
-                    }
-                    if (d2 < e) && (text[d2 - 1] == 95) && (d1 < d2 - 1) && (text[d1 - 1] == 95) && (d1 - 1 > i + 2) {
-                        if pe == 0 {
-                            pa = i;
-                            pe = d2 - 1;
-                        }
-                        if (d2 - 1 - i == pe - pa) && ir::same_range(view(text), i, d2 - 1, text[pa..pe]) {
-                            mut v = 0;
-                            for k in e - d2 {
-                                v = v * 10 + u64(text[d2 + k] - 48);
-                            }
-                            if top < v {
-                                top = v;
-                            }
-                        }
-                    }
-                }
-                i = e;
             } else {
-                i += 1;
-            }
-        }
-        if names.len() == 0 {
-            out.append(text[bs..be]);
-        } else {
-            // A body with no numbering of its own keeps its copy labels, marked `_r<round>` so the next
-            // round's copies (whose site numbers start again) cannot take the same names.
-            mut prefix = u8[];
-            mut base = top;
-            if pe != 0 {
-                prefix = text[pa..pe].copy();
-                for x in nums.len() {
-                    if (nums[x].len() == prefix.len()) && ir::same_range(view(nums[x]), 0, prefix.len(), view(prefix)) {
-                        base = tops[x];
-                        ir::put(&mut tops, x, base + names.len());
+                mut v = 0;
+                ope := own_label(view(text), i, e, &mut v);
+                if ope != 0 {
+                    if pe == 0 {
+                        pa = i;
+                        pe = ope;
                     }
-                }
-            }
-            mut j = bs;
-            mut pend = bs;
-            while j + 2 < be {
-                if (text[j] == 46) && (text[j + 1] == 76) && ((j == bs) || !label_char(text[j - 1])) {
-                    mut e = j + 2;
-                    while (e < be) && label_char(text[e]) {
-                        e += 1;
-                    }
-                    for x in names.len() {
-                        if (names[x].len() == e - j) && ir::same_range(view(text), j, e, view(names[x])) {
-                            out.append(text[pend..j]);
-                            pend = e;
-                            if pe != 0 {
-                                out.append(view(prefix));
-                                out.push(95);
-                                push_decimal(&mut out, base + 1 + x);
-                            } else {
-                                out.append(text[j..e]);
-                                out.push(95);
-                                out.push(114);
-                                push_decimal(&mut out, round);
-                            }
-                            break;
+                    if (ope - i == pe - pa) && ir::same_range(view(text), i, ope, text[pa..pe]) {
+                        if top < v {
+                            top = v;
                         }
                     }
-                    j = e;
-                } else {
-                    j += 1;
                 }
             }
-            out.append(text[pend..be]);
+            i = e;
+        } else {
+            i += 1;
         }
-        bs = be;
     }
+    if names.len() == 0 {
+        return text.copy();
+    }
+    mut prefix = u8[];
+    mut base = top;
+    if pe != 0 {
+        prefix = text[pa..pe].copy();
+    } else {
+        mut k = 0;
+        while k + 10 < be {
+            if ((k == 0) || (text[k - 1] == 10)) && ir::at(view(text), k, view("subq $.F")) {
+                mut fe = k + 8;
+                while (fe < be) && label_char(text[fe]) {
+                    fe += 1;
+                }
+                mut fv = 0;
+                fpe := own_label(view(text), k + 6, fe, &mut fv);
+                if fpe != 0 {
+                    prefix.push(46);
+                    prefix.push(76);
+                    prefix.append(text[k + 8..fpe]);
+                    base = 0;
+                }
+                break;
+            }
+            k += 1;
+        }
+    }
+    if prefix.len() != 0 {
+        h := name_hash(view(prefix), 0, prefix.len());
+        mut k = nhead[h];
+        mut found = false;
+        while k != 0 {
+            x := k - 1;
+            if (nums[x].len() == prefix.len()) && ir::same_range(view(nums[x]), 0, prefix.len(), view(prefix)) {
+                base = tops[x];
+                ir::put(&mut tops, x, base + names.len());
+                found = true;
+                break;
+            }
+            k = nnext[x];
+        }
+        if !found {
+            idx := nums.len();
+            nums.push(prefix.copy());
+            tops.push(base + names.len());
+            nnext.push(nhead[h]);
+            ir::put(&mut nhead, h, idx + 1);
+        }
+    }
+    mut out = u8[];
+    mut j = 0;
+    mut pend = 0;
+    while j + 2 < be {
+        if (text[j] == 46) && (text[j + 1] == 76) && ((j == 0) || !label_char(text[j - 1])) {
+            mut e = j + 2;
+            while (e < be) && label_char(text[e]) {
+                e += 1;
+            }
+            for x in names.len() {
+                if (names[x].len() == e - j) && ir::same_range(view(text), j, e, view(names[x])) {
+                    out.append(text[pend..j]);
+                    pend = e;
+                    if prefix.len() != 0 {
+                        out.append(view(prefix));
+                        out.push(95);
+                        push_decimal(&mut out, base + 1 + x);
+                    } else {
+                        out.append(text[j..e]);
+                        out.push(95);
+                        out.push(114);
+                        push_decimal(&mut out, round);
+                    }
+                    break;
+                }
+            }
+            j = e;
+        } else {
+            j += 1;
+        }
+    }
+    out.append(text[pend..be]);
     return out;
+}
+fn is_rt_name<a>(n: &a [u8]) -> bool {
+    return (n.len() > 3) && (n[0] == 114) && (n[1] == 116) && (n[2] == 95);
+}
+fn body_calls_in_range<a, b, c>(text: &a [u8], o: (&b ir::Body), cand_from: u64, cand_to: u64, unit: &c [u8]) -> bool {
+    n := text.len();
+    mut a = 0;
+    while a < n {
+        mut e = bytes::find_byte(view(text), a, 10);
+        if n <= e {
+            e = n;
+        }
+        if (e - a > 5) && (text[a] == 99) && ir::at(view(text), a, view("call ")) {
+            h := name_hash(view(text), a + 5, e);
+            mut k = o.inl_head[h];
+            while k != 0 {
+                idx := k - 1;
+                if (cand_from <= idx) && (idx < cand_to) {
+                    nm := &o.inl_names[idx];
+                    if (nm.len() == e - (a + 5)) && ir::same_range(view(text), a + 5, e, view(nm)) {
+                        if (unit.len() == 0) || same_text(view(o.inl_units[idx]), unit) || crossing_unit(view(o.inl_units[idx])) {
+                            return true;
+                        }
+                    }
+                }
+                k = o.inl_next[idx];
+            }
+        }
+        a = e + 1;
+    }
+    return false;
+}
+// Scan `.L...:` label definitions in `s` once (O(lines), hashed O(1) lookup) to seed `nums`/`tops`.
+fn scan_label_tops<a, b>(s: &a [u8], prefixes: &b u8[][], nums: (&mut u8[][]), tops: (&mut u64[]), nhead: (&mut u64[]), nnext: (&mut u64[])) {
+    n := s.len();
+    mut pos = 0;
+    while pos < n {
+        mut e = bytes::find_byte(view(s), pos, 10);
+        if n <= e {
+            e = n;
+        }
+        if (e - pos > 5) && (s[pos] == 46) && (s[pos + 1] == 76) && (s[e - 1] == 58) {
+            mut v = 0;
+            pe := own_label(view(s), pos, e - 1, &mut v);
+            if (pe != 0) && !copy_label(view(s), pos, e - 1, prefixes) {
+                h := name_hash(view(s), pos, pe);
+                mut k = nhead[h];
+                mut found = false;
+                while k != 0 {
+                    x := k - 1;
+                    if (nums[x].len() == pe - pos) && ir::same_range(view(s), pos, pe, view(nums[x])) {
+                        if tops[x] < v {
+                            ir::put(&mut tops, x, v);
+                        }
+                        found = true;
+                        break;
+                    }
+                    k = nnext[x];
+                }
+                if !found {
+                    idx := nums.len();
+                    nums.push(s[pos..pe].copy());
+                    tops.push(v);
+                    nnext.push(nhead[h]);
+                    ir::put(&mut nhead, h, idx + 1);
+                }
+            }
+        }
+        pos = e + 1;
+    }
+}
+// Targeted multi-round inlining (dyn-and-callable-bounds.md 7): only bodies that actually call a
+// newly discovered non-runtime inline candidate are spliced and re-optimised, so untouched bodies
+// pay nothing (no copying, no parsing, no re-optimising). Returns true if any body in `o.out` changed.
+fn targeted_rounds<a, b, c, x>(o: (&a mut ir::Body), s: &b [u8], facts: (&c llvm::Facts), ix: (&x ir::FactIndex), rounds: u64) -> bool {
+    mut any_non_rt = false;
+    for k in o.inl_names.len() {
+        if !is_rt_name(view(o.inl_names[k])) {
+            any_non_rt = true;
+            break;
+        }
+    }
+    if !any_non_rt {
+        return false;
+    }
+    // Index raw body spans [lo..hi] in `s` without copying body bytes.
+    n := s.len();
+    mut prefixes = u8[][];
+    mut rb_sym = u8[][];
+    mut rb_unit = u8[][];
+    mut rb_uprefix = u8[][];
+    mut rb_gbase = u64[];
+    mut rb_ord = u64[];
+    mut rb_lo = u64[];
+    mut rb_hi = u64[];
+    mut rb_spliced = u8[][];
+    mut u_names = u8[][];
+    mut u_counts = u64[];
+    mut u_plain: u64 = 0;
+    mut cur_unit = u8[];
+    mut cur_uprefix = u8[];
+    mut cur_gbase: u64 = 0;
+    mut has_sites = false;
+    mut inside = 0;
+    mut opened = 0;
+    mut cur_sym = u8[];
+    mut pos = 0;
+    while pos < n {
+        mut e = bytes::find_byte(view(s), pos, 10);
+        if n <= e {
+            e = n;
+        }
+        next := e + 1;
+        if inside == 0 {
+            if opens_body(view(s), pos, e) {
+                cur_sym = ir::type_symbol(view(s), pos, e);
+                opened = pos;
+                inside = 1;
+            } else if (e - pos > 12) && ir::at(view(s), pos, view(".grail_part ")) {
+                mut sp = pos + 12;
+                while (sp < e) && (s[sp] != 32) {
+                    sp += 1;
+                }
+                cur_unit = s[pos + 12..sp].copy();
+                if sp + 1 < e {
+                    cur_uprefix = s[sp + 1..e].copy();
+                    prefixes.push(cur_uprefix.copy());
+                } else {
+                    cur_uprefix = u8[];
+                }
+            } else if (e - pos >= 8) && (s[pos] == 46) && (s[pos + 1] == 103) && ir::at(view(s), pos, view(".gbase ")) {
+                has_sites = true;
+                mut gb = 0;
+                mut gi = pos + 7;
+                while gi < e {
+                    gb = gb * 10 + u64(s[gi] - 48);
+                    gi += 1;
+                }
+                cur_gbase = gb;
+            }
+        } else if closes_body(view(s), pos, e) {
+            end := if next <= n { next } else { n };
+            rb_sym.push(cur_sym.copy());
+            rb_unit.push(cur_unit.copy());
+            rb_uprefix.push(cur_uprefix.copy());
+            rb_gbase.push(cur_gbase);
+            mut ord: u64 = 0;
+            if cur_unit.len() == 0 {
+                u_plain += 1;
+                ord = u_plain;
+            } else {
+                mut ui = u_names.len();
+                for xi in u_names.len() {
+                    if same_text(view(u_names[xi]), view(cur_unit)) {
+                        ui = xi;
+                        break;
+                    }
+                }
+                if ui == u_names.len() {
+                    u_names.push(cur_unit.copy());
+                    u_counts.push(1);
+                    ord = 1;
+                } else {
+                    ord = u_counts[ui] + 1;
+                    ir::put(&mut u_counts, ui, ord);
+                }
+            }
+            rb_ord.push(ord);
+            rb_lo.push(opened);
+            rb_hi.push(end);
+            rb_spliced.push(u8[]);
+            inside = 0;
+        }
+        pos = next;
+    }
+    mut tops_ready = false;
+    mut nums = u8[][];
+    mut tops = u64[];
+    mut nhead = u64[];
+    mut nnext = u64[];
+    mut repl_sym = u8[][];
+    mut repl_opt = u8[][];
+    mut active_from: u64 = 0;
+    mut active_to = o.inl_names.len();
+    mut round: u64 = 2;
+    while round <= rounds {
+        mut hidden = u64[];
+        for k in o.inl_names.len() {
+            if is_rt_name(view(o.inl_names[k])) {
+                o.inl_names[k][0] = 33;
+                hidden.push(k);
+            }
+        }
+        prev_len := o.inl_names.len();
+        mut any_spliced = false;
+        for b in rb_sym.len() {
+            mut calls = false;
+            if rb_spliced[b].len() != 0 {
+                calls = body_calls_in_range(view(rb_spliced[b]), &o, active_from, active_to, view(rb_unit[b]));
+            } else {
+                calls = body_calls_in_range(s[rb_lo[b]..rb_hi[b]], &o, active_from, active_to, view(rb_unit[b]));
+            }
+            if !calls {
+                continue;
+            }
+            if !tops_ready {
+                for hi in 4096 {
+                    nhead.push(0);
+                }
+                scan_label_tops(view(s), &prefixes, &mut nums, &mut tops, &mut nhead, &mut nnext);
+                tops_ready = true;
+            }
+            mut buf = u8[];
+            has_hdr := rb_unit[b].len() != 0;
+            if has_hdr {
+                app(&mut buf, view(".grail_part "));
+                buf.append(view(rb_unit[b]));
+                buf.push(32);
+                buf.append(view(rb_uprefix[b]));
+                buf.push(10);
+            }
+            if rb_spliced[b].len() != 0 {
+                buf.append(view(rb_spliced[b]));
+            } else {
+                buf.append(s[rb_lo[b]..rb_hi[b]]);
+            }
+            saved_out := exchange(&mut o.out, buf);
+            mut b_lines = u64[];
+            lines_of_interest(view(o.out), 0, &mut b_lines);
+            mut dummy_marks = u64[];
+            inline_calls(&mut o, 1, &mut dummy_marks, &b_lines);
+            spliced_full := exchange(&mut o.out, saved_out);
+            mut body_start: u64 = 0;
+            if has_hdr {
+                nl := bytes::find_byte(view(spliced_full), 0, 10);
+                if nl < spliced_full.len() {
+                    body_start = nl + 1;
+                }
+            }
+            mut spliced_body = drop_jumps_to_next(view(number_copy_labels_one(spliced_full[body_start..spliced_full.len()], &prefixes, &mut nums, &mut tops, &mut nhead, &mut nnext, round)));
+            if has_sites {
+                spliced_body = mark_bounds_checks(view(spliced_body));
+            }
+            exchange(&mut rb_spliced[b], spliced_body.copy());
+            mut sub = ir::new_body();
+            for hi in 4096 {
+                sub.inl_head.push(0);
+            }
+            sub.name = rb_sym[b].copy();
+            sub.unit = rb_unit[b].copy();
+            sub.uprefix = rb_uprefix[b].copy();
+            sub.gbase = rb_gbase[b];
+            exchange(&mut sub.uniq, rb_ord[b] * 1048576 + round * 16384);
+            mut d_ir = u8[];
+            mut d_syms = u8[][];
+            mut d_counts = u64[];
+            one_body(&mut sub, view(spliced_body), 0, spliced_body.len(), true, view(""), facts, ix, 0, &mut d_ir, &mut d_syms, &mut d_counts);
+            mut rslot = repl_sym.len();
+            for ri in repl_sym.len() {
+                if same_text(view(repl_sym[ri]), view(rb_sym[b])) {
+                    rslot = ri;
+                    break;
+                }
+            }
+            if rslot == repl_sym.len() {
+                repl_sym.push(rb_sym[b].copy());
+                repl_opt.push(sub.out.copy());
+            } else {
+                exchange(&mut repl_opt[rslot], sub.out.copy());
+            }
+            any_spliced = true;
+            for ci in sub.inl_names.len() {
+                cn := &sub.inl_names[ci];
+                cb := &sub.inl_bodies[ci];
+                cu := &sub.inl_units[ci];
+                if is_rt_name(view(cn)) {
+                    continue;
+                }
+                h := name_hash(view(cn), 0, cn.len());
+                mut k = o.inl_head[h];
+                mut identical = false;
+                while k != 0 {
+                    if same_text(view(o.inl_names[k - 1]), view(cn)) {
+                        if same_text(view(o.inl_bodies[k - 1]), view(cb)) {
+                            identical = true;
+                        }
+                        break;
+                    }
+                    k = o.inl_next[k - 1];
+                }
+                if !identical {
+                    inl_file(&mut o, cn.copy(), cb.copy(), cu.copy());
+                }
+            }
+        }
+        for hi in hidden.len() {
+            o.inl_names[hidden[hi]][0] = 114;
+        }
+        if !any_spliced || (o.inl_names.len() == prev_len) {
+            break;
+        }
+        active_from = prev_len;
+        active_to = o.inl_names.len();
+        round += 1;
+    }
+    if repl_sym.len() == 0 {
+        return false;
+    }
+    orig := exchange(&mut o.out, u8[]);
+    m := orig.len();
+    mut p = 0;
+    mut pend = 0;
+    mut in_b = 0;
+    mut open_p = 0;
+    mut open_r = repl_sym.len();
+    while p < m {
+        mut e = bytes::find_byte(view(orig), p, 10);
+        if m <= e {
+            e = m;
+        }
+        next := e + 1;
+        if in_b == 0 {
+            if opens_body(view(orig), p, e) {
+                sym := ir::type_symbol(view(orig), p, e);
+                open_r = repl_sym.len();
+                for ri in repl_sym.len() {
+                    if same_text(view(repl_sym[ri]), view(sym)) {
+                        open_r = ri;
+                        break;
+                    }
+                }
+                open_p = p;
+                in_b = 1;
+            }
+        } else if closes_body(view(orig), p, e) {
+            if open_r < repl_sym.len() {
+                o.out.append(orig[pend..open_p]);
+                o.out.append(view(repl_opt[open_r]));
+                pend = if next <= m { next } else { m };
+            }
+            in_b = 0;
+        }
+        p = next;
+    }
+    o.out.append(orig[pend..m]);
+    return true;
 }
 // `jmp L` whose next line (past directives) is `L:` - a copy's jump to its own end - is dropped.
 fn drop_jumps_to_next<a>(text: &a [u8]) -> u8[] {
@@ -8176,8 +8503,8 @@ fn name_hash<b>(s: &b [u8], a: u64, e: u64) -> u64 {
 // Slots promoted to callee-saved registers (`chosen`, zeroed at entry where `zeroed` says) are the
 // caller's registers in a copy, so the copy keeps them in free scratch registers instead: a leaf's
 // copy holds nothing across a call, and the saves and restores around the body are not in it.
-const INLINE_COST: u64 = 32;
-fn inline_candidate<a, b, c>(o: (&a mut ir::Body), s: &b [u8], prologue: u64, chosen: (&c u64[]), zeroed: (&c u64[])) {
+const INLINE_COST: u64 = 48;
+fn inline_candidate<a, b, c>(o: (&a mut ir::Body), s: &b [u8], prologue: u64, chosen: (&c u64[]), zeroed: (&c u64[]), zkeep: (&c u64[])) {
     if o.dyn_pairs.len() != 0 {
         return ();
     }
@@ -8271,7 +8598,7 @@ fn inline_candidate<a, b, c>(o: (&a mut ir::Body), s: &b [u8], prologue: u64, ch
                     if at == span_v.len() {
                         span_v.push(v);
                         mut first = i;
-                        if o.zfrom * 8 < v + 1 {
+                        if (o.zfrom * 8 < v + 1) && ((v / 8 - o.zfrom) < zkeep.len()) && (zkeep[v / 8 - o.zfrom] != 0) {
                             first = 0;
                         }
                         span_a.push(first);
@@ -8283,10 +8610,177 @@ fn inline_candidate<a, b, c>(o: (&a mut ir::Body), s: &b [u8], prologue: u64, ch
             }
         }
     }
+    // For a loop-free body, compute exact backward liveness of registers after each line so a slot
+    // with span [a, e] can take any scratch register that is dead across [a, e] (not merely unused
+    // anywhere in the body). This lets a closure that already holds spliced copies reuse scratch
+    // registers across non-overlapping phases.
+    mut live_after = u64[0; last];
+    mut line_rd = u64[0; last];
+    mut line_wr = u64[0; last];
+    mut live_entry: u64 = 0;
+    if !loops {
+        fx := live_fx(&o);
+        mut lin = u64[0; last];
+        mut cur_live: u64 = 0;
+        mut idx = last;
+        while idx > prologue + 1 {
+            idx -= 1;
+            if (o.del[idx] != 0) || (dead[idx] != 0) || (o.tr[idx] != 0) {
+                ir::put(&mut live_after, idx, cur_live);
+                continue;
+            }
+            op := o.op[idx];
+            if op == 100 {
+                ir::put(&mut lin, idx, cur_live);
+                ir::put(&mut live_after, idx, cur_live);
+            } else if op == 101 {
+                ir::put(&mut live_after, idx, cur_live);
+            } else if (op == 16) || ((16 < op) && (op < 25)) {
+                t := fx.tgt[idx];
+                mut there = ir::all_regs();
+                if t < last {
+                    there = lin[t];
+                }
+                if op == 16 {
+                    cur_live = there;
+                } else {
+                    cur_live = cur_live | there;
+                }
+                ir::put(&mut live_after, idx, cur_live);
+            } else if (op == 29) || (op == 30) {
+                cur_live = ir::result_live(&o);
+                ir::put(&mut live_after, idx, cur_live);
+            } else if op == 0 {
+                cur_live = ir::all_regs();
+                ir::put(&mut live_after, idx, cur_live);
+            } else {
+                ir::put(&mut live_after, idx, cur_live);
+                rd := fx.rd[idx] | ir::mask_of(o.k0[idx], o.v0[idx], o.m0[idx]);
+                wr := fx.wr[idx];
+                ir::put(&mut line_rd, idx, rd);
+                ir::put(&mut line_wr, idx, wr);
+                if (op == 15) && never_returns(&o, view(s), idx) {
+                    cur_live = fx.rd[idx];
+                } else {
+                    cur_live = (cur_live & (ir::all_regs() - wr)) | fx.rd[idx];
+                }
+            }
+        }
+        live_entry = cur_live;
+    }
     // Map every slot in the body to a free caller-saved register.
     free := u64[8, 9, 10, 11, 2, 1, 6, 7];
     mut slots = u64[];
     mut regs = u64[];
+    for i in last {
+        if (prologue < i) & (o.del[i] == 0) & (dead[i] == 0) {
+            for j in 2 {
+                mut k = o.k0[i];
+                mut v = o.v0[i];
+                if j != 0 {
+                    k = o.k1[i];
+                    v = o.v1[i];
+                }
+                if k == 2 {
+                    mut known = 0;
+                    for x in slots.len() {
+                        if slots[x] == v {
+                            known = 1;
+                        }
+                    }
+                    if known == 0 {
+                        mut pick = 99;
+                        mut me = 0;
+                        for x in span_v.len() {
+                            if span_v[x] == v {
+                                me = x;
+                            }
+                        }
+                        sa := span_a[me];
+                        se := span_e[me];
+                        for f in free.len() {
+                            r := free[f];
+                            mut taken: u64 = 0;
+                            if loops {
+                                taken = (used >> r) & 1;
+                            } else {
+                                // Check interference with existing register uses across [sa, se].
+                                rbit := ir::bit(r);
+                                if sa == 0 {
+                                    if (live_entry & rbit) != 0 {
+                                        taken = 1;
+                                    }
+                                } else {
+                                    // At sa, slot v is written (if pure write) or read+written.
+                                    // r must not be live after sa (overwriting it would clobber).
+                                    if (live_after[sa] & rbit) != 0 {
+                                        taken = 1;
+                                    }
+                                    pure_wr := ((o.op[sa] == 1) || (o.op[sa] == 2)) && (o.k1[sa] == 2) && (o.v1[sa] == v) && !((o.k0[sa] == 2) && (o.v0[sa] == v));
+                                    if !pure_wr && (((line_rd[sa] | line_wr[sa]) & rbit) != 0) {
+                                        taken = 1;
+                                    }
+                                }
+                                if taken == 0 {
+                                    mut start_i = sa + 1;
+                                    if sa == 0 {
+                                        start_i = prologue + 1;
+                                    }
+                                    mut p = start_i;
+                                    while (p < se) && (taken == 0) {
+                                        if (o.del[p] == 0) && (dead[p] == 0) {
+                                            if ((line_rd[p] | line_wr[p] | live_after[p]) & rbit) != 0 {
+                                                taken = 1;
+                                            }
+                                        }
+                                        p += 1;
+                                    }
+                                    // At se (last mention of v): r cannot be read by another operand
+                                    // of se, nor written by se if se reads v into a different dest
+                                    // (actually reading v and writing r is valid: movq %r, %r; only
+                                    // reading r as the other operand of se conflicts).
+                                    if (taken == 0) && (se > sa) && (se < last) {
+                                        if (line_rd[se] & rbit) != 0 {
+                                            taken = 1;
+                                        }
+                                        // If se is a read-modify-write of another operand using r,
+                                        // line_rd already includes r; if se writes r and r is live
+                                        // after se, that's fine because v is dead after se!
+                                        // Wait: if se is `movq %r, slot` (a dead last write), r
+                                        // was already in line_rd[se]; if se is `movq slot, %other`,
+                                        // r is not in line_rd[se] unless it's an address base of %other.
+                                    }
+                                }
+                            }
+                            if taken == 0 {
+                                for y in regs.len() {
+                                    if regs[y] == r {
+                                        mut other = 0;
+                                        for x in span_v.len() {
+                                            if span_v[x] == slots[y] {
+                                                other = x;
+                                            }
+                                        }
+                                        if loops || !((span_e[other] < sa) || (se < span_a[other])) {
+                                            taken = 1;
+                                        }
+                                    }
+                                }
+                            }
+                            if (taken == 0) & (pick == 99) {
+                                pick = r;
+                            }
+                        }
+                        if pick == 99 {
+                            return ();
+                        }
+                        slots.push(v);
+                        regs.push(pick);
+                    }
+                }
+            }
+        }
+    }
     for i in last {
         if (prologue < i) & (o.del[i] == 0) {
             for j in 2 {
@@ -8417,7 +8911,8 @@ fn inline_candidate<a, b, c>(o: (&a mut ir::Body), s: &b [u8], prologue: u64, ch
     // Cleared (non-parameter) slots start at zero, as the frame zeroing guaranteed - those whose
     // register the copy still names.
     for x in slots.len() {
-        if (o.zfrom * 8 < slots[x] + 1) && copy_names(&o, view(s), prologue, &dead, regs[x]) {
+        v := slots[x];
+        if (o.zfrom * 8 < v + 1) && ((v / 8 - o.zfrom) < zkeep.len()) && (zkeep[v / 8 - o.zfrom] != 0) && copy_names(&o, view(s), prologue, &dead, regs[x]) {
             app(&mut o.out, view("movq $0,%"));
             reg_name(&mut o, regs[x]);
             o.out.push(10);
@@ -8886,15 +9381,17 @@ fn import_bodies<a, b>(o: (&a mut ir::Body), shared: (&b Shared)) {
     }
 }
 // The runtime bodies this run filed itself that can cross a unit, in the order it filed them.
-fn export_bodies<a, b>(o: (&a ir::Body), own: u64, shared: (&b mut Shared)) {
+fn export_bodies<a, b>(o: (&a ir::Body), own: u64, imported_end: u64, shared: (&b mut Shared)) {
     shared.names.clear();
     shared.bodies.clear();
-    for k in own {
-        if crossing_unit(view(o.inl_units[k])) {
-            form := export_form(view(o.inl_bodies[k]));
-            if form.len() != 0 {
-                shared.names.push(o.inl_names[k].copy());
-                shared.bodies.push(form);
+    for k in o.inl_names.len() {
+        if (k < own) || (imported_end <= k) {
+            if crossing_unit(view(o.inl_units[k])) {
+                form := export_form(view(o.inl_bodies[k]));
+                if form.len() != 0 {
+                    shared.names.push(o.inl_names[k].copy());
+                    shared.bodies.push(form);
+                }
             }
         }
     }
@@ -9158,18 +9655,10 @@ pub fn optimize<b, c, d, m, q, r, t>(s: &b [u8], facts: (&c llvm::Facts), want_i
 // stale (the emitter takes text back on a retry) and in no particular order; empty means scan.
 pub fn optimize_parts<b, c, d, e, m, q, r, t>(s: &b [u8], split: u64, marks: (&mut u64[]), names: (&mut u8[][]), facts: (&c llvm::Facts), want_ir: u64, ir_text: (&mut u8[]), call_syms: (&mut u8[][]), call_counts: (&mut u64[]), memo_dir: &m [u8], memo_id: &m [u8], starts: (&q u64[]), known: (&r ir::Known), shared: (&t mut Shared)) -> u8[] {
     want := host::env(view("GRAIL_OPT_ROUNDS"));
-    mut rounds = 1;
+    mut rounds: u64 = 4;
     if (want.len() == 1) && (48 < want[0]) && (want[0] < 58) {
         rounds = u64(want[0] - 48);
     }
-    return optimize_round(s, split, marks, names, facts, want_ir, ir_text, call_syms, call_counts, memo_dir, memo_id, starts, known, shared, rounds);
-}
-// One optimiser run; with `rounds` above 1, the copies this run would splice are spliced into the
-// emitter's own text instead (markers kept), and that text is optimised again from the start: every
-// caller is then optimised with its callees' copies in place, where a run splices them only after
-// every body is done (dyn-and-callable-bounds.md 7, item 1). What a body becomes still depends only
-// on its own lines and the candidates the previous round found, not on where the stream is cut.
-fn optimize_round<b, c, d, e, m, q, r, t>(s: &b [u8], split: u64, marks: (&mut u64[]), names: (&mut u8[][]), facts: (&c llvm::Facts), want_ir: u64, ir_text: (&mut u8[]), call_syms: (&mut u8[][]), call_counts: (&mut u64[]), memo_dir: &m [u8], memo_id: &m [u8], starts: (&q u64[]), known: (&r ir::Known), shared: (&t mut Shared), rounds: u64) -> u8[] {
     // The type facts, indexed by body symbol once: the table is complete before any body is walked.
     ix := ir::index_facts(facts);
     mut o = ir::new_body();
@@ -9219,39 +9708,17 @@ fn optimize_round<b, c, d, e, m, q, r, t>(s: &b [u8], split: u64, marks: (&mut u
     jobs::phase(view("optimiser-workers"));
     own := o.inl_names.len();
     import_bodies(&mut o, &shared);
+    imported_end := o.inl_names.len();
     if (rounds > 1) && (o.inl_names.len() != 0) {
-        // The next round reads the emitter's text with this round's copies in it.
-        exchange(&mut o.out, s.copy());
-        mut again = u64[];
-        lines_of_interest(view(o.out), 0, &mut again);
-        mut kept = u64[];
-        // The runtime's bodies are not spliced in a round: its accessors (`rt_at`, `rt_slot`, ...)
-        // are pseudo-instructions the next round expands inline with their checks fused, which a
-        // copy of their general body would lose. The final splice still copies them.
-        mut hidden = u64[];
-        for k in o.inl_names.len() {
-            if (o.inl_names[k].len() > 3) && (o.inl_names[k][0] == 114) && (o.inl_names[k][1] == 116) && (o.inl_names[k][2] == 95) {
-                o.inl_names[k][0] = 33;
-                hidden.push(k);
-            }
+        if targeted_rounds(&mut o, view(s), facts, &ix, rounds) {
+            lines.clear();
+            lines_of_interest(view(o.out), 0, &mut lines);
         }
-        inline_calls(&mut o, 1, &mut kept, &again);
-        for h in hidden.len() {
-            o.inl_names[hidden[h]][0] = 114;
-        }
-        spliced := mark_bounds_checks(view(drop_jumps_to_next(view(number_copy_labels(view(exchange(&mut o.out, u8[])), rounds)))));
-        no_starts := u64[];
-        // The call records (the effect checker's cross-check) and the IR dump are this round's,
-        // made from the emitter's text: a later round's bodies have calls replaced by copies.
-        mut syms = u8[][];
-        mut counts = u64[];
-        mut ir = u8[];
-        return optimize_round(view(spliced), split, marks, names, facts, 0, &mut ir, &mut syms, &mut counts, memo_dir, memo_id, &no_starts, known, shared, rounds - 1);
     }
     if (o.inl_names.len() != 0) || (o.marked != 0) {
         inline_calls(&mut o, split, marks, &lines);
     }
-    export_bodies(&o, own, &mut shared);
+    export_bodies(&o, own, imported_end, &mut shared);
     jobs::phase(view("optimiser-inline"));
     return exchange(&mut o.out, u8[]);
 }
