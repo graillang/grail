@@ -1,28 +1,31 @@
 // Zig twin of bench/ecs_par.grl: 1M entities, 600 frames split across a persistent pool of
-// ZIG_THREADS workers synchronized with a reusable barrier (threads spawned once before the loop,
-// matching OpenMP, rayon and Grail's pool).
+// ZIG_THREADS workers synchronized with an atomic sense-reversing barrier (threads spawned once
+// before the loop, matching OpenMP, rayon, C++ std::barrier and Grail's pool).
 const std = @import("std");
 
 const Cols = struct { px: []f32, py: []f32, pz: []f32, vx: []f32, vy: []f32, vz: []f32 };
 
 const Barrier = struct {
-    total: usize,
-    arrived: usize = 0,
-    gen: usize = 0,
-    mutex: std.Thread.Mutex = .{},
-    cond: std.Thread.Condition = .{},
+    total: u32,
+    arrived: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+    gen: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 
     fn wait(self: *Barrier) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        const g = self.gen;
-        self.arrived += 1;
-        if (self.arrived == self.total) {
-            self.arrived = 0;
-            self.gen +%= 1;
-            self.cond.broadcast();
+        const g = self.gen.load(.acquire);
+        const prev = self.arrived.fetchAdd(1, .acq_rel);
+        if (prev + 1 == self.total) {
+            self.arrived.store(0, .monotonic);
+            self.gen.store(g +% 1, .release);
         } else {
-            while (self.gen == g) self.cond.wait(&self.mutex);
+            var spin: u32 = 0;
+            while (self.gen.load(.acquire) == g) {
+                if (spin < 4096) {
+                    std.atomic.spinLoopHint();
+                    spin += 1;
+                } else {
+                    std.Thread.yield() catch {};
+                }
+            }
         }
     }
 };
@@ -35,19 +38,22 @@ fn xs(x0: u64) u64 {
     return x;
 }
 
-fn update(c: Cols, lo: usize, hi: usize) void {
+fn updateSlices(noalias px: []f32, noalias py: []f32, noalias pz: []f32, noalias vx: []f32, noalias vy: []f32, noalias vz: []f32) void {
     const dt: f32 = 0.016;
     const damping: f32 = 0.999;
     const gravity: f32 = 0.0981;
-    var i = lo;
-    while (i < hi) : (i += 1) {
-        c.vx[i] = c.vx[i] * damping;
-        c.vy[i] = c.vy[i] * damping - gravity * dt;
-        c.vz[i] = c.vz[i] * damping;
-        c.px[i] = c.px[i] + c.vx[i] * dt;
-        c.py[i] = c.py[i] + c.vy[i] * dt;
-        c.pz[i] = c.pz[i] + c.vz[i] * dt;
+    for (0..px.len) |i| {
+        vx[i] = vx[i] * damping;
+        vy[i] = vy[i] * damping - gravity * dt;
+        vz[i] = vz[i] * damping;
+        px[i] = px[i] + vx[i] * dt;
+        py[i] = py[i] + vy[i] * dt;
+        pz[i] = pz[i] + vz[i] * dt;
     }
+}
+
+fn update(c: Cols, lo: usize, hi: usize) void {
+    updateSlices(c.px[lo..hi], c.py[lo..hi], c.pz[lo..hi], c.vx[lo..hi], c.vy[lo..hi], c.vz[lo..hi]);
 }
 
 fn workerLoop(c: Cols, lo: usize, hi: usize, frames: usize, barrier: *Barrier) void {
@@ -83,7 +89,7 @@ pub fn main() !void {
     if (workers == 1) {
         for (0..frames) |_| update(c, 0, n);
     } else {
-        var barrier = Barrier{ .total = workers };
+        var barrier = Barrier{ .total = @intCast(workers) };
         const threads = try allocator.alloc(std.Thread, workers - 1);
         for (1..workers) |w| {
             threads[w - 1] = try std.Thread.spawn(.{}, workerLoop, .{ c, w * chunk, @min((w + 1) * chunk, n), frames, &barrier });

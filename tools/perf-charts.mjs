@@ -226,9 +226,9 @@ export function summary(files) {
 // row is averaged over the rows it has, and its bar says which it lacks. Nothing is measured here.
 const languageNames = { c: 'C', cpp: 'C++', rust: 'Rust', go: 'Go', zig: 'Zig', grail: 'Grail' };
 export const overviewPanels = [
-  { id: 'compile-build', label: 'Compile speed - build', files: ['compile'], table: 'compile-wall', only: /^syn\d+ build (cold|edited)$/, figure: '4-job wall time (20-unit scaling builds)', rows: 'measurements', missing: 'no figure for',
+  { id: 'compile-build', label: 'Compile speed - build', files: ['compile'], table: 'compile-wall', only: /^(syn\d+|app\d+) build (cold|edited)$/, figure: '4-job wall time (20-unit flat + layered generic builds)', rows: 'measurements', missing: 'no figure for',
     languages: [['c', 'C', 'c'], ['cpp', 'C++', 'cpp'], ['rust', 'Rust', 'rust'], ['go', 'Go', 'go'], ['zig', 'Zig', 'zig'], ['grail', 'Grail', 'grail']] },
-  { id: 'compile-check', label: 'Compile speed - check', files: ['compile'], table: 'compile-wall', only: /^syn\d+ check (cold|edited)$/, figure: '4-job wall time (20-unit scaling checks)', rows: 'measurements', missing: 'no figure for', why: 'no check-only mode',
+  { id: 'compile-check', label: 'Compile speed - check', files: ['compile'], table: 'compile-wall', only: /^(syn\d+|app\d+) check (cold|edited)$/, figure: '4-job wall time (20-unit flat + layered generic checks)', rows: 'measurements', missing: 'no figure for', why: 'no check-only mode',
     languages: [['c', 'C', 'c'], ['cpp', 'C++', 'cpp'], ['rust', 'Rust', 'rust'], ['zig', 'Zig', 'zig'], ['grail', 'Grail', 'grail']] },
   { id: 'release', label: 'Release builds - run time', files: ['bench-rivals', 'engine', 'parallel'], table: 'release', skip: /^chan$/, figure: 'CPU time (wall for parallel ECS; excl. chan)', rows: 'programs', missing: 'no twin of',
     languages: [['c', 'C', 'c'], ['cpp', 'C++', 'cpp'], ['rust-release', 'Rust', 'rust'], ['go', 'Go', 'go'], ['zig-fast', 'Zig', 'zig'], ['grail-llvm', 'Grail', 'grail']] },

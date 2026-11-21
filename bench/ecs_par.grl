@@ -1,7 +1,8 @@
 // The parallel twin of bench/ecs.grl: the same million entities, the same 600 frames, the same
 // sum, with each frame's update run on the pool's workers through one fused parallel_for_zip over
 // all six columns (matching OpenMP, rayon, C++ std::barrier, Go and Zig).
-// GRAIL_WORKERS sets the worker count.
+// Runs inside a structured green task so main sleeps and GRAIL_WORKERS=W uses exactly W threads
+// total (matching OMP_NUM_THREADS, CPP_THREADS, RAYON_NUM_THREADS, GOMAXPROCS and ZIG_THREADS).
 const GRAIN: u64 = 16384;
 const DT: f32 = 0.016;
 const DAMPING: f32 = 0.999;
@@ -29,7 +30,7 @@ fn update(vx: &mut [f32], vy: &mut [f32], vz: &mut [f32], px: &mut [f32], py: &m
     axis(vz, pz);
 }
 
-fn main() {
+fn run_sim(_n: u64, _ctx: u64) -> f64 {
     n: u64 := 1000000;
     mut px = f32[0.0; n];
     mut py = f32[0.0; n];
@@ -56,5 +57,14 @@ fn main() {
     for i in n {
         sum = sum + f64(px[i]) + f64(py[i]) + f64(pz[i]);
     }
-    println("{}", sum);
+    sum
+}
+
+fn body<s>(sc: (&s Scope<u64>), _ctx: u64) -> f64 {
+    t := spawn(sc, 0, run_sim);
+    join(t)
+}
+
+fn main() {
+    println("{}", task_scope(0, body));
 }

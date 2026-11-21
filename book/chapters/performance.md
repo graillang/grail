@@ -7,26 +7,28 @@ that checks and builds faster than Go, Zig and rustc, cold and after a one-funct
 scheduler that matches Rust's rayon and C++'s oneTBB. They are targets, not results. On the commit
 charted:
 
-- **Compile speed — build:** On the 20-unit scaling projects (`syn1000` and `syn4000`, 4 build
-  rows at 4 jobs, every language producing a linked debug executable), Grail (1.19x, fastest on
-  both edited builds: 0.05 s and 0.11 s), C (1.32x) and Go (1.93x, fastest on both cold builds:
-  0.25 s and 0.73 s) lead, ahead of Rust (2.78x, 20-crate workspace), C++ (5.21x) and Zig (6.24x,
-  self-hosted x86-64 backend). Default `grail build` runs the native optimiser and writes line
-  tables (whereas `grail build --debug` turns the optimiser off, writes full variable DWARF and
+- **Compile speed — build:** Across the three 20-unit projects (`syn1000`, `syn4000` and the
+  3-layer generic/interface/HashMap DAG `app2000`, 6 build rows at 4 jobs, every language producing
+  a linked debug executable), C (1.26x, 1/6) and Grail (1.26x, 2/6: fastest on edited `syn1000`
+  and `syn4000`, tied with C on edited `app2000`) lead, followed by Go (1.61x, fastest on all 3
+  cold builds: 0.25 s, 0.64 s and 0.34 s), Rust (2.60x, 20-crate workspace), C++ (4.47x) and Zig
+  (5.85x, self-hosted x86-64 backend; fastest 1-process cold build, but 1.25x 4-job scaling and no
+  on-disk incremental cache outside `--watch`). Default `grail build` runs the native optimiser and
+  writes line tables (`grail build --debug` turns the optimiser off, writes full variable DWARF and
   builds `syn4000` cold in 0.44 s).
 - **Compile speed — check:** Across the 5 languages with a type-check-only command (Go is omitted
   because `go vet` compiles and runs static analysis; it stays in the detail tables below), Grail
-  leads all 4 rows (1.00x: 0.20 s cold, 0.03 s edited on `syn4000`), ahead of C (1.61x), Zig
-  (4.83x), Rust (5.14x) and C++ (13.12x).
-- **Release builds:** Over the 18 programs where every language has a comparable implementation
-  (`chan` is kept in the Engine chart below because C, C++ and Zig lack a stdlib channel), Zig
-  (1.19x, 8/18), Grail (1.19x, 3/18: `iterchain` and `ecs_par` at 1 and 4 workers) and C (1.19x,
-  5/18) are level at the top, ahead of C++ (1.21x), Rust (1.29x) and Go (2.43x). Grail's largest gaps
-  are `ecs_par` at 8 workers (2.14x C's OpenMP) and `sort` (1.72x C++'s `std::merge`, 1.06x C's).
-- **Development builds:** Go's is ahead by 9% (1.19x against Grail-native's 1.30x over the 18
+  leads all 6 rows (1.00x: 0.20 s cold / 0.03 s edited on `syn4000`, 0.14 s / 0.03 s on `app2000`),
+  ahead of C (1.42x), Zig (4.25x), Rust (4.44x) and C++ (9.44x).
+- **Release builds:** Over the 18 comparable programs (`chan` is kept in the Engine chart below
+  because C, C++ and Zig lack a stdlib channel), Zig (1.10x, 9/18) and Grail (1.17x, 3/18:
+  `iterchain`, `xform_f32` and `xform_f64`) lead, ahead of C (1.21x, 4/18), C++ (1.24x, 3/18),
+  Rust (1.29x) and Go (2.40x). Grail's largest gaps are `sort` (1.72x C++'s `std::merge`, 1.06x
+  C's), `nbody` (1.65x Zig, at parity with C) and `ecs_par` at 8 workers (1.55x Zig, 1.24x C).
+- **Development builds:** Go's is ahead by 10% (1.18x against Grail-native's 1.30x over the 18
   programs; Grail is faster than Go on `ecs`, `ecs_par`, `json` and `strings`). Grail's is faster
-  than Rust's dev profile (7.30x) on all 18 (and 19/19 with `chan`) and faster than Zig Debug
-  (3.61x) on 17 of 18 (all except `ffi_call`).
+  than Rust's dev profile (7.34x) on all 18 (and 19/19 with `chan`) and faster than Zig Debug
+  (3.56x) on 17 of 18 (all except `ffi_call`).
 - **Scheduler:** oneTBB is ahead (1.22x against Grail's 1.39x and rayon's 2.35x across the 12
   scheduler rows, excluding the serial `fib(32)` baseline). Grail is fastest on `join` from main
   (146 ns, 0.53x), `join` on a worker (132 ns, 0.61x) and `frame max` (1.11 ms, 0.77x), and within
@@ -67,9 +69,9 @@ as long again as the fastest. All four panels share one logarithmic scale that s
 bar's length is how far a language is from the fastest, and each panel lists the lowest first.
 Each panel names the file it reads, its figure and the languages it has no bar for:
 
-- **Compile speed - build** compares all six languages on the 4 multi-unit scaling build rows
-  (`syn1000` and `syn4000`, cold and edited, 4-job wall time) where every toolchain produces a
-  linked debug binary.
+- **Compile speed - build** compares all six languages on the 6 multi-unit scaling build rows
+  (`syn1000`, `syn4000` and the 3-layer generic `app2000`, cold and edited, 4-job wall time)
+  where every toolchain produces a linked debug binary.
 - **Compile speed - check** compares the five languages that have a type-check-only mode (Grail, C,
   Zig, Rust and C++; Go is omitted rather than penalised for `go vet`, which runs full compilation
   and static analysis and stays in the detail tables below).
@@ -145,7 +147,7 @@ quickly, as Go's compiler and Zig's debug backend do. Go has one build mode and 
 
 **Where it stands, and why.** Grail's development build takes less CPU time than Rust's dev profile
 on all 19 programs and than Zig Debug on 18 of 19 (Zig Debug is ahead only on `ffi_call`, 2.00 ns
-against 2.39 ns). Against Go it is ahead on `ecs` (0.77x), `ecs_par` (0.57x to 0.63x), `json` (0.88x) and `strings`
+against 2.39 ns). Against Go it is ahead on `ecs` (0.77x), `ecs_par` (0.75x at 8 workers), `json` (0.88x) and `strings`
 (0.95x), and within 1.2x on `dot_f64`, `fnv`, `matmul`, `sort` and `hashmap`, while trailing
 furthest on `iterchain` (2.19x Go, down from 12.71x after targeted multi-round inlining flattened
 the adapter chain into `SliceIter::fold`) and `chan` (1.93x Go). A vector or slice a loop does not change keeps its
@@ -225,27 +227,28 @@ Zig, Rust, C and Go). What remains:
 ## Parallel loops
 
 The `ecs` program above, run on several cores: the same million entities and 600 frames, the update
-split across workers each frame, at 1, 4 and 8 workers. Grail uses one `parallel_for_zip` over all six
-columns per frame, in pieces of 16,384 entities; C uses OpenMP
-(`parallel for schedule(static)`), C++ uses a persistent `std::jthread` pool synchronised with
-`std::barrier`, Rust uses rayon (`par_iter_mut().zip(..)` over all six columns), Go spawns one
-goroutine per worker each frame, and Zig uses a persistent `std.Thread` pool with a reusable
-barrier. Every runtime creates its worker threads once before the 600-frame loop (except Go's
-goroutines). Each entity's arithmetic is independent and the final sum is serial, so every program
-prints the exact serial checksum at any worker count, and the tool verifies that it does.
+split across workers each frame, at 1, 4 and 8 workers. Grail runs the simulation inside a structured green task (`task_scope`, so `main` sleeps and
+`GRAIL_WORKERS=W` uses strictly `W` threads total) using one `parallel_for_zip` over all six
+columns per frame, in pieces of 16,384 entities; C uses OpenMP (`parallel for schedule(static)`),
+C++ uses a persistent `std::jthread` pool synchronised with `std::barrier`, Rust uses rayon
+(`par_iter_mut().zip(..)` over all six columns), Go spawns one goroutine per worker each frame, and
+Zig uses a persistent `std.Thread` pool with `noalias` slices and an atomic sense-reversing
+barrier. Every runtime uses strictly 1, 4 and 8 total threads and creates its worker threads once
+before the 600-frame loop (except Go's goroutines). Each entity's arithmetic is independent and the
+final sum is serial, so every program prints the exact serial checksum at any worker count, and the
+tool verifies that it does.
 
 A parallel loop is about wall time, so this chart is wall time, best of nine runs, with every
-runtime told the same number of threads. Grail's release build is the fastest of the six at 1 worker
-(0.114 s against Zig's 0.208 s and C's 0.233 s) and at 4 (0.072 s against C++'s 0.074 s and C's
-0.083 s); at 8 it is 2.14x C's OpenMP (0.093 s against 0.044 s). It executes 4.8 billion
-instructions where C, C++, Rust and Zig execute 4.3 billion: the callback's loops are vectorised,
-since every element access in a release build is now marked as unable to alias a slice header, so
-LLVM reads each slice's data pointer once per loop. At 8 workers each worker's share of a frame is
-small enough that the fork-join cost of Grail's work-stealing pool (a wake per piece, then a join)
-outweighs the work, where OpenMP's static schedule hands each thread one fixed range.
+runtime given the same total thread count. Grail's release build scales cleanly from 1 to 4 to 8
+workers: **0.229 s** at 1 worker (1.01x Zig's 0.226 s, ahead of C++ 0.248 s, C 0.262 s and Rust
+0.276 s), **0.074 s** at 4 workers (tied with C's 0.074 s, ahead of C++ 0.081 s and Rust 0.101 s,
+1.14x Zig's 0.065 s), and **0.063 s** at 8 workers (ahead of C++ 0.074 s and 1.6x faster than Rust
+rayon's 0.102 s; 1.24x C's 0.051 s and 1.55x Zig's 0.041 s). It executes 4.8–5.0 billion
+instructions against 3.8–4.5 billion in Zig/C/C++/Rust: every element access is marked unable to
+alias a slice header, so LLVM hoists the data pointers and vectorises the callback 4-wide.
 
-In development builds, Grail-native is faster than Go, Zig Debug and Rust dev at every worker count
-(0.57x to 0.63x Go).
+In development builds, Grail-native beats Go at 1 and 8 workers (0.79x and 0.75x Go, 1.12x at 4)
+and is 3–6x faster than Zig Debug and 13–23x faster than Rust dev.
 
 {{perf:parallel#release}}
 
@@ -293,11 +296,20 @@ The target: Grail compiles faster than Go, Zig and rustc, and its development bu
 sooner than Zig Debug's, Rust's dev profile's and Go's; C and C++, compiled by clang and clang++,
 are measured beside them.
 
-To avoid skewing the overview with 100-line toolchain start-up, the two scaling projects
-(`syn1000` at ~26,000 lines and `syn4000` at ~104,000 lines — N copies of a record, constructor and
-15-line loop function, with `main` calling every one) are split across **20 Grail modules / Go packages / Rust crates / C and C++ translation units** (`m0` through `m19` plus `main`). Every toolchain therefore gets
-realistic parallel compilation across 4 jobs and real incremental builds when one constant changes
-inside module `m10`:
+To avoid skewing the overview with 100-line toolchain start-up, three 20-unit scaling projects are
+measured across **20 Grail modules / Go packages / Rust Cargo workspace crates / C and C++
+translation units** plus `main`:
+
+- **`syn1000` (~26k lines) and `syn4000` (~104k lines):** flat monomorphic scaling — N copies of a
+  record, constructor and 15-line loop function across `m0`..`m19`, with a one-constant edit in
+  `m10`.
+- **`app2000` (2,000 functions):** a **3-layer dependency DAG** (4 foundation units `base0..3` ->
+  8 domain units `mid0..7` -> 8 service units `top0..7` -> `main`) using everyday idiomatic
+  generics, interfaces/traits, `Option`/`std::optional`, and hash maps, with a mid-layer edit in
+  `mid4` that downstream units depend on.
+
+Every toolchain therefore gets realistic parallel compilation across 4 jobs and real incremental
+builds:
 
 - **Grail:** a `grail.toml` project with `src/main.grl` and `src/m0.grl`..`src/m19.grl`, checked
   with `grail check` and built with `grail build` through the build store (which writes line tables
@@ -319,8 +331,8 @@ inside module `m10`:
   compilation keeps state in a persistent `zig build --watch` daemon rather than on-disk caches.
 
 Single-file `hello` and the seven engine twins are also measured and shown in the detail tables
-below, while the overview panel averages only the 8 multi-module scaling rows (`syn1000` and
-`syn4000`). Every toolchain's standard library cache is warm before timing (`grail cache warm`,
+below, while the overview panels average the 6 build rows and 6 check rows of `syn1000`, `syn4000` and
+`app2000`. Every toolchain's standard library cache is warm before timing (`grail cache warm`,
 `GOCACHE`, `zig-cache`, offline Cargo registry). Two passes run: one process (`-j1` / `-p=1` /
 `GRAIL_JOBS=1`) for deterministic user-space instruction counts, and four jobs for wall time.
 
@@ -328,22 +340,24 @@ below, while the overview panel averages only the 8 multi-module scaling rows (`
 
 {{perf:compile#compile-wall}}
 
-**Where Grail stands.** On the 20-unit 104,000-line project (`syn4000`):
+**Where Grail stands.** On both the 104,000-line flat project (`syn4000`) and the 3-layer generic
+DAG (`app2000`):
 
-- **Incremental edits (one function body in `m10` changed):** Grail leads every language on both
-  instructions and 4-job wall time for builds (**0.61 G / 0.11 s** against C's 0.84 G / 0.16 s,
-  Rust's 2.44 G / 0.30 s, Go's 6.45 G / 0.42 s, C++'s 2.87 G / 0.46 s and Zig's 16.72 G /
-  1.69 s, since one-shot `zig build-exe` does not persist incremental state between runs). On edited
-  check, Grail (**0.25 G / 0.03 s**) and C (**0.19 G / 0.04 s**) are virtually tied, ahead of Rust
-  (1.16 G / 0.14 s), Go (2.58 G / 0.17 s), C++ (1.60 G / 0.26 s) and Zig (2.55 G / 0.27 s).
-- **Cold checks:** Grail (**4.57 G / 0.20 s**), C (4.10 G / 0.23 s) and Zig (3.32 G / 0.29 s) are
-  all under 0.3 s in 4-job wall time, ahead of Go's `go vet ./...` (34.31 G / 0.56 s, which runs
-  full static analysis on top of type-checking), Rust (20.28 G / 0.81 s across 20 crates) and C++
-  (34.25 G / 1.59 s, re-parsing STL headers in every translation unit).
-- **Cold builds:** C uses the fewest instructions (16.21 G / 0.79 s), closely followed by Zig's
-  self-hosted backend (17.49 G / 1.69 s), and **Go has the fastest 4-job wall time (32.62 G /
-  0.73 s)** across the 20 packages; Grail is third in wall time (37.95 G / 1.23 s), ahead of Zig
-  (1.69 s), Rust (43.98 G / 1.83 s) and C++ (57.15 G / 2.68 s).
+- **Incremental edits:** On `syn4000`, Grail leads every language on builds (**0.63 G / 0.10 s**
+  against C's 0.84 G / 0.16 s, Rust's 2.44 G / 0.34 s, Go's 6.34 G / 0.35 s, C++'s 2.87 G / 0.48 s
+  and Zig's 16.72 G / 1.69 s). On a mid-layer edit to `mid4` in `app2000`, Grail (**0.92 G / 0.13 s**)
+  and C (**0.76 G / 0.13 s**) lead, ahead of Go (0.18 s), Rust (0.18 s), C++ (0.35 s) and Zig
+  (1.00 s). On edited check, Grail leads both (`syn4000` **0.03 s**, `app2000` **0.03 s**).
+- **Cold checks:** Grail leads all six 4-job wall-time check rows (`syn4000` **0.20 s**, `app2000`
+  **0.14 s**), ahead of C (0.24 s / 0.15 s), Zig (0.29 s / 0.22 s), Rust (0.91 s / 0.36 s) and C++
+  (1.60 s / 0.62 s).
+- **Cold builds:** **Go has the fastest 4-job wall time on all three cold builds** (`syn1000`
+  **0.25 s**, `syn4000` **0.64 s**, `app2000` **0.34 s** — 2.4–3.1x faster than Rust's 0.69 s /
+  2.00 s / 0.81 s), followed by C (0.29 s / 0.80 s / 0.38 s) and Grail (0.29 s / 1.26 s / 0.57 s),
+  ahead of Rust (0.69 s / 2.00 s / 0.81 s), Zig (0.70 s / 1.65 s / 1.00 s) and C++ (1.74 s / 2.80 s
+  / 1.06 s). In single-process CPU time, Zig's self-hosted backend is actually the fastest on
+  `syn4000` cold (2.12 s / 17.49 G), but scales only ~1.25x across 4 cores and recompiles from
+  scratch on one-shot CLI edits.
 - **Debug-info trade-off:** Default `grail build` runs the native optimiser and writes line tables
   and function ranges (so dev binaries run 5x faster than Rust dev and 2.6x faster than Zig Debug).
   Running `grail build --debug` turns the optimiser off and emits full variable DWARF too — on

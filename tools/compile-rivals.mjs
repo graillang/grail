@@ -28,6 +28,7 @@ import { spawnSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { root } from './platforms.mjs';
+import { grailApp, rustApp, goApp, zigApp, cppApp, cApp, editApp } from './rivals/app-project.mjs';
 import { compilerOptions, grailCompiler, jsonOption, loadavg, measurer, ratio, run, toolchains, versions, writeResults } from './rivals/common.mjs';
 
 const argv = process.argv.slice(2);
@@ -36,6 +37,7 @@ const jsonPath = jsonOption(argv);
 const option = (name, fallback) => { const at = argv.indexOf(name); return at < 0 ? fallback : argv[at + 1]; };
 const runs = Number(option('--runs', 2));
 const sizes = option('--sizes', '1000,4000').split(',').filter(Boolean).map(Number);
+const appSizes = option('--apps', '2000').split(',').filter(Boolean).map(Number);
 const MODULES = 20;
 const work = join(root, '.work/compile-rivals');
 rmSync(work, { recursive: true, force: true });
@@ -250,7 +252,7 @@ const twinEdit = {
 
 const languages = {
   grail: {
-    file: 'main.grl', comment: '//', scaling: grailScaling, hello: grailHello,
+    file: 'main.grl', comment: '//', scaling: grailScaling, app: grailApp, hello: grailHello,
     fresh(dir) { if (existsSync(storeTemplate)) cpSync(storeTemplate, join(dir, 'store'), { recursive: true }); },
     env: dir => ({ GRAIL_CACHE_DIR: join(dir, 'store') }),
     check: (multi) => multi ? ['__grail', 'check'] : ['__grail', 'check', 'main.grl'],
@@ -258,7 +260,7 @@ const languages = {
     exe: (multi) => multi ? 'target/syn' : 'target/main',
   },
   go: {
-    file: 'main.go', comment: '//', scaling: goScaling, hello: goHello,
+    file: 'main.go', comment: '//', scaling: goScaling, app: goApp, hello: goHello,
     fresh(dir) { writeFileSync(join(dir, 'go.mod'), 'module syn\n\ngo 1.23\n'); },
     env: () => ({}),
     check: (multi) => ['go', 'vet', multi ? './...' : '.'],
@@ -267,7 +269,7 @@ const languages = {
     exe: 'syn',
   },
   zig: {
-    file: 'main.zig', comment: '//', scaling: zigScaling, hello: zigHello,
+    file: 'main.zig', comment: '//', scaling: zigScaling, app: zigApp, hello: zigHello,
     env: dir => ({ ZIG_LOCAL_CACHE_DIR: join(dir, 'zig-cache') }),
     fresh() {},
     check: () => ['zig', 'build-exe', '-fno-emit-bin', 'main.zig'],
@@ -275,7 +277,7 @@ const languages = {
     exe: 'main',
   },
   c: {
-    file: 'main.c', comment: '//', scaling: cScaling, hello: cHello,
+    file: 'main.c', comment: '//', scaling: cScaling, app: cApp, hello: cHello,
     fresh(dir, spec) {
       if (!spec.multi) writeFileSync(join(dir, 'Makefile'), 'CC = clang\nCFLAGS = -O0 -g\nLDFLAGS = -fuse-ld=lld\n\nmain: main.c\n\t$(CC) $(CFLAGS) $(LDFLAGS) -o main main.c\n');
     },
@@ -285,7 +287,7 @@ const languages = {
     exe: 'main',
   },
   cpp: {
-    file: 'main.cpp', comment: '//', scaling: cppScaling, hello: cppHello,
+    file: 'main.cpp', comment: '//', scaling: cppScaling, app: cppApp, hello: cppHello,
     fresh(dir, spec) {
       if (!spec.multi) writeFileSync(join(dir, 'Makefile'), 'CXX = clang++\nCXXFLAGS = -std=c++20 -O0 -g\nLDFLAGS = -fuse-ld=lld\n\nmain: main.cpp\n\t$(CXX) $(CXXFLAGS) $(LDFLAGS) -o main main.cpp\n');
     },
@@ -295,7 +297,7 @@ const languages = {
     exe: 'main',
   },
   rust: {
-    file: 'src/main.rs', comment: '//', scaling: rustScaling, hello: rustHello,
+    file: 'src/main.rs', comment: '//', scaling: rustScaling, app: rustApp, hello: rustHello,
     fresh(dir, spec) {
       mkdirSync(join(dir, 'src'), { recursive: true });
       const text = Object.values(spec.files).join('\n');
@@ -367,6 +369,11 @@ const programs = [
     label: `syn${n}`, check: true,
     spec: (lang, seed) => languages[lang].scaling(n, seed),
     edit: (_lang, spec) => editScaling(spec.files[spec.editFile], spec.editTarget),
+  })),
+  ...appSizes.map(n => ({
+    label: `app${n}`, check: true,
+    spec: (lang, seed) => languages[lang].app(n, seed),
+    edit: (_lang, spec) => editApp(spec.files[spec.editFile], spec.editTarget),
   })),
   ...twins.map(name => ({
     label: name, check: false,
@@ -449,8 +456,8 @@ if (jsonPath) {
   });
   writeResults(jsonPath, {
     tool: 'compile-rivals', title: 'Compile speed against C, C++, Go, Zig and rustc', commit: measuredGrail.commit, versions: v, load,
-    commands: [`bun tools/compile-rivals.mjs --runs ${runs} --sizes ${sizes.join(',')} --twins ${twins.join(',')}`,
-      `syn1000 and syn4000 are split across ${MODULES} Grail modules / Go packages / Rust crates / C and C++ translation units so every toolchain gets parallel compilation and incremental module/package/TU edits`,
+    commands: [`bun tools/compile-rivals.mjs --runs ${runs} --sizes ${sizes.join(',')} --apps ${appSizes.join(',')} --twins ${twins.join(',')}`,
+      `syn1000 and syn4000 are flat 20-unit projects; app2000 is a 3-layer 20-unit dependency DAG (4 foundation + 8 domain + 8 service modules/packages/crates/TUs) using generics, interfaces/traits, Option/optional, and hash maps, edited in mid-layer unit mid4`,
       `Grail's store before each cold run: ${templateFrom}; Go's GOCACHE holds its standard library, Zig's cache its compiler_rt, and cargo uses the offline registry, so the standard library is warm for every toolchain`,
       'one process: GRAIL_JOBS=1, GOMAXPROCS=1 GOFLAGS=-p=1, make -j1, CARGO_BUILD_JOBS=1; four jobs: the same at 4',
       'Grail: check `grail check`, build `grail build` (grail.toml project with 20 modules under src/)',
