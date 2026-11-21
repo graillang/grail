@@ -7869,14 +7869,141 @@ fn push_decimal(out: (&mut u8[]), v: u64) {
     }
     out.push(u8(48 + v % 10));
 }
+// Whether `text[a..e]` ends `_i<prefix>_<digits>` for one of the unit prefixes: a copy's label.
+fn copy_label<a, b>(text: &a [u8], a: u64, e: u64, prefixes: &b u8[][]) -> bool {
+    mut d = e;
+    while (d > a) && (48 <= text[d - 1]) && (text[d - 1] <= 57) {
+        d -= 1;
+    }
+    if (d == e) || (d < a + 4) || (text[d - 1] != 95) {
+        return false;
+    }
+    for k in prefixes.len() {
+        pl := prefixes[k].len();
+        if (d - 1 >= a + pl + 2) && ir::same_range(view(text), d - 1 - pl, d - 1, view(prefixes[k])) && (text[d - 2 - pl] == 105) && (text[d - 3 - pl] == 95) {
+            return true;
+        }
+    }
+    return false;
+}
+// For an own label `.L<numbering>_<n>` (`<numbering>` ending `_<digits>`): the end of its numbering
+// part, or 0, with the number in `num`.
+fn own_label<a>(text: &a [u8], i: u64, e: u64, num: (&mut u64)) -> u64 {
+    mut d2 = e;
+    while (d2 > i + 2) && (48 <= text[d2 - 1]) && (text[d2 - 1] <= 57) {
+        d2 -= 1;
+    }
+    if (d2 == e) || (d2 <= i + 3) || (text[d2 - 1] != 95) {
+        return 0;
+    }
+    mut d1 = d2 - 1;
+    while (d1 > i + 2) && (48 <= text[d1 - 1]) && (text[d1 - 1] <= 57) {
+        d1 -= 1;
+    }
+    if (d1 == d2 - 1) || (text[d1 - 1] != 95) || (d1 - 1 <= i + 2) {
+        return 0;
+    }
+    mut v = 0;
+    for k in e - d2 {
+        v = v * 10 + u64(text[d2 + k] - 48);
+    }
+    exchange(num, v);
+    return d2 - 1;
+}
+// A bounds check the site table recognises by its shape (`cmpq 8(%rdi),%rsi`, `jb`, `call rt_abort`:
+// native.grl, site_table) is marked `.gkind 1` before a round optimises it again, which may spell
+// its registers otherwise; the report still says which index was out of bounds.
+fn mark_bounds_checks<a>(text: &a [u8]) -> u8[] {
+    mut out = u8[];
+    n := text.len();
+    mut p1a = 0;
+    mut p1e = 0;
+    mut p2a = 0;
+    mut p2e = 0;
+    mut a = 0;
+    while a < n {
+        mut e = a;
+        while (e < n) && (text[e] != 10) {
+            e += 1;
+        }
+        directive := (e > a) && (text[a] == 46);
+        if (e - a == 13) && ir::at(view(text), a, view("call rt_abort")) && (p1e > p1a + 3) && ir::at(view(text), p1a, view("jb ")) && (p2e - p2a == 17) && ir::at(view(text), p2a, view("cmpq 8(%rdi),%rsi")) {
+            app(&mut out, view(".gkind 1\n"));
+        }
+        out.append(text[a..e]);
+        if e < n {
+            out.push(10);
+        }
+        if !directive && (e > a) {
+            p2a = p1a;
+            p2e = p1e;
+            p1a = a;
+            p1e = e;
+        }
+        a = e + 1;
+    }
+    return out;
+}
 // A copy's labels carry its site suffix (`.L..._i<prefix>_<site>`, `.Lret_i...`), which the optimiser
 // does not read as a label number, so a jump to one has no known target and every register is live
 // there. Before a round optimises a body with copies in it, each such label is renamed into the
 // body's own numbering - the `.L<prefix>_<scope>_<n>` its own labels have, with numbers past its
 // highest - so the next round reads one function.
-fn number_copy_labels<a>(text: &a [u8]) -> u8[] {
+fn number_copy_labels<a>(text: &a [u8], round: u64) -> u8[] {
     mut out = u8[];
     n := text.len();
+    // The unit prefixes (`.grail_part UNIT PREFIX`): a copy's labels end `_i<prefix>_<site>`.
+    mut prefixes = u8[][];
+    mut at = 0;
+    while at < n {
+        mut e = at;
+        while (e < n) && (text[e] != 10) {
+            e += 1;
+        }
+        if (e - at > 12) && ir::at(view(text), at, view(".grail_part ")) {
+            mut x = at + 12;
+            while (x < e) && (text[x] != 32) {
+                x += 1;
+            }
+            if x + 1 < e {
+                prefixes.push(text[x + 1..e].copy());
+            }
+        }
+        at = e + 1;
+    }
+    // The highest number of every numbering in the whole text: a numbering is not only one body's
+    // (an extern callback's trampoline numbers its labels with its body's, before that body's
+    // `.type`), so new names count from here and move it on.
+    mut nums = u8[][];
+    mut tops = u64[];
+    mut q = 0;
+    while q + 2 < n {
+        if (text[q] == 46) && (text[q + 1] == 76) && ((q == 0) || !label_char(text[q - 1])) {
+            mut e = q + 2;
+            while (e < n) && label_char(text[e]) {
+                e += 1;
+            }
+            mut v = 0;
+            pe := own_label(view(text), q, e, &mut v);
+            if (pe != 0) && !copy_label(view(text), q, e, &prefixes) {
+                mut at = nums.len();
+                for x in nums.len() {
+                    if (nums[x].len() == pe - q) && ir::same_range(view(text), q, pe, view(nums[x])) {
+                        at = x;
+                    }
+                }
+                if at == nums.len() {
+                    nums.push(text[q..pe].copy());
+                    tops.push(v);
+                } else if tops[at] < v {
+                    ir::put(&mut tops, at, v);
+                }
+            }
+            q = e;
+        } else {
+            q += 1;
+        }
+    }
     mut bs = 0;
     while bs < n {
         // A body runs from a `.type` line to the next one.
@@ -7900,12 +8027,7 @@ fn number_copy_labels<a>(text: &a [u8]) -> u8[] {
                 while (e < be) && label_char(text[e]) {
                     e += 1;
                 }
-                mut copy = false;
-                for k in e - i - 1 {
-                    if (text[i + k] == 95) && (text[i + k + 1] == 105) {
-                        copy = true;
-                    }
-                }
+                copy := copy_label(view(text), i, e, &prefixes);
                 if copy {
                     mut known = false;
                     for x in names.len() {
@@ -7951,11 +8073,18 @@ fn number_copy_labels<a>(text: &a [u8]) -> u8[] {
         if names.len() == 0 {
             out.append(text[bs..be]);
         } else {
-            // A body with no numbering of its own keeps its copy labels, marked `_r` so the next
+            // A body with no numbering of its own keeps its copy labels, marked `_r<round>` so the next
             // round's copies (whose site numbers start again) cannot take the same names.
             mut prefix = u8[];
+            mut base = top;
             if pe != 0 {
                 prefix = text[pa..pe].copy();
+                for x in nums.len() {
+                    if (nums[x].len() == prefix.len()) && ir::same_range(view(nums[x]), 0, prefix.len(), view(prefix)) {
+                        base = tops[x];
+                        ir::put(&mut tops, x, base + names.len());
+                    }
+                }
             }
             mut j = bs;
             mut pend = bs;
@@ -7972,11 +8101,12 @@ fn number_copy_labels<a>(text: &a [u8]) -> u8[] {
                             if pe != 0 {
                                 out.append(view(prefix));
                                 out.push(95);
-                                push_decimal(&mut out, top + 1 + x);
+                                push_decimal(&mut out, base + 1 + x);
                             } else {
                                 out.append(text[j..e]);
                                 out.push(95);
                                 out.push(114);
+                                push_decimal(&mut out, round);
                             }
                             break;
                         }
@@ -7989,6 +8119,47 @@ fn number_copy_labels<a>(text: &a [u8]) -> u8[] {
             out.append(text[pend..be]);
         }
         bs = be;
+    }
+    return out;
+}
+// `jmp L` whose next line (past directives) is `L:` - a copy's jump to its own end - is dropped.
+fn drop_jumps_to_next<a>(text: &a [u8]) -> u8[] {
+    mut out = u8[];
+    n := text.len();
+    mut a = 0;
+    while a < n {
+        mut e = a;
+        while (e < n) && (text[e] != 10) {
+            e += 1;
+        }
+        mut keep = true;
+        if (e - a > 5) && ir::at(view(text), a, view("jmp .L")) {
+            // The next line that is not a directive (`.gpos`, `.loc`, a site label) must be the target.
+            mut b = e + 1;
+            while b < n {
+                mut f = b;
+                while (f < n) && (text[f] != 10) {
+                    f += 1;
+                }
+                directive := (f > b) && (text[b] == 46) && (text[f - 1] != 58);
+                site := (f - b > 4) && ir::at(view(text), b, view(".Lgs")) && (text[f - 1] == 58);
+                if directive || site {
+                    b = f + 1;
+                    continue;
+                }
+                if (f - b == e - a - 3) && (text[f - 1] == 58) && ir::same_range(view(text), b, f - 1, text[a + 4..e]) {
+                    keep = false;
+                }
+                break;
+            }
+        }
+        if keep {
+            out.append(text[a..e]);
+            if e < n {
+                out.push(10);
+            }
+        }
+        a = e + 1;
     }
     return out;
 }
@@ -8005,6 +8176,7 @@ fn name_hash<b>(s: &b [u8], a: u64, e: u64) -> u64 {
 // Slots promoted to callee-saved registers (`chosen`, zeroed at entry where `zeroed` says) are the
 // caller's registers in a copy, so the copy keeps them in free scratch registers instead: a leaf's
 // copy holds nothing across a call, and the saves and restores around the body are not in it.
+const INLINE_COST: u64 = 32;
 fn inline_candidate<a, b, c>(o: (&a mut ir::Body), s: &b [u8], prologue: u64, chosen: (&c u64[]), zeroed: (&c u64[])) {
     if o.dyn_pairs.len() != 0 {
         return ();
@@ -8031,7 +8203,8 @@ fn inline_candidate<a, b, c>(o: (&a mut ir::Body), s: &b [u8], prologue: u64, ch
                     if op != 29 {
                         count += 1;
                     }
-                    if 32 < count {
+                    // A loose bound here; what the copy costs is counted once its slots are registers.
+                    if 96 < count {
                         return ();
                     }
                     if op == 0 || op == 31 || op == 32 || op == 45 || op == 46 {
@@ -8065,6 +8238,51 @@ fn inline_candidate<a, b, c>(o: (&a mut ir::Body), s: &b [u8], prologue: u64, ch
             }
         }
     }
+    // Each slot's span: its first and last mention, from the copy's start for a slot the frame
+    // clearing zeroed (it is read as zero before any write). With no backward jump every path
+    // visits the lines in order, so two slots whose spans do not overlap can share a register
+    // (dyn-and-callable-bounds.md 7, item 4): a copy with others inside has more slots than
+    // scratch registers, though few are live at once.
+    mut loops = false;
+    for i in last {
+        if (prologue < i) && (o.del[i] == 0) && (dead[i] == 0) && (o.op[i] == 16 || ir::is_jump(o.op[i])) && (jump_target(&o, i) <= i) {
+            loops = true;
+        }
+    }
+    mut span_v = u64[];
+    mut span_a = u64[];
+    mut span_e = u64[];
+    for i in last {
+        if (prologue < i) && (o.del[i] == 0) && (dead[i] == 0) {
+            for j in 2 {
+                mut k = o.k0[i];
+                mut v = o.v0[i];
+                if j != 0 {
+                    k = o.k1[i];
+                    v = o.v1[i];
+                }
+                if k == 2 {
+                    mut at = span_v.len();
+                    for x in span_v.len() {
+                        if span_v[x] == v {
+                            at = x;
+                        }
+                    }
+                    if at == span_v.len() {
+                        span_v.push(v);
+                        mut first = i;
+                        if o.zfrom * 8 < v + 1 {
+                            first = 0;
+                        }
+                        span_a.push(first);
+                        span_e.push(i);
+                    } else {
+                        ir::put(&mut span_e, at, i);
+                    }
+                }
+            }
+        }
+    }
     // Map every slot in the body to a free caller-saved register.
     free := u64[8, 9, 10, 11, 2, 1, 6, 7];
     mut slots = u64[];
@@ -8087,12 +8305,26 @@ fn inline_candidate<a, b, c>(o: (&a mut ir::Body), s: &b [u8], prologue: u64, ch
                     }
                     if known == 0 {
                         mut pick = 99;
+                        mut me = 0;
+                        for x in span_v.len() {
+                            if span_v[x] == v {
+                                me = x;
+                            }
+                        }
                         for f in free.len() {
                             r := free[f];
                             mut taken = (used >> r) & 1;
                             for y in regs.len() {
                                 if regs[y] == r {
-                                    taken = 1;
+                                    mut other = 0;
+                                    for x in span_v.len() {
+                                        if span_v[x] == slots[y] {
+                                            other = x;
+                                        }
+                                    }
+                                    if loops || !((span_e[other] < span_a[me]) || (span_e[me] < span_a[other])) {
+                                        taken = 1;
+                                    }
                                 }
                             }
                             if (taken == 0) & (pick == 99) {
@@ -8136,6 +8368,17 @@ fn inline_candidate<a, b, c>(o: (&a mut ir::Body), s: &b [u8], prologue: u64, ch
         mut g = new_facts(o.maxslot / 8 + 1);
         forward(&mut o, &mut g, view(s), 0, last);
         dead_defs(&mut o, view(s), 0, last);
+    }
+    // The cap (dyn-and-callable-bounds.md 7, item 3): what the copy costs once its slots are
+    // registers and the moves and stores that left behind are gone, not the lines it had.
+    mut cost = 0;
+    for i in last {
+        if (prologue < i) && (o.del[i] == 0) && (dead[i] == 0) && (o.op[i] != 100) && (o.op[i] != 101) && (o.op[i] != 29) {
+            cost += 1;
+        }
+    }
+    if INLINE_COST < cost {
+        return ();
     }
     // A scratch register for each promoted register.
     mut moved = u64[];
@@ -8982,8 +9225,21 @@ fn optimize_round<b, c, d, e, m, q, r, t>(s: &b [u8], split: u64, marks: (&mut u
         mut again = u64[];
         lines_of_interest(view(o.out), 0, &mut again);
         mut kept = u64[];
+        // The runtime's bodies are not spliced in a round: its accessors (`rt_at`, `rt_slot`, ...)
+        // are pseudo-instructions the next round expands inline with their checks fused, which a
+        // copy of their general body would lose. The final splice still copies them.
+        mut hidden = u64[];
+        for k in o.inl_names.len() {
+            if (o.inl_names[k].len() > 3) && (o.inl_names[k][0] == 114) && (o.inl_names[k][1] == 116) && (o.inl_names[k][2] == 95) {
+                o.inl_names[k][0] = 33;
+                hidden.push(k);
+            }
+        }
         inline_calls(&mut o, 1, &mut kept, &again);
-        spliced := number_copy_labels(view(exchange(&mut o.out, u8[])));
+        for h in hidden.len() {
+            o.inl_names[hidden[h]][0] = 114;
+        }
+        spliced := mark_bounds_checks(view(drop_jumps_to_next(view(number_copy_labels(view(exchange(&mut o.out, u8[])), rounds)))));
         no_starts := u64[];
         // The call records (the effect checker's cross-check) and the IR dump are this round's,
         // made from the emitter's text: a later round's bodies have calls replaced by copies.

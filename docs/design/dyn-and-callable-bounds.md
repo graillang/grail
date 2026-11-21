@@ -287,12 +287,46 @@ Three steps, each useful on its own in one optimiser round:
   check of a division by a constant goes, and with it the cold `call rt_trap` that kept the
   argument registers live (iterchain 21.65G -> 21.25G).
 
-What is still missing is item 1. The copy of the predicate lands in `filter_step` only when calls are
-spliced, after every body is optimised, so the call's argument setup (`leaq`, `movq %rax,%rsi`)
-stays and `filter_step` is not a leaf. Running the whole optimiser again over its own output was
-tried and is not the way: the second run lacks the first's unit markers and context, and removes
-nothing more. Item 1 needs the splice before a caller is optimised, with its callees' copies known
-in an order that does not depend on how the stream is cut for the forked workers.
+Item 1 is built: `GRAIL_OPT_ROUNDS=N` (default 1). A round splices its copies into the *emitter's*
+text (markers kept) and optimises that again, so each caller is optimised with its callees' copies
+in place, and what a body becomes still does not depend on where the stream is cut. What it takes:
+
+- the effect checker's call records and the IR dump are the first round's (a later round's bodies
+  have fewer calls);
+- a copy's labels (`.L..._i<prefix>_<site>`, `.Lret_i...`, recognised by the unit prefixes of the
+  `.grail_part` markers) are renamed into the body's own `.L<prefix>_<scope>_<n>` numbering, since an
+  unnumbered jump target makes every register live; in a body with no numbering they are suffixed
+  `_r<round>` so the next round's copies cannot reuse them;
+- a copy's `jmp` to its own end is dropped;
+- a bounds check the site table knows by its shape (`cmpq 8(%rdi),%rsi`, `jb`, `call rt_abort`) is
+  marked `.gkind 1` before the next round, which may spell its registers otherwise, so its report
+  still names the index;
+- new label numbers count from the highest of their numbering in the whole text, since an extern
+  callback's trampoline numbers its labels with its body's before that body's `.type` line;
+- the runtime's bodies are not spliced in a round: its accessors (`rt_at`, `rt_slot`, ...) are
+  pseudo-instructions the next round expands with their checks fused, which a copy of their general
+  body loses (bench/hashmap went 1.20G -> 1.46G until this).
+
+Items 3 and 4 as built: the cap counts the copy once its slots are registers and the moves and
+stores left behind are gone (`INLINE_COST`, 32; the line count before promotion is a loose bound of
+96), and two slots whose spans (first to last mention, from the start for a cleared slot) do not
+overlap share a scratch register in a body with no backward jump.
+
+Measured, native, user-space instructions:
+
+| | 1 round | 2 rounds |
+|---|---|---|
+| bench/iterchain | 21.25G | **18.45G** |
+| bench/json | 4.81G | 4.80G |
+| bench/hashmap | 1.196G | 1.198G |
+| bench/strings | 5.57G | 5.56G |
+| bench/bintrees, sort, dyncall, ecs | 9.69G, 9.48G, 1.13G, 21.17G | the same |
+
+A third round adds nothing. Compiling costs about half again (single process: json 1.14 s -> 1.78 s,
+iterchain 0.87 s -> 1.28 s), so the default stays one round. Items 3 and 4 change none of these
+figures: what stops the chain flattening further is item 2 - Map's closure passes the address of
+its stack copy of Filter's closure, an address-taken slot, so it is never a copy - and Filter's
+closure, with `filter_step` and the predicate inside, still costs over 32 after promotion.
 
 ### 7.1 Two copy-quality steps taken (branch gap-iterchain)
 
