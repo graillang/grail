@@ -199,7 +199,9 @@ export function dynamicLinkFlags(target, linkArgs) {
   if (target !== hostTarget) return [];
   const loader = (dynamicLoaders[target] ?? []).find(candidate => existsSync(candidate));
   // libc always: the runtime creates its threads through a weak pthread_create (docs/ffi.md).
-  return [...(loader ? ['--dynamic-linker', loader] : []), '-L/usr/lib', '-L/usr/lib64', '-lc'];
+  // lld has no default search path, so name Debian/Ubuntu's multiarch directories too, where libc lives there.
+  const dirs = ['/usr/lib', '/usr/lib64', `/usr/lib/${target}-linux-gnu`, `/lib/${target}-linux-gnu`].filter(existsSync);
+  return [...(loader ? ['--dynamic-linker', loader] : []), ...dirs.map(d => `-L${d}`), '-lc'];
 }
 // What clang needs to compile an LLVM module for a target, besides the triple. RISC-V: the ISA and
 // ABI the assembly is written for. AArch64: atomics inline - clang's default for Linux calls

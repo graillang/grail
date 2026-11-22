@@ -1,5 +1,9 @@
 ## Unreleased
 
+- **Fixed: linking against libc on Debian and Ubuntu.** `lld` has no default search path, and the host
+  link named only `/usr/lib` and `/usr/lib64`, so a program that needs libc (FFI, `lib` inputs)
+  failed with `unable to find library -lc` where glibc lives in the multiarch directory
+  (`/usr/lib/<arch>-linux-gnu`). CI's cross-build job also links Ubuntu's versioned `ld64.lld`.
 - **Fixed: the Windows compiler (`grail.exe`) crashed at its first instruction.** Grail's own COFF
   writer stored a section's relocation count in COFF's 16-bit field without the overflow convention,
   so the compiler's `.text` (108,310 relocations) declared 42,774 and the linker left everything past
