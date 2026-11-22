@@ -4655,6 +4655,18 @@ fn win32_dll<a>(name: &a [u8]) -> u8[] {
     }
     return copy_bytes(view("kernel32"));
 }
+fn ends_with<a, b>(s: &a [u8], suffix: &b [u8]) -> bool {
+    if s.len() < suffix.len() {
+        return false;
+    }
+    at := s.len() - suffix.len();
+    for i in suffix.len() {
+        if s[at + i] != suffix[i] {
+            return false;
+        }
+    }
+    return true;
+}
 // `// grail-link: import DLL SYMBOL` for one Win32 entry point the image calls, so a driver can build
 // the import objects without a table of its own.
 fn win32_link<a, b>(c: (&a mut C), name: &b [u8]) -> unit {
@@ -20441,8 +20453,11 @@ fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     if find_func(&mut c, view(m), view(name)) != 0 {
         fail(&mut c, view(duplicate_msg(&mut c, view(name))));
     }
+    // An object or archive (`lib "shim.o"`) is linked in on every target; only a library name is a DLL.
+    is_object := ends_with(view(input), view(".o")) || ends_with(view(input), view(".obj"))
+        || ends_with(view(input), view(".a")) || ends_with(view(input), view(".lib"));
     if 0 < input.len() {
-        if (c.target == 3) || (c.target == 4) {
+        if ((c.target == 3) || (c.target == 4)) && !is_object {
             // A PE image binds each symbol to one DLL through the import table, so Windows tooling
             // needs the pair, not just the library: `// grail-link: import kernel32 LoadLibraryA`.
             mut note = u8[];

@@ -1,5 +1,8 @@
 ## Unreleased
 
+- **Fixed: `extern "C" lib "shim.o"` on Windows.** An object or archive input (`.o`, `.obj`, `.a`,
+  `.lib`) was written as a DLL import note, so the image imported `shim.o.dll` and failed to start
+  (`STATUS_DLL_NOT_FOUND`); it is now a link input, as on Linux. CI's Windows lane builds the shim.
 - **Fixed: on real Windows, `grail.exe` faulted on its first thread-pointer access.** The x64 runtime
   read and wrote the TEB's user pointer through `%fs:40`, but 64-bit Windows reaches the TEB through
   `%gs` (`%fs` has base 0 there); under Wine `%fs` is still the Linux thread block, which hid it. The
