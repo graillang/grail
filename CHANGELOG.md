@@ -1,5 +1,9 @@
 ## Unreleased
 
+- **Fixed: on macOS a failed `open`, `access`, `mkdir` or other `int`-returning libSystem call read as
+  success.** Their -1 arrives as `0xFFFFFFFF` (the upper half of x0 is not sign-extended), and the
+  darwin module recognised only the 64-bit -1: `host::exists` answered yes for a missing file and the
+  compiler aborted reading its build cache's `generation`. Both spellings of -1 are errors now.
 - **Fixed: on Apple silicon every task-stack reservation aborted.** The darwin module made a task
   stack's guard one 4 KiB page and `mprotect`ed the rest from there, which is not a page boundary
   with arm64 macOS's 16 KiB pages (`EINVAL`, then a silent abort). The guard is 16 KiB now.

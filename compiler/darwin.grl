@@ -137,7 +137,11 @@ fn rt_os_error() -> u64 {
     return raw_load(p);
 }
 fn rt_os_result(r: u64) -> u64 {
-    if r == wrapping_sub(0, 1) {
+    // libSystem's int-returning calls (open, access, close, mkdir, ...) report failure as a 32-bit
+    // -1: w0 holds 0xFFFFFFFF and the upper half of x0 is not sign-extended. Only the ssize_t and
+    // pointer results give the 64-bit -1. Taking only that one made every failed int call a
+    // success: `exists` said yes to a missing file and the read that followed aborted.
+    if (r == wrapping_sub(0, 1)) || (r == 4294967295) {
         return wrapping_sub(0, rt_os_error());
     }
     return r;
@@ -314,7 +318,7 @@ pub fn rt_call(n: u64, a: u64, b: u64, c: u64) -> u64 {
             }
         }
         fd := raw_import("open", a, fl, c);
-        if (created != 0) && (fd != wrapping_sub(0, 1)) {
+        if (created != 0) && (fd != wrapping_sub(0, 1)) && (fd != 4294967295) {
             mask := raw_import("umask", 0, 0, 0);
             raw_import("umask", mask, 0, 0);
             raw_import("fchmod", fd, c - (c & mask), 0);
