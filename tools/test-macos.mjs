@@ -34,7 +34,7 @@ const libSystem = new Set([
   // _NSGetExecutablePath is dyld's, re-exported through libSystem: the running image's own path,
   // which is what lets the driver re-invoke itself for `grail build`.
   '__NSGetExecutablePath',
-  '_access', '_chmod', '_flock', '_fchmod', '_umask', '_clock_gettime', '_close', '___error', '_execve', '_exit', '_fork', '_getdirentries64',
+  '_access', '_chmod', '_flock', '_fchmod', '_umask', '_clock_gettime', '_close', '___error', '_execve', '_exit', '_fork', '___getdirentries64',
   '_getpid', '_kill', '_mkdir', '_mmap', '_mprotect', '_munmap', '_nanosleep', '_open', '_pipe',
   // The portable scheduler parks a worker on this thread's address with libsystem_pthread's
   // private ulock entry points; they are real libSystem exports, so an object that calls them is

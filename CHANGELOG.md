@@ -1,5 +1,7 @@
 ## Unreleased
 
+- **Fixed: listing a directory on macOS jumped to address 0.** `getdirentries64` is not exported by
+  current libSystem; the darwin module imports `__getdirentries64` (the symbol Go's runtime uses too).
 - **Fixed: on macOS a failed `open`, `access`, `mkdir` or other `int`-returning libSystem call read as
   success.** Their -1 arrives as `0xFFFFFFFF` (the upper half of x0 is not sign-extended), and the
   darwin module recognised only the 64-bit -1: `host::exists` answered yes for a missing file and the
