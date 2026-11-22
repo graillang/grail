@@ -25,7 +25,7 @@ other position writes `&` explicitly.
 ## Ranges that carry their slice
 
 `..` is the half-open range spelling in a loop header, and brackets accept it exactly where the colon
-is: `s[a..e]`, `s[a..]`, `s[..e]` and `s[..]` are the same slice as `s[a: e]`, `s[a: ]`, `s[: e]` and
+is: `s[a..e]`, `s[a..]`, `s[..e]` and `s[..]` are the same slice as `s[a:e]`, `s[a:]`, `s[:e]` and
 `s[:]`, on vectors, views and strings. One spelling for one idea, and no extra cost: both forms
 compile to the same slice.
 
@@ -56,7 +56,7 @@ can be assembled from two different slices, and a span cannot.
 
 ## Slices of any vector
 
-`v[a: b]` works on every vector, not just bytes. A function that takes `&[f32]` reads part of a vector
+`v[a:b]` works on every vector, not just bytes. A function that takes `&[f32]` reads part of a vector
 without copying it, and one that takes `&mut [f32]` changes exactly the elements it was given:
 
 {{example:slices}}

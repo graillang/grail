@@ -99,7 +99,7 @@ numbers.
 - **References and slices.** A function takes an array as `&[T; N]` to read it and `&mut [T; N]`
   to change it; that is one word, the address of the elements, and the fastest way in. Where a
   slice is expected, `&a` is one: `&[T]`, `&mut [T]` (for `&mut a`), or `&[u8]` for a `[u8; N]`, and
-  `a[lo: hi]` is a sub-slice. Every slice method works on an array, and `a.copy_from(&v)` copies a
+  `a[lo:hi]` is a sub-slice. Every slice method works on an array, and `a.copy_from(&v)` copies a
   vector or slice of exactly `N` elements in (the length is checked as it runs). Until views are
   pairs in the frame, making a slice from an array allocates its `{pointer, length}` record, so a
   hot path takes `&[T; N]`.

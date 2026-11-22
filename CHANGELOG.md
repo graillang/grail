@@ -1,5 +1,15 @@
 ## Unreleased
 
+- **`grail fmt` formats more like rustfmt.** A slice bound sits tight (`a[3:5]`, `v[:2]`) while a
+  map type or literal keeps its space (`[string: u64]`); a closure's body is spaced from its
+  parameters (`|x| x * 2`); and an expression that ends in a long call keeps its head on the line
+  and breaks only the arguments (`total + helper(` ... `)`), rather than splitting at the operator
+  first. Method chains with two or more calls still break one call per line. `tests/fmt/messy.grl`
+  pins each case; the book's examples and prose use the tight slice form.
+- **The book is 26 chapters, down from 33.** *Grail by Example* now opens with why Grail exists and
+  your first program; ownership, borrowing, typed references, lifetimes and replacing values that
+  hold borrows are one chapter, *Ownership, borrowing and lifetimes*; and *Printing your own types*
+  is part of *Methods*.
 - **A non-exhaustive `match` says what it misses, and where.** E0011 named nothing and pointed at the
   closing brace. It now points at the scrutinee and lists the uncovered variants (or union member
   types), up to four and then a count - "`Tri` is not covered (add an arm for it, or a _ arm)". A
