@@ -1,5 +1,13 @@
 ## Unreleased
 
+- **`for x in s` over a typed slice borrows each element, as `for x in &v` does over a vector.** A
+  `&[T]` yields `&T` and a `&mut [T]` yields `&mut T`, for every element type. Before, a slice of
+  scalars copied each element out and a slice of anything else was refused without `&s`. Code that
+  did arithmetic on the loop variable of a scalar slice now reads `*x`. Comparisons and method calls
+  are unchanged, and byte views (`&[u8]`) still copy bytes. The book's cheatsheet, `local-functions` and
+  `statics` examples now take `&[T]` as their Rust twins do, and the cheatsheet loops over elements
+  instead of indexes; the `slices` example reads `*x` in its sum. Pinned by `slice-for-borrows-elements` and
+  `slice-for-shared-element-not-writable`.
 - **Benchmarks: strict 1/4/8 thread parity in `ecs_par` + 3-layer generic `app2000` compile benchmark**:
   - Wrapped `bench/ecs_par.grl` in `task_scope` so `main` sleeps and `GRAIL_WORKERS=W` runs strictly `W` threads total (fixing the previous `W+1` off-by-one while also cutting x8 wall time to 0.063 s), and added `noalias` slice parameters + an atomic sense-reversing barrier in `bench/rivals/ecs_par.zig` (cutting Zig x4 from 0.328 s to 0.065 s and x8 from 0.195 s to 0.041 s).
   - Added `app2000` (`tools/rivals/app-project.mjs`): a 3-layer, 20-unit dependency DAG using generics, interfaces/traits, `Option`/`std::optional`, and hash maps across all six languages, edited in mid-layer unit `mid4`, included alongside `syn1000` and `syn4000` in the Compile speed overview panels.

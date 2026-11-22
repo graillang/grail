@@ -4661,8 +4661,8 @@
   },
   {
     "name": "typed-slices",
-    "note": "&[T]/&mut [T] over word and narrow vectors: slicing, sub-slicing, element reads, writes and borrows, by-value and by-reference loops, copy, contains, generic code",
-    "source": "fn total<a>(s: &a [f32]) -> f32 {\n    mut t: f32 = 0.0;\n    for x in s {\n        t = t + x;\n    }\n    return t;\n}\nfn scale<a>(s: (&a mut [f32]), k: f32) {\n    for x in &mut s {\n        *x = *x * k;\n    }\n}\nfn count<a, T>(s: &a [T]) -> u64 {\n    return s.len();\n}\nfn bump<a>(r: (&a mut u64)) {\n    *r += 100;\n}\nfn main() {\n    mut v = f32[1.0, 2.0, 3.0, 4.0, 5.0];\n    println(\"{} {}\", total(&v[1: 4]), total(&v[:]));\n    scale(&mut v[2:], 10.0);\n    println(\"{}\", v);\n    mid := v[1: 4];\n    println(\"{} {} {} {}\", mid, mid.len(), mid[0], count(&mid));\n    inner := mid[1:];\n    println(\"{} {}\", inner, inner.copy());\n    mut w = u64[10, 20, 30, 40];\n    {\n        s := &mut w[1: 3];\n        s[0] = 21;\n        s[1] += 1;\n        bump(&mut s[0]);\n    }\n    println(\"{} {}\", w, w[:2].contains(10));\n    mut i = i32[-1, -2, -3];\n    {\n        t := &mut i[:2];\n        for x in &mut t {\n            *x = *x * 3;\n        }\n    }\n    println(\"{} {}\", i, count(&i[1:]));\n}\n",
+    "note": "&[T]/&mut [T] over word and narrow vectors: slicing, sub-slicing, element reads, writes and borrows, loops that borrow each element, copy, contains, generic code",
+    "source": "fn total<a>(s: &a [f32]) -> f32 {\n    mut t: f32 = 0.0;\n    for x in s {\n        t = t + *x;\n    }\n    return t;\n}\nfn scale<a>(s: (&a mut [f32]), k: f32) {\n    for x in &mut s {\n        *x = *x * k;\n    }\n}\nfn count<a, T>(s: &a [T]) -> u64 {\n    return s.len();\n}\nfn bump<a>(r: (&a mut u64)) {\n    *r += 100;\n}\nfn main() {\n    mut v = f32[1.0, 2.0, 3.0, 4.0, 5.0];\n    println(\"{} {}\", total(&v[1: 4]), total(&v[:]));\n    scale(&mut v[2:], 10.0);\n    println(\"{}\", v);\n    mid := v[1: 4];\n    println(\"{} {} {} {}\", mid, mid.len(), mid[0], count(&mid));\n    inner := mid[1:];\n    println(\"{} {}\", inner, inner.copy());\n    mut w = u64[10, 20, 30, 40];\n    {\n        s := &mut w[1: 3];\n        s[0] = 21;\n        s[1] += 1;\n        bump(&mut s[0]);\n    }\n    println(\"{} {}\", w, w[:2].contains(10));\n    mut i = i32[-1, -2, -3];\n    {\n        t := &mut i[:2];\n        for x in &mut t {\n            *x = *x * 3;\n        }\n    }\n    println(\"{} {}\", i, count(&i[1:]));\n}\n",
     "stdout": "9 15\n[1.0, 2.0, 30.0, 40.0, 50.0]\n[2.0, 30.0, 40.0] 3 2 3\n[30.0, 40.0] [30.0, 40.0]\n[10, 121, 31, 40] true\n[-3, -6, -3] 2\n",
     "status": 0
   },
@@ -16679,6 +16679,19 @@
     "note": "`&mut v` for `&mut [T]`: the writes land in the vector",
     "source": "fn bump<K>(v: (&mut [u64]), k: K) -> unit { v[0] = v[0] + 1; }\nfn main() { mut x = u64[1, 2]; bump(&mut x, 0); bump(&mut x, 0); println(x[0]); }\n",
     "stdout": "3\n"
+  },
+  {
+    "name": "slice-for-borrows-elements",
+    "note": "`for x in s` over a typed slice borrows each element as `for x in &v` does over a vector: `&T` from `&[T]` (scalars included, so arithmetic reads `*x`), `&mut T` from `&mut [T]`, records with owned fields in place, and sub-slices",
+    "source": "struct P { x: u64 }\nfn sum(v: &[u64]) -> u64 {\n    mut t = 0;\n    for x in v { t += *x; }\n    t\n}\nfn big(v: &[P]) -> u64 {\n    mut b = 0;\n    for p in v { if p.x > b { b = p.x; } }\n    b\n}\nfn bump(v: &mut [u64]) {\n    for x in v { *x += 1; }\n}\nstruct Q { name: string, n: u64 }\nfn names(v: &[Q]) -> u64 {\n    mut t = 0;\n    for q in v { t += q.n + q.name.len(); }\n    t\n}\nfn main() {\n    qs := Q[Q { name: \"ab\", n: 1 }, Q { name: \"c\", n: 2 }];\n    println(\"{} {} {}\", names(&qs), names(qs[1:]), qs[0].name);\n    mut a = u64[1, 2, 3];\n    ps := P[P { x: 4 }, P { x: 9 }];\n    bump(&mut a);\n    println(\"{} {} {}\", sum(&a), big(&ps), sum(a[1:]));\n    for x in a[0: 2] { println(\"{}\", *x); }\n}\n",
+    "stdout": "6 3 ab\n9 9 7\n2\n3\n"
+  },
+  {
+    "name": "slice-for-shared-element-not-writable",
+    "note": "the element a `for` over a shared slice borrows is read-only",
+    "source": "fn f(v: &[u64]) { for x in v { *x = 1; } }\nfn main() { a := u64[1]; f(&a); }\n",
+    "reject": true,
+    "diagnostic": "mutation through readonly reference"
   },
   {
     "name": "slice-from-vector-shared-for-mut-refused",

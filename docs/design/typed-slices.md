@@ -10,8 +10,9 @@
   (`&v[a: b]`, or implicitly where a `&[T]` is expected) or exclusively (`&mut v[a: b]`).
   Bounds are checked: `a <= b <= len`.
 - Use: `s.len()`, `s.is_empty()`, `s[i]` (read), `s[i] = x` and `s[i] += x` (`&mut` only),
-  `&s[i]` / `&mut s[i]` (element references, narrow elements included), `for x in s`,
-  `for x in &mut s`, sub-slicing, `s.copy()` -> `T[]` for plain elements, `{}` formatting,
+  `&s[i]` / `&mut s[i]` (element references, narrow elements included), `for x in s`
+  (each element borrowed: `&T`, or `&mut T` through `&mut [T]`; `for x in &s` is the same loop),
+  sub-slicing, `s.copy()` -> `T[]` for plain elements, `{}` formatting,
   `contains` for integer/bool elements, `==` like vectors.
 - Not in a slice: anything that changes the length (`push`, `pop`, `insert`, `remove`, `truncate`).
 - Generic code over `&[T]` specializes per element type like every generic.

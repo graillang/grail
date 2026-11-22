@@ -117,9 +117,11 @@ nothing.
 
 `v[a: b]` borrows elements `a` up to (not including) `b` of a vector as a slice, `&[T]`; `&mut v[a: b]`
 borrows them exclusively as `&mut [T]`. Either bound may be left out (`v[2:]`, `v[: n]`, `v[:]`), and
-both are checked. A slice has `len()`, indexing (`s[i]`, and `s[i] = x` through `&mut [T]`), `for` loops
-by value or by reference (`for x in &mut s`), sub-slicing, `copy()` into a new vector and `{}`
-formatting; it cannot change length. While a slice lives, its vector cannot grow or be written
+both are checked. A slice has `len()`, indexing (`s[i]`, and `s[i] = x` through `&mut [T]`), `for x in s`
+loops, sub-slicing, `copy()` into a new vector and `{}`
+formatting; it cannot change length. `for x in s` borrows each element, as `for x in &v`
+does over a vector: `x` is a `&T` from a `&[T]` and a `&mut T` from a `&mut [T]`, so arithmetic
+reads `*x` and `*x += 1` writes the element. While a slice lives, its vector cannot grow or be written
 elsewhere, and a slice cannot outlive its vector. Functions take slices to work on any part of a
 vector: `fn total(s: &[f32]) -> f32` sums all of `v` with `total(&v[:])` or part of it with
 `total(&v[1: 4])`. `&[u8]` is the byte view (see Views).

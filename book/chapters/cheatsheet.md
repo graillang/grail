@@ -16,7 +16,7 @@ is checked to agree.
 | `x.abs()`, `x.checked_add(y)`, `x.to_string()` | `x.abs()`, `x.checked_add(y)`, `x.to_string()` | Integer and `char` methods need no `use`; float functions such as `x.sin()` come with `use math;`. |
 | `f64::from_bits(b)` | `f64::from_bits(b)` | |
 | `trait Ext { .. }` + `impl Ext for u64` | `interface Ext { .. }` + `impl Ext for u64` | Callable as `x.method()` where `Ext`'s module is `use`d; an inherent `impl u64` is the standard library's alone. |
-| `fn largest<T: Shape>(items: &[T])` | `fn largest<T: Shape>(items: &T[])` | `T[]` is a vector, `&T[]` its view. |
+| `fn largest<T: Shape>(items: &[T])` | `fn largest<T: Shape>(items: &[T])` | `T[]` is a vector (`Vec<T>`); `&v` passes it where a slice is expected, and `for x in s` borrows each element. |
 | `vec![a, b]` | `[a, b]` or `Rect[a, b]` | The element type may lead the literal; `[]` alone needs an expected type. |
 | `Option<u64>`, `Some(x)`, `None` | `u64?`, `Some(x)`, `None` | `x!` insists, `?` propagates. |
 | `match t { Token::Num(n) => ..., }` | `match t { Num(n) => ..., }` | An arm body is an expression or a block. |
