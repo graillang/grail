@@ -1,4 +1,4 @@
-## Unreleased
+## 0.1.0 (2026-11-22)
 
 - **The Abundance port moved out of this repository.** Its sources, tests, tools, design notes and
   benchmark results now live in a separate private repository, and the history was rewritten
