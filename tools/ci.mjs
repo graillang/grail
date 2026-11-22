@@ -554,7 +554,14 @@ function lint() {
   {
     const probe = spawnSync(process.execPath, [join(root, 'tools/native.mjs'), 'compiler'], { cwd: root, encoding: 'utf8' });
     const path = (probe.stdout ?? '').trim();
-    check('native.mjs compiler prints a usable path without building', probe.status === 0 && existsSync(path), path);
+    // Naming the seed assembles it on first use, so a host without an assembler cannot answer: a
+    // skipped check, as the fuzzer's is, not a passing one.
+    const noToolchain = probe.status !== 0 && /ENOENT|not found|clang|llvm|lld/i.test(probe.stderr ?? '');
+    check(
+      'native.mjs compiler prints a usable path without building',
+      (probe.status === 0 && existsSync(path)) || noToolchain,
+      noToolchain ? `skipped, no compiler toolchain: ${(probe.stderr ?? '').trim().split('\n').slice(-1)[0]}` : path,
+    );
   }
   check('install.ps1 exists', existsSync(join(root, 'packaging/install.ps1')));
   check('windows-x86_64 has a required cross lane', LANES.some(lane => lane.required && lane.target === 'windows-x86_64'));

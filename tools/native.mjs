@@ -132,6 +132,18 @@ export function targetName(target) {
   if (!allTargets.includes(target)) throw new Error(`Unsupported target ${target}; expected ${allTargets.join(', ')}`);
   return target;
 }
+// Cargo-style status lines on stderr (`   Compiling ab-engine-grail (123 sources)`): the verb right-aligned in 12 columns,
+// bold green on a terminal. Builds opt in (compileProgram's `progress`, buildCompiler's `progress`) so the test
+// harnesses' many quiet builds stay quiet.
+export function status(verb, message) {
+  const tty = process.stderr.isTTY && !process.env.NO_COLOR;
+  const pad = verb.padStart(12);
+  process.stderr.write(`${tty ? `\x1b[1;32m${pad}\x1b[0m` : pad} ${message}\n`);
+}
+export function elapsed(start) {
+  const s = (Date.now() - start) / 1000;
+  return s < 60 ? `${s.toFixed(2)}s` : `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`;
+}
 export function command(argv, options = {}) {
   // GRAIL_COMMAND_TIMEOUT (seconds) raises the limit for a step known to be long on a loaded host,
   // such as clang -O2 over the whole compiler's LLVM module in `release`.
@@ -450,12 +462,12 @@ let internalAssembler = null;
 export function useAssemblerOf(compiler) {
   internalAssembler = compiler;
 }
-export function buildCompiler() {
-  const executable = buildTreeCompiler();
+export function buildCompiler({ progress = false } = {}) {
+  const executable = buildTreeCompiler(progress);
   internalAssembler ??= executable;
   return executable;
 }
-function buildTreeCompiler() {
+function buildTreeCompiler(progress = false) {
   const base = bootstrapCompiler();
   const hash = createHash('sha256');
   hash.update(readFileSync(fileURLToPath(import.meta.url)));
@@ -473,6 +485,8 @@ function buildTreeCompiler() {
   // clang "no preprocessable inputs" or an ld "cannot open ...grail.pending.o", which reads like a
   // broken build rather than two builds colliding. The final name is still claimed by rename,
   // which is atomic, so the loser of the race simply finds the executable already there.
+  const started = Date.now();
+  if (progress) status('Compiling', `grail compiler (${compilerSources.length} sources: the compiler changed)`);
   const output = join(directory, `compiler.${process.pid}.s`);
   // A seed from before typed references and the u64 default became the only modes still needs the
   // switches to read today's sources; a newer bootstrap accepts them too, so they are passed
@@ -480,6 +494,7 @@ function buildTreeCompiler() {
   command([base, '--default-u64', '--typed-refs', output, ...compilerSources], { env: compilerEnvironment() });
   const pending = assemble(output, join(directory, `grail.pending.${process.pid}`));
   claimExecutable(pending, executable);
+  if (progress) status('Finished', `grail compiler in ${elapsed(started)}`);
   for (const leftover of [output, pending, `${pending}.o`, `${pending}.s`]) {
     if (existsSync(leftover)) rmSync(leftover);
   }
@@ -640,8 +655,9 @@ export function compileOnly(compiler, inputs, directory, { target = hostTarget, 
 }
 // backend 'llvm' (or GRAIL_BACKEND=llvm) lowers through compiler/llvm.grl: the compiler writes
 // NAME.s.ll beside NAME.s, clang -O2 compiles it, and the object joins the link.
-export function compileProgram(compiler, inputs, directory, { target = hostTarget, overflow = 'checked', name = 'program', interfaces = null, runtime = join(root, 'compiler/runtime.grl'), osRuntime = join(root, 'compiler/os-linux.grl'), darwin = join(root, 'compiler/darwin.grl'), frameworks = [], sdk = process.env.GRAIL_SDK, sign = false, backend = process.env.GRAIL_BACKEND ?? 'native', verifyFacts = process.env.GRAIL_VERIFY_FACTS === '1', rangeFacts = process.env.GRAIL_RANGE_FACTS === '1', extra = [], output = null } = {}) {
+export function compileProgram(compiler, inputs, directory, { target = hostTarget, overflow = 'checked', name = 'program', interfaces = null, runtime = join(root, 'compiler/runtime.grl'), osRuntime = join(root, 'compiler/os-linux.grl'), darwin = join(root, 'compiler/darwin.grl'), frameworks = [], sdk = process.env.GRAIL_SDK, sign = false, backend = process.env.GRAIL_BACKEND ?? 'native', verifyFacts = process.env.GRAIL_VERIFY_FACTS === '1', rangeFacts = process.env.GRAIL_RANGE_FACTS === '1', extra = [], output = null, progress = false } = {}) {
   targetName(target);
+  const started = Date.now();
   if (!['checked', 'wrap'].includes(overflow)) throw new Error('overflow must be checked or wrap');
   mkdirSync(directory, { recursive: true });
   const assembly = join(directory, `${name}.s`);
@@ -681,6 +697,7 @@ export function compileProgram(compiler, inputs, directory, { target = hostTarge
   if ((process.env.GRAIL_NO_BUILD_CACHE !== '1') && !output) {
     try {
       if (readFileSync(stampFile, 'utf8') === stamp && statSync(executable).size > 0) {
+        if (progress) status('Fresh', `${name} (${files.length} sources unchanged)`);
         if (output) output.push('');
         return executable;
       }
@@ -693,6 +710,7 @@ export function compileProgram(compiler, inputs, directory, { target = hostTarge
         copyFileSync(shared, executable);
         if (process.platform !== 'win32') chmodSync(executable, 0o755);
         writeFileSync(stampFile, stamp);
+        if (progress) status('Fresh', `${name} (from the shared build cache)`);
         if (output) output.push('');
         return executable;
       }
@@ -700,7 +718,10 @@ export function compileProgram(compiler, inputs, directory, { target = hostTarge
       // not in the shared store: build it
     }
   }
-  const compiled = command([compiler, ...interfaceFlags, ...(llvm ? ['--backend=llvm'] : []), ...(verifyFacts ? ['--verify-facts'] : []), ...(rangeFacts ? ['--range-facts'] : []), ...extra, '--target', target, `--overflow=${overflow}`, assembly, ...files]);
+  if (progress) status('Compiling', `${name} (${files.length} sources, ${backend} backend, ${target})`);
+  // With progress the compiler's own diagnostics stream to the terminal as they come.
+  const compiled = command([compiler, ...interfaceFlags, ...(llvm ? ['--backend=llvm'] : []), ...(verifyFacts ? ['--verify-facts'] : []), ...(rangeFacts ? ['--range-facts'] : []), ...extra, '--target', target, `--overflow=${overflow}`, assembly, ...files], progress ? { stdio: ['ignore', 'pipe', 'inherit'] } : {});
+  if (progress) status('Linking', `${name} (compiled in ${elapsed(started)})`);
   // `output`, when a caller passes an array, receives what the compiler printed.
   if (output) output.push(`${compiled.stdout ?? ''}${compiled.stderr ?? ''}`);
   const linkArgs = linkInputs(readFileSync(assembly, 'utf8'), dirname(resolve(root, inputs[0])));
@@ -711,6 +732,7 @@ export function compileProgram(compiler, inputs, directory, { target = hostTarge
   }
   const framework = machoTargets.includes(target) ? frameworkArguments(frameworks, { directory, sdk }) : { args: [] };
   const built = assemble(assembly, join(directory, name), target, linkArgs, { frameworkArgs: framework.args, sign, sdk });
+  if (progress) status('Finished', `${name} in ${elapsed(started)}`);
   try {
     writeFileSync(stampFile, stamp);
   } catch {
@@ -728,9 +750,10 @@ export function compileProgram(compiler, inputs, directory, { target = hostTarge
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const mode = process.argv[2] ?? 'build';
-  if (mode === 'compiler' || mode === 'which') {
+  if (mode === 'which' || (mode === 'compiler' && !process.argv.includes('--target'))) {
     // The compiler you would build with, without building anything: the development bootstrap when
-    // GRAIL_COMPILER names one, else the checked-in seed assembled for this host.
+    // GRAIL_COMPILER names one, else the checked-in seed assembled for this host. `compiler
+    // --target T` builds the compiler for T instead (below).
     process.stdout.write(bootstrapCompiler() + '\n');
     process.exit(0);
   }

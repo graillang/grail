@@ -1,5 +1,12 @@
 ## Unreleased
 
+- **`bun tools/native.mjs compiler --target T` builds the compiler for T again.** The path-printing
+  form (`compiler` with no target, and `which`) had swallowed it, so the documented
+  `compiler --target macos-aarch64` printed the host seed instead. CI repairs from the first runs
+  the public repository could start: the tooling lint skips (and says so) the seed-path check on a
+  runner with no assembler, the runtime ABI job installs `llvm` for `llvm-nm`, and the graphics
+  device test no longer calls `gr_push_constant_stage_mask`, removed with its implementation in
+  63318fd3.
 - **`for x in s` over a typed slice borrows each element, as `for x in &v` does over a vector.** A
   `&[T]` yields `&T` and a `&mut [T]` yields `&mut T`, for every element type. Before, a slice of
   scalars copied each element out and a slice of anything else was refused without `&s`. Code that

@@ -7,12 +7,6 @@
 #include "../include/grail/grail_window.h"
 #include "../include/grail/grail_shader.h"
 
-/* From grail_internal.h; the push-constant stage derivation is pure, so it is tested without a
- * device. */
-uint32_t gr_push_constant_stage_mask(const uint32_t *range_offsets, const uint32_t *range_sizes,
-                                    const uint32_t *range_stages, uint32_t range_count,
-                                    uint32_t offset, uint32_t size);
-
 #include <stdio.h>
 #include <string.h>
 
@@ -447,56 +441,8 @@ static void test_pipeline_and_swapchain(void)
     gr_device_destroy(device);
 }
 
-/* The push-constant stage mask is derived from the layout's declared ranges, so a write naming a
- * narrower (or wider) set of stages is impossible by construction. Vulkan stage bits are used as
- * plain integers here: the function takes and returns masks, not Vulkan types. */
-static void test_push_constant_stages(void)
-{
-    const uint32_t kVertex = 0x1u, kFragment = 0x2u, kCompute = 0x4u, kAll = 0x7FFFFFFFu;
-
-    /* The layout the backend actually declares: one range covering every stage. */
-    {
-        uint32_t offsets[1] = { 0 }, sizes[1] = { 128 }, stages[1] = { kAll };
-        CHECK_EQ(gr_push_constant_stage_mask(offsets, sizes, stages, 1, 0, 16), kAll);
-        CHECK_EQ(gr_push_constant_stage_mask(offsets, sizes, stages, 1, 112, 16), kAll);
-    }
-    /* A layout split into two ranges with disjoint stages, which is what a caller would use to give
-     * the vertex and fragment stages different constants at the same offsets. */
-    {
-        uint32_t offsets[2] = { 0, 8 }, sizes[2] = { 8, 8 }, stages[2] = { kVertex, kCompute };
-        /* Exactly the declared stages for each half. */
-        CHECK_EQ(gr_push_constant_stage_mask(offsets, sizes, stages, 2, 0, 8), kVertex);
-        CHECK_EQ(gr_push_constant_stage_mask(offsets, sizes, stages, 2, 8, 8), kCompute);
-        /* A write spanning both names both, because it touches both declared ranges. */
-        CHECK_EQ(gr_push_constant_stage_mask(offsets, sizes, stages, 2, 0, 16),
-                 kVertex | kCompute);
-        /* A partial overlap still names the range it touches. */
-        CHECK_EQ(gr_push_constant_stage_mask(offsets, sizes, stages, 2, 4, 8), kVertex | kCompute);
-        CHECK_EQ(gr_push_constant_stage_mask(offsets, sizes, stages, 2, 0, 4), kVertex);
-        /* Beyond every range there is nothing to name, and the backend refuses that as a
-         * programming error rather than writing bytes no stage can read. */
-        CHECK_EQ(gr_push_constant_stage_mask(offsets, sizes, stages, 2, 16, 4), 0u);
-        CHECK_EQ(gr_push_constant_stage_mask(offsets, sizes, stages, 2, 100, 4), 0u);
-    }
-    /* Three ranges, to show the union is over all of them rather than the first match. */
-    {
-        uint32_t offsets[3] = { 0, 0, 32 }, sizes[3] = { 16, 16, 16 };
-        uint32_t stages[3] = { kVertex, kFragment, kCompute };
-        CHECK_EQ(gr_push_constant_stage_mask(offsets, sizes, stages, 3, 0, 16),
-                 kVertex | kFragment);
-        CHECK_EQ(gr_push_constant_stage_mask(offsets, sizes, stages, 3, 0, 48),
-                 kVertex | kFragment | kCompute);
-    }
-    /* A zero-length write names nothing. */
-    {
-        uint32_t offsets[1] = { 0 }, sizes[1] = { 16 }, stages[1] = { kAll };
-        CHECK_EQ(gr_push_constant_stage_mask(offsets, sizes, stages, 1, 0, 0), 0u);
-    }
-}
-
 int main(void)
 {
-    test_push_constant_stages();
     test_window();
     test_device_and_resources();
     test_recording();
