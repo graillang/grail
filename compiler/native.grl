@@ -55077,7 +55077,7 @@ fn if_value<a>(c: (&a mut C), hint: u64, hint_at: u64, into: u64) -> Val {
     }
     return own(&mut c, slot, out_ty);
 }
-fn scalar_match<a>(c: (&a mut C), s: Val, term: u8[]) -> unit {
+fn scalar_match<a>(c: (&a mut C), s: Val, term: u8[], scrut_at: u64) -> unit {
     xt := s.t;
     ty := s.ty;
     observe(&mut c, xt);
@@ -55314,7 +55314,16 @@ fn scalar_match<a>(c: (&a mut C), s: Val, term: u8[]) -> unit {
     }
     complete := default != 0 || (boolean && seen.len() == 2);
     if !complete {
-        fail(&mut c, view("non-exhaustive match (add a _ arm)"));
+        if boolean && seen.len() == 1 {
+            // A bool has two values: name the one no arm takes.
+            if seen[0] == 0 {
+                fail_at(&mut c, scrut_at, view("non-exhaustive match: `true` is not covered (add an arm for it, or a _ arm)"));
+            } else {
+                fail_at(&mut c, scrut_at, view("non-exhaustive match: `false` is not covered (add an arm for it, or a _ arm)"));
+            }
+        } else {
+            fail_at(&mut c, scrut_at, view("non-exhaustive match: an integer needs a _ arm for the values no arm names"));
+        }
     }
     call_out(&mut c, view("rt_abort"));
     mark(&mut c, end);
@@ -57500,6 +57509,56 @@ fn hint_use<a>(c: (&a mut C), v: Val, start: u64, end: u64, expected: u64) -> Va
 // per-arm ownership snapshots and the join are the same whichever kind of value is matched;
 // an expression `match` (docs/design/match-expression-arms.md) only changes what an arm body
 // does with its value (c.arm_slot).
+// "non-exhaustive match: `B` and `C` are not covered (add an arm for each, or a _ arm)", naming the
+// variants (or, for a union, the member types) that no arm matched, at most four of them.
+fn uncovered_msg<a>(c: (&a mut C), d: u64, ty: u64, seen: &a u64[], count: u64) -> u8[] {
+    mut names = u8[][];
+    union := is_union(&mut c, ty);
+    mut args = u64[];
+    if union {
+        args = type_args(&mut c, ty);
+    }
+    for k in count {
+        mut hit = false;
+        for i in seen.len() {
+            if seen[i] == k {
+                hit = true;
+            }
+        }
+        if !hit {
+            if union {
+                names.push(type_name(&mut c, args[k]));
+            } else {
+                names.push(c.fields[c.decls[d].first + k].name.copy());
+            }
+        }
+    }
+    mut msg = copy_bytes(view("non-exhaustive match: "));
+    shown := if names.len() > 4 { 4 } else { names.len() };
+    for i in shown {
+        if i != 0 {
+            if (i + 1 == shown) && (names.len() <= 4) {
+                push_bytes(&mut msg, view(" and "));
+            } else {
+                push_bytes(&mut msg, view(", "));
+            }
+        }
+        push_bytes(&mut msg, view("`"));
+        push_bytes(&mut msg, view(names[i]));
+        push_bytes(&mut msg, view("`"));
+    }
+    if names.len() > 4 {
+        push_bytes(&mut msg, view(" and "));
+        decimal(&mut msg, names.len() - 4);
+        push_bytes(&mut msg, view(" more"));
+    }
+    if names.len() == 1 {
+        push_bytes(&mut msg, view(" is not covered (add an arm for it, or a _ arm)"));
+    } else {
+        push_bytes(&mut msg, view(" are not covered (add an arm for each, or a _ arm)"));
+    }
+    return msg;
+}
 fn match_statement<a>(c: (&a mut C)) -> unit {
     // Matching through a reference (`match self`) inspects the value in place: payloads are bound
     // as references of the same mode instead of being moved out.
@@ -57521,7 +57580,7 @@ fn match_statement<a>(c: (&a mut C)) -> unit {
         if integer(&mut c, sty)
             || is_bool(&mut c, sty)
             || is_char(&mut c, sty) {
-            scalar_match(&mut c, s, scrut_term);
+            scalar_match(&mut c, s, scrut_term, scrut_at);
             return ();
         }
     }
@@ -57738,7 +57797,8 @@ fn match_statement<a>(c: (&a mut C)) -> unit {
         }
     }
     if (seen.len() != count) & (default == 0) {
-        fail(&mut c, view("non-exhaustive match"));
+        msg := uncovered_msg(&mut c, d, x.ty, &seen, count);
+        fail_at(&mut c, scrut_at, view(msg));
     }
     if default != 0 && seen.len() == count {
         fail(&mut c, view("unreachable _ arm (all variants are covered)"));

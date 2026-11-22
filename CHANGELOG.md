@@ -1,5 +1,10 @@
 ## Unreleased
 
+- **A non-exhaustive `match` says what it misses, and where.** E0011 named nothing and pointed at the
+  closing brace. It now points at the scrutinee and lists the uncovered variants (or union member
+  types), up to four and then a count - "`Tri` is not covered (add an arm for it, or a _ arm)". A
+  `bool` match names the missing `true` or `false`, and an integer match says it needs a `_` arm.
+  Pinned by `match-uncovered-*`.
 - **Fixed: compile-time values on AArch64 and RISC-V hosts.** The probe that runs a compile-time
   expression was always built for x86-64 (`--target x86_64`, `ld -m elf_x86_64`), so on any other
   Linux host it could not execute and every `comptime`/baked `static` failed. The probe, its shared
