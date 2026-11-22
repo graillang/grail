@@ -1,5 +1,7 @@
 ## Unreleased
 
+- Reseeded the bootstrap (x86-64, AArch64, RISC-V 64) from the current compiler sources; CI's
+  preflight finds it fresh again, so the native Linux, cross and Windows-cross lanes run.
 - CI's macOS lane runs sequential book examples (output checked against `book/book.json`) in place
   of `scope_tasks`: the Mach-O runtime cannot start OS threads yet, so task-parallel programs abort
   there. The lane now builds and runs hello, numbers and floats with the macOS-native compiler.
