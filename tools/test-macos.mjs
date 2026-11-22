@@ -33,7 +33,7 @@ function tool(name, argv) {
 const libSystem = new Set([
   // _NSGetExecutablePath is dyld's, re-exported through libSystem: the running image's own path,
   // which is what lets the driver re-invoke itself for `grail build`.
-  '_NSGetExecutablePath',
+  '__NSGetExecutablePath',
   '_access', '_clock_gettime', '_close', '___error', '_execve', '_exit', '_fork', '_getdirentries64',
   '_getpid', '_kill', '_mkdir', '_mmap', '_mprotect', '_munmap', '_nanosleep', '_open', '_pipe',
   // The portable scheduler parks a worker on this thread's address with libsystem_pthread's

@@ -1,5 +1,11 @@
 ## Unreleased
 
+- **Fixed: the macOS compiler crashed at startup on Apple hardware.** The darwin module imported
+  `NSGetExecutablePath`, which became the Mach-O symbol `_NSGetExecutablePath`; libSystem's is
+  `__NSGetExecutablePath` (C `_NSGetExecutablePath`). A cross-build links against a libSystem stub
+  made from the object's own imports, so the misspelling linked and the call jumped to address 0 the
+  first time `grail build` asked for its own path. `tools/test-macos.mjs`'s allowlist had the same
+  spelling and now names the real symbol. Found under lldb on a macos-15 runner.
 - CI: the macOS lanes run on `macos-15` (Apple silicon) and `macos-15-intel`; GitHub no longer starts
   `macos-14` or `macos-13` jobs. On a Windows host `tools/windows.mjs` assembles with clang, so the
   native Windows lane's self-host runs.
