@@ -1,5 +1,8 @@
 ## Unreleased
 
+- CI's macOS lane runs sequential book examples (output checked against `book/book.json`) in place
+  of `scope_tasks`: the Mach-O runtime cannot start OS threads yet, so task-parallel programs abort
+  there. The lane now builds and runs hello, numbers and floats with the macOS-native compiler.
 - **Fixed: listing a directory on macOS jumped to address 0.** `getdirentries64` is not exported by
   current libSystem; the darwin module imports `__getdirentries64` (the symbol Go's runtime uses too).
 - **Fixed: on macOS a failed `open`, `access`, `mkdir` or other `int`-returning libSystem call read as
