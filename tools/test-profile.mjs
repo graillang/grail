@@ -103,7 +103,8 @@ try {
   ].join('\n'));
   const binary = join(work, 'hotloop');
   const env = { ...process.env, GRAIL_HOME: root };
-  ok([compiler, 'build', source, '-o', binary], { cwd: work, env });
+  // --debug: the optimiser would inline `hot` into `main`, and the report could not tell them apart.
+  ok([compiler, 'build', '--debug', source, '-o', binary], { cwd: work, env });
 
   // The sampler reports link-time addresses; that is only true for a non-PIE build.
   const image = readFileSync(binary);
