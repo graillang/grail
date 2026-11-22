@@ -17,7 +17,7 @@ Windows AArch64, and macOS x86-64/AArch64, and the *compiler itself* is a native
 x86-64 and on both macOS targets. On this host Linux x86-64 executes natively and the Windows
 compiler executes under Wine; the native lanes in
 [.github/workflows/ci.yml](../../.github/workflows/ci.yml) run the same binaries on
-`windows-latest` and `macos-14`. Linux AArch64 and RISC-V 64 are runnable targets whose qemu lanes
+`windows-latest` and `macos-15`. Linux AArch64 and RISC-V 64 are runnable targets whose qemu lanes
 need a runner, and Windows AArch64 has no ARM64 runner.
 
 | Target | Compiler output | Execution evidence | Status |
@@ -27,7 +27,7 @@ need a runner, and Windows AArch64 has no ARM64 runner.
 | Linux RISC-V 64 | ELF cross-image | cross-build and ELF machine checks; qemu-static used for self-host and the FFI fixtures | **Cross-build + qemu checks** |
 | Windows x86-64 | PE32+ console images, COFF objects, kernel32 imports, Win32 OS layer; the **compiler itself** as `grail.exe` | `bun tools/windows.mjs check` (the `tests/windows-cases.json` programs execute under Wine: thread join, wake, FFI out-parameters, seven-word calls, a C callback abort); `bun tools/windows.mjs selfhost` runs the native compiler under Wine: it builds hello end to end, and its stage 2 is byte-identical to the Linux compiler's; `grail build` on this host links a PE image with lld-link that runs under Wine | **Executed (under Wine); native CI lane on windows-latest** |
 | Windows AArch64 | ARM64 PE/COFF objects and images, Win64 ARM64 imports | 4 ARM64 images statically verified; no ARM64 runner | **Cross-build only; not executable** |
-| macOS x86-64 / AArch64 | Mach-O objects and executables, libSystem layer, platform-module runtime; the **compiler itself** as a Mach-O binary | `bun tools/test-macos.mjs` (objects, images, frameworks, dylibs, signatures) plus both driver links; the compiler cross-builds and links for both targets | **Executed objects; native CI lane on macos-14** |
+| macOS x86-64 / AArch64 | Mach-O objects and executables, libSystem layer, platform-module runtime; the **compiler itself** as a Mach-O binary | `bun tools/test-macos.mjs` (objects, images, frameworks, dylibs, signatures) plus both driver links; the compiler cross-builds and links for both targets | **Executed objects; native CI lane on macos-15** |
 
 Linux x86-64 is the only target with full compiler and runtime execution evidence on this host.
 Linux AArch64 and RISC-V 64 build and pass ELF checks; qemu-static was used for both self-hosting

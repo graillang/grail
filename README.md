@@ -74,7 +74,7 @@ build.
 
 The evidence behind this section, per platform, is in
 [docs/platform-status.md](docs/platform-status.md); the CI lanes that run these binaries on
-`windows-latest` and `macos-14` are in [.github/workflows/ci.yml](.github/workflows/ci.yml).
+`windows-latest` and `macos-15` are in [.github/workflows/ci.yml](.github/workflows/ci.yml).
 
 ## Release artifacts
 
@@ -90,8 +90,8 @@ with the artifacts below, one `SHA256SUMS` file, `release.json` provenance and a
 | `linux-riscv64` | `grail-VERSION-linux-riscv64.tar.gz` plus the raw compiler | Linux RISC-V 64, static ELF; cross-built and smoke-run under qemu, not on RISC-V hardware |
 | `windows-x86_64` | `grail-VERSION-windows-x86_64.zip`, `...-compiler.exe`, `...-objects.zip` | Windows x86-64: a PE32+ compiler and programs, run natively by the `windows-latest` CI lane and under Wine on a Linux host |
 | `windows-aarch64` | none | **Not built**: ARM64 PE code generation is not implemented; the lane is planned |
-| `macos-aarch64` | `grail-VERSION-macos-aarch64-objects.tar.gz` | Apple silicon: a Mach-O compiler and programs, cross-built and linked on Linux, run natively by the `macos-14` CI lane |
-| `macos-x86_64` | `grail-VERSION-macos-x86_64-objects.tar.gz` | Intel macOS: a Mach-O compiler and programs, cross-built and linked on Linux (the signing dry-run lane runs on `macos-13`) |
+| `macos-aarch64` | `grail-VERSION-macos-aarch64-objects.tar.gz` | Apple silicon: a Mach-O compiler and programs, cross-built and linked on Linux, run natively by the `macos-15` CI lane |
+| `macos-x86_64` | `grail-VERSION-macos-x86_64-objects.tar.gz` | Intel macOS: a Mach-O compiler and programs, cross-built and linked on Linux (the signing dry-run lane runs on `macos-15-intel`) |
 
 Build the compiler with `bun tools/native.mjs build` (Bun, Clang assembler and LLD required).
 There is no Rust seed or C-backend dependency. `just book` builds and opens the offline book;
@@ -102,7 +102,7 @@ The Windows x86-64 backend emits PE/COFF objects and PE32+ images, and the compi
 there: `bun tools/windows.mjs selfhost` runs the Windows compiler under Wine, compiles a program end
 to end and compiles the compiler itself to assembly identical to the Linux compiler's. The macOS
 x86-64 and AArch64 backends emit Mach-O objects and linked images; the compiler cross-builds and
-links for both and runs in the `macos-14` CI lane. Windows AArch64 is cross-built and statically
+links for both and runs in the `macos-15` CI lane. Windows AArch64 is cross-built and statically
 verified only. On Windows the built-in socket operations, the green-task scheduler's IOCP reactor
 and exception unwinding are still missing, as is dynamic unloading; ARM64 Win32 code generation is
 not implemented (see [docs/design/windows-backend.md](docs/design/windows-backend.md)).

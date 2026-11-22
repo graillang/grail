@@ -370,7 +370,7 @@ for (const target of machoTargets) {
 
 // The driver itself, not just the tooling: `grail build --target macos-*` has to assemble and link
 // a Mach-O executable on a host with no macOS SDK. This is the path a user (and the CI job on
-// macos-14) takes, and it failed at the assembler until the emitter stopped writing ELF directives
+// macos-15) takes, and it failed at the assembler until the emitter stopped writing ELF directives
 // and Darwin spelled weak definitions `.weak_definition`.
 let driverBuilds = 0;
 for (const target of machoTargets) {

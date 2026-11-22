@@ -1,5 +1,8 @@
 ## Unreleased
 
+- CI: the macOS lanes run on `macos-15` (Apple silicon) and `macos-15-intel`; GitHub no longer starts
+  `macos-14` or `macos-13` jobs. On a Windows host `tools/windows.mjs` assembles with clang, so the
+  native Windows lane's self-host runs.
 - **Fixed: `extern "C" lib "shim.o"` on Windows.** An object or archive input (`.o`, `.obj`, `.a`,
   `.lib`) was written as a DLL import note, so the image imported `shim.o.dll` and failed to start
   (`STATUS_DLL_NOT_FOUND`); it is now a link input, as on Linux. CI's Windows lane builds the shim.
