@@ -1,5 +1,10 @@
 ## Unreleased
 
+- **Fixed: compile-time values on AArch64 and RISC-V hosts.** The probe that runs a compile-time
+  expression was always built for x86-64 (`--target x86_64`, `ld -m elf_x86_64`), so on any other
+  Linux host it could not execute and every `comptime`/baked `static` failed. The probe, its shared
+  base object and its link now follow the host the compiler runs on. `tools/native.mjs` also allows a
+  command 256 MiB of output (clang's on the cross lanes passed 16).
 - The release compiler's PGO profile is used only when this clang can read it: a clang older than
   the profile's writer (Ubuntu 24.04's clang 18) refused every compile with "unsupported
   instrumentation profile format version". The build now notes it and goes on without the profile.

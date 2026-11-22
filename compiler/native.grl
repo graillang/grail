@@ -25850,7 +25850,16 @@ fn ct_probe_exec<a, b, d, e>(c: (&a mut C), probe: &b [u8], text: &d [u8], key: 
         push_bytes(&mut cmd, view(" --separate"));
         // Assembled in process (`--object`), as a build is: a probe needs no C toolchain, only the
         // linker a build uses.
-        push_bytes(&mut cmd, view(" --target x86_64 --object "));
+        // The probe runs here, so it is built for the machine the compiler is running on.
+        push_bytes(&mut cmd, view(" --target "));
+        mut probe_target = copy_bytes(view("x86_64"));
+        if host::target() == 1 {
+            probe_target = copy_bytes(view("aarch64"));
+        } else if host::target() == 2 {
+            probe_target = copy_bytes(view("riscv64"));
+        }
+        push_bytes(&mut cmd, view(probe_target));
+        push_bytes(&mut cmd, view(" --object "));
         push_bytes(&mut cmd, view(ct_shell_quote(view(probe_o))));
         push_bytes(&mut cmd, view(" --comptime-probe "));
         push_bytes(&mut cmd, view(ct_shell_quote(view(probe_s))));
@@ -25918,7 +25927,13 @@ fn ct_probe_exec<a, b, d, e>(c: (&a mut C), probe: &b [u8], text: &d [u8], key: 
         if ld.len() == 0 {
             ld = copy_bytes(view("ld.lld"));
         }
-        mut link = u8[][ld, copy_bytes(view("-m")), copy_bytes(view("elf_x86_64")), copy_bytes(view("-static")), probe_o.copy(), path_cat(view(base_dir), view("/base.o")), copy_bytes(view("-o")), probe_exe.copy()];
+        mut emulation = copy_bytes(view("elf_x86_64"));
+        if host::target() == 1 {
+            emulation = copy_bytes(view("aarch64linux"));
+        } else if host::target() == 2 {
+            emulation = copy_bytes(view("elf64lriscv"));
+        }
+        mut link = u8[][ld, copy_bytes(view("-m")), emulation.copy(), copy_bytes(view("-static")), probe_o.copy(), path_cat(view(base_dir), view("/base.o")), copy_bytes(view("-o")), probe_exe.copy()];
         mut link2 = u8[][];
         for li in link.len() {
             link2.push(link[li].copy());
@@ -26635,7 +26650,15 @@ fn ct_probe_base<a, b>(c: (&a mut C), self: &b [u8], files: (&a u8[][]), mods: (
         host::command(u8[][copy_bytes(view("mkdir")), copy_bytes(view("-p")), path_cat(view(tmp), view("/if"))]);
         mut cmd = ct_shell_quote(self);
         push_bytes(&mut cmd, view(flags));
-        push_bytes(&mut cmd, view(" --target x86_64 --emit-interface "));
+        push_bytes(&mut cmd, view(" --target "));
+        if host::target() == 1 {
+            push_bytes(&mut cmd, view("aarch64"));
+        } else if host::target() == 2 {
+            push_bytes(&mut cmd, view("riscv64"));
+        } else {
+            push_bytes(&mut cmd, view("x86_64"));
+        }
+        push_bytes(&mut cmd, view(" --emit-interface "));
         push_bytes(&mut cmd, view(ct_shell_quote(view(path_cat(view(tmp), view("/if"))))));
         push_bytes(&mut cmd, view(" --separate --no-entry --object "));
         push_bytes(&mut cmd, view(ct_shell_quote(view(path_cat(view(tmp), view("/base.o"))))));
