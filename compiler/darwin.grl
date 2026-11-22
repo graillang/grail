@@ -54,10 +54,15 @@ fn rt_exe_path(buf: u64, size: u64) -> u64 {
     slot := rt_alloc(16);
     raw_store(slot, size - 1);
     r := raw_import("__NSGetExecutablePath", buf, slot);
-    n := raw_load(slot);
     rt_free(slot);
     if r != 0 {
         return wrapping_sub(0, 34);
+    }
+    // On success the size word is left as it was (it is rewritten only when the buffer is too small),
+    // so the path's length is where its terminating NUL is.
+    mut n = 0;
+    while (n < size - 1) && (raw_byte(buf + n) != 0) {
+        n += 1;
     }
     raw_putbyte(buf + n, 0);
     return n;
