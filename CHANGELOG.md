@@ -1,5 +1,8 @@
 ## Unreleased
 
+- The release compiler's PGO profile is used only when this clang can read it: a clang older than
+  the profile's writer (Ubuntu 24.04's clang 18) refused every compile with "unsupported
+  instrumentation profile format version". The build now notes it and goes on without the profile.
 - Reseeded the bootstrap (x86-64, AArch64, RISC-V 64) from the current compiler sources; CI's
   preflight finds it fresh again, so the native Linux, cross and Windows-cross lanes run.
 - CI's macOS lane runs sequential book examples (output checked against `book/book.json`) in place

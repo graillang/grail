@@ -533,8 +533,20 @@ function profileUse(log) {
     }
     writeFileSync(path, unpacked.stdout);
   }
+  // The profile carries its writer's format version, and an older clang refuses a newer one outright
+  // ("unsupported instrumentation profile format version"), so try it once on an empty unit first.
+  if (!(path in pgoUsable)) {
+    const probe = spawnSync('clang', ['-x', 'c', '-c', '-o', '/dev/null', `-fprofile-use=${path}`, '-'],
+      { input: 'int grail_pgo_probe(void) { return 0; }\n', encoding: 'utf8' });
+    pgoUsable[path] = probe.status === 0;
+    if (!pgoUsable[path]) {
+      log(`this clang cannot read tools/pgo/grail.profdata.xz (${(probe.stderr ?? '').trim().split('\n')[0]}): building the release compiler without its profile`);
+    }
+  }
+  if (!pgoUsable[path]) return [];
   return [`-fprofile-use=${path}`, '-Wno-profile-instr-unprofiled', '-Wno-profile-instr-out-of-date', '-Wno-backend-plugin'];
 }
+const pgoUsable = {};
 // `bun tools/native.mjs pgo-train`: the instrumented release compiler (clang -fprofile-generate, the
 // counters written at exit by tools/pgo/shim.c), the training runs with one process each
 // (GRAIL_JOBS=1, so no forked worker's counters are lost), and the merged profile written to
