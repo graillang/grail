@@ -58,7 +58,7 @@ const numeric = ['--target', target];
 function compile(files, directory, extra = []) {
   mkdirSync(directory, { recursive: true });
   const asm = join(directory, 'out.s');
-  const result = spawnSync(compiler, [...numeric, ...extra, asm, ...files], { encoding: 'utf8', maxBuffer: 512 * 1024 * 1024, timeout: 900_000 });
+  const result = spawnSync(compiler, [...numeric, ...extra, asm, ...files], { encoding: 'utf8', maxBuffer: 512 * 1024 * 1024, timeout: Number(process.env.GRAIL_COMMAND_TIMEOUT ?? 2400) * 1000 });
   return { status: result.status, output: `${result.stdout ?? ''}${result.stderr ?? ''}`, asm };
 }
 
