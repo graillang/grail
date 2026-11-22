@@ -174,7 +174,9 @@ export function writeImportLibrary(directory = join(workDirectory, 'lib'), machi
 // GRAIL_ASM_ORACLE=1 also holds each internal object to clang's (tools/asm-oracle.mjs).
 export function assemble(source, object, target = windowsTarget) {
   // (C sources - the FFI shims - are compiled by clang.)
-  const internal = target === 'windows-x86_64' && /\.s$/.test(source);
+  // On a Windows host (the native CI lane) there is no Linux compiler to run `grail asm`, so clang
+  // assembles there.
+  const internal = target === 'windows-x86_64' && /\.s$/.test(source) && process.platform !== 'win32';
   if (internal) {
     command([buildCompiler(), 'asm', '--target', 'windows-x86_64', source, '-o', object]);
     if (process.env.GRAIL_ASM_ORACLE === '1') {
