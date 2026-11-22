@@ -256,40 +256,6 @@ and is 3–6x faster than Zig Debug and 13–23x faster than Rust dev.
 
 {{perf:parallel#provenance}}
 
-## Abundance: the engine itself
-
-The programs above are written for comparison; Abundance's port is the engine this language is
-being built beside. `bun tools/abundance-perf.mjs` compiles a curated set of ten real engine
-workloads from the port's parity suite (`abgeo`, `abtex`, `audio_procedural`, `audio_vocal`,
-`cache`, `coherent_coasts`, `coherent_mesa`, `coherent_stepped_hills`, `combat_world` and `job` —
-skipping sub-millisecond unit tests) through the build store - cold, and after one statement is
-added to `main` - runs both development and release builds with the suite's own arguments, checks
-every output against the C++ reference, and profiles the slowest release run. `--branch REF` adds
-another compiler's columns, so a change is measured on the engine the same way.
-
-{{perf:abundance#abundance-compile}}
-
-{{perf:abundance#abundance-run}}
-
-**What it found.** All ten workloads build through the store and match their C++ parity references.
-After a one-statement edit to `main`, incremental rebuilds drop to 0.11–0.84 billion instructions
-(0.03–0.08 s CPU) because the store replays every unchanged module and function: `cache` drops from
-23.76 G cold to 0.17 G edited (140x fewer instructions), `abgeo` from 17.42 G to 0.27 G (65x), and
-`abtex` from 10.31 G to 0.26 G (40x).
-
-On the runtime side, the terrain and audio synthesis workloads exercise sustained compute:
-`coherent_coasts` runs in 5.11 G / 0.35 s release (35.33 G / 1.68 s dev), `coherent_stepped_hills`
-in 3.34 G / 0.15 s release (54.57 G / 2.35 s dev), `audio_vocal` in 3.05 G / 0.33 s release, and
-`audio_procedural` in 2.18 G / 0.13 s release. Profiling `coherent_coasts` (the slowest release run)
-puts the top three inclusive hotspots in the terrain algorithm itself (`coherent_coasts_box_blur`
-14%, `coherent_coasts_value_noise` 11.3%, `coherent_coasts_flow_to_sea` 11%).
-
-{{perf:abundance#abundance-compile-cpu}}
-
-{{perf:abundance#abundance-run-cpu}}
-
-{{perf:abundance#provenance}}
-
 ## Compile speed
 
 The target: Grail compiles faster than Go, Zig and rustc, and its development builds are ready

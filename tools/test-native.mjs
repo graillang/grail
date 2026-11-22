@@ -122,7 +122,7 @@ function checkSources(cases) {
       assert.ok(test.reject && test.removedSyntax === true, `${test.name}: legacy syntax is only allowed as intentional removed-syntax rejection input`);
     }
   }
-  for (const directory of ['compiler/tests', 'book/examples', 'abundance/src', 'abundance/tests']) {
+  for (const directory of ['compiler/tests', 'book/examples']) {
     for (const file of readdirSync(join(root, directory)).filter(f => f.endsWith('.grl'))) {
       const path = join(root, directory, file);
       // Line comments are prose, not syntax: `read through a borrow (` is not a legacy reference.

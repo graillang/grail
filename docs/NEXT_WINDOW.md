@@ -5,8 +5,6 @@ is already on main, and the one thing to do first. Each lane also has its own re
 worktree (named below), which is the authoritative detail; this page is the index so a fresh session
 does not have to rediscover the queue.
 
-Read `docs/PORT_STATUS.md` for the coverage numbers and the named boundaries.
-
 | Lane | Area | Resume note |
 |---|---|---|
 | `abn_gp_prod` | production: economy domains | `grail-w-abn-gp-prod/NEXT_STEPS.md` |

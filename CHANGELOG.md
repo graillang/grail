@@ -1,5 +1,11 @@
 ## Unreleased
 
+- **The Abundance port moved out of this repository.** Its sources, tests, tools, design notes and
+  benchmark results now live in a separate private repository, and the history was rewritten
+  without them. Removed with it: `just abundance-test`, `just ab-engine`, `just ab-dev`, the
+  Abundance benchmark in `just bench-results` and the Performance chapter, `docs/rhi.md`,
+  `docs/imgui.md` and `docs/PORT_STATUS.md` (which described code under `abundance/`). The native
+  suite's legacy-syntax scan covers `compiler/tests` and `book/examples`.
 - **`grail fmt` formats more like rustfmt.** A slice bound sits tight (`a[3:5]`, `v[:2]`) while a
   map type or literal keeps its space (`[string: u64]`); a closure's body is spaced from its
   parameters (`|x| x * 2`); and an expression that ends in a long call keeps its head on the line

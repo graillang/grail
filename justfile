@@ -28,7 +28,6 @@ bench-results:
     bun tools/bench-rivals.mjs --metric wall --runs 9 --workers 1,4,8 --json bench/results/parallel.json ecs_par
     bun tools/sched-rivals.mjs --json bench/results/sched-rivals.json
     bun tools/compile-rivals.mjs --json bench/results/compile.json
-    bun tools/abundance-perf.mjs --json bench/results/abundance.json abgeo abtex audio_procedural audio_vocal cache coherent_coasts coherent_mesa coherent_stepped_hills combat_world job
 
 # Verify Grail examples without compiling the optional Rust comparisons.
 book-check-grail:
@@ -67,9 +66,6 @@ test-split:
 test-cache:
     bun tools/cache-test.mjs
 
-# Run the Abundance CPU-port parity tests (math, compared bit-for-bit with Abundance's own C++).
-abundance-test:
-    bun tools/abundance-test.mjs
 
 # FFI: extern "C" declarations/calls against a freestanding C shim, all targets.
 test-ffi:
@@ -208,12 +204,4 @@ land BRANCH:
 land-status-remote:
     GRAIL_LAND_REMOTE=${GRAIL_LAND_REMOTE:-} bash tools/land.sh --remote-status
 
-# Build the playable Grail Abundance engine binary (.work/ab-engine-grail/ab-engine-grail).
-ab-engine *args:
-    bun abundance/tools/build-ab-engine.mjs "$@"
 
-# Extra arguments go to the engine, e.g. `just ab-dev --seed 386677 --width 1920 --height 1080`; run from the checkout.
-# Build and play the Grail Abundance engine, windowed (the `just dev` equivalent).
-ab-dev *args:
-    bun abundance/tools/build-ab-engine.mjs
-    .work/ab-engine-grail/ab-engine-grail "$@"
