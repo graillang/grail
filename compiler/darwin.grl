@@ -303,7 +303,23 @@ pub fn rt_call(n: u64, a: u64, b: u64, c: u64) -> u64 {
         return rt_os_result(raw_import("write", a, b, c));
     }
     if n == 2 {
-        return rt_os_result(raw_import("open", a, rt_os_open_flags(b), c));
+        // open(2) is variadic in C, and Apple arm64 passes variadic arguments on the stack, so the
+        // mode in a register never reaches it: a created file came out mode 0000. Create it, then
+        // give it the mode (less the umask) with fchmod - only when this call created it.
+        fl := rt_os_open_flags(b);
+        mut created = 0;
+        if (fl & 512) != 0 {
+            if raw_import("access", a, 0, 0) != 0 {
+                created = 1;
+            }
+        }
+        fd := raw_import("open", a, fl, c);
+        if (created != 0) && (fd != wrapping_sub(0, 1)) {
+            mask := raw_import("umask", 0, 0, 0);
+            raw_import("umask", mask, 0, 0);
+            raw_import("fchmod", fd, c - (c & mask), 0);
+        }
+        return rt_os_result(fd);
     }
     if n == 3 {
         return rt_os_result(raw_import("close", a, 0, 0));

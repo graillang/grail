@@ -1,5 +1,11 @@
 ## Unreleased
 
+- **Fixed: files created on macOS were mode 0000.** `open(2)` is variadic, and Apple arm64 passes
+  variadic arguments on the stack, so the mode the darwin module passed in a register never arrived:
+  every created file was unreadable, and the compiler aborted reading back what it had written. A
+  file `open` creates now gets its mode (less the umask) through `fchmod`. `tools/test-macos.mjs`
+  allows the libSystem imports the module really has (`_chmod`, `_flock`, `_fchmod`, `_umask`) and
+  accepts the duplicate-declaration diagnostic's current wording.
 - **Fixed: the macOS compiler crashed at startup on Apple hardware.** The darwin module imported
   `NSGetExecutablePath`, which became the Mach-O symbol `_NSGetExecutablePath`; libSystem's is
   `__NSGetExecutablePath` (C `_NSGetExecutablePath`). A cross-build links against a libSystem stub
