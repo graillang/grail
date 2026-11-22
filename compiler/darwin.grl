@@ -598,10 +598,16 @@ fn rt_os_sched_prepare() -> u64 {
     return 0;
 }
 // ---- task stacks -------------------------------------------------------------------------------
-// 1 MiB reserved, lowest page PROT_NONE as the guard, pages committed by the kernel on first touch,
+// 1 MiB reserved, lowest 16 KiB PROT_NONE as the guard, pages committed by the kernel on first touch,
 // and finished stacks recycled through the finishing worker's free list (link in the top word).
 fn rt_os_stack_size() -> u64 {
     return 1048576;
+}
+// The guard is one 16 KiB page: Apple silicon's page size (and four of Intel's), so the mprotect of
+// the writable part starts on a page boundary on both. 4096 made it EINVAL on arm64, and every task
+// stack reservation aborted.
+fn rt_os_stack_guard() -> u64 {
+    return 16384;
 }
 fn rt_os_stack_reserve() -> u64 {
     size := rt_os_stack_size();
@@ -615,7 +621,7 @@ fn rt_os_stack_reserve() -> u64 {
     if rt_error(rt_syscall(10, stack, size, 0)) {
         rt_abort();
     }
-    if rt_error(rt_syscall(10, stack + 4096, size - 4096, 3)) {
+    if rt_error(rt_syscall(10, stack + rt_os_stack_guard(), size - rt_os_stack_guard(), 3)) {
         rt_abort();
     }
     return stack;
@@ -656,10 +662,10 @@ fn rt_os_stack_guard_hit(addr: u64) -> u64 {
     }
     base := raw_load(t + 8);
     size := raw_load(t + 16);
-    if size <= 4096 {
+    if size <= rt_os_stack_guard() {
         return 0;
     }
-    return (base <= addr) && (addr < base + 4096);
+    return (base <= addr) && (addr < base + rt_os_stack_guard());
 }
 // Darwin's siginfo_t is not Linux's: si_addr sits after si_signo, si_errno, si_code, si_pid, si_uid
 // and si_status, so it is at offset 24. A Mach-O fault that is not a task-stack overflow keeps the

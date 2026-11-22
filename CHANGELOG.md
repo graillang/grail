@@ -1,5 +1,8 @@
 ## Unreleased
 
+- **Fixed: on Apple silicon every task-stack reservation aborted.** The darwin module made a task
+  stack's guard one 4 KiB page and `mprotect`ed the rest from there, which is not a page boundary
+  with arm64 macOS's 16 KiB pages (`EINVAL`, then a silent abort). The guard is 16 KiB now.
 - **Fixed: files created on macOS were mode 0000.** `open(2)` is variadic, and Apple arm64 passes
   variadic arguments on the stack, so the mode the darwin module passed in a register never arrived:
   every created file was unreadable, and the compiler aborted reading back what it had written. A
