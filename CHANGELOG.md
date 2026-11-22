@@ -1,5 +1,10 @@
 ## Unreleased
 
+- **Fixed: on real Windows, `grail.exe` faulted on its first thread-pointer access.** The x64 runtime
+  read and wrote the TEB's user pointer through `%fs:40`, but 64-bit Windows reaches the TEB through
+  `%gs` (`%fs` has base 0 there); under Wine `%fs` is still the Linux thread block, which hid it. The
+  thread-pointer get/set and the foreign-call marker now use `%gs:40`, and the x86 assembler encodes
+  the `%gs` segment override (0x65). Found by running `grail.exe` under `cdb` on a Windows runner.
 - **Fixed: linking against libc on Debian and Ubuntu.** `lld` has no default search path, and the host
   link named only `/usr/lib` and `/usr/lib64`, so a program that needs libc (FFI, `lib` inputs)
   failed with `unable to find library -lc` where glibc lives in the multiarch directory
