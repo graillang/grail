@@ -278,7 +278,20 @@ export function compilerInputs() {
 
 // The compiler itself as a PE image: `grail.exe`, cross-built from the seed-built compiler.
 export function buildWindowsCompiler(compiler = buildCompiler(), { target = windowsTarget, directory = join(workDirectory, 'compiler') } = {}) {
-  return compileProgram(compiler, compilerInputs(), directory, { name: 'grail', target });
+  const built = compileProgram(compiler, compilerInputs(), directory, { name: 'grail', target });
+  // The compiler's `.text` carries more relocations than COFF's 16-bit count holds. A section past
+  // 0xFFFF must say so (IMAGE_SCN_LNK_NRELOC_OVFL) or the linker silently drops the excess and the
+  // image faults at its entry; refuse such an object here, where it is cheap to see.
+  const sections = inspectObject(built.object).split(/\n(?=\s*Section \{)/);
+  for (const section of sections) {
+    const count = Number(section.match(/RelocationCount: (\d+)/)?.[1] ?? 0);
+    const flags = parseInt(section.match(/Characteristics \[ \((0x[0-9A-Fa-f]+)\)/)?.[1] ?? '0', 16);
+    if (count === 0xFFFF && !(flags & 0x01000000)) {
+      const name = section.match(/Name: (\S+)/)?.[1] ?? '?';
+      throw new Error(`${built.object}: section ${name} has 0xFFFF relocations without IMAGE_SCN_LNK_NRELOC_OVFL`);
+    }
+  }
+  return built;
 }
 
 // A native Windows compiler is only credible if it runs, so this proves it where it can: under Wine

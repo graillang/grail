@@ -142,6 +142,10 @@ pub fn write<a>(o: (&a Obj)) -> u8[] {
         if nrel[k] != 0 {
             rel_at.push(at);
             at += 10 * nrel[k];
+            if nrel[k] > 0xFFFF {
+                // The overflow record that carries the real count (see the section header).
+                at += 10;
+            }
         } else {
             rel_at.push(0);
         }
@@ -182,13 +186,28 @@ pub fn write<a>(o: (&a Obj)) -> u8[] {
         w32(&mut out, data_at[k]);
         w32(&mut out, rel_at[k]);
         w32(&mut out, 0);
-        w16(&mut out, nrel[k]);
+        // NumberOfRelocations is 16 bits. Past 0xFFFF the count field holds 0xFFFF, the section is
+        // marked IMAGE_SCN_LNK_NRELOC_OVFL, and the first relocation record's VirtualAddress holds
+        // the real count (that record included); a truncated count made the linker skip the rest,
+        // which left the end of a large `.text` - the entry point among it - unrelocated.
+        mut flags = o.sec_flags[k];
+        if nrel[k] > 0xFFFF {
+            w16(&mut out, 0xFFFF);
+            flags = flags | 0x01000000;
+        } else {
+            w16(&mut out, nrel[k]);
+        }
         w16(&mut out, 0);
-        w32(&mut out, o.sec_flags[k]);
+        w32(&mut out, flags);
     }
     for k in nsec {
         if o.sec_nobits[k] == 0 {
             out.append(view(o.sec_data[k]));
+        }
+        if nrel[k] > 0xFFFF {
+            w32(&mut out, nrel[k] + 1);
+            w32(&mut out, 0);
+            w16(&mut out, 0);
         }
         for i in o.r_sec.len() {
             if o.r_sec[i] == k {
@@ -220,7 +239,12 @@ pub fn write<a>(o: (&a Obj)) -> u8[] {
             sum = jamcrc(view(o.sec_data[k]));
         }
         w32(&mut out, size);
-        w16(&mut out, nrel[k]);
+        // The auxiliary count is 16 bits too; it saturates, as MSVC's does (the header has the truth).
+        mut aux_rel = nrel[k];
+        if aux_rel > 0xFFFF {
+            aux_rel = 0xFFFF;
+        }
+        w16(&mut out, aux_rel);
         w16(&mut out, 0);
         w32(&mut out, sum);
         w16(&mut out, k + 1);

@@ -1,5 +1,12 @@
 ## Unreleased
 
+- **Fixed: the Windows compiler (`grail.exe`) crashed at its first instruction.** Grail's own COFF
+  writer stored a section's relocation count in COFF's 16-bit field without the overflow convention,
+  so the compiler's `.text` (108,310 relocations) declared 42,774 and the linker left everything past
+  them - the entry point among it - unrelocated. Past 0xFFFF a section now carries
+  `IMAGE_SCN_LNK_NRELOC_OVFL` with the real count in a leading record, and the auxiliary count
+  saturates. `tools/windows.mjs` refuses a compiler object with a saturated count and no overflow
+  flag; `bun tools/windows.mjs selfhost` passes again (stage 2 byte-identical to the Linux build's).
 - **`bun tools/native.mjs compiler --target T` builds the compiler for T again.** The path-printing
   form (`compiler` with no target, and `which`) had swallowed it, so the documented
   `compiler --target macos-aarch64` printed the host seed instead. CI repairs from the first runs
