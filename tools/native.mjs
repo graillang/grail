@@ -215,7 +215,9 @@ export function moduleFlags(target) {
 // x86-64/AArch64/RISC-V, Windows x86-64), clang for the rest (macOS). GRAIL_ASM_ORACLE=1 holds each
 // internal ELF object to clang's from the same text (tools/asm-oracle.mjs).
 export function assembleObject(source, object, target = hostTarget) {
-  const flags = target === 'riscv64' ? ['-march=rv64imafd', '-mabi=lp64d'] : [];
+  // -w: the compiler's assembly is hundreds of megabytes, and an assembler that warns per line (clang
+  // 18 on the CI runners, about the AArch64 output) fills any output buffer. Errors still print.
+  const flags = ['-w', ...(target === 'riscv64' ? ['-march=rv64imafd', '-mabi=lp64d'] : [])];
   if ((target === 'x86_64' || target === 'aarch64' || target === 'riscv64' || target === 'windows-x86_64' || target === 'macos-aarch64') && internalAssembler) {
     command([internalAssembler, 'asm', ...(target === 'x86_64' ? [] : ['--target', target]), source, '-o', object]);
     if (process.env.GRAIL_ASM_ORACLE === '1' && target !== 'windows-x86_64') {

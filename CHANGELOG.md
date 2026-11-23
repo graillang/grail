@@ -1,5 +1,8 @@
 ## 0.1.0 (2026-11-22)
 
+- `tools/native.mjs` assembles with clang's warnings off (`-w`): the compiler's assembly is hundreds of
+  megabytes, and clang 18 on the CI runners warned about the AArch64 output until the output buffer
+  overflowed (`spawnSync clang ENOBUFS`). Errors still print.
 - **The Abundance port moved out of this repository.** Its sources, tests, tools, design notes and
   benchmark results now live in a separate private repository, and the history was rewritten
   without them. Removed with it: `just abundance-test`, `just ab-engine`, `just ab-dev`, the
