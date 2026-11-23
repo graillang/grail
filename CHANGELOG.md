@@ -1,5 +1,9 @@
 ## 0.1.0 (2026-11-22)
 
+- The cross lanes (`linux-aarch64`, `linux-riscv64` under qemu) pass their cross-built compiler as
+  `GRAIL_TEST_COMPILER`, the compiler under test. They passed it as `GRAIL_COMPILER`, which now means
+  only the bootstrap, so `test-native` built the host compiler with the AArch64 one and assembled its
+  AArch64 output as x86-64.
 - `tools/native.mjs` assembles with clang's warnings off (`-w`): the compiler's assembly is hundreds of
   megabytes, and clang 18 on the CI runners warned about the AArch64 output until the output buffer
   overflowed (`spawnSync clang ENOBUFS`). Errors still print.

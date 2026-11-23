@@ -368,7 +368,7 @@ function testTarget(platformId, options = {}) {
     const result = spawnSync('bun', ['tools/test-native.mjs', target.compilerTarget], {
       cwd: root,
       stdio: 'inherit',
-      env: { ...process.env, GRAIL_COMPILER: compiler, [`GRAIL_QEMU_${target.arch.toUpperCase()}`]: qemu },
+      env: { ...process.env, GRAIL_TEST_COMPILER: compiler, [`GRAIL_QEMU_${target.arch.toUpperCase()}`]: qemu },
     });
     if (result.status !== 0) throw new Error(`${target.id} native tests failed (${result.status})`);
     return { platform: target.id, compiler, mode: 'qemu', runner: qemu, status: 'passed' };
