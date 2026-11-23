@@ -21107,5 +21107,26 @@
     "source": "fn f(n: u64) -> u64 {\n    match n {\n        0 => 10,\n        1 => 11,\n    }\n}\nfn main() { println(f(1)); }\n",
     "reject": true,
     "diagnostic": "an integer needs a _ arm"
+  },
+  {
+    "name": "lifetime-nested-ref-implies-nothing",
+    "note": "Rust #25860's shape: a `&a &b T` parameter does not imply `b` outlives `a`, so returning the `&b` value as `&a` is refused",
+    "source": "// Rust #25860 shape: the nested reference is meant to imply `b` outlives `a`.\nfn foo<a, b>(_w: &a &b u64, v: &b u64) -> &a u64 {\n    v\n}\nfn main() { println(1); }\n",
+    "reject": true,
+    "diagnostic": "returned borrow escapes its declared input lifetime"
+  },
+  {
+    "name": "lifetime-unrelated-widen-refused",
+    "note": "a `&b T` cannot be returned as `&a T` when nothing relates `a` and `b`",
+    "source": "// No relation at all between a and b: must be refused.\nfn widen<a, b>(v: &b u64) -> &a u64 {\n    v\n}\nfn main() { println(1); }\n",
+    "reject": true,
+    "diagnostic": "returned borrow escapes its declared input lifetime"
+  },
+  {
+    "name": "lifetime-nested-ref-escape-refused",
+    "note": "the #25860 shape used to let a borrow of an inner block's local outlive it: refused at the definition",
+    "source": "fn foo<a, b>(_w: &a &b u64, v: &b u64) -> &a u64 {\n    v\n}\nfn keep<a>(x: &a u64) -> &a u64 {\n    x\n}\nfn main() {\n    outer := 7;\n    r := &outer;\n    mut out = &outer;\n    {\n        inner := 42;\n        out = foo(&r, &inner);\n    }\n    println(*out);\n}\n",
+    "reject": true,
+    "diagnostic": "returned borrow escapes its declared input lifetime"
   }
 ]
