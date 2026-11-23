@@ -4,10 +4,12 @@
   the clock, the network and processes to a `comptime` probe ran only on x86-64, so on the other
   Linux targets a compile-time `now()` or file read ran instead of being refused. Every target now
   checks the operation before translating it to the target's own system call.
-- The cross lanes install the target's glibc (`libc6-dev-arm64-cross`, `libc6-dev-riscv64-cross`) and
-  set `GRAIL_SYSROOT_AARCH64` / `GRAIL_SYSROOT_RISCV64`, so the four cases that link a C library
-  (`extern-lib-link-only`, `fx-no-block-accepted`, `cross-module-handle-signatures`,
-  `interfaces-handle-audit`) link and run under qemu instead of failing with `unable to find library -lc`.
+- The four cases that link a C library by `-l` (`extern-lib-link-only`, `fx-no-block-accepted`,
+  `cross-module-handle-signatures`, `interfaces-handle-audit`) are marked `cross: false` and run
+  natively rather than under qemu. A cross layout's `libc.so` is a linker script of absolute paths,
+  and a linker opens a script's members literally instead of through `--sysroot`, so the emulated
+  cross link cannot resolve the target's loader; the cases still run on x86-64 and on the native
+  AArch64 lane, where the link-time environment exists.
 - The cross lanes (`linux-aarch64`, `linux-riscv64` under qemu) pass their cross-built compiler as
   `GRAIL_TEST_COMPILER`, the compiler under test. They passed it as `GRAIL_COMPILER`, which now means
   only the bootstrap, so `test-native` built the host compiler with the AArch64 one and assembled its

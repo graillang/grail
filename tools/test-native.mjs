@@ -149,6 +149,9 @@ function hostOnly(test, target) {
   // quiet-window runs set it): under load it fails without anything being wrong. Each such case has
   // a correctness twin that asserts the result without the clock.
   if (test.timing && process.env.GRAIL_TIMING !== '1') return true;
+  // `cross: false` marks a case that needs a native link-time environment: a C library named by
+  // -l resolves against the host's own libraries, which an emulated cross link cannot do.
+  if (test.cross === false && target !== hostTarget) return true;
   if (test.targets && !test.targets.includes(target)) return true;
   if (test.backends && !test.backends.includes(process.env.GRAIL_BACKEND ?? 'native')) return true;
   return false;

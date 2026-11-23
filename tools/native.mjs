@@ -187,15 +187,11 @@ export function dynamicLinkFlags(target, linkArgs) {
   // as a `-lNAME` does: without the interpreter and libc the call would land on an unrelocated PLT
   // slot. platform/audio found this: its shim is a path, and the program crashed on the first call.
   if (!linkArgs.some(input => input.startsWith('-l') || input.endsWith('.so'))) return [];
-  const sysroot = crossSysroot(target);
-  if (sysroot) {
-    const loader = (dynamicLoaders[target] ?? []).find(candidate => existsSync(join(sysroot, candidate)));
-    // Fedora-style lib64 trees and Debian-style multiarch trees.
-    const multiarch = `usr/lib/${target}-linux-gnu`;
-    const dirs = ['lib64', 'usr/lib64', multiarch, 'lib', 'usr/lib'].map(d => join(sysroot, d)).filter(existsSync);
-    // --sysroot resolves the absolute paths inside glibc's libc.so linker script.
-    return [`--sysroot=${sysroot}`, ...(loader ? ['--dynamic-linker', loader] : []), ...dirs.map(d => `-L${d}`), '-lc'];
-  }
+  // A cross layout's libc.so is a GROUP() script of ABSOLUTE paths that a linker does not rewrite:
+  // lld applies --sysroot to command-line paths and `-l` but opens a script's own absolute members
+  // literally, and this layout names both /usr/<triple>/lib/libc.so.6 and /lib/ld-linux-<triple>.so.1.
+  // No sysroot satisfies both, so a cross case that links a C library needs a link-time environment
+  // this host does not have; those cases are marked `cross: false` and run natively instead.
   if (target !== hostTarget) return [];
   const loader = (dynamicLoaders[target] ?? []).find(candidate => existsSync(candidate));
   // libc always: the runtime creates its threads through a weak pthread_create (docs/ffi.md).
