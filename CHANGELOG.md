@@ -1,5 +1,9 @@
 ## 0.1.0 (2026-11-22)
 
+- **Fixed: compile-time code was not sandboxed on AArch64 and RISC-V.** The check that refuses files,
+  the clock, the network and processes to a `comptime` probe ran only on x86-64, so on the other
+  Linux targets a compile-time `now()` or file read ran instead of being refused. Every target now
+  checks the operation before translating it to the target's own system call.
 - The cross lanes (`linux-aarch64`, `linux-riscv64` under qemu) pass their cross-built compiler as
   `GRAIL_TEST_COMPILER`, the compiler under test. They passed it as `GRAIL_COMPILER`, which now means
   only the bootstrap, so `test-native` built the host compiler with the AArch64 one and assembled its

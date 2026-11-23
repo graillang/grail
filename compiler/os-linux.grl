@@ -21,10 +21,12 @@ fn rt_syscall_low(n: u64, a: u64, b: u64, c: u64) -> u64 {
     return rt_syscall(n, a, b, c);
 }
 fn rt_syscall(n: u64, a: u64, b: u64, c: u64) -> u64 {
+    // Compile-time code is vetted on every target, by operation number, before the number is
+    // translated: AArch64 and RISC-V probes used to skip the check and could read files and the clock.
+    if rt_comptime_on() {
+        rt_comptime_check(n, a);
+    }
     if raw_target() == 0 {
-        if rt_comptime_on() {
-            rt_comptime_check(n, a);
-        }
         return raw_syscall(n, a, b, c);
     }
     if n == 0 {
@@ -353,7 +355,7 @@ fn rt_is_parent_var(p: u64) -> bool {
 // The decision is made once and kept in state word 3224.
 // A probe reached a constant that is still being computed: a dependency cycle (exit 4).
 fn rt_comptime_cycle() -> u64 {
-    raw_syscall(231, 4, 0, 0);
+    rt_syscall(231, 4, 0, 0);
     return 0;
 }
 fn rt_comptime_on() -> bool {
@@ -408,7 +410,7 @@ fn rt_comptime_check(n: u64, a: u64) -> u64 {
     }
     // A failed check in compile-time code ends the probe the way it ends a program: SIGABRT to
     // itself (rt_abort_final). Only its own process: signalling another one is an effect.
-    if (n == 62) & (a == raw_syscall(39, 0, 0, 0)) {
+    if (n == 62) && (a == rt_syscall(39, 0, 0, 0)) {
         return 0;
     }
     if rt_comptime_allowed(n) {
@@ -426,8 +428,9 @@ fn rt_comptime_check(n: u64, a: u64) -> u64 {
     raw_store(scratch + 56, 8245940784540295269);
     raw_store(scratch + 64, 8030604370216165483);
     raw_store(scratch + 72, 2941629332940131);
-    raw_syscall(1, 2, scratch, 79);
-    raw_syscall(231, 3, 0, 0);
+    // Operation numbers, translated for this target; both are on the allowed list, so no recursion.
+    rt_syscall(1, 2, scratch, 79);
+    rt_syscall(231, 3, 0, 0);
     return 0;
 }
 
