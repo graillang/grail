@@ -21,8 +21,8 @@ const grail = buildCompiler();
 }
 const work = join(root, '.work/cli-tests');
 rmSync(work, { recursive: true, force: true }); mkdirSync(work, { recursive: true });
-const run = (args, cwd = work, ok = true) => {
-  const r = spawnSync(grail, args, { cwd, encoding: 'utf8', timeout: 600_000 });
+const run = (args, cwd = work, ok = true, env = process.env) => {
+  const r = spawnSync(grail, args, { cwd, encoding: 'utf8', timeout: 600_000, env });
   if (ok) assert.equal(r.status, 0, `grail ${args.join(' ')}: ${r.stdout}${r.stderr}`);
   return r;
 };
@@ -210,8 +210,24 @@ writeFileSync(join(clink, 'src/main.grl'), [
   '}',
   '',
 ].join('\n'));
-assert.equal(run(['run'], clink).stdout.trim(), '13', 'grail run links a shared library and a relative C object');
-checks++;
+// Capture the real linker argv as well as running the image. Direct ld.lld has no
+// default library search path; Debian/Ubuntu's libc lives in target-prefixed
+// multiarch directories, and omitting them made the release runner fail at -lc.
+const realLinker = process.env.GRAIL_LINKER ?? 'ld.lld';
+const linkLog = join(work, 'link-args.log');
+const linkerWrapper = join(work, 'linker-wrapper.sh');
+writeFileSync(linkerWrapper, '#!/bin/sh\nprintf \'%s\\n\' "$@" > "$GRAIL_LINK_LOG"\nexec "$GRAIL_REAL_LINKER" "$@"\n', { mode: 0o755 });
+assert.equal(run(['run'], clink, true, {
+  ...process.env,
+  GRAIL_LINKER: linkerWrapper,
+  GRAIL_REAL_LINKER: realLinker,
+  GRAIL_LINK_LOG: linkLog,
+}).stdout.trim(), '13', 'grail run links a shared library and a relative C object');
+const linkerArgs = readFileSync(linkLog, 'utf8').trim().split('\n');
+assert.ok(linkerArgs.includes(`-L/usr/lib/${hostTarget}-linux-gnu`), `linker argv lacks /usr/lib multiarch: ${linkerArgs.join(' ')}`);
+assert.ok(linkerArgs.includes(`-L/lib/${hostTarget}-linux-gnu`), `linker argv lacks /lib multiarch: ${linkerArgs.join(' ')}`);
+assert.ok(linkerArgs.includes('-lc'), 'libc is still linked for the runtime thread bridge');
+checks += 3;
 // 6. Watch mode: `grail check --watch` and `grail build --watch`. A warm process re-runs the cycle
 // when an input changes. Every wait below is on the process's own output, not on a sleep: a cycle
 // prints exactly one summary line, so "cycle N arrived" and "no further cycle arrived" are both

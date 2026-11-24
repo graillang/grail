@@ -397,7 +397,8 @@ fn dynamic_link_flags<a, b>(target: &a [u8], inputs: (&b u8[][])) -> u8[][] {
     mut out = u8[][];
     mut shared = 0;
     for i in inputs.len() {
-        if starts(view(item(&inputs, i)), view("-l")) {
+        input := item(&inputs, i);
+        if starts(view(input), view("-l")) || ends(view(input), view(".so")) {
             shared = 1;
         }
     }
@@ -427,6 +428,11 @@ fn dynamic_link_flags<a, b>(target: &a [u8], inputs: (&b u8[][])) -> u8[][] {
     }
     out.push(copy(view("-L/usr/lib")));
     out.push(copy(view("-L/usr/lib64")));
+    // Debian/Ubuntu keep libc and the ELF loader in target-prefixed multiarch
+    // directories. ld.lld has no default search path, so name those directories
+    // explicitly; a host without them simply ignores the nonexistent -L paths.
+    out.push(cat(cat(view("-L/usr/lib/"), view(target)), view("-linux-gnu")));
+    out.push(cat(cat(view("-L/lib/"), view(target)), view("-linux-gnu")));
     // A dynamic process has loaded libc whatever it named, and the runtime creates its threads
     // through pthread_create so each has a libc TCB (docs/ffi.md); a weak reference only binds
     // when libc is on the link line.

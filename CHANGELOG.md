@@ -1,5 +1,8 @@
 ## 0.1.0 (2026-11-22)
 
+- Fixed Linux foreign-library linking on Debian/Ubuntu: direct `ld.lld` invocations now name the
+  target's multiarch library directories, so `grail run` can resolve `-lc` on release runners.
+  Shared-library paths ending in `.so` also enable the dynamic loader/libc flags.
 - Fixed release workflow runner setup: the macOS object-bundle job now symlinks Ubuntu's versioned
   `ld64.lld` onto `PATH` (matching `ci.yml`), the Linux release job installs `qemu-user-static` for
   cross-target CLI checks, and `tools/test-cli.mjs` sets a repo-local git identity inside its
