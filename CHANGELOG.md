@@ -1,5 +1,14 @@
 ## 0.1.0 (2026-11-22)
 
+- **Fixed: a bare place on the right of an indexed-field assignment stored the destination's own
+  value.** `v[2].a = v[0].a` left `v[2].a` at its own 3, and a parenthesised right side did the same: the
+  store was skipped as a self-assignment because every element of a vector shares one place, so the
+  right side's place equalled the destination's and the read never happened. A field store is now
+  skipped only when the right side names exactly the path the target writes (`v[i].a = v[i].a`, including
+  a parenthesised right side), so `v[2].a = v[0].a`, `v[2].a = (v[0].a)`, another element's other field, an
+  operator over it, and a copy through a local all store what they read - while `v[i].a = v[i].a * 2`
+  still reads the field before the target borrows its element. Pinned by
+  `index-field-assignment-other-element`.
 - **Fixed: compile-time code was not sandboxed on AArch64 and RISC-V.** The check that refuses files,
   the clock, the network and processes to a `comptime` probe ran only on x86-64, so on the other
   Linux targets a compile-time `now()` or file read ran instead of being refused. Every target now
@@ -10,6 +19,10 @@
   and a linker opens a script's members literally instead of through `--sysroot`, so the emulated
   cross link cannot resolve the target's loader; the cases still run on x86-64 and on the native
   AArch64 lane, where the link-time environment exists.
+- The cross lanes' tests are split into shard jobs (AArch64 three, RISC-V64 four) through
+  `GRAIL_TEST_SHARD`. Running the emulated compiler for every case took 4h47m on AArch64 and reached
+  GitHub's six-hour job limit on RISC-V64 as a single job; each shard now builds the compiler and runs
+  its share of the suite, and shard 1 packages and uploads the platform's artifact.
 - The cross lanes (`linux-aarch64`, `linux-riscv64` under qemu) pass their cross-built compiler as
   `GRAIL_TEST_COMPILER`, the compiler under test. They passed it as `GRAIL_COMPILER`, which now means
   only the bootstrap, so `test-native` built the host compiler with the AArch64 one and assembled its

@@ -230,8 +230,12 @@ jobs:
 
   # Cross-build lane: one x86-64 host builds and packages AArch64 and RISC-V64,
   # executes both under qemu-user, and verifies the artifact architecture.
+  # The suite runs the cross-built compiler itself under qemu for every case, which took 4h47m on
+  # AArch64 and ran into GitHub's six-hour job limit on RISC-V64 as one job. Each platform's cases
+  # are split across shard jobs (GRAIL_TEST_SHARD, read by test-native.mjs); shard 1 also packages
+  # and uploads the platform's artifact.
   linux-cross:
-    name: linux cross ${{ matrix.platform }}
+    name: linux cross ${{ matrix.platform }} (shard ${{ matrix.shard }})
     needs: preflight
     if: needs.preflight.outputs.ready == 'true'
     runs-on: ubuntu-24.04
@@ -241,8 +245,25 @@ jobs:
         include:
           - platform: linux-aarch64
             qemu: qemu-aarch64-static
+            shard: 1/3
+          - platform: linux-aarch64
+            qemu: qemu-aarch64-static
+            shard: 2/3
+          - platform: linux-aarch64
+            qemu: qemu-aarch64-static
+            shard: 3/3
           - platform: linux-riscv64
             qemu: qemu-riscv64-static
+            shard: 1/4
+          - platform: linux-riscv64
+            qemu: qemu-riscv64-static
+            shard: 2/4
+          - platform: linux-riscv64
+            qemu: qemu-riscv64-static
+            shard: 3/4
+          - platform: linux-riscv64
+            qemu: qemu-riscv64-static
+            shard: 4/4
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -255,15 +276,19 @@ jobs:
           ${{ matrix.qemu }} --version
       - name: Build the host compiler once
         run: bun tools/ci.mjs build --platform linux-x86_64
-      - name: Build, cross-test and package
+      - name: Build and cross-test this shard
         env:
           # The emulated compiler compiles the compiler under qemu: well past the 40-minute default.
           GRAIL_COMMAND_TIMEOUT: '7200'
+          GRAIL_TEST_SHARD: ${{ matrix.shard }}
         run: |
           bun tools/ci.mjs build --platform ${{ matrix.platform }}
           bun tools/ci.mjs test --platform ${{ matrix.platform }}
-          bun tools/ci.mjs package --platform ${{ matrix.platform }}
+      - name: Package
+        if: startsWith(matrix.shard, '1/')
+        run: bun tools/ci.mjs package --platform ${{ matrix.platform }}
       - uses: actions/upload-artifact@v4
+        if: startsWith(matrix.shard, '1/')
         with:
           name: dist-${{ matrix.platform }}
           path: dist/

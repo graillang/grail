@@ -53961,7 +53961,7 @@ fn chained_field_assignment<a>(c: (&a mut C)) -> unit {
     a := assign_field_path(&mut c, base.t, base.ty);
     target := a.t;
     fieldty := ty_arg(&mut c, a.ty);
-    assignment_tail(&mut c, 0, base.t, base.ty, target, u64[1, fieldty, c.ref_assign_d, c.ref_assign_k, c.ref_assign_base, c.ref_assign_rty], view(fname), record_ty, preparse, rhs.t, rhs.ty, rhs_start, rhs_end);
+    assignment_tail(&mut c, 0, base.t, base.ty, target, u64[1, fieldty, c.ref_assign_d, c.ref_assign_k, c.ref_assign_base, c.ref_assign_rty], view(fname), record_ty, preparse, rhs.t, rhs.ty, rhs_start, rhs_end, chain_start);
     return ();
 }
 // Writing or mutably borrowing a string's bytes. A string literal is a `string` (read-only,
@@ -56851,6 +56851,7 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
         return ();
     }
     if assignment_ahead(&mut c) {
+        assign_start := c.pos;
         name := ident(&mut c);
         mut written = u8[];
         if c.pv_on != 0 {
@@ -56867,7 +56868,7 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
                     target := a.t;
                     fieldty := ty_arg(&mut c, a.ty);
                     mut none = u8[];
-                    assignment_tail(&mut c, 0, head.t, head.ty, target, u64[1, fieldty, c.ref_assign_d, c.ref_assign_k, c.ref_assign_base, c.ref_assign_rty], view(none), 0, 0, 0, 0, 0, 0);
+                    assignment_tail(&mut c, 0, head.t, head.ty, target, u64[1, fieldty, c.ref_assign_d, c.ref_assign_k, c.ref_assign_base, c.ref_assign_rty], view(none), 0, 0, 0, 0, 0, 0, assign_start);
                     return ();
                 }
                 capture_assignment(&mut c, view(name));
@@ -56933,7 +56934,7 @@ fn statement_body<a>(c: (&a mut C)) -> unit {
             record_ty = shape;
         }
         op_at := c.pos;
-        assignment_tail(&mut c, l, id, ty, target, u64[through, fieldty, assigned_d, assigned_k, assigned_base, assigned_rty], view(field_name), record_ty, 0, 0, 0, 0, 0);
+        assignment_tail(&mut c, l, id, ty, target, u64[through, fieldty, assigned_d, assigned_k, assigned_base, assigned_rty], view(field_name), record_ty, 0, 0, 0, 0, 0, assign_start);
         // `x = e` writes the binding; `x.f = e` writes a field of what `x` owns, which is not a fact
         // about `x`'s own value.
         if through != 0 {
@@ -56999,9 +57000,61 @@ fn discard_value<a>(c: (&a mut C), v: Val) -> unit {
     }
     return ();
 }
+// Whether the tokens `[start_b, end_b)` name exactly the place path the tokens `[start_a, op)` write,
+// ignoring parentheses around the whole right side (`b.f = (b.f)` names the same place, and the
+// compiler has always accepted it as a self-assignment).
+//
+// A store whose right side is that very path already holds the value it stores, so it is skipped.
+// The *place* of a value cannot decide it: every element of a vector shares one place, so `v[0].f`
+// and `v[2].f` are one place, and `v[2].f = v[0].f` looked like a self-store - the destination's own
+// value was stored back and the right side was never read.
+fn same_place_tokens<a>(c: (&a mut C), start_a: u64, op: u64, start_b: u64, end_b: u64) -> bool {
+    mut s = start_b;
+    mut e = end_b;
+    while (e >= s + 2) && (kind_at(&mut c, s) == 40) && (kind_at(&mut c, e - 1) == 41) {
+        // Only a pair that closes at `e - 1` is around the whole right side (`(a).f` is not).
+        mut depth = 0;
+        mut close = e;
+        mut p = s;
+        while p < e {
+            k := kind_at(&mut c, p);
+            if k == 40 {
+                depth += 1;
+            }
+            if k == 41 {
+                depth -= 1;
+                if depth == 0 {
+                    close = p;
+                    break;
+                }
+            }
+            p += 1;
+        }
+        if close != e - 1 {
+            break;
+        }
+        s = s + 1;
+        e = e - 1;
+    }
+    if (op <= start_a) || (e <= s) || ((op - start_a) != (e - s)) {
+        return false;
+    }
+    for i in op - start_a {
+        if kind_at(&mut c, start_a + i) == 40 {
+            return false;
+        }
+        a := tok_text(&mut c, start_a + i);
+        b := tok_text(&mut c, s + i);
+        if !same(view(a), view(b)) {
+            return false;
+        }
+    }
+    return true;
+}
 // The rest of an assignment once its target is known: `target` is the binding slot (through =
-// 0, `l` its local) or a field reference (through = 1, `fieldty` the field type).
-fn assignment_tail<a, b>(c: (&a mut C), l: u64, id: u64, ty: u64, target: u64, through_fieldty: u64[], fname: &b [u8], rtype: u64, preparsed: u64, rhs_t: u64, rhs_ty: u64, rhs_start: u64, rhs_end: u64) -> unit {
+// 0, `l` its local) or a field reference (through = 1, `fieldty` the field type); `path_start` is
+// the token the target's own place path begins at.
+fn assignment_tail<a, b>(c: (&a mut C), l: u64, id: u64, ty: u64, target: u64, through_fieldty: u64[], fname: &b [u8], rtype: u64, preparsed: u64, rhs_t: u64, rhs_ty: u64, rhs_start: u64, rhs_end: u64, path_start: u64) -> unit {
     through := through_fieldty[0];
     fieldty := through_fieldty[1];
     // The field the path ends at, when the target was read by `assign_field_path`.
@@ -57233,7 +57286,10 @@ fn assignment_tail<a, b>(c: (&a mut C), l: u64, id: u64, ty: u64, target: u64, t
             return ();
         }
     } else {
-        if (destination != 0) & (destination == source) {
+        // A field write whose right side is the very path it writes - `v[i].f = v[i].f` - stores the
+        // value already there, so it is skipped; the elements of one vector share a place, so the
+        // place comparison alone would also skip `v[2].f = v[0].f` (see same_place_tokens).
+        if (operator == 61) & (destination != 0) & (destination == source) & same_place_tokens(&mut c, path_start, op_tok, vstart, vend) {
             return ();
         }
     }
