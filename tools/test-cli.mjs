@@ -90,7 +90,7 @@ const lib = join(work, 'mathlib'); mkdirSync(join(lib, 'src'), { recursive: true
 writeFileSync(join(lib, 'grail.toml'), '[package]\nname = "mathlib"\nversion = "0.1.0"\n');
 writeFileSync(join(lib, 'src/mathlib.grl'), 'module mathlib;\npub fn triple(n: u64) -> u64 {\n    return n * 3;\n}\n');
 const git = args => assert.equal(spawnSync('git', args, { cwd: lib }).status, 0, `git ${args.join(' ')}`);
-git(['init', '-q']); git(['add', '.']); git(['commit', '-qm', 'init']);
+git(['init', '-q']); git(['config', 'user.name', 'Grail Test']); git(['config', 'user.email', 'test@grail.invalid']); git(['config', 'commit.gpgsign', 'false']); git(['add', '.']); git(['commit', '-qm', 'init']);
 const branch = spawnSync('git', ['symbolic-ref', '--short', 'HEAD'], { cwd: lib, encoding: 'utf8' }).stdout.trim();
 run(['add', '--git', `file://${lib}`, '--branch', branch], demo);
 assert.match(readFileSync(join(demo, 'grail.toml'), 'utf8'), /^mathlib = \{ git = "file:\/\/.*", rev = "[0-9a-f]{40}" \}$/m);

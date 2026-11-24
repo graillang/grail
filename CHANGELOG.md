@@ -1,5 +1,9 @@
 ## 0.1.0 (2026-11-22)
 
+- Fixed release workflow runner setup: the macOS object-bundle job now symlinks Ubuntu's versioned
+  `ld64.lld` onto `PATH` (matching `ci.yml`), the Linux release job installs `qemu-user-static` for
+  cross-target CLI checks, and `tools/test-cli.mjs` sets a repo-local git identity inside its
+  temporary `mathlib` fixture so it passes on clean runners without global git config.
 - **Fixed: a bare place on the right of an indexed-field assignment stored the destination's own
   value.** `v[2].a = v[0].a` left `v[2].a` at its own 3, and a parenthesised right side did the same: the
   store was skipped as a self-assignment because every element of a vector shares one place, so the
