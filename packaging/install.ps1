@@ -24,6 +24,8 @@ New-Item -ItemType Directory -Force -Path $binDir, $libDir | Out-Null
 
 Copy-Item -Force $binary (Join-Path $binDir 'grail.exe')
 Copy-Item -Force $runtime (Join-Path $Prefix 'lib\grail\runtime.grl')
+# The platform modules the compiler loads beside the runtime (os-linux, os-windows, darwin).
+Copy-Item -Force (Join-Path $here 'lib\grail\*.grl') (Join-Path $Prefix 'lib\grail')
 $std = Join-Path $here 'lib\grail\std'
 if (Test-Path $std) { Copy-Item -Force (Join-Path $std '*.grl') $libDir }
 

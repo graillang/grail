@@ -252,6 +252,8 @@ describe('release packaging', () => {
     expect(paths).toContain('install.sh');
     expect(paths).toContain('install.ps1');
     expect(paths).toContain('share/grail/package.json');
+    // The compiler cannot build anything without the platform module beside runtime.grl.
+    for (const module of ['os-linux.grl', 'os-windows.grl', 'darwin.grl']) expect(paths).toContain(`lib/grail/${module}`);
     expect(paths.filter(path => path.startsWith('lib/grail/std/')).length).toBeGreaterThan(5);
     expect(entries.find(entry => entry.path.endsWith('/bin/grail')).mode).toBe(0o755);
   });

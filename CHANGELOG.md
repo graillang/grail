@@ -1,5 +1,8 @@
 ## 0.1.0 (2026-11-22)
 
+- Fixed the release archives: they now ship the platform modules (`os-linux.grl`, `os-windows.grl`,
+  `darwin.grl`) the compiler loads beside `runtime.grl`, and both install scripts copy them. The
+  release build now unpacks each host archive with an empty `HOME` and builds and runs a program.
 - Fixed Linux foreign-library linking on Debian/Ubuntu: direct `ld.lld` invocations now name the
   target's multiarch library directories, so `grail run` can resolve `-lc` on release runners.
   Shared-library paths ending in `.so` also enable the dynamic loader/libc flags.

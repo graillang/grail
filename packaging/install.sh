@@ -29,6 +29,10 @@ cp "$here/bin/grail" "$bindir/grail.new"
 chmod 0755 "$bindir/grail.new"
 mv "$bindir/grail.new" "$bindir/grail"
 cp "$here/lib/grail/runtime.grl" "$libdir/runtime.grl"
+for module in "$here"/lib/grail/*.grl; do
+    [ -e "$module" ] || continue
+    cp "$module" "$libdir/$(basename "$module")"
+done
 for module in "$here"/lib/grail/std/*.grl; do
     [ -e "$module" ] || continue
     cp "$module" "$libdir/std/$(basename "$module")"

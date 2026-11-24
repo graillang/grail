@@ -3,6 +3,7 @@
 //   grail-VERSION-PLATFORM/
 //     bin/grail[.exe]
 //     lib/grail/runtime.grl
+//     lib/grail/{os-linux,os-windows,darwin}.grl   (platform modules the compiler loads beside the runtime)
 //     lib/grail/std/*.grl
 //     share/doc/grail/{README.md,LICENSE,CHANGELOG.md}
 //     share/grail/package.json       (version, commit, file digests)
@@ -26,6 +27,10 @@ export function packageName(platform, version) {
   return `grail-${version}-${platformById(platform).id}`;
 }
 
+// The platform modules the compiler loads from beside runtime.grl (cli.grl platform_module and
+// probe_runtime_sources). Every package ships all three so each one can cross-compile.
+export const PLATFORM_MODULES = ['os-linux.grl', 'os-windows.grl', 'darwin.grl'];
+
 export function packageLayout(platform, version) {
   const target = platformById(platform);
   const name = packageName(platform, version);
@@ -41,6 +46,7 @@ export function packageLayout(platform, version) {
     entries: [
       binary,
       'lib/grail/runtime.grl',
+      ...PLATFORM_MODULES.map(file => `lib/grail/${file}`),
       'lib/grail/std/',
       'share/doc/grail/README.md',
       'share/doc/grail/LICENSE',
@@ -63,6 +69,7 @@ export function packageEntries({ platform, version, compiler, commit = gitCommit
 
   add(layout.binary, compiler, 0o755);
   add(layout.runtime, read(join(root, 'compiler/runtime.grl')));
+  for (const file of PLATFORM_MODULES) add(`lib/grail/${file}`, read(join(root, 'compiler', file)));
   const standardLibrary = list(join(root, 'lib')).filter(file => file.endsWith('.grl')).sort();
   if (standardLibrary.length === 0) throw new Error('lib/ contains no .grl modules');
   for (const file of standardLibrary) add(`${layout.std}/${file}`, read(join(root, 'lib', file)));
@@ -160,6 +167,7 @@ export function verifyPackage(artifact, platform, version = '0.1.0') {
   const required = [
     layout.binary,
     layout.runtime,
+    ...PLATFORM_MODULES.map(file => `lib/grail/${file}`),
     layout.manifest,
     'install.sh',
     'install.ps1',

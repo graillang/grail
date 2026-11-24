@@ -19,7 +19,9 @@
 //   assemble --dir DIR [--out DIR]       merge targets into checksums + README
 //   verify --dir DIR                     recompute checksums, check the claims
 //   dry-run [--out DIR]                  build everything locally, assemble, verify
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import {
   BUILD_ONLY, PLANNED, PLATFORMS, SUPPORTED, artifactName, gitCommit, hostPlatformId,
@@ -176,6 +178,7 @@ export function buildPlatform(platformId, options = {}) {
     built = buildTarget(platformId, { out: outDir, version, stage0: stage0.path });
     const pkg = createPackage({ platform: platformId, version, compiler: built.artifact, outDir });
     verifyPackage(pkg.artifact, platformId, version);
+    if (buildKind === 'native') smokeInstalledPackage(pkg.artifact, platformId, version);
   } else if (target.id === 'windows-x86_64') {
     built = buildTarget(platformId, { out: outDir, version, stage0: stage0.path });
     const pkg = createPackage({ platform: platformId, version, compiler: built.artifact, outDir });
@@ -454,6 +457,31 @@ export function verifyRelease(options = {}) {
   };
   console.log(JSON.stringify(result, null, 2));
   return result;
+}
+
+// Unpack the archive a user downloads and build and run a program with it, with an empty HOME so
+// nothing from a development tree or build store can stand in for a missing packaged file. The
+// layout check alone missed a package without the platform module the compiler loads.
+export function smokeInstalledPackage(artifact, platformId, version) {
+  const work = mkdtempSync(join(tmpdir(), 'grail-package-smoke-'));
+  try {
+    const unpack = spawnSync('tar', ['-xzf', artifact, '-C', work], { encoding: 'utf8' });
+    if (unpack.status !== 0) throw new Error(`${platformId}: cannot unpack ${basename(artifact)}: ${unpack.stderr}`);
+    const grail = join(work, `grail-${version}-${platformId}`, 'bin', 'grail');
+    const program = join(work, 'hello.grl');
+    writeFileSync(program, 'fn main() { println("package smoke ok"); }\n');
+    const home = join(work, 'home');
+    mkdirSync(home);
+    const env = { ...process.env, HOME: home, XDG_CACHE_HOME: join(home, '.cache') };
+    delete env.GRAIL_HOME;
+    const result = spawnSync(grail, ['run', program], { cwd: work, encoding: 'utf8', env, timeout: 600_000 });
+    if (result.status !== 0 || !result.stdout.includes('package smoke ok')) {
+      throw new Error(`${platformId}: the unpacked package cannot build and run a program (exit ${result.status})\n${result.stdout}${result.stderr}`);
+    }
+    console.log(`release: ${platformId}: unpacked package builds and runs a program`);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
 }
 
 export function dryRun(options = {}) {
