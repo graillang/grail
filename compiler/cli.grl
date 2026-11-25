@@ -3432,6 +3432,20 @@ fn info_of<a>(text: &a [u8], scan: bool) -> FileInfo {
         if lexer::calls_iter(text) && !eq(view(info.module), view("iter")) {
             info.uses.push(copy(view("iter")));
         }
+        // A script (no `module` line) gets the built-in types' other modules the same way: a map
+        // literal or type brings `hashmap`, a vector's or text's method brings `vecs` or `strings`
+        // (native.grl's discovery applies the same rule).
+        if info.module.len() == 0 {
+            if lexer::writes_map(text) {
+                info.uses.push(copy(view("hashmap")));
+            }
+            if lexer::calls_any(text, lexer::vecs_methods()[..]) {
+                info.uses.push(copy(view("vecs")));
+            }
+            if lexer::calls_any(text, lexer::strings_methods()[..]) {
+                info.uses.push(copy(view("strings")));
+            }
+        }
         info.embed = mentions_embed(text);
     }
     return info;
@@ -3439,7 +3453,7 @@ fn info_of<a>(text: &a [u8], scan: bool) -> FileInfo {
 // The record: the path, the stamp, the digest, then `-` for a file read only for its digest, or the
 // module (`-` for none), the embed flag and the `use`d names, and the scan's format (fp_scan).
 fn fp_scan() -> string {
-    return "scan2";
+    return "scan3";
 }
 fn fp_write<a, b, d, e>(c: (&a mut Cache), path: &b [u8], stamp: &d [u8], info: (&e FileInfo), scan: bool) -> unit {
     if (c.root.len() == 0) || (stamp.len() == 0) {

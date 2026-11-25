@@ -1,5 +1,6 @@
 ## Unreleased
 
+- A map literal or type (`["a": 1]`, `[string: u64]`, `[:]`) needs no `use hashmap;` in a program file.
 - **Breaking:** `..` is the one range spelling. Slices are `s[a..e]`, `s[a..]`, `s[..e]` and `s[..]` (as in
   `for i in a..b`); the colon form `s[a:e]` is refused with the replacement, and `grail fmt` rewrites it.
   `[K: V]` map types and `x: T` annotations are unchanged. Fixed arrays now accept `a[lo..hi]` too.

@@ -28865,6 +28865,17 @@ fn resolve_modules<a>(c: (&a mut C), offset: u64) -> unit {
                 queue.push(found);
             }
         }
+        // A map literal or type (`["a": 1]`, `[string: u64]`) is built-in syntax whose type lives in
+        // `hashmap`: a script that writes one brings it in, as with `iter`.
+        if !mod_known(&c, view("hashmap")) && !in_std_dir(view(file)) && !declares_module(view(text))
+            && lexer::writes_map(view(text)) {
+            found := mod_find(&c, view("hashmap"));
+            if found.len() != 0 {
+                c.mod_names.push(copy_bytes(view("hashmap")));
+                c.mod_files.push(found.copy());
+                queue.push(found);
+            }
+        }
         // Sorting, searching and summing a vector (`xs.sort()`, `xs.contains(&x)`, `xs.sum()`) and
         // splitting, trimming and joining text are a built-in type's methods in the same way: a source
         // that calls one brings `vecs` or `strings` in (lexer::vecs_methods, lexer::strings_methods).

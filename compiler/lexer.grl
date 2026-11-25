@@ -185,6 +185,48 @@ pub fn vecs_methods() -> string[] {
 pub fn strings_methods() -> string[] {
     return string["char_count", "char_indices", "chars", "chunks", "find", "is_char_boundary", "is_utf8", "join", "join_with", "lines", "parse_f64", "parse_i64", "parse_u64", "slice_chars", "split", "split_owned", "split_whitespace", "to_text_lossy", "trim", "trim_end", "trim_start", "utf8_error", "windows"];
 }
+// Whether a source writes a map: a `:` directly inside square brackets (`[K: V]`, `["a": 1]`,
+// `[:]`). A slice's bounds are `..`, so a colon there is a map's. Comments and strings are skipped.
+pub fn writes_map<a>(text: &a [u8]) -> bool {
+    n := text.len();
+    mut depth = u8[];
+    mut i = 0;
+    while i < n {
+        ch := text[i];
+        if (ch == 47) && (i + 1 < n) && (text[i + 1] == 47) {
+            while (i < n) && (text[i] != 10) {
+                i += 1;
+            }
+            continue;
+        }
+        if ch == 34 {
+            i += 1;
+            while (i < n) && (text[i] != 34) {
+                if text[i] == 92 {
+                    i += 1;
+                }
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+        if (ch == 91) || (ch == 40) || (ch == 123) {
+            depth.push(ch);
+        } else if (ch == 93) || (ch == 41) || (ch == 125) {
+            if depth.len() != 0 {
+                depth.pop();
+            }
+        } else if (ch == 58) && (depth.len() != 0) && (depth[depth.len() - 1] == 91) {
+            // `::` is a path, not a map's colon.
+            colon_pair := ((i + 1 < n) && (text[i + 1] == 58)) || ((i > 0) && (text[i - 1] == 58));
+            if !colon_pair {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    return false;
+}
 // Whether `text` calls a method with one of `names`: a dot, the name, then `(` (spaces allowed).
 pub fn calls_any<a, b>(text: &a [u8], names: &b [string]) -> bool {
     n := text.len();
