@@ -37280,6 +37280,9 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
             }
             if reborrow != 0 {
                 v = place(&mut c, reborrow - 1, 0);
+            } else if (argi < count) && (c.raw == 0) && string_literal_for_ref(&mut c, c.params[template_first + argi]) {
+                // `greet("hi")` for `fn greet(s: &string)`: the literal is borrowed, as `&"hi"` is.
+                v = borrow_temporary(&mut c, 0);
             } else {
                 v = expr_expected(&mut c, 0, context);
             }
@@ -52569,8 +52572,24 @@ fn operator_call<a>(c: (&a mut C), k: u64, left: Val, right: Val) -> Val {
 fn expr<a>(c: (&a mut C), min: u64) -> Val {
     return expr_expected(&mut c, min, NO_TYPE);
 }
+// A lone string literal (`"hi"` then `,`, `)` or `;`) where a shared `&string` is expected: it is
+// borrowed as `&"hi"` would be, its temporary held to the end of the block.
+fn string_literal_for_ref<a>(c: (&a mut C), expected: u64) -> bool {
+    if kind(&mut c) != 3 {
+        return false;
+    }
+    after := kind_at(&mut c, c.pos + 1);
+    if (after != 44) && (after != 41) && (after != 59) {
+        return false;
+    }
+    return (ty_kind(&mut c, expected) == 7) && (ty_mode(&mut c, expected) == 0)
+        && ((ty_kind(&mut c, ty_arg(&mut c, expected)) == 3) || (ty_kind(&mut c, ty_arg(&mut c, expected)) == 4));
+}
 fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
     lstart := c.pos;
+    if (c.raw == 0) && (expected != NO_TYPE) && (expected != 0) && string_literal_for_ref(&mut c, expected) {
+        return borrow_temporary(&mut c, 0);
+    }
     if closure_at(&mut c, c.pos) {
         if expected != NO_TYPE {
             none := u64[];

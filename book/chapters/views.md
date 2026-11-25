@@ -17,8 +17,8 @@ their source immortal: their existence constrains when the owner may move, grow 
 
 Readonly view derivation can copy a descriptor while retaining its provenance. That is different
 from copying an owning buffer, and different from duplicating an exclusive view. An owned `string` or
-`u8[]` argument is adjusted to a `&[u8]` parameter when the expected type is already known; every
-other position writes `&` explicitly.
+`u8[]` argument is adjusted to a `&[u8]` parameter when the expected type is already known, and a
+string literal passes as a `&string` (`greet("hi")`); every other position writes `&` explicitly.
 
 **Try it:** slice `[0..3]` instead, then return the first byte. Do not read index 3 from that view.
 

@@ -1,5 +1,6 @@
 ## Unreleased
 
+- A string literal passes where `&string` is expected: `greet("hi")` for `fn greet(s: &string)`.
 - `grail build main.grl` and `grail run main.grl` find a module beside the named file (`use shapes;` reads
   `shapes.grl` in its directory) without `--module-root` or a `grail.toml`.
 - A map literal or type (`["a": 1]`, `[string: u64]`, `[:]`) needs no `use hashmap;` in a program file.
