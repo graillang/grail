@@ -67,7 +67,9 @@ Floats have `sqrt`, `abs`, `floor`, `ceil`, `trunc`, `round` (halves away from z
 all bit-identical to the C library, and `to_bits` (with `f64::from_bits(b)` and `f32::from_bits(b)`
 for the way back). `use math;` adds the elementary functions as methods of `f64` and `f32`: `sin`,
 `cos`, `tan`, `asin`, `acos`, `atan`, `y.atan2(x)`, `exp`, `exp2`, `ln`, `log2`, `log10`, `pow`,
-`powi`, `hypot` and `fmod`, with the constants `math::PI`, `math::TAU` and `math::E`.
+`powi`, `hypot`, `fmod`, `tanh`, and `exp_m1` and `ln_1p` (e^x - 1 and ln(1 + x) without the
+cancellation near zero), with the constants `math::PI`, `math::TAU` and `math::E`. The f32 routines
+are also functions: `math::logf(x)`, `math::expf(x)`, `math::powf(x, y)`.
 
 ```grl
 use math;

@@ -421,7 +421,7 @@ fn f32_top(x: f32) -> u64 {
 
 
 @no_block
-fn expf(x: f32) -> f32 {
+pub fn expf(x: f32) -> f32 {
     xd := f64(x);
     abstop := f32_top(x);
     if abstop >= 1067 {
@@ -453,7 +453,7 @@ fn expf(x: f32) -> f32 {
 }
 
 @no_block
-fn exp2f(x: f32) -> f32 {
+pub fn exp2f(x: f32) -> f32 {
     xd := f64(x);
     abstop := f32_top(x);
     if abstop >= 1072 {
@@ -516,7 +516,7 @@ fn logf_split(x: f32) -> LogfSplit {
 }
 
 @no_block
-fn logf(x: f32) -> f32 {
+pub fn logf(x: f32) -> f32 {
     sp := logf_split(x);
     if sp.is_special {
         return sp.special;
@@ -533,7 +533,7 @@ fn logf(x: f32) -> f32 {
 }
 
 @no_block
-fn log2f(x: f32) -> f32 {
+pub fn log2f(x: f32) -> f32 {
     sp := logf_split(x);
     if sp.is_special {
         return sp.special;
@@ -640,12 +640,12 @@ fn sincosf_eval(y: f32, cosine: bool) -> f32 {
 }
 
 @no_block
-fn sinf(x: f32) -> f32 {
+pub fn sinf(x: f32) -> f32 {
     return sincosf_eval(x, false);
 }
 
 @no_block
-fn cosf(x: f32) -> f32 {
+pub fn cosf(x: f32) -> f32 {
     return sincosf_eval(x, true);
 }
 
@@ -786,7 +786,7 @@ fn asinf_poly12(z: f64, tab: u64) -> f64 {
 }
 
 @no_block
-fn asinf(x: f32) -> f32 {
+pub fn asinf(x: f32) -> f32 {
     ax := dbl32(f32_bits(x));
     if ax > 2130706432 {
         // |x| > 1: NaN (a NaN passes through as x + x).
@@ -852,6 +852,231 @@ fn asinf(x: f32) -> f32 {
 }
 
 // ---- the methods ------------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------------------------
+// expm1, log1p and tanh: fdlibm's s_expm1.c, s_log1p.c and s_tanh.c, the code glibc's dbl-64
+// versions are, operation for operation, so a port matches the C library bit for bit. expm1(x) is
+// e^x - 1 and log1p(x) is ln(1 + x) without the cancellation of writing them that way near zero.
+
+fn high_word(x: f64) -> u64 { return bits(x) >> 32; }
+fn set_high_word(x: f64, h: u64) -> f64 { return f64_from_bits((h << 32) | (bits(x) & 4294967295)); }
+// x * 2^k by adding to the exponent field, as fdlibm's `SET_HIGH_WORD(y, high + (k << 20))`.
+fn add_exponent(x: f64, k: i64) -> f64 {
+    if k >= 0 {
+        return f64_from_bits(wrapping_add(bits(x), u64(k) << 52));
+    }
+    return f64_from_bits(wrapping_sub(bits(x), u64(0 - k) << 52));
+}
+
+@no_block
+pub fn expm1(x0: f64) -> f64 {
+    mut x = x0;
+    hx_all := high_word(x);
+    xsb := hx_all & 2147483648;
+    hx := hx_all & 2147483647;
+    // Filter out huge and non-finite arguments.
+    if hx >= 1078159482 {
+        if hx >= 1082535490 {
+            if hx >= 2146435072 {
+                if (((hx & 1048575) | (bits(x) & 4294967295)) != 0) {
+                    return x + x;
+                }
+                if xsb == 0 { return x; }
+                return -1.0;
+            }
+            if x > 7.09782712893383973096e+02 {
+                return 1.0e300 * 1.0e300;
+            }
+        }
+        if xsb != 0 {
+            if x + 1.0e-300 < 0.0 {
+                return 1.0e-300 - 1.0;
+            }
+        }
+    }
+    mut k: i64 = 0;
+    mut c = 0.0;
+    if hx > 1071001154 {
+        mut hi = 0.0;
+        mut lo = 0.0;
+        if hx < 1072734898 {
+            if xsb == 0 {
+                hi = x - 6.93147180369123816490e-01;
+                lo = 1.90821492927058770002e-10;
+                k = 1;
+            } else {
+                hi = x + 6.93147180369123816490e-01;
+                lo = -1.90821492927058770002e-10;
+                k = -1;
+            }
+        } else {
+            mut half = 0.5;
+            if xsb != 0 { half = -0.5; }
+            k = i64(1.44269504088896338700e+00 * x + half);
+            t := f64(k);
+            hi = x - t * 6.93147180369123816490e-01;
+            lo = t * 1.90821492927058770002e-10;
+        }
+        x = hi - lo;
+        c = (hi - x) - lo;
+    } else if hx < 1016070144 {
+        t := 1.0e300 + x;
+        return x - (t - (1.0e300 + x));
+    }
+    hfx := 0.5 * x;
+    hxs := x * hfx;
+    r1 := 1.0 + hxs * (-3.33333333333331316428e-02 + hxs * (1.58730158725481460165e-03 + hxs * (-7.93650757867487942473e-05 + hxs * (4.00821782732936239552e-06 + hxs * -2.01099218183624371326e-07))));
+    t := 3.0 - r1 * hfx;
+    mut e = hxs * ((r1 - t) / (6.0 - x * t));
+    if k == 0 {
+        return x - (x * e - hxs);
+    }
+    e = x * (e - c) - c;
+    e = e - hxs;
+    if k == -1 {
+        return 0.5 * (x - e) - 0.5;
+    }
+    if k == 1 {
+        if x < -0.25 {
+            return -2.0 * (e - (x + 0.5));
+        }
+        return 1.0 + 2.0 * (x - e);
+    }
+    if (k <= -2) || (k > 56) {
+        mut y = 1.0 - (e - x);
+        if k == 1024 {
+            y = y * 2.0 * 8.98846567431157953865e+307;
+        } else {
+            y = add_exponent(y, k);
+        }
+        return y - 1.0;
+    }
+    mut y = 0.0;
+    if k < 20 {
+        tt := set_high_word(1.0, 1072693248 - (2097152 >> u64(k)));
+        y = tt - (e - x);
+    } else {
+        tt := set_high_word(1.0, u64(1023 - k) << 20);
+        y = x - (e + tt);
+        y = y + 1.0;
+    }
+    return add_exponent(y, k);
+}
+
+@no_block
+pub fn log1p(x: f64) -> f64 {
+    hx := i64(high_word(x)) - (i64(high_word(x) >> 31) << 32);
+    ax := high_word(x) & 2147483647;
+    mut k: i64 = 1;
+    mut f = 0.0;
+    mut c = 0.0;
+    mut hu: u64 = 0;
+    if hx < 1071284858 {
+        if ax >= 1072693248 {
+            if x == -1.0 {
+                return -1.80143985094819840000e+16 / 0.0;
+            }
+            return (x - x) / (x - x);
+        }
+        if ax < 1042284544 {
+            if (1.80143985094819840000e+16 + x > 0.0) && (ax < 1016070144) {
+                return x;
+            }
+            return x - x * x * 0.5;
+        }
+        if (hx > 0) || (hx <= -1076707644) {
+            k = 0;
+            f = x;
+            hu = 1;
+        }
+    }
+    if hx >= 2146435072 {
+        return x + x;
+    }
+    if k != 0 {
+        mut u = 0.0;
+        if hx < 1128267776 {
+            u = 1.0 + x;
+            hu = high_word(u);
+            k = i64(hu >> 20) - 1023;
+            if k > 0 {
+                c = 1.0 - (u - x);
+            } else {
+                c = x - (u - 1.0);
+            }
+            c = c / u;
+        } else {
+            u = x;
+            hu = high_word(u);
+            k = i64(hu >> 20) - 1023;
+            c = 0.0;
+        }
+        hu = hu & 1048575;
+        if hu < 434334 {
+            u = set_high_word(u, hu | 1072693248);
+        } else {
+            k += 1;
+            u = set_high_word(u, hu | 1071644672);
+            hu = (1048576 - hu) >> 2;
+        }
+        f = u - 1.0;
+    }
+    hfsq := 0.5 * f * f;
+    dk := f64(k);
+    if hu == 0 {
+        if f == 0.0 {
+            if k == 0 {
+                return 0.0;
+            }
+            c = c + dk * 1.90821492927058770002e-10;
+            return dk * 6.93147180369123816490e-01 + c;
+        }
+        r := hfsq * (1.0 - 0.66666666666666666 * f);
+        if k == 0 {
+            return f - r;
+        }
+        return dk * 6.93147180369123816490e-01 - ((r - (dk * 1.90821492927058770002e-10 + c)) - f);
+    }
+    s := f / (2.0 + f);
+    z := s * s;
+    r := z * (6.666666666666735130e-01 + z * (3.999999999940941908e-01 + z * (2.857142874366239149e-01 + z * (2.222219843214978396e-01 + z * (1.818357216161805012e-01 + z * (1.531383769920937332e-01 + z * 1.479819860511658591e-01))))));
+    if k == 0 {
+        return f - (hfsq - s * (hfsq + r));
+    }
+    return dk * 6.93147180369123816490e-01 - ((hfsq - (s * (hfsq + r) + (dk * 1.90821492927058770002e-10 + c))) - f);
+}
+
+@no_block
+pub fn tanh(x: f64) -> f64 {
+    jx := high_word(x);
+    ix := jx & 2147483647;
+    negative := (jx & 2147483648) != 0;
+    if ix >= 2146435072 {
+        if negative { return 1.0 / x - 1.0; }
+        return 1.0 / x + 1.0;
+    }
+    mut z = 0.0;
+    if ix < 1077280768 {
+        if ix < 1015021568 {
+            return x * (1.0 + x);
+        }
+        if ix >= 1072693248 {
+            t := expm1(2.0 * x.abs());
+            z = 1.0 - 2.0 / (t + 2.0);
+        } else {
+            t := expm1(-2.0 * x.abs());
+            z = -t / (t + 2.0);
+        }
+    } else {
+        z = 1.0 - 1.0e-300;
+    }
+    if negative { return -z; }
+    return z;
+}
+
+// powf as a function, for a caller that writes `math::powf(x, y)`: the f32 method below.
+pub fn powf(x: f32, y: f32) -> f32 { return x.pow(y); }
+
 // `x.sin()`, `y.atan2(x)`, `x.powi(3)`: the functions above as methods of f64 and f32, next to the
 // compiler's own `sqrt`, `abs`, `floor`, `ceil`, `trunc`, `round`, `min` and `max`. An f32 method
 // is the f32 routine where this module has one (sinf, expf, powf, ...), and otherwise the f64
@@ -888,6 +1113,13 @@ impl f64 {
     pub fn powi(self, exponent: i64) -> f64 { return powi(self, exponent); }
     @no_block
     pub fn hypot(self, other: f64) -> f64 { return hypot(self, other); }
+    // e^self - 1 and ln(1 + self), exact near zero where the plain forms cancel (Rust's names).
+    @no_block
+    pub fn exp_m1(self) -> f64 { return expm1(self); }
+    @no_block
+    pub fn ln_1p(self) -> f64 { return log1p(self); }
+    @no_block
+    pub fn tanh(self) -> f64 { return tanh(self); }
     // The remainder of self / other with the sign of self, like C's fmod and Rust's `%` on floats.
     @no_block
     pub fn fmod(self, other: f64) -> f64 { return fmod(self, other); }
@@ -917,6 +1149,12 @@ impl f32 {
     pub fn log2(self) -> f32 { return log2f(self); }
     @no_block
     pub fn log10(self) -> f32 { return f32(log10(f64(self))); }
+    @no_block
+    pub fn exp_m1(self) -> f32 { return f32(expm1(f64(self))); }
+    @no_block
+    pub fn ln_1p(self) -> f32 { return f32(log1p(f64(self))); }
+    @no_block
+    pub fn tanh(self) -> f32 { return f32(tanh(f64(self))); }
     // powf itself, written as the method: a signaling NaN must reach the special-value checks as it was
     // passed, so there is no second call for it to cross.
     @no_block

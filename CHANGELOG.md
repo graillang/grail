@@ -1,5 +1,9 @@
 ## Unreleased
 
+- Added `exp_m1`, `ln_1p` and `tanh` on `f64` and `f32` (`math::expm1`, `math::log1p`, `math::tanh`), from fdlibm:
+  `expm1` and `log1p` are within 0.75 ulp and `tanh` within 2 ulp; they are not bit-identical to every host libm
+  (glibc 2.44's `tanh` is correctly rounded). `lib/math`'s exact float kernels `expf`, `exp2f`, `logf`, `log2f`,
+  `sinf`, `cosf`, `asinf` and a `powf` function are now public, so `math::logf(x)` compiles.
 - Fixed a module constant that reads another module's constant: it failed with "not a compile-time
   constant" whenever the defining module's file came later on the command line. The first pass now
   folds each file after the modules it `use`s or names with `module::`.
