@@ -53320,7 +53320,14 @@ fn expr_rest<a>(c: (&a mut C), min: u64, expected: u64, lstart: u64, first: Val)
                                 } else {
                                     o(&mut c, view(",%rax\nsetne %al\nmovzbq %al,%rax\n"));
                                 }
-                                t = save(&mut c);
+                                tested := save(&mut c);
+                                // A temporary optional (`find(s, a) == None`) is done with once its tag
+                                // is read: its loan ends here, so `|| find(s, b) == None` may borrow
+                                // `s` again. A named optional is left as it is.
+                                if !is_local_slot(&mut c, t) {
+                                    discard_value(&mut c, val(t, ty));
+                                }
+                                t = tested;
                                 ty = bool_type(&mut c);
                                 left_lit = false;
                                 continue;
