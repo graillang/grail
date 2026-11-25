@@ -1,5 +1,7 @@
 ## Unreleased
 
+- Fixed arrays as aliases and vector elements: `type V3 = [f32; 3];`, `[u32; 3][]` (empty or with elements),
+  `V3[[1.0, 0.0, 0.0]]`, and `[u32; 3][]` fields.
 - Named captures in format strings: `format("x is {x}")`, `println("{p.name} at {p.x}")` read the binding or field
   path in scope (Rust's inline form). A lone `println` literal whose braces name nothing in scope still prints
   as written.

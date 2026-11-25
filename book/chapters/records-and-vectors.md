@@ -146,6 +146,9 @@ numbers.
   `stack overflow` and never steps over the guard page; a frame larger than the 1 MiB stack a task
   runs on is refused at the array that makes it so - keep such data in a vector or a static.
 
+A fixed array can be named and collected like any element type: `type V3 = [f32; 3];` gives it a
+name, and `[u32; 3][]` (or `V3[]`) is a vector of them - `tris.push([0, 1, 2])`, `tris[i][0]`.
+
 ## Returning several values
 
 A function can return several values in a named record. `Stats` gives each result a clear name, and

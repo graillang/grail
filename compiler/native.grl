@@ -18220,6 +18220,28 @@ fn body_label<a, b, d, e>(c: (&a C), m: &b [u8], n: &d [u8], symbol: &e [u8], ex
     mangle_into(&mut out, c.plat, m, n);
     return out;
 }
+// Past an alias's type and its `;`: the `;` at bracket depth 0 (`[f32; 3]` holds one of its own).
+fn skip_alias_type<a>(c: (&a mut C)) -> unit {
+    mut depth = 0;
+    while true {
+        k := kind(&mut c);
+        if k == 0 {
+            break;
+        }
+        if (k == 40) || (k == 91) || (k == 123) {
+            depth += 1;
+        }
+        if ((k == 41) || (k == 93) || (k == 125)) && (depth > 0) {
+            depth -= 1;
+        }
+        if (k == 59) && (depth == 0) {
+            break;
+        }
+        advance(&mut c);
+    }
+    expect(&mut c, view(";"));
+    return ();
+}
 fn alias_declaration<a>(c: (&a mut C), pass: u64) -> unit {
     expect(&mut c, view("type"));
     mut at_name = c.pos;
@@ -18228,20 +18250,14 @@ fn alias_declaration<a>(c: (&a mut C), pass: u64) -> unit {
     module := module_copy(&mut c);
     expect(&mut c, view("="));
     if pass == 1 {
-        while !is(&mut c, view(";")) {
-            advance(&mut c);
-        }
-        expect(&mut c, view(";"));
+        skip_alias_type(&mut c);
         refuse_duplicate_type(&mut c, view("type alias"), view(module), view(name), at_name);
         alias_public := c.decl_public;
         c.aliases.push(Alias { module: module, name: name, declared_at: declared,  public: alias_public, ty: NO_TYPE });
         return ();
     }
     if pass == 3 {
-        while !is(&mut c, view(";")) {
-            advance(&mut c);
-        }
-        expect(&mut c, view(";"));
+        skip_alias_type(&mut c);
         return ();
     }
     ty := parse_type(&mut c);
@@ -49718,7 +49734,8 @@ fn type_literal_ahead<a, b>(c: (&a mut C), name: &b [u8]) -> bool {
         return true;
     }
     m := module_copy(&mut c);
-    return find_decl(&mut c, view(m), view(n)) != 0;
+    // A type alias heads one too: `V3[[1.0, 0.0, 0.0]]` for `type V3 = [f32; 3]`.
+    return (find_decl(&mut c, view(m), view(n)) != 0) || (find_alias(&mut c, view(m), view(n)) != 0);
 }
 // ---- constant promotion of literal vectors -------------------------------------------------------
 //
@@ -52642,6 +52659,31 @@ fn string_literal_for_ref<a>(c: (&a mut C), expected: u64) -> bool {
     return (ty_kind(&mut c, expected) == 7) && (ty_mode(&mut c, expected) == 0)
         && ((ty_kind(&mut c, ty_arg(&mut c, expected)) == 3) || (ty_kind(&mut c, ty_arg(&mut c, expected)) == 4));
 }
+// `[T; N]` followed by `[`, where `T` names a type (a built-in one, a record, an alias) and not a
+// value: a vector literal headed by an array type. `[x; 3][1]` with `x` a binding or a constant is a
+// repeated array, indexed.
+fn array_type_head<a>(c: (&a mut C)) -> bool {
+    p := c.pos;
+    if (kind_at(&mut c, p + 1) != 1) || (kind_at(&mut c, p + 2) != 59) {
+        return false;
+    }
+    mut q = p + 3;
+    while (q < c.toks.len()) && (kind_at(&mut c, q) != 93) && (kind_at(&mut c, q) != 0) {
+        q += 1;
+    }
+    if kind_at(&mut c, q + 1) != 91 {
+        return false;
+    }
+    name := tok_text(&mut c, p + 1);
+    if find_local(&mut c, view(name)) != 0 {
+        return false;
+    }
+    if type_keyword(&mut c, view(name)) {
+        return true;
+    }
+    module := module_copy(&mut c);
+    return (find_alias(&mut c, view(module), view(name)) != 0) || (find_decl_internal(&mut c, view(module), view(name)) != 0);
+}
 fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
     lstart := c.pos;
     if (c.raw == 0) && (expected != NO_TYPE) && (expected != 0) && string_literal_for_ref(&mut c, expected) {
@@ -52658,7 +52700,12 @@ fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
         }
     }
     mut first = val(0, 0);
-    if is(&mut c, view("[")) {
+    if is(&mut c, view("[")) && array_type_head(&mut c) {
+        // `[u32; 3][]` / `[f32; 3][a, b]`: a vector of fixed arrays, headed by the array's type as
+        // `u64[]` is by its element's.
+        ty := parse_type(&mut c);
+        first = finish_type_literal(&mut c, ty);
+    } else if is(&mut c, view("[")) {
         first = map_expression(&mut c, expected);
     } else {
         after_open := c.pos + 1;
