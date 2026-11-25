@@ -28530,6 +28530,114 @@ fn mod_add_root<a>(c: (&a mut C), dir: &a [u8]) -> unit {
     return ();
 }
 // The file a module name resolves to, or empty: `ROOT/NAME.grl` in the first root that holds it.
+// A method a standard-library module this build did not link defines: say which, rather than leave
+// "has no method" reading as if the type could not do it.
+fn hint_unlinked_method<a, b>(c: (&a mut C), name: &b [u8]) -> unit {
+    home := unlinked_std_method(&mut c, name);
+    if home.len() != 0 {
+        mut help = copy_bytes(view("`"));
+        push_bytes(&mut help, name);
+        push_bytes(&mut help, view("` is defined in the `"));
+        push_bytes(&mut help, view(home));
+        push_bytes(&mut help, view("` module, which this build does not include: add `use "));
+        push_bytes(&mut help, view(home));
+        push_bytes(&mut help, view(";`"));
+        diag_help(&mut c, view(help));
+    }
+    return ();
+}
+// The standard-library module, not linked in this build, that declares a method `name` inside an
+// `impl` (a `pub fn name(` line indented under one), or empty. Read only on the error path.
+fn unlinked_std_method<a, b>(c: (&a mut C), name: &b [u8]) -> u8[] {
+    mut needle = copy_bytes(view("    pub fn "));
+    push_bytes(&mut needle, name);
+    // The standard-library directories: the module roots, and the directory of the `core.grl` this
+    // build was handed (the driver passes its resolved files directly).
+    mut dirs = u8[][];
+    for r in c.mod_roots.len() {
+        dirs.push(mod_dir(view(c.mod_roots[r])));
+    }
+    for f in c.mod_base + c.mod_files.len() {
+        path := input_path(&c, f);
+        n := path.len();
+        if (n >= 8) && same(path[n - 8: n], view("core.grl")) && ((n == 8) || (path[n - 9] == 47) || (path[n - 9] == 92)) {
+            dirs.push(copy_bytes(path[0: n - 8]));
+        }
+    }
+    // A module compiled on its own (a per-module build) reads the library as interfaces, so neither
+    // gives a directory: find it as the driver does (cli.grl `home`), from GRAIL_HOME or the
+    // executable - `lib/grail/std` when installed, `lib` in a checkout.
+    if dirs.len() == 0 {
+        mut starts = u8[][];
+        env := host::env(view("GRAIL_HOME"));
+        if env.len() != 0 {
+            starts.push(env.copy());
+        }
+        exe := host::exe_path();
+        mut cut = 0;
+        for i in exe.len() {
+            if exe[i] == 47 {
+                cut = i;
+            }
+        }
+        mut dir = copy_bytes(exe[0: cut]);
+        for level in 6 {
+            starts.push(dir.copy());
+            push_bytes(&mut dir, view("/.."));
+        }
+        for s in starts.len() {
+            if dirs.len() != 0 {
+                break;
+            }
+            mut installed = starts[s].copy();
+            push_bytes(&mut installed, view("/lib/grail/std/core.grl"));
+            if host::exists(view(installed)) != 0 {
+                mut d = starts[s].copy();
+                push_bytes(&mut d, view("/lib/grail/std/"));
+                dirs.push(d);
+                break;
+            }
+            mut repo = starts[s].copy();
+            push_bytes(&mut repo, view("/lib/core.grl"));
+            if host::exists(view(repo)) != 0 {
+                mut d = starts[s].copy();
+                push_bytes(&mut d, view("/lib/"));
+                dirs.push(d);
+                break;
+            }
+        }
+    }
+    for r in dirs.len() {
+        dir := dirs[r].copy();
+        entries := host::list_dir(view(dir));
+        for e in entries.len() {
+            entry := view(entries[e]);
+            n := entry.len();
+            if (n < 5) || !same(entry[n - 4: n], view(".grl")) {
+                continue;
+            }
+            module := copy_bytes(entry[0: n - 4]);
+            if mod_known(&c, view(module)) {
+                continue;
+            }
+            mut path = dir.copy();
+            push_bytes(&mut path, entry);
+            text := host::read_file(view(path));
+            m := needle.len();
+            mut i = 0;
+            while i + m < text.len() {
+                if ((i == 0) || (text[i - 1] == 10)) && same(text[i: i + m], view(needle)) {
+                    after := text[i + m];
+                    if (after == 40) || (after == 60) {
+                        return module;
+                    }
+                }
+                i += 1;
+            }
+        }
+    }
+    return u8[];
+}
 fn mod_find<a>(c: (&a C), name: &a [u8]) -> u8[] {
     for i in c.mod_roots.len() {
         mut path = mod_dir(view(c.mod_roots[i]));
@@ -48351,6 +48459,7 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
     }
     if c.raw == 0 {
         if (k != 3) & (k != 4) & (k != 5) & (k != 6) & (k != 27) {
+            hint_unlinked_method(&mut c, view(name));
             mut msg = copy_bytes(view("`"));
             push_bytes(&mut msg, view(source_type_name(&mut c, xty)));
             push_bytes(&mut msg, view("` has no method `"));
@@ -48492,6 +48601,8 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
         }
         if same(view(name), view("chars")) & byte_sequence_value(&mut c, inty) {
             diag_help(&mut c, view("add `use strings;`: `s.chars()` is its lazy iterator over the code points"));
+        } else {
+            hint_unlinked_method(&mut c, view(name));
         }
         recv := source_type_name(&mut c, xty);
         mut msg = copy_bytes(view("`"));
