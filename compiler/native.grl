@@ -53028,6 +53028,29 @@ fn array_type_head<a>(c: (&a mut C)) -> bool {
     module := module_copy(&mut c);
     return (find_alias(&mut c, view(module), view(name)) != 0) || (find_decl_internal(&mut c, view(module), view(name)) != 0);
 }
+// Whether the operand ending at token `close` is a call's result (`f(..)`, `x.m(..)`): its `)`
+// matches a `(` written right after a name. A field or a binding (`w.workshop == None`) is a place,
+// not a temporary, and is left alone.
+fn call_result_before<a>(c: (&a mut C), close: u64) -> bool {
+    if kind_at(&mut c, close) != 41 {
+        return false;
+    }
+    mut depth = 0;
+    mut i = close;
+    while i > 0 {
+        k := kind_at(&mut c, i);
+        if k == 41 {
+            depth += 1;
+        } else if k == 40 {
+            depth -= 1;
+            if depth == 0 {
+                return (i > 0) && (kind_at(&mut c, i - 1) == 1);
+            }
+        }
+        i -= 1;
+    }
+    return false;
+}
 fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
     lstart := c.pos;
     if (c.raw == 0) && (expected != NO_TYPE) && (expected != 0) && string_literal_for_ref(&mut c, expected) {
@@ -53324,7 +53347,7 @@ fn expr_rest<a>(c: (&a mut C), min: u64, expected: u64, lstart: u64, first: Val)
                                 // A temporary optional (`find(s, a) == None`) is done with once its tag
                                 // is read: its loan ends here, so `|| find(s, b) == None` may borrow
                                 // `s` again. A named optional is left as it is.
-                                if !is_local_slot(&mut c, t) {
+                                if call_result_before(&mut c, c.pos - 3) {
                                     discard_value(&mut c, val(t, ty));
                                 }
                                 t = tested;
