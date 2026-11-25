@@ -7,6 +7,8 @@ enum and hands the active payload to its arm. Cover every variant.
 
 `T?` is the concise spelling of `result::Option<T>`: `Some(value)` holds a value and `None` holds
 nothing. There is no null: a value that may be absent is a `T?`, and the type says so.
+Where a `T?` is expected, a plain `T` is `Some` of it: a `-> P?` function may `return p;`,
+`x: u64? = 5` holds `Some(5)`, and `&a` passes for a `(&P)?` parameter.
 
 Testing an optional against `None` narrows it. Where the test proves it present, its name is its
 value, with no unwrapping:

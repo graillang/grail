@@ -74,7 +74,8 @@ References work uniformly for records, vectors, scalars and byte buffers.
 ## Typed references and exchange
 
 `&value` refers to storage and `&mut value` grants mutable access. Mutable access is always written
-explicitly: a read-only borrow never silently becomes writable. Every elided input reference gets a
+explicitly: a read-only borrow never silently becomes writable. The other direction is free: a
+`&mut T` passes where a function takes `&T`, as a shared reborrow for the call. Every elided input reference gets a
 fresh lifetime; an elided output follows the receiver or the sole input, and otherwise names its
 groups with `&a`/`&b` (see *Lifetimes describe relationships* below). Local references infer their lifetime.
 Numeric references do not require a heap allocation for the referent.

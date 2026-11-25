@@ -1,5 +1,17 @@
 ## Unreleased
 
+- A value of an optional's payload type now converts to the optional where one is expected, as `Some(value)`:
+  `return P { .. };` from a `-> P?` function, `x: u64? = 5`, and `show(&a)` for a `(&P)?` parameter.
+  (`x == None` and `x != None` already worked on any optional.)
+- A `&mut T` argument now passes where a function takes `&T`, as a shared reborrow (`count(book)` inside
+  `fn grow(book: &mut Book)`); the same reference as both `&T` and `&mut T` in one call is still refused.
+- Added `clamp(low, high)` and `signum()` on `f64` and `f32` (Rust's semantics: a NaN stays NaN, bounds out of
+  order are refused), next to the `min`, `max`, `clamp` and `abs` every integer type already has.
+- A built-in vector's methods from `lib/vecs.grl` (`sort`, `sort_by`, `contains`, `position`, `sum`, `min`, `max`,
+  `binary_search`, `dedup`, ...) and text's from `lib/strings.grl` (`split`, `trim`, `lines`, `join`, `parse_u64`,
+  ...) now work without a `use` line: a source that calls one links the module, as `.iter()` links `iter`, and a
+  program that calls none carries neither. Added `join(separator)` on `string[]` and byte vectors, and
+  `hash::fnv1a64`.
 - Added `exp_m1`, `ln_1p` and `tanh` on `f64` and `f32` (`math::expm1`, `math::log1p`, `math::tanh`), from fdlibm:
   `expm1` and `log1p` are within 0.75 ulp and `tanh` within 2 ulp; they are not bit-identical to every host libm
   (glibc 2.44's `tanh` is correctly rounded). `lib/math`'s exact float kernels `expf`, `exp2f`, `logf`, `log2f`,

@@ -63,7 +63,8 @@ same value, which is why `0.1 + 0.2` shows its rounding error.
 {{example:floats}}
 
 Floats have `sqrt`, `abs`, `floor`, `ceil`, `trunc`, `round` (halves away from zero), `min`, `max`
-(a NaN operand yields the other), `is_nan`, `is_finite`, `is_infinite`, `next_up` and `next_down`,
+(a NaN operand yields the other), `clamp(low, high)`, `signum`, `is_nan`, `is_finite`, `is_infinite`,
+`next_up` and `next_down`,
 all bit-identical to the C library, and `to_bits` (with `f64::from_bits(b)` and `f32::from_bits(b)`
 for the way back). `use math;` adds the elementary functions as methods of `f64` and `f32`: `sin`,
 `cos`, `tan`, `asin`, `acos`, `atan`, `y.atan2(x)`, `exp`, `exp2`, `ln`, `log2`, `log10`, `pow`,

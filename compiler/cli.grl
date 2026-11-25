@@ -1747,6 +1747,21 @@ fn resolved_groups<a, d>(store: (&d mut Cache), command: (&a u8[][]), at: u64, l
                 }
             }
         }
+        // `vecs` (a vector's sort, search and sum) and `strings` (text's split, trim, lines and join)
+        // are every program module's dependencies as well, except for the modules each is built from:
+        // everything its own `use` lines reach, and `scalar`, which every module depends on.
+        mut below = u8[][][];
+        mut implicit_names = u8[][];
+        for which in 2 {
+            mut name = "vecs";
+            if which == 1 {
+                name = "strings";
+            }
+            if group_of(&groups, view(name)) != 0 {
+                implicit_names.push(copy(view(name)));
+                below.push(module_closure(&groups, view(name)));
+            }
+        }
         for g in groups.len() {
             name := groups[g].name.copy();
             mut in_prelude = 0;
@@ -1762,10 +1777,51 @@ fn resolved_groups<a, d>(store: (&d mut Cache), command: (&a u8[][]), at: u64, l
                 if (group_of(&groups, view("scalar")) != 0) & !eq(view(name), view("scalar")) {
                     groups[g].uses.push(copy(view("scalar")));
                 }
+                // A module an implicit one is built from - or an implicit module itself - gets none of
+                // them: the standard library below them orders by its own `use` lines.
+                mut under = 0;
+                for m in implicit_names.len() {
+                    for i in below[m].len() {
+                        if eq(view(below[m][i]), view(name)) {
+                            under = 1;
+                        }
+                    }
+                }
+                if under == 0 {
+                    for m in implicit_names.len() {
+                        groups[g].uses.push(implicit_names[m].copy());
+                    }
+                }
             }
         }
     }
     return groups;
+}
+// `name` and every module its `use` lines reach, with `scalar` (every module's implicit dependency).
+fn module_closure<a, b>(groups: (&a ModuleGroup[]), name: &b [u8]) -> u8[][] {
+    mut out = u8[][copy(name), copy(view("scalar"))];
+    mut q = 0;
+    while q < out.len() {
+        here := out[q].copy();
+        q += 1;
+        g := group_of(groups, view(here));
+        if g == 0 {
+            continue;
+        }
+        for u in groups[g - 1].uses.len() {
+            used := item(&groups[g - 1].uses, u);
+            mut seen = 0;
+            for i in out.len() {
+                if eq(view(out[i]), view(used)) {
+                    seen = 1;
+                }
+            }
+            if seen == 0 {
+                out.push(used);
+            }
+        }
+    }
+    return out;
 }
 // The program's own modules. The runtime and platform files are the base group every program has,
 // and the standard library's core prelude (with `scalar`) is compiled whether a module names it or not, so neither
@@ -1779,6 +1835,12 @@ fn program_modules<a>(groups: (&a ModuleGroup[])) -> u64 {
         n -= 1;
     }
     if group_of(&groups, view("scalar")) != 0 {
+        n -= 1;
+    }
+    if group_of(&groups, view("vecs")) != 0 {
+        n -= 1;
+    }
+    if group_of(&groups, view("strings")) != 0 {
         n -= 1;
     }
     return n;

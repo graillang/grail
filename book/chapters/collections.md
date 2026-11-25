@@ -38,7 +38,9 @@ out.
 `v.sort()` sorts any vector whose element type implements the `Ord` interface, imported here with
 `use order::Ord;`; numbers and text already do, and here `Score` sorts by points, highest first.
 
-A vector's operations are its own methods, and `vecs` is where the generic ones live: `map`,
+A vector's operations are its own methods, with no `use` line: `vecs`, where the generic ones live,
+is linked by any source that calls one (text's `split`, `trim`, `lines` and `join` come from
+`strings` the same way). They are `map`,
 `filter`, `filter_map`, `flat_map`, `fold`, `reduce`, `for_each`, `any`, `all`, `count`, `find`,
 `position`, `get`, `first`, `last`, `into_iter`, `sort`, `sort_by`, `sort_by_key`,
 `is_sorted`, `min`, `max`, `min_by_key`, `max_by_key`, `binary_search`, `insert_sorted`, `dedup`

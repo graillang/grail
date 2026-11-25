@@ -2828,7 +2828,8 @@
     "name": "vector-contains-f64-rejected",
     "source": "fn main(){v:=f64[1.0];println(v.contains(1.0));}",
     "reject": true,
-    "diagnostic": "contains on a vector of other than integers or bools is the `vecs` module's method"
+    "diagnostic": "`contains` needs `T: hash::Equal`, and `f64` does not implement it",
+    "note": "f64 has no total equality, so the general `contains` (lib/vecs.grl, linked with no `use` line) refuses it and says why."
   },
   {
     "name": "structural-equality",
@@ -20540,11 +20541,10 @@
     "note": "`v.contains(&x)` for every element type with `hash::Equal` (vecs: `impl<T: hash::Equal> [T]`, reached from a vector or a slice); integer and bool vectors keep the compiler's own `contains`, which takes the value or `&x`."
   },
   {
-    "name": "postfix-lib-contains-needs-vecs",
+    "name": "postfix-lib-contains-without-use",
     "source": "fn main() {\n    names := [\"ann\".text()];\n    who := \"bo\".text();\n    println(names.contains(&who));\n}\n",
-    "reject": true,
-    "diagnostic": "contains on a vector of other than integers or bools is the `vecs` module's method",
-    "note": "Without `use vecs;` only integer and bool vectors have `contains`; the refusal says where the general one lives."
+    "note": "`contains` on a vector of strings needs no `use vecs;`: a source that calls a vecs method links the module.",
+    "stdout": "false\n"
   },
   {
     "name": "postfix-lib-contains-needs-equal",
@@ -20569,11 +20569,10 @@
     "note": "`s.chars()` is strings' lazy `iter::Iter<char>` (Rust's `str::chars`): `count`, `collect` and `for` work on it, and an invalid sequence is one U+FFFD per maximal subpart."
   },
   {
-    "name": "postfix-lib-chars-needs-strings",
+    "name": "postfix-lib-chars-without-use",
     "source": "fn main() {\n    s := \"abc\";\n    println(s.chars().count());\n}\n",
-    "reject": true,
-    "diagnostic": "has no method `chars`",
-    "note": "The compiler has no `.chars()` of its own; the refusal's help says `use strings;`."
+    "note": "`.chars()` comes from lib/strings.grl, which a source that calls it links with no `use strings;`.",
+    "stdout": "3\n"
   },
   {
     "name": "postfix-lib-handles-and-arena-methods",
@@ -21160,5 +21159,35 @@
     "note": "fdlibm expm1/log1p/tanh as f64 and f32 methods (exp_m1, ln_1p, tanh), and lib/math's exact f32 kernels (logf, powf, ...) callable as math::NAME.",
     "source": "use math;\nfn main() {\n    println(1.0e-10.exp_m1().to_bits());\n    println(1.0.exp_m1().to_bits());\n    println((-40.0).exp_m1().to_bits());\n    println(1.0e-10.ln_1p().to_bits());\n    println(1.0.ln_1p().to_bits());\n    println(0.5.tanh().to_bits());\n    println((-3.0).tanh().to_bits());\n    println(math::logf(2.0).to_bits());\n    println(math::powf(2.0, 0.5).to_bits());\n    println(f32(0.25).exp_m1().to_bits());\n}\n",
     "stdout": "4457293557087970531\n4610417272575012562\n13830554455654793216\n4457293557087196819\n4604418534313441775\n4601996382546856691\n13830509912835885824\n1060205080\n1068827891\n1049717704\n"
+  },
+  {
+    "name": "float-clamp-and-signum",
+    "note": "f64/f32 clamp and signum from lib/scalar.grl beside the compiler's min/max/abs; integers already had min/max/clamp/abs.",
+    "source": "fn main() {\n    x := 2.5;\n    println(x.clamp(0.0, 1.0));\n    println((-0.5).clamp(0.0, 1.0));\n    println(x.min(1.0));\n    println((-0.0).signum());\n    println(f32(3.0).signum());\n    println(u64(7).clamp(1, 5));\n    println((-4).abs());\n}\n",
+    "stdout": "1\n0\n1\n-1\n1\n5\n4\n"
+  },
+  {
+    "name": "mut-reference-passes-as-shared",
+    "note": "A `&mut T` argument where `&T` is the parameter is a shared reborrow (GRAIL_ISSUES 1.1).",
+    "source": "struct Book {\n    rows: u64[]\n}\nfn count(book: &Book) -> u64 {\n    return book.rows.len();\n}\nfn grow(book: &mut Book) -> u64 {\n    book.rows.push(1);\n    n := count(book);\n    book.rows.push(2);\n    return n + count(book);\n}\nfn main() {\n    mut b = Book { rows: u64[] };\n    println(grow(&mut b));\n}\n",
+    "stdout": "3\n"
+  },
+  {
+    "name": "mut-reference-shared-and-unique-in-one-call-rejected",
+    "note": "The shared reborrow keeps the mutable borrow's loans, so the same reference as `&T` and `&mut T` in one call still conflicts.",
+    "source": "struct Book {\n    rows: u64[]\n}\nfn both(a: &Book, b: &mut Book) -> u64 {\n    b.rows.push(1);\n    return a.rows.len();\n}\nfn twice(book: &mut Book) -> u64 {\n    return both(book, book);\n}\nfn main() {\n    mut b = Book { rows: u64[] };\n    println(twice(&mut b));\n}\n",
+    "reject": true,
+    "diagnostic": "borrow conflicts with active access"
+  },
+  {
+    "name": "optional-auto-wrap-return-and-argument",
+    "note": "A payload-typed value where its optional is expected is Some(value): a record or scalar returned from a `-> T?` function, `&a` for a `(&P)?` parameter, `x: u64? = 5`.",
+    "source": "struct P {\n    x: u64\n}\nfn find(k: u64) -> P? {\n    if k == 0 {\n        return None;\n    }\n    return P { x: k };\n}\nfn number(k: u64) -> u64? {\n    if k == 0 {\n        return None;\n    }\n    return k * 2;\n}\nfn show(p: (&P)?) -> u64 {\n    if let Some(q) = p {\n        return q.x;\n    }\n    return 0;\n}\nfn main() {\n    println(find(0).is_some());\n    if let Some(p) = find(7) {\n        println(p.x);\n    }\n    println(number(21).unwrap_or(0));\n    a := P { x: 3 };\n    println(show(&a));\n    println(show(None));\n    x: u64? = 5;\n    println(x.unwrap_or(0));\n    r := find(2);\n    println(r == None);\n}\n",
+    "stdout": "false\n7\n42\n3\n0\n5\nfalse\n"
+  },
+  {
+    "name": "optional-auto-wrap-float-payload",
+    "source": "fn f(n: u64) -> f64? {\n    if n == 0 {\n        return None;\n    }\n    v := f64(n) * 1.5;\n    return v;\n}\nfn main() {\n    println(f(2).is_some());\n    println(f(2).unwrap_or(0.0));\n    println(f(0).is_some());\n}\n",
+    "stdout": "true\n3\nfalse\n"
   }
 ]

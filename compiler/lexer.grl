@@ -115,6 +115,56 @@ fn pair_kind(c: u64, d: u64) -> u64 {
     return 0;
 }
 
+// The standard-library modules whose methods a built-in type has without a `use` line, and the
+// method names that bring each in: a source that calls `.sort(` or `.split(` links `vecs` or
+// `strings`, as one that calls `.iter(` links `iter`. A mention in a comment or a string answers yes
+// too; that only loads the module. A program that calls none of them does not carry them.
+pub fn vecs_methods() -> string[] {
+    return string["all", "any", "binary_search", "contains", "count", "dedup", "filter", "filter_map", "find", "first", "flat_map", "fold", "for_each", "get", "insert_sorted", "into_iter", "is_sorted", "last", "map", "max", "max_by_key", "max_index", "min", "min_by_key", "min_index", "position", "reduce", "sort", "sort_by", "sort_by_key", "sum"];
+}
+pub fn strings_methods() -> string[] {
+    return string["char_count", "char_indices", "chars", "chunks", "find", "is_char_boundary", "is_utf8", "join", "join_with", "lines", "parse_f64", "parse_i64", "parse_u64", "slice_chars", "split", "split_owned", "split_whitespace", "to_text_lossy", "trim", "trim_end", "trim_start", "utf8_error", "windows"];
+}
+// Whether `text` calls a method with one of `names`: a dot, the name, then `(` (spaces allowed).
+pub fn calls_any<a, b>(text: &a [u8], names: &b [string]) -> bool {
+    n := text.len();
+    mut i = 0;
+    while i + 1 < n {
+        if text[i] == 46 {
+            mut j = i + 1;
+            while (j < n) && (((text[j] >= 97) && (text[j] <= 122)) || ((text[j] >= 65) && (text[j] <= 90)) || ((text[j] >= 48) && (text[j] <= 57)) || (text[j] == 95)) {
+                j += 1;
+            }
+            mut k = j;
+            while (k < n) && (text[k] == 32) {
+                k += 1;
+            }
+            if (j > i + 1) && (k < n) && (text[k] == 40) {
+                word := text[i + 1: j];
+                for m in names.len() {
+                    name := view(names[m]);
+                    if name.len() == word.len() {
+                        mut same = true;
+                        for q in name.len() {
+                            if name[q] != word[q] {
+                                same = false;
+                                break;
+                            }
+                        }
+                        if same {
+                            return true;
+                        }
+                    }
+                }
+            }
+            i = j;
+            continue;
+        }
+        i += 1;
+    }
+    return false;
+}
+
 // Whether a source calls a method named `iter`: a dot, `iter`, then `(` (spaces allowed before it).
 // A mention in a comment or a string also answers yes; that only loads the module. Both the
 // compiler's module closure and the driver's build order ask it: `iter()` on a vector is a vector's own method,
