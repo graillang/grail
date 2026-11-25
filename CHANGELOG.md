@@ -1,5 +1,7 @@
 ## Unreleased
 
+- Added `use module as alias;`: the alias names the module in that file (`use geometry_shapes as gs;` then
+  `gs::Box`, `gs::area(&b)`); the module's own name keeps working.
 - A value of an optional's payload type now converts to the optional where one is expected, as `Some(value)`:
   `return P { .. };` from a `-> P?` function, `x: u64? = 5`, and `show(&a)` for a `(&P)?` parameter.
   (`x == None` and `x != None` already worked on any optional.)

@@ -115,6 +115,63 @@ fn pair_kind(c: u64, d: u64) -> u64 {
     return 0;
 }
 
+// `use module as alias;`: the alias names the module in this file. Applied to the tokens: the `as
+// alias` pair is dropped from the `use` line, and every `alias` that starts a path (`alias::x`) is
+// pointed at a copy of the module's name appended to the source, so every later stage reads the
+// module's own name. Line and column stay the alias's own, so a diagnostic points at what was written.
+fn token_is<a, b>(src: &a [u8], t: &Token, word: &b [u8]) -> bool {
+    if t.end - t.start != word.len() {
+        return false;
+    }
+    for i in word.len() {
+        if src[t.start + i] != word[i] {
+            return false;
+        }
+    }
+    return true;
+}
+fn same_span_text<a>(src: &a [u8], x: &Token, start: u64, end: u64) -> bool {
+    if x.end - x.start != end - start {
+        return false;
+    }
+    for i in end - start {
+        if src[x.start + i] != src[start + i] {
+            return false;
+        }
+    }
+    return true;
+}
+pub fn apply_use_aliases(toks: Token[], src: (&mut u8[])) -> Token[] {
+    mut out = toks;
+    mut i = 0;
+    while i + 4 < out.len() {
+        if token_is(src[:], &out[i], "use") && token_is(src[:], &out[i + 2], "as") && token_is(src[:], &out[i + 4], ";") {
+            // The module's name, appended once: tokens may now point past the original text.
+            start := src.len();
+            for k in out[i + 1].end - out[i + 1].start {
+                src.push(src[out[i + 1].start + k]);
+            }
+            module_end := src.len();
+            // The alias's text stays in the source; its span is what the comparisons below read.
+            alias_start := out[i + 3].start;
+            alias_end := out[i + 3].end;
+            out.remove(i + 2);
+            out.remove(i + 2);
+            mut j = 0;
+            while j + 1 < out.len() {
+                if same_span_text(src[:], &out[j], alias_start, alias_end) && token_is(src[:], &out[j + 1], "::") {
+                    out[j].start = start;
+                    out[j].end = module_end;
+                }
+                j += 1;
+            }
+            continue;
+        }
+        i += 1;
+    }
+    return out;
+}
+
 // The standard-library modules whose methods a built-in type has without a `use` line, and the
 // method names that bring each in: a source that calls `.sort(` or `.split(` links `vecs` or
 // `strings`, as one that calls `.iter(` links `iter`. A mention in a comment or a string answers yes
