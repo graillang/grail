@@ -185,6 +185,113 @@ pub fn vecs_methods() -> string[] {
 pub fn strings_methods() -> string[] {
     return string["char_count", "char_indices", "chars", "chunks", "find", "is_char_boundary", "is_utf8", "join", "join_with", "lines", "parse_f64", "parse_i64", "parse_u64", "slice_chars", "split", "split_owned", "split_whitespace", "to_text_lossy", "trim", "trim_end", "trim_start", "utf8_error", "windows"];
 }
+// The float methods `math` defines (`x.tan()`, `a.hypot(b)`): a script that calls one links `math`.
+pub fn math_methods() -> string[] {
+    return string["acos", "asin", "atan", "atan2", "cos", "exp", "exp2", "exp_m1", "fmod", "hypot", "ln", "ln_1p", "log10", "log2", "pow", "powi", "sin", "tan", "tanh"];
+}
+// The names a source writes directly before `::` (`hash::fnv1a64`, `math::powf`), once each, outside
+// comments and strings: a script that names a standard-library module by path links it.
+pub fn qualified_names<a>(text: &a [u8]) -> u8[][] {
+    mut out = u8[][];
+    n := text.len();
+    mut i = 0;
+    while i < n {
+        ch := text[i];
+        if (ch == 47) && (i + 1 < n) && (text[i + 1] == 47) {
+            while (i < n) && (text[i] != 10) {
+                i += 1;
+            }
+            continue;
+        }
+        if ch == 34 {
+            i += 1;
+            while (i < n) && (text[i] != 34) {
+                if text[i] == 92 {
+                    i += 1;
+                }
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+        if word_start(u64(ch)) && ((i == 0) || !word_byte(u64(text[i - 1]))) {
+            start := i;
+            while (i < n) && word_byte(u64(text[i])) {
+                i += 1;
+            }
+            if (i + 1 < n) && (text[i] == 58) && (text[i + 1] == 58) && ((start == 0) || (text[start - 1] != 58)) {
+                mut name = u8[];
+                for k in start..i {
+                    name.push(text[k]);
+                }
+                mut seen = false;
+                for k in out.len() {
+                    if out[k] == name {
+                        seen = true;
+                    }
+                }
+                if !seen {
+                    out.push(name);
+                }
+            }
+            continue;
+        }
+        i += 1;
+    }
+    return out;
+}
+// The modules a source's `@derive(...)` lists need: Eq `ops`, Ord `order`, Hash `hash`, Clone
+// `clone`, Debug `debug`.
+pub fn derive_modules<a>(text: &a [u8]) -> u8[][] {
+    mut out = u8[][];
+    n := text.len();
+    mut i = 0;
+    while i + 8 < n {
+        if (text[i] == 64) && (text[i..i + 8] == "@derive(") {
+            mut j = i + 8;
+            while (j < n) && (text[j] != 41) {
+                start := j;
+                while (j < n) && word_byte(u64(text[j])) {
+                    j += 1;
+                }
+                word := text[start..j];
+                mut module = "";
+                if word == "Eq" { module = "ops"; }
+                if word == "Ord" { module = "order"; }
+                if word == "Hash" { module = "hash"; }
+                if word == "Clone" { module = "clone"; }
+                if word == "Debug" { module = "debug"; }
+                if module.len() != 0 {
+                    mut seen = false;
+                    for k in out.len() {
+                        if out[k] == module {
+                            seen = true;
+                        }
+                    }
+                    if !seen {
+                        mut bytes = u8[];
+                        for k in module.len() {
+                            bytes.push(module[k]);
+                        }
+                        out.push(bytes);
+                    }
+                }
+                if j == start {
+                    j += 1;
+                }
+            }
+            i = j;
+        }
+        i += 1;
+    }
+    return out;
+}
+fn word_start(ch: u64) -> bool {
+    return ((ch >= 97) && (ch <= 122)) || ((ch >= 65) && (ch <= 90)) || (ch == 95);
+}
+fn word_byte(ch: u64) -> bool {
+    return word_start(ch) || ((ch >= 48) && (ch <= 57));
+}
 // Whether a source writes a map: a `:` directly inside square brackets (`[K: V]`, `["a": 1]`,
 // `[:]`). A slice's bounds are `..`, so a colon there is a map's. Comments and strings are skipped.
 pub fn writes_map<a>(text: &a [u8]) -> bool {

@@ -12,6 +12,7 @@ is `@`.
   explicitly and `:=` infers it.
   A constant may read another module's constant (`const LIMIT: f32 = rules::PITCH;`) whatever
   order the files are given in: the compiler folds a module's constants after the modules it names.
+  Within a module the order does not matter either: `const A: u64 = B * 2;` may come before `const B`.
   An integer conversion folds too (`const WIDE: u64 = u64(SMALL) * 2;`); one that does not fit is a
   build error.
   A negative value folds as a signed one: `const DOWN: i32 = i32(-5);`, `const STEP: i64 = -3 * 4;`,

@@ -3445,6 +3445,26 @@ fn info_of<a>(text: &a [u8], scan: bool) -> FileInfo {
             if lexer::calls_any(text, lexer::strings_methods()[..]) {
                 info.uses.push(copy(view("strings")));
             }
+            if lexer::calls_any(text, lexer::math_methods()[..]) {
+                info.uses.push(copy(view("math")));
+            }
+            // A path's module (`hash::fnv1a64`) and the modules `@derive(...)` needs, when it is a
+            // standard-library module: `Shape::Circle` and an alias's `m::f` name none.
+            qualified := lexer::qualified_names(text);
+            if qualified.len() != 0 {
+                std := home().std;
+                for q in qualified.len() {
+                    mut file = copy(view(qualified[q]));
+                    push_bytes(&mut file, view(".grl"));
+                    if (std.len() != 0) && (host::exists(view(path_join(view(std), view(file)))) != 0) {
+                        info.uses.push(copy(view(qualified[q])));
+                    }
+                }
+            }
+            derived := lexer::derive_modules(text);
+            for d in derived.len() {
+                info.uses.push(copy(view(derived[d])));
+            }
         }
         info.embed = mentions_embed(text);
     }
@@ -3453,7 +3473,7 @@ fn info_of<a>(text: &a [u8], scan: bool) -> FileInfo {
 // The record: the path, the stamp, the digest, then `-` for a file read only for its digest, or the
 // module (`-` for none), the embed flag and the `use`d names, and the scan's format (fp_scan).
 fn fp_scan() -> string {
-    return "scan3";
+    return "scan4";
 }
 fn fp_write<a, b, d, e>(c: (&a mut Cache), path: &b [u8], stamp: &d [u8], info: (&e FileInfo), scan: bool) -> unit {
     if (c.root.len() == 0) || (stamp.len() == 0) {

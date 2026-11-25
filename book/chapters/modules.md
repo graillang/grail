@@ -14,6 +14,11 @@ full name still works.
 Calling a method that a standard-library module defines but your program never `use`s fails with a
 help line naming that module (`add use xxhash;`).
 
+A program file (one with no `module` line) also links the standard-library modules it names without
+a `use` line: a path such as `hash::fnv1a64("a")` or `math::powf(x, 3.0)`, a float method of `math`'s
+(`x.tan()`, `a.hypot(b)`), and what `@derive(Clone, Eq, Hash, Debug)` needs. A declared module writes
+its `use` lines itself.
+
 A module in the same directory as the file you build is found with no setup: `grail run main.grl`
 resolves `use shapes;` to `shapes.grl` beside it.
 

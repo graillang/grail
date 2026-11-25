@@ -1,5 +1,10 @@
 ## Unreleased
 
+- A program file links the standard-library modules it names without `use`: a path (`hash::fnv1a64`,
+  `math::powf`), `math` for a float method (`x.tan()`, `a.hypot(b)`, `x.tanh()`), and what `@derive(...)` needs
+  (`clone`, `ops`, `hash`, `order`, `debug`).
+- Constants within a module fold in dependency order: `const A: u64 = B * 2;` may come before `const B`; a cycle
+  is still refused.
 - Record statics can be written out: `static ORIGIN: P = P { x: 1, y: 2 };` and vectors of records, computed
   while compiling like `@f()`. A `const` of record type is refused with the `static` to write.
 - A shared slice parameter passed on by name is not moved (`total(rooms) + biggest(rooms)` for `rooms: &[Room]`),

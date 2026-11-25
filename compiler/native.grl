@@ -816,6 +816,12 @@ struct C {
     statics: Static[],
     ct_calls: CtCall[],
     ct_done: CtDone[],
+    // A constant whose expression names one declared later in its file (`const A: u64 = B * 2;`
+    // above `const B`): its `const` token and whether it was `pub`, folded once the file's names are
+    // in (constants_deferred). `const_replay` marks the fold of one of them.
+    const_later: u64[],
+    const_later_public: u64[],
+    const_replay: u64,
     // R4 (comptime-speed.md): in a probe compile, the functions the probe reaches by name, as
     // (file, position) pairs; a body outside them is not compiled. 0 in r4_on: compile everything.
     r4_on: u64,
@@ -27311,7 +27317,93 @@ fn module_binding<a>(c: (&a mut C), pass: u64) -> unit {
     c.constants.push(Constant { module: module, name: name, declared_at: declared, file: c.file, at: at_name,  public: constant_public, ty: ty, value: value, text: text });
     return ();
 }
+// Whether the constant declared here (at `const`) reads a constant that is not known yet but is
+// declared further down this file: then it waits for the file's other names (constants_deferred).
+fn const_names_later<a>(c: (&a mut C)) -> bool {
+    mut i = c.pos;
+    while (kind_at(&mut c, i) != 61) && (kind_at(&mut c, i) != 59) && (kind_at(&mut c, i) != 0) {
+        i += 1;
+    }
+    if kind_at(&mut c, i) != 61 {
+        return false;
+    }
+    module := module_copy(&mut c);
+    i += 1;
+    while (kind_at(&mut c, i) != 59) && (kind_at(&mut c, i) != 0) {
+        if kind_at(&mut c, i) == 1 {
+            prev := kind_at(&mut c, i - 1);
+            next := kind_at(&mut c, i + 1);
+            if (prev != 46) && (prev != 260) && (next != 40) && (next != 260) {
+                name := tok_text(&mut c, i);
+                if find_constant(&mut c, view(module), view(name)) == 0 {
+                    // One still waiting itself (declared above, deferred) is not known yet either.
+                    for k in c.const_later.len() {
+                        if (c.const_later[k] != c.pos) && same(view(tok_text(&mut c, c.const_later[k] + 1)), view(name)) {
+                            return true;
+                        }
+                    }
+                    mut j = i + 1;
+                    while kind_at(&mut c, j) != 0 {
+                        if is_at(&mut c, j, view("const")) && (kind_at(&mut c, j + 1) == 1) && same(view(tok_text(&mut c, j + 1)), view(name)) {
+                            return true;
+                        }
+                        j += 1;
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    return false;
+}
+// The constants a file deferred (const_names_later), folded once its first pass is done: each in
+// turn once what it reads is known, so the order they are written in does not matter. What is left
+// (a cycle) folds anyway, and its unknown name is the error.
+fn constants_deferred<a>(c: (&a mut C)) -> unit {
+    saved_pos := c.pos;
+    saved_public := c.decl_public;
+    while c.const_later.len() != 0 {
+        mut progress = false;
+        mut k = 0;
+        while k < c.const_later.len() {
+            at := c.const_later[k];
+            exchange(&mut c.pos, at);
+            if !const_names_later(&mut c) {
+                exchange(&mut c.decl_public, c.const_later_public[k]);
+                exchange(&mut c.const_replay, 1);
+                constant_declaration(&mut c, 1);
+                exchange(&mut c.const_replay, 0);
+                c.const_later.remove(k);
+                c.const_later_public.remove(k);
+                progress = true;
+            } else {
+                k += 1;
+            }
+        }
+        if !progress {
+            exchange(&mut c.pos, c.const_later[0]);
+            exchange(&mut c.decl_public, c.const_later_public[0]);
+            exchange(&mut c.const_replay, 1);
+            constant_declaration(&mut c, 1);
+            exchange(&mut c.const_replay, 0);
+            c.const_later.remove(0);
+            c.const_later_public.remove(0);
+        }
+    }
+    exchange(&mut c.pos, saved_pos);
+    exchange(&mut c.decl_public, saved_public);
+    return ();
+}
 fn constant_declaration<a>(c: (&a mut C), pass: u64) -> unit {
+    if (pass == 1) && (c.const_replay == 0) && const_names_later(&mut c) {
+        c.const_later.push(c.pos);
+        c.const_later_public.push(c.decl_public);
+        while !is(&mut c, view(";")) {
+            advance(&mut c);
+        }
+        advance(&mut c);
+        return ();
+    }
     expect(&mut c, view("const"));
     mut at_name = c.pos;
     name := ident(&mut c);
@@ -29060,6 +29152,33 @@ fn resolve_modules<a>(c: (&a mut C), offset: u64) -> unit {
                 c.mod_names.push(copy_bytes(view("iter")));
                 c.mod_files.push(found.copy());
                 queue.push(found);
+            }
+        }
+        // A script also links what it names without a `use` line: a standard-library module written
+        // as a path (`hash::fnv1a64`), `math` for a float method of its (`x.tan()`), and the modules
+        // its `@derive(...)` needs.
+        if !in_std_dir(view(file)) && !declares_module(view(text)) {
+            mut wanted = u8[][];
+            qualified := lexer::qualified_names(view(text));
+            for q in qualified.len() {
+                wanted.push(copy_bytes(view(qualified[q])));
+            }
+            if lexer::calls_any(view(text), lexer::math_methods()[..]) {
+                wanted.push(copy_bytes(view("math")));
+            }
+            derived := lexer::derive_modules(view(text));
+            for d in derived.len() {
+                wanted.push(copy_bytes(view(derived[d])));
+            }
+            for w in wanted.len() {
+                if !mod_known(&c, view(wanted[w])) {
+                    found := mod_find(&c, view(wanted[w]));
+                    if (found.len() != 0) && (in_std_dir(view(found)) != 0) {
+                        c.mod_names.push(copy_bytes(view(wanted[w])));
+                        c.mod_files.push(found.copy());
+                        queue.push(found);
+                    }
+                }
             }
         }
         // A map literal or type (`["a": 1]`, `[string: u64]`) is built-in syntax whose type lives in
@@ -65189,6 +65308,9 @@ pub fn main() -> u64 {
         statics: Static[],
         ct_calls: CtCall[],
         ct_done: CtDone[],
+        const_later: u64[],
+        const_later_public: u64[],
+        const_replay: 0,
         r4_on: 0,
         r4_keep: u64[],
         ct_guards: u8[][],
@@ -66130,6 +66252,9 @@ pub fn main() -> u64 {
             load_file(&mut c, i);
             exchange(&mut c.file, i);
             toplevel(&mut c, pass + 1);
+            if pass == 0 {
+                constants_deferred(&mut c);
+            }
             if pass == 0 {
                 c
                     .iface_list
