@@ -2,6 +2,10 @@
 
 - Added `use module as alias;`: the alias names the module in that file (`use geometry_shapes as gs;` then
   `gs::Box`, `gs::area(&b)`); the module's own name keeps working.
+- An integer conversion folds in a constant: `const WIDE: u64 = u64(SMALL) * 2;`, and a value that does not
+  fit (`u8(300)`) is a build error.
+- A shift's amount may be any unsigned integer type, as in C and Rust: `x << n` with `x: u32` and `n: u64`.
+  The result keeps the left operand's type, and an amount of the type's width or more still stops the program.
 - A value of an optional's payload type now converts to the optional where one is expected, as `Some(value)`:
   `return P { .. };` from a `-> P?` function, `x: u64? = 5`, and `show(&a)` for a `(&P)?` parameter.
   (`x == None` and `x != None` already worked on any optional.)

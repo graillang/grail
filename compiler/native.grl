@@ -24808,6 +24808,18 @@ fn ct_layout<a>(c: (&a mut C), align: u64) -> u64 {
     fail(&mut c, view("size_of and align_of take a scalar, a handle or C pointer, or an extern \"C\" record: a Grail record or vector has no layout the language promises"));
     return 0;
 }
+// The integer type an integer-conversion call names, as bits | signed << 8, or 0 when the name is
+// not one (`u8`, `i64`, `usize` is not a Grail type).
+fn ct_int_conversion<a>(name: &a [u8]) -> u64 {
+    names := string["u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64"];
+    codes := u64[8, 16, 32, 64, 264, 272, 288, 320];
+    for i in names.len() {
+        if same(name, view(names[i])) {
+            return codes[i];
+        }
+    }
+    return 0;
+}
 fn ct_primary<a>(c: (&a mut C)) -> CVal {
     here := c.pos;
     k := kind(&mut c);
@@ -24929,6 +24941,51 @@ fn ct_primary<a>(c: (&a mut C)) -> CVal {
                 }
                 return ct_val(c.ct_loop_index[b - 1], 0);
             }
+        }
+        // `u8(x)`, `i32(x)`, `u64(x)`: an integer conversion folds as at run time, and a value that
+        // does not fit is a build error rather than a program that stops (`const SMALL: u8 = u8(200);`).
+        conv_name := tok_text(&mut c, c.pos);
+        conv_code := ct_int_conversion(view(conv_name));
+        if (conv_code != 0) && is_at(&mut c, c.pos + 1, view("(")) {
+            advance(&mut c);
+            advance(&mut c);
+            inner := ct_expr(&mut c, 0);
+            expect(&mut c, view(")"));
+            if !integer(&mut c, inner.ty) {
+                fail(&mut c, view("a compile-time integer conversion takes an integer"));
+            }
+            bits := conv_code % 256;
+            signed := conv_code / 256;
+            mut from_signed = 0;
+            if inner.ty != 0 {
+                from_signed = ty_mode(&mut c, inner.ty);
+            }
+            v := inner.value;
+            negative := (from_signed != 0) && ((v >> 63) != 0);
+            mut fits = true;
+            if signed == 0 {
+                if negative {
+                    fits = false;
+                } else if (bits < 64) && ((v >> bits) != 0) {
+                    fits = false;
+                }
+            } else if bits < 64 {
+                limit := u64(1) << (bits - 1);
+                if negative {
+                    fits = (0 - v) <= limit;
+                } else {
+                    fits = v < limit;
+                }
+            } else if (from_signed == 0) && ((v >> 63) != 0) {
+                fits = false;
+            }
+            if !fits {
+                mut msg = copy_bytes(view("compile-time value does not fit in `"));
+                push_bytes(&mut msg, view(conv_name));
+                msg.push(96);
+                fail(&mut c, view(msg));
+            }
+            return ct_val(v, int_type(&mut c, bits, signed));
         }
         if ct_call_ahead(&mut c) {
             text := ct_take_call_text(&mut c);
@@ -27200,7 +27257,9 @@ fn constant_declaration<a>(c: (&a mut C), pass: u64) -> unit {
                 exchange(&mut c.pos, here);
                 fail(&mut c, view("constants must be integer, float, bool or text"));
             }
-            if (v.ty != 0) {
+            // A typed integer (a conversion call's, `u8(200)`) is an integer value too; it must fit the
+            // constant's type like a literal.
+            if (v.ty != 0) && (ty_kind(&mut c, v.ty) != 18) {
                 exchange(&mut c.pos, here);
                 fail(&mut c, view("integer constant needs an integer value"));
             }
@@ -52829,7 +52888,13 @@ fn expr_rest<a>(c: (&a mut C), min: u64, expected: u64, lstart: u64, first: Val)
                                                 it = rty;
                                             }
                                             if ty_kind(&mut c, it) == 18 {
-                                                if c.raw == 0 {
+                                                // A shift's amount is a bit count, not a value of the shifted
+                                                // width: `x << n` with `x: u32` and `n: u64` (C's and Rust's rule).
+                                                // It is any unsigned integer; the result is the left operand's type.
+                                                shift_by_count := ((k == 271) || (k == 272))
+                                                    && ((ty_kind(&mut c, base_type(&mut c, rty)) == 18) && (ty_mode(&mut c, base_type(&mut c, rty)) == 0)
+                                                        || (base_type(&mut c, rty) == 0));
+                                                if (c.raw == 0) && !shift_by_count {
                                                     require_type(&mut c, rty, ty);
                                                 }
                                                 if k == 38

@@ -52,7 +52,8 @@ A suffix such as `200u8` or `-12i32` fixes a literal's type, and an unsuffixed l
 value takes that value's type, checked to fit. Nothing converts implicitly: `u16(small)` converts and
 stops the program if the value does not fit, `wrapping_u8(300)` deliberately keeps the low bits, and
 `bits(x)` gives the raw 64-bit pattern (`x.to_bits()` on a float, and `f64::from_bits(b)` back). `&`, `|`, `^`, `<<` and `>>` work on integers; `>>` keeps a
-signed value's sign.
+signed value's sign. A shift's amount is a bit count of any unsigned type (`x << n` with `x: u32`
+and `n: u64`); shifting by the width or more stops the program.
 
 ## Floating point
 

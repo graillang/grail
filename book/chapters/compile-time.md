@@ -12,6 +12,8 @@ is `@`.
   explicitly and `:=` infers it.
   A constant may read another module's constant (`const LIMIT: f32 = rules::PITCH;`) whatever
   order the files are given in: the compiler folds a module's constants after the modules it names.
+  An integer conversion folds too (`const WIDE: u64 = u64(SMALL) * 2;`); one that does not fit is a
+  build error.
 - `@assert(condition, "message")` is a compile error carrying the message when the condition is
   false. `size_of` and `align_of` describe the *target*: scalars, handles and C pointers, and
   `extern "C"` records, whose C layout is fixed.
