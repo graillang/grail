@@ -5,6 +5,8 @@
   `[K: V]` map types and `x: T` annotations are unchanged. Fixed arrays now accept `a[lo..hi]` too.
 - "has no method" now names the standard-library module that defines the method when the build does not
   include it: ``help: `digest` is defined in the `xxhash` module ... add `use xxhash;` ``.
+- Added record update: `base with { width: 1920 }` is a copy of `base` with the fields written replaced;
+  fields that own storage are written out rather than shared.
 - Added `use module as alias;`: the alias names the module in that file (`use geometry_shapes as gs;` then
   `gs::Box`, `gs::area(&b)`); the module's own name keeps working.
 - An integer conversion folds in a constant: `const WIDE: u64 = u64(SMALL) * 2;`, and a value that does not

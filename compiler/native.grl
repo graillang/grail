@@ -36042,6 +36042,12 @@ fn eat_kind<a>(c: (&a mut C), k: u64) -> bool {
     return false;
 }
 fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
+    return record_with(&mut c, d, explicit, val(0, 0), 0);
+}
+// `base with { f: v, .. }` (expr_rest): a record of base's type, each field not written copied
+// from `base`. `base` is read, not moved, so each field it supplies must be one whose copy is the
+// value (an integer, float, bool or plain record); a field that owns storage is written out.
+fn record_with<a>(c: (&a mut C), d: u64, explicit: u64, update_base: Val, update_at: u64) -> Val {
     // A tuple literal `(a, b)` is a record built positionally (tuple_decl).
     positional := exchange(&mut c.positional, 0) != 0;
     // The closing bracket's token kind: `)` or `}`.
@@ -36178,6 +36184,49 @@ fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
             if eat_kind(&mut c, close) {
                 break;
             }
+        }
+    }
+    if update_base.ty != 0 {
+        base_ty := base_type(&mut c, update_base.ty);
+        if (ty_kind(&mut c, base_ty) != ty_kind(&mut c, constructed_type(&mut c, d, hint, map.copy())))
+            || (ty_arg(&mut c, base_ty) != d) {
+            exchange(&mut c.pos, update_at);
+            fail(&mut c, view("`with` needs a record on its left"));
+        }
+        for k in count {
+            mut given = false;
+            for i in seen.len() {
+                if seen[i] == k {
+                    given = true;
+                }
+            }
+            if given {
+                continue;
+            }
+            fty := field_type(&mut c, base_ty, k);
+            // A plain record (words only, nothing it owns) copies like a number.
+            if affine(&mut c, fty) && !(framed(&mut c, fty) && plain(&mut c, fty)) {
+                exchange(&mut c.pos, update_at);
+                fname := c.fields[c.decls[d].first + k].name.copy();
+                mut msg = copy_bytes(view("`with` copies the fields not written, and field `"));
+                push_bytes(&mut msg, view(fname));
+                push_bytes(&mut msg, view("` owns storage: write it in the braces (`"));
+                push_bytes(&mut msg, view(fname));
+                push_bytes(&mut msg, view(": base."));
+                push_bytes(&mut msg, view(fname));
+                push_bytes(&mut msg, view(".clone()`)"));
+                fail(&mut c, view(msg));
+            }
+            part := field_load(&mut c, update_base.t, base_ty, k, 0);
+            if affine(&mut c, fty) {
+                // A plain record field: its words are copied into storage of the new record's own,
+                // and the copy is what is owned (the base keeps its field).
+                own(&mut c, part, fty);
+            }
+            held := move_value(&mut c, val(part, fty));
+            seen.push(k);
+            sources.push(held.t);
+            lit_terms.push(u8[]);
         }
     }
     if seen.len() != count {
@@ -52553,7 +52602,8 @@ fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
             }
         }
         p0 := prec(kp);
-        if (k0 == 46) || (p0 == 0) || (p0 < min) {
+        with_next := is(&mut c, view("with")) && is_at(&mut c, c.pos + 1, view("{"));
+        if !with_next && ((k0 == 46) || (p0 == 0) || (p0 < min)) {
             return first;
         }
     }
@@ -52574,6 +52624,19 @@ fn expr_rest<a>(c: (&a mut C), min: u64, expected: u64, lstart: u64, first: Val)
     mut t = first.t;
     mut ty = first.ty;
     while true {
+        // `base with { f: v }`: a copy of the record `base` with the fields written replaced.
+        if is(&mut c, view("with")) && is_at(&mut c, c.pos + 1, view("{")) {
+            at := c.pos;
+            bty := base_type(&mut c, ty);
+            if ty_kind(&mut c, bty) != 8 {
+                fail(&mut c, view("`with` needs a record on its left: `base with { field: value }`"));
+            }
+            advance(&mut c);
+            made := record_with(&mut c, ty_arg(&mut c, bty), bty, val(t, ty), at);
+            t = made.t;
+            ty = made.ty;
+            continue;
+        }
         mut k = kind(&mut c);
         if (k == 60) || (k == 62) {
             here := c.pos;

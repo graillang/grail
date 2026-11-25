@@ -70,6 +70,20 @@ Any vector can be sliced (see [Views and slices](views.html)).
 
 **Try it:** use `u8[][]`, push `u8[]`, and inspect the popped buffer's length.
 
+## A copy with some fields changed
+
+`base with { field: value, .. }` is a new record of `base`'s type: the fields written take the new
+values and every other field is copied from `base`, which stays usable.
+
+```grail
+wide := config with { width: 1920 };
+tall := defaults() with { height: 2000, scale: 2.0 };
+```
+
+The copied fields must be ones whose copy is the value - numbers, `bool`s and records made of them.
+A field that owns storage (a `string`, a vector) is written in the braces instead
+(`label: base.label.clone()`), so nothing is shared by accident.
+
 ## Fixed-size arrays
 
 `[T; N]` is `N` values of `T` back to back, with no heap allocation and no length word: the
