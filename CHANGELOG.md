@@ -5,6 +5,8 @@
   `[K: V]` map types and `x: T` annotations are unchanged. Fixed arrays now accept `a[lo..hi]` too.
 - "has no method" now names the standard-library module that defines the method when the build does not
   include it: ``help: `digest` is defined in the `xxhash` module ... add `use xxhash;` ``.
+- Arithmetic reads through a reference to a number, as comparisons already did and as in Rust: `|x| x * 2`,
+  `i + x` over `enumerate()`, `n + 1` with `n: &u64`. Assignment through a reference is still `*n += 1`.
 - `match` arms may qualify a variant by its enum (`Shape::Circle(r) =>`), and a block arm needs no comma before
   the next arm. A qualifier naming another enum is refused.
 - Added record update: `base with { width: 1920 }` is a copy of `base` with the fields written replaced;

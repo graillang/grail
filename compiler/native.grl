@@ -52853,33 +52853,20 @@ fn expr_rest<a>(c: (&a mut C), min: u64, expected: u64, lstart: u64, first: Val)
                                     continue;
                                 }
                             }
-                            // Comparisons see through references to plain values, on either side and
-                            // at any depth: `n > 4`, `4 < n` and `a == b` compare the values behind
-                            // them. Arithmetic does not: `n + 1` stays a mismatch that names `*n`.
+                            // Operators see through references to plain values, on either side and at any
+                            // depth, as Rust's do: `n > 4`, `a == b`, and `x * 2` for `x: &u64` (an
+                            // iterator's element, `|x| x * 2`) read the value behind it, and the result
+                            // is a plain value. Assignment operators still need `*n += 1`.
                             if (c.raw == 0)
                                 && (ref_to_plain(&mut c, ty) || ref_to_plain(&mut c, rty)) {
-                                if is_comparison(k) {
-                                    if ref_to_plain(&mut c, ty) {
-                                        x := deref(&mut c, val(t, ty));
-                                        snap = x.t;
-                                        ty = x.ty;
-                                    }
-                                    if ref_to_plain(&mut c, rty) {
-                                        right = deref(&mut c, val(right.t, rty));
-                                        rty = right.ty;
-                                    }
-                                } else {
-                                    if c.tolerant == 0 {
-                                        diag_help(
-                                            &mut c,
-                                            view("only comparisons read through a reference; dereference it for arithmetic: `*n + 1`")
-                                        );
-                                        if ref_to_plain(&mut c, ty) {
-                                            require_type(&mut c, ty, plain_behind(&mut c, ty));
-                                        } else {
-                                            require_type(&mut c, rty, plain_behind(&mut c, rty));
-                                        }
-                                    }
+                                if ref_to_plain(&mut c, ty) {
+                                    x := deref(&mut c, val(t, ty));
+                                    snap = x.t;
+                                    ty = x.ty;
+                                }
+                                if ref_to_plain(&mut c, rty) {
+                                    right = deref(&mut c, val(right.t, rty));
+                                    rty = right.ty;
                                 }
                             }
                             if c.raw == 0 {

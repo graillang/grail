@@ -89,10 +89,11 @@ view descriptor copying retains checked provenance. `*r = v` drops the old value
 
 A comparison reads through a reference to a plain value by itself: with `n: &u64`, `n > 4`,
 `4 < n` and `n == m` (where `m` is a `u64`, a `&u64` or a `&&u64`) compare the numbers, so a
-predicate such as `filter(|n| n > 4)` needs no `*`. Only the comparison operators (`==`, `!=`, `<`,
-`<=`, `>`, `>=`) do this, and only for integers, floats, bools and chars. Arithmetic still wants the
-value itself, `*n + 1`: `n + 1` is a type mismatch that says so. Text compares through a reference
-as well; records and vectors compare as values only.
+predicate such as `filter(|n| n > 4)` needs no `*`. Arithmetic does the same, as in Rust: `n + 1`,
+`map(|x| x * 2)` and `i + x` in `for (i, x) in xs.iter().enumerate()` read the number, and the result
+is a plain value. This holds for integers, floats, bools and chars. Assignment through a reference
+still names it: `*n += 1`. Text compares through a reference as well; records and vectors compare as
+values only.
 
 `exchange(reference, new_value)` replaces the stored value and returns the old one instead of
 dropping it: use it to move an owned value out of a reference. Its value argument is read before
