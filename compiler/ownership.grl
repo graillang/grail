@@ -418,9 +418,18 @@ fn loan_ancestor<a>(s: (&a State), outer: u64, inner: u64) -> bool {
 pub fn use_loan<a>(s: (&a State), id: u64, write: u64) -> u64 {
     return use_loan_beside(&s, id, write, 0);
 }
+// A read through a loan - an element or field read through a `&mut`, not a move or a reborrow of
+// it: live shared reborrows of it are not in the way (Rust's rule), `a := v[i]; b := v[j];` on
+// `v: &mut T[]`. A live exclusive reborrow still is.
+pub fn use_loan_read<a>(s: (&a State), id: u64) -> u64 {
+    return use_loan_checked(&s, id, 0, 0, true);
+}
 // use_loan, where the live reborrows of group `group` (the halves a split is making) are not in
 // the way of making another half.
 fn use_loan_beside<a>(s: (&a State), id: u64, write: u64, group: u64) -> u64 {
+    return use_loan_checked(&s, id, write, group, false);
+}
+fn use_loan_checked<a>(s: (&a State), id: u64, write: u64, group: u64, read: bool) -> u64 {
     if id == 0 || s.loans.len() < id {
         return 1;
     }
@@ -437,7 +446,8 @@ fn use_loan_beside<a>(s: (&a State), id: u64, write: u64, group: u64) -> u64 {
         for i in s.loans.len() {
             child := &s.loans[i];
             active := child.live;
-            if active != 0 && i + 1 != id && ((group == 0) || (child.group != group)) {
+            shared_beside_read := read && (child.mode == 0);
+            if active != 0 && i + 1 != id && ((group == 0) || (child.group != group)) && !shared_beside_read {
                 if loan_ancestor(&s, id, i + 1) {
                     return 6;
                 }

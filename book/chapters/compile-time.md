@@ -25,6 +25,10 @@ is `@`.
 - `@expr` folds one operand: `@(PAGE * 2)`.
 - `static TABLE: u64[] = @build();` runs `build` while compiling and keeps its result as one
   read-only object the program borrows (see *Module values* in the modules chapter).
+- A record static may be written out: `static ORIGIN: P = P { x: 1, y: 2 };`, `static PTS: P[] =
+  P[P { x: 5, y: 6 }];`, its fields constant expressions (other constants included). It is computed
+  while compiling as an `@f()` is. A record is a `static`, not a `const`: a constant is pasted into
+  each use, and the refusal says which to write.
 
 Constant expressions use literals, other constants, `size_of`, `align_of`, `target.os`,
 `target.arch` and `target.pointer_bits`, with the usual operators; arithmetic is checked, so an

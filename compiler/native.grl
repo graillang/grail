@@ -7767,7 +7767,7 @@ fn observe<a>(c: (&a mut C), slot: u64) -> unit {
                 if (guard == 0) & ownership::ancestor(&c.check, h, place) {
                     if loan_live(&mut c, loan) != 0 {
                         checked = 1;
-                        if ownership::use_loan(&c.check, loan, 0) != 0 {
+                        if ownership::use_loan_read(&c.check, loan) != 0 {
                             fail(&mut c, view("reference is suspended or expired"));
                         }
                     }
@@ -7789,7 +7789,7 @@ fn observe<a>(c: (&a mut C), slot: u64) -> unit {
                     if guard == 0 {
                         if loan_live(&mut c, loan) != 0 {
                             checked = 1;
-                            if ownership::use_loan(&c.check, loan, 0) != 0 {
+                            if ownership::use_loan_read(&c.check, loan) != 0 {
                                 fail(&mut c, view("reference is suspended or expired"));
                             }
                         }
@@ -25657,7 +25657,12 @@ fn ct_qualify<a, b>(c: (&a mut C), module: &b [u8], text: &b [u8]) -> u8[] {
         prev_scope := (i >= 1) && (toks[i - 1].kind == 260);
         prev_dot := (i >= 1) && (toks[i - 1].kind == 46);
         next_scope := (i + 1 < toks.len()) && (toks[i + 1].kind == 260);
-        if (tkind == 1) && !prev_scope && !prev_dot && !next_scope && (ct_module_names(&mut c, module, view(word)) != 0) {
+        // A record or alias the module declares heads a literal (`P { .. }`, `P[..]`) - but a word
+        // followed by `:` is a field being written, not a type.
+        next_colon := (i + 1 < toks.len()) && (toks[i + 1].kind == 58);
+        names_type := !next_colon && ((find_decl_internal(&mut c, module, view(word)) != 0) || (find_alias(&mut c, module, view(word)) != 0)
+            || (find_constant(&mut c, module, view(word)) != 0) || (find_static(&mut c, module, view(word)) != 0));
+        if (tkind == 1) && !prev_scope && !prev_dot && !next_scope && ((ct_module_names(&mut c, module, view(word)) != 0) || names_type) {
             push_bytes(&mut qualified, module);
             push_bytes(&mut qualified, view("::"));
         }
@@ -26983,6 +26988,11 @@ fn r4_compute<a>(c: (&a mut C)) -> unit {
     return ();
 }
 fn run_tier<a, b, d, e>(c: (&a mut C), module: &b [u8], text: &d [u8], key: &e [u8]) -> CTRes {
+    return run_tier_typed(&mut c, module, text, key, NO_TYPE);
+}
+// run_tier for a value whose type is already known (`known`, NO_TYPE when the call names it): a
+// static's record literal, `static ORIGIN: P = P { x: 1, y: 2 };`, is computed by the same probe.
+fn run_tier_typed<a, b, d, e>(c: (&a mut C), module: &b [u8], text: &d [u8], key: &e [u8], known: u64) -> CTRes {
     if key.len() != 0 {
         for i in c.ct_done.len() {
             if same(view(c.ct_done[i].key), key) {
@@ -26991,27 +27001,30 @@ fn run_tier<a, b, d, e>(c: (&a mut C), module: &b [u8], text: &d [u8], key: &e [
             }
         }
     }
-    // The call's function, for its result type.
-    toks := lexer::tokenize(text);
-    if (toks.len() < 3) || (toks[0].kind != 1) {
-        fail(&mut c, view("a compile-time call is `f(...)` or `module::f(...)`"));
-    }
-    mut fmod = module.copy();
-    mut fname = slice_bytes(text, toks[0].start, toks[0].end);
-    if (toks.len() > 2) && (toks[1].kind == 260) && (toks[2].kind == 1) {
-        fmod = fname.copy();
-        fname = slice_bytes(text, toks[2].start, toks[2].end);
-    }
-    f := ct_module_names(&mut c, view(fmod), view(fname));
-    if f == 0 {
-        mut msg = copy_bytes(view("compile-time call to an unknown function `"));
-        push_bytes(&mut msg, view(fname));
-        msg.push(96);
-        fail(&mut c, view(msg));
-    }
-    ret := c.funcs[f - 1].ret;
-    if c.funcs[f - 1].types != 0 {
-        fail(&mut c, view("a compile-time call names a generic function; call a function of concrete types"));
+    mut ret = known;
+    if known == NO_TYPE {
+        // The call's function, for its result type.
+        toks := lexer::tokenize(text);
+        if (toks.len() < 3) || (toks[0].kind != 1) {
+            fail(&mut c, view("a compile-time call is `f(...)` or `module::f(...)`"));
+        }
+        mut fmod = module.copy();
+        mut fname = slice_bytes(text, toks[0].start, toks[0].end);
+        if (toks.len() > 2) && (toks[1].kind == 260) && (toks[2].kind == 1) {
+            fmod = fname.copy();
+            fname = slice_bytes(text, toks[2].start, toks[2].end);
+        }
+        f := ct_module_names(&mut c, view(fmod), view(fname));
+        if f == 0 {
+            mut msg = copy_bytes(view("compile-time call to an unknown function `"));
+            push_bytes(&mut msg, view(fname));
+            msg.push(96);
+            fail(&mut c, view(msg));
+        }
+        ret = c.funcs[f - 1].ret;
+        if c.funcs[f - 1].types != 0 {
+            fail(&mut c, view("a compile-time call names a generic function; call a function of concrete types"));
+        }
     }
     mut rty = 0;
     if is_bool(&mut c, ret) {
@@ -27314,6 +27327,17 @@ fn constant_declaration<a>(c: (&a mut C), pass: u64) -> unit {
         return ();
     }
     ty := parse_type(&mut c);
+    if (ty != 0) && (ty != NO_TYPE) && (ty_kind(&mut c, ty) == 8) {
+        // A constant is pasted into each use; a record value is one object computed while compiling.
+        mut msg = copy_bytes(view("a record value computed while compiling is a static: write `static "));
+        push_bytes(&mut msg, view(name));
+        push_bytes(&mut msg, view(": "));
+        push_bytes(&mut msg, view(source_type_name(&mut c, ty)));
+        push_bytes(&mut msg, view(" = "));
+        push_bytes(&mut msg, view(source_type_name(&mut c, ty)));
+        push_bytes(&mut msg, view(" { .. };`"));
+        fail_at(&mut c, at_name, view(msg));
+    }
     expect(&mut c, view("="));
     module := module_copy(&mut c);
     refuse_duplicate_constant(&mut c, view(module), view(name), at_name);
@@ -28304,6 +28328,12 @@ fn static_declaration<a>(c: (&a mut C), pass: u64) -> unit {
                 call := ct_take_call_text(&mut c);
                 c.ct_calls.push(CtCall { module: module.copy(), name: name.copy(), text: call, is_static: 1 });
             }
+        } else if static_structured(&mut c, ty) && (kind_at(&mut c, c.pos + 1) == 1) {
+            advance(&mut c);
+            if !ct_call_ahead(&mut c) {
+                literal := static_literal_text(&mut c);
+                c.ct_calls.push(CtCall { module: module.copy(), name: name.copy(), text: literal, is_static: 1 });
+            }
         }
         static_skip_item(&mut c);
         return ();
@@ -28319,6 +28349,34 @@ fn static_declaration<a>(c: (&a mut C), pass: u64) -> unit {
 // Evaluate static `i`'s initialiser once, where it is written: at its declaration in the third pass,
 // or earlier when the prover, an interface or the function cache asks for its value first. The
 // type rules run first, so a refusal reads the same whichever asks. The value is kept on the entry.
+// A static's written-out value, from here to the `;` at bracket depth 0, as source text.
+fn static_literal_text<a>(c: (&a mut C)) -> u8[] {
+    first := c.pos;
+    mut depth = 0;
+    while true {
+        k := kind(&mut c);
+        if k == 0 {
+            fail(&mut c, view("a static's initialiser ends at `;`"));
+        }
+        if (k == 40) || (k == 91) || (k == 123) {
+            depth += 1;
+        }
+        if ((k == 41) || (k == 93) || (k == 125)) && (depth > 0) {
+            depth -= 1;
+        }
+        if (k == 59) && (depth == 0) {
+            break;
+        }
+        advance(&mut c);
+    }
+    start := c.toks[first].start;
+    end := c.toks[c.pos - 1].end;
+    mut out = u8[];
+    for i in start..end {
+        out.push(c.src[i]);
+    }
+    return out;
+}
 fn static_resolve<a>(c: (&a mut C), i: u64) -> unit {
     if (c.statics[i].imported != 0) || (c.statics[i].state != 0) || (c.statics[i].init_at == 0) {
         return ();
@@ -28378,6 +28436,23 @@ fn static_resolve<a>(c: (&a mut C), i: u64) -> unit {
             value = r.value;
             text = r.text;
             exchange(&mut c.pos, after_call);
+        }
+    } else if static_structured(&mut c, ty) && (k == 1) && !ct_call_ahead(&mut c) {
+        // `static ORIGIN: P = P { x: 1, y: 2 };` (or `R[R { .. }, ..]`): the value is written out
+        // and computed while compiling by the same probe an `@f()` runs, typed by the declaration.
+        literal := static_literal_text(&mut c);
+        after_literal := c.pos;
+        mut key = module.copy();
+        push_bytes(&mut key, view("::"));
+        push_bytes(&mut key, view(name));
+        if c.probe_mode != 0 {
+            ready = 0;
+        } else {
+            exchange(&mut c.pos, init);
+            r := run_tier_typed(&mut c, view(module), view(literal), view(key), ty);
+            value = r.value;
+            text = r.text;
+            exchange(&mut c.pos, after_literal);
         }
     } else if k == 3 {
         if ty != 3 {
@@ -37400,7 +37475,10 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
             if (argi < count) && (c.raw == 0) && lent_parameter(&mut c, c.params[template_first + argi]) {
                 exchange(&mut c.lent_arg_at, astart + 1);
             }
-            if reborrow != 0 {
+            shared_slice := shared_slice_argument(&mut c);
+            if shared_slice != 0 {
+                v = reslice_argument(&mut c, shared_slice);
+            } else if reborrow != 0 {
                 v = place(&mut c, reborrow - 1, 0);
             } else if (argi < count) && (c.raw == 0) && string_literal_for_ref(&mut c, c.params[template_first + argi]) {
                 // `greet("hi")` for `fn greet(s: &string)`: the literal is borrowed, as `&"hi"` is.
@@ -52169,6 +52247,10 @@ fn vector_slice<a>(c: (&a mut C), x: Val, input: u64, access: u64) -> Val {
         end = bound.t;
     }
     expect(&mut c, view("]"));
+    return slice_between(&mut c, xt, elem, start, end, write);
+}
+// The typed slice of `xt`'s elements `start..end`, borrowing them (exclusively when `write`).
+fn slice_between<a>(c: (&a mut C), xt: u64, elem: u64, start: u64, end: u64, write: bool) -> Val {
     mut width = 8;
     if narrow_code(&mut c, elem) != 0 {
         width = 4;
@@ -52184,6 +52266,36 @@ fn vector_slice<a>(c: (&a mut C), x: Val, input: u64, access: u64) -> Val {
     own(&mut c, result, sty);
     view_bonds(&mut c, result, xt, write, false);
     return val(result, sty);
+}
+// A shared slice binding passed by name (`total(rooms)` for `rooms: &[Room]`): a fresh slice of all of
+// its elements, as `rooms[..]` would be, so `rooms` stays usable - Rust copies a `&[T]`. 0 when the
+// argument is not one; else the binding's index + 1.
+fn shared_slice_argument<a>(c: (&a mut C)) -> u64 {
+    if (c.raw != 0) || (kind(&mut c) != 1) {
+        return 0;
+    }
+    after := kind_at(&mut c, c.pos + 1);
+    if (after != 44) && (after != 41) {
+        return 0;
+    }
+    l := find_local(&mut c, view(tok_text(&mut c, c.pos)));
+    if l == 0 {
+        return 0;
+    }
+    ty := local_ty(&mut c, l - 1);
+    if (ty_kind(&mut c, ty) != 27) || (ty_mode(&mut c, ty) != 0) {
+        return 0;
+    }
+    return l;
+}
+fn reslice_argument<a>(c: (&a mut C), l: u64) -> Val {
+    advance(&mut c);
+    xt := local_id(&mut c, l - 1);
+    ty := local_ty(&mut c, l - 1);
+    observe(&mut c, xt);
+    start := imm(&mut c, 0);
+    end := apply(&mut c, view("rt_len"), one(xt));
+    return slice_between(&mut c, xt, ty_arg(&mut c, ty), start, end, false);
 }
 // From just after `[`: whether the brackets hold a single index (no `:` at their own depth).
 fn element_index_ahead<a>(c: (&a mut C)) -> bool {

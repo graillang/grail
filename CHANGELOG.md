@@ -1,5 +1,10 @@
 ## Unreleased
 
+- Record statics can be written out: `static ORIGIN: P = P { x: 1, y: 2 };` and vectors of records, computed
+  while compiling like `@f()`. A `const` of record type is refused with the `static` to write.
+- A shared slice parameter passed on by name is not moved (`total(rooms) + biggest(rooms)` for `rooms: &[Room]`),
+  and several shared element reads through a `&mut T[]` may be live at once (`a := v[i]; b := v[j];`); a
+  write beside one is still refused.
 - Constants fold negative values: `const A: i32 = i32(-5);`, `const B: i64 = -3 * 4;`, `A < 0`, in checked
   signed arithmetic; a value outside the constant's type is a build error.
 - Fixed arrays as aliases and vector elements: `type V3 = [f32; 3];`, `[u32; 3][]` (empty or with elements),

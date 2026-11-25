@@ -63,6 +63,9 @@ A slice cannot change length, cannot outlive its vector, and while it lives the 
 be written elsewhere; an exclusive slice excludes every other access. These checks happen at compile
 time, so passing `&mut samples[2..]` cannot alias a live reader the way a raw pointer and length could.
 A slice compares with `==` against any vector or slice of the same element type.
+A shared slice passed on by name stays usable, as a `&[T]` is copied in Rust: `total(rooms) +
+biggest(rooms)` lends the same elements twice. Through a `&mut T[]`, several element reads may be
+live at once (`a := v[i]; b := v[j];`); a write waits until they end.
 
 ## Exclusive views and reborrowing
 

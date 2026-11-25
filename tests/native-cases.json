@@ -21335,5 +21335,35 @@
     "source": "const A: u8 = u8(-1);\nfn main() {\n    println(A);\n}\n",
     "reject": true,
     "diagnostic": "compile-time value does not fit in `u8`"
+  },
+  {
+    "name": "shared-slice-param-passed-twice",
+    "note": "A `&[T]` binding passed by name is resliced, not moved, so it can be passed again.",
+    "source": "struct Room {\n    area: u64\n}\nfn total(rooms: &[Room]) -> u64 {\n    mut t = 0;\n    for r in rooms {\n        t += r.area;\n    }\n    return t;\n}\nfn biggest(rooms: &[Room]) -> u64 {\n    mut b = 0;\n    for r in rooms {\n        if r.area > b {\n            b = r.area;\n        }\n    }\n    return b;\n}\nfn report(rooms: &[Room]) -> u64 {\n    return total(rooms) + biggest(rooms) + rooms.len();\n}\nfn main() {\n    v := Room[Room { area: 3 }, Room { area: 5 }];\n    println(report(&v));\n    println(report(v[1..]));\n}\n",
+    "stdout": "15\n11\n"
+  },
+  {
+    "name": "mut-vector-two-element-reads",
+    "note": "Two shared element reads through a `&mut T[]` at once (`ea := v[a]; eb := v[b];`, `pages[i].x == px && pages[i].y == py`).",
+    "source": "struct Pg {\n    x: u64,\n    y: u64\n}\nfn find(pages: &mut Pg[], px: u64, py: u64) -> u64 {\n    for index in pages.len() {\n        if pages[index].x == px && pages[index].y == py {\n            return index;\n        }\n    }\n    return 99;\n}\nstruct R {\n    w: u64,\n    name: string\n}\nfn heavier(v: &mut R[], a: u64, b: u64) -> bool {\n    ea := v[a];\n    eb := v[b];\n    return ea.w > eb.w;\n}\nfn main() {\n    mut v = Pg[Pg { x: 1, y: 2 }, Pg { x: 3, y: 4 }];\n    println(find(&mut v, 3, 4));\n    mut r = R[R { w: 1, name: \"a\".text() }, R { w: 5, name: \"b\".text() }];\n    println(heavier(&mut r, 1, 0));\n}\n",
+    "stdout": "1\ntrue\n"
+  },
+  {
+    "name": "mut-vector-write-beside-shared-read-refused",
+    "source": "struct R {\n    w: u64\n}\nfn bad(v: &mut R[]) -> u64 {\n    ea := &v[0];\n    v[1].w = 3;\n    return ea.w;\n}\nfn main() {\n    mut r = R[R { w: 1 }, R { w: 5 }];\n    println(bad(&mut r));\n}\n",
+    "reject": true,
+    "diagnostic": "borrow conflicts with active access"
+  },
+  {
+    "name": "static-record-literal",
+    "note": "A record static written out (nested records, a string field, a constant in a field, a vector of records).",
+    "source": "struct P {\n    x: u64,\n    y: u64\n}\nstruct Cfg {\n    name: string,\n    origin: P,\n    scale: u64\n}\nconst W: u64 = 3;\nstatic ORIGIN: P = P { x: 1, y: 2 };\nstatic CFG: Cfg = Cfg { name: \"main\".text(), origin: P { x: W, y: W * 2 }, scale: 4 };\nstatic PTS: P[] = P[P { x: 5, y: 6 }, P { x: 7, y: 8 }];\nfn main() {\n    println(ORIGIN.x + ORIGIN.y);\n    println(CFG.name);\n    println(CFG.origin.y);\n    println(PTS[1].x);\n    println(PTS.len());\n}\n",
+    "stdout": "3\nmain\n6\n7\n2\n"
+  },
+  {
+    "name": "const-record-points-to-static",
+    "source": "struct P {\n    x: u64,\n    y: u64\n}\nconst ORIGIN: P = P { x: 1, y: 2 };\nfn main() {\n    println(ORIGIN.x);\n}\n",
+    "reject": true,
+    "diagnostic": "a record value computed while compiling is a static: write `static ORIGIN: P = P { .. };`"
   }
 ]
