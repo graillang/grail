@@ -10,6 +10,8 @@ is `@`.
 - `const PAGE: u64 = 4 * 1024;` and `MASK := PAGE - 1;` are module-level constants. A module has no
   run-time initialiser, so every module binding is computed while compiling; `const` gives the type
   explicitly and `:=` infers it.
+  A constant may read another module's constant (`const LIMIT: f32 = rules::PITCH;`) whatever
+  order the files are given in: the compiler folds a module's constants after the modules it names.
 - `@assert(condition, "message")` is a compile error carrying the message when the condition is
   false. `size_of` and `align_of` describe the *target*: scalars, handles and C pointers, and
   `extern "C"` records, whose C layout is fixed.

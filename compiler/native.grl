@@ -28714,6 +28714,72 @@ fn resolve_modules<a>(c: (&a mut C), offset: u64) -> unit {
 }
 // The path of the `index`-th input: the command line's own argument, or one of the files the roots
 // added above. A file an interface carried is a virtual input and keeps its own numbering.
+// The order the first pass visits the inputs in: every file after the files of the modules its
+// header `use`s, and otherwise in command-line order. The first pass registers and folds module
+// constants, so a `const` that reads another module's `const` must see that module first - with
+// plain command-line order, `const y: f32 = a::x;` failed whenever `a`'s file came later. A cycle
+// keeps command-line order. Only the visit order changes: every file keeps its index.
+fn file_visit_order<a>(c: (&a mut C), files: u64) -> u64[] {
+    mut names = u8[][];
+    mut uses = u8[][][];
+    mut f = 2;
+    while f < files {
+        load_file(&mut c, f);
+        mut p = 0;
+        if same(view(tok_text(&mut c, p)), view("unsafe")) {
+            p += 1;
+        }
+        mut name = copy_bytes(view("main"));
+        if same(view(tok_text(&mut c, p)), view("module")) {
+            name = tok_text(&mut c, p + 1);
+            p += 3;
+        }
+        mut deps = u8[][];
+        while same(view(tok_text(&mut c, p)), view("use")) && (p + 1 < c.toks.len()) {
+            deps.push(tok_text(&mut c, p + 1));
+            p += 2;
+            while (p < c.toks.len()) && !same(view(tok_text(&mut c, p)), view(";")) {
+                p += 1;
+            }
+            p += 1;
+        }
+        // A qualified path names a module too, with or without a `use` line: `a::x` reads `a`.
+        while p + 1 < c.toks.len() {
+            if (kind_at(&mut c, p) == 1) && same(view(tok_text(&mut c, p + 1)), view("::")) {
+                deps.push(tok_text(&mut c, p));
+            }
+            p += 1;
+        }
+        names.push(name);
+        uses.push(deps);
+        f += 1;
+    }
+    mut state = u64[];
+    for i in names.len() {
+        state.push(0);
+    }
+    mut order = u64[];
+    for i in names.len() {
+        visit_file_order(names[:], uses[:], &mut state, &mut order, i);
+    }
+    return order;
+}
+fn visit_file_order<a, b, d, e>(names: &a [u8[]], uses: &b [u8[][]], state: (&d mut u64[]), order: (&e mut u64[]), i: u64) -> unit {
+    if state[i] != 0 {
+        return ();
+    }
+    state[i] = 1;
+    for u in uses[i].len() {
+        for j in names.len() {
+            if (j != i) && same(view(names[j]), view(uses[i][u])) {
+                visit_file_order(names[:], uses[:], &mut state, &mut order, j);
+            }
+        }
+    }
+    state[i] = 2;
+    order.push(i + 2);
+    return ();
+}
 fn input_path<a>(c: (&a C), index: u64) -> u8[] {
     if 1000000 <= index {
         return c.virt_path[index - 1000000].copy();
@@ -65364,8 +65430,20 @@ pub fn main() -> u64 {
                 exchange(&mut c.quiet, 1);
             }
         }
-        mut i = 2;
-        while i < n {
+        // The first pass folds module constants, so it visits a file after the modules it uses;
+        // the later passes keep command-line order.
+        mut visit = u64[];
+        if pass == 0 {
+            visit = file_visit_order(&mut c, n);
+        } else {
+            mut v = 2;
+            while v < n {
+                visit.push(v);
+                v += 1;
+            }
+        }
+        for vi in visit.len() {
+            i := visit[vi];
             path := input_path(&c, i);
             load_file(&mut c, i);
             exchange(&mut c.file, i);
@@ -65383,7 +65461,6 @@ pub fn main() -> u64 {
                         }
                     );
             }
-            i = i + 1;
         }
         if pass == 2 {
             default_methods(&mut c, 3);

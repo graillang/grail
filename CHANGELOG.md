@@ -1,3 +1,9 @@
+## Unreleased
+
+- Fixed a module constant that reads another module's constant: it failed with "not a compile-time
+  constant" whenever the defining module's file came later on the command line. The first pass now
+  folds each file after the modules it `use`s or names with `module::`.
+
 ## 0.1.0 (2026-11-22)
 
 - Fixed the release archives: they now ship the platform modules (`os-linux.grl`, `os-windows.grl`,
