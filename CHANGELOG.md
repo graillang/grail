@@ -1,5 +1,7 @@
 ## Unreleased
 
+- Constants fold negative values: `const A: i32 = i32(-5);`, `const B: i64 = -3 * 4;`, `A < 0`, in checked
+  signed arithmetic; a value outside the constant's type is a build error.
 - Fixed arrays as aliases and vector elements: `type V3 = [f32; 3];`, `[u32; 3][]` (empty or with elements),
   `V3[[1.0, 0.0, 0.0]]`, and `[u32; 3][]` fields.
 - Named captures in format strings: `format("x is {x}")`, `println("{p.name} at {p.x}")` read the binding or field

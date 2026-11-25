@@ -14,6 +14,8 @@ is `@`.
   order the files are given in: the compiler folds a module's constants after the modules it names.
   An integer conversion folds too (`const WIDE: u64 = u64(SMALL) * 2;`); one that does not fit is a
   build error.
+  A negative value folds as a signed one: `const DOWN: i32 = i32(-5);`, `const STEP: i64 = -3 * 4;`,
+  and comparisons order it below zero. A value outside the constant's type is a build error.
 - `@assert(condition, "message")` is a compile error carrying the message when the condition is
   false. `size_of` and `align_of` describe the *target*: scalars, handles and C pointers, and
   `extern "C"` records, whose C layout is fixed.

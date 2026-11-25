@@ -24762,6 +24762,77 @@ fn ct_bool<a>(c: (&a mut C), v: CVal, what: &a [u8]) -> u64 {
     }
     return v.value;
 }
+// A folded signed integer: typed with a signed mode (a negation's `i64`, a conversion's `i32`).
+fn ct_signed<a>(c: (&a mut C), ty: u64) -> bool {
+    return (ty != 0) && (ty != ct_tag_ty()) && (ty_kind(&mut c, ty) == 18) && (ty_mode(&mut c, ty) != 0);
+}
+// A folded integer as a two's-complement i64 word; an unsigned one must fit.
+fn ct_signed_word<a>(c: (&a mut C), x: u64, ty: u64) -> u64 {
+    if (ty == ct_tag_ty()) || ct_is_bool(&mut c, ty) || is_float(&mut c, ty) {
+        fail(&mut c, view("this compile-time operator needs integers"));
+    }
+    if !ct_signed(&mut c, ty) && ((x >> 63) != 0) {
+        fail(&mut c, view("compile-time integer overflow: this value does not fit in i64 beside a negative one"));
+    }
+    return x;
+}
+// `+ - * / %` with a signed operand, in checked i64 arithmetic (Rust's: division truncates and the
+// remainder takes the dividend's sign). The bitwise operators, shifts and `**` stay unsigned-only.
+fn ct_signed_op<a>(c: (&a mut C), k: u64, lv: u64, lt: u64, rv: u64, rt: u64) -> CVal {
+    a := ct_signed_word(&mut c, lv, lt);
+    b := ct_signed_word(&mut c, rv, rt);
+    sa := (a >> 63) != 0;
+    sb := (b >> 63) != 0;
+    mut out = 0;
+    if k == 43 {
+        out = wrapping_add(a, b);
+        if (sa == sb) && (((out >> 63) != 0) != sa) {
+            fail(&mut c, view("compile-time integer overflow"));
+        }
+    } else if k == 45 {
+        out = wrapping_sub(a, b);
+        if (sa != sb) && (((out >> 63) != 0) != sa) {
+            fail(&mut c, view("compile-time integer overflow"));
+        }
+    } else if (k == 42) || (k == 47) || (k == 37) {
+        mut ma = a;
+        if sa {
+            ma = wrapping_sub(0, a);
+        }
+        mut mb = b;
+        if sb {
+            mb = wrapping_sub(0, b);
+        }
+        mut m = 0;
+        mut neg = sa != sb;
+        if k == 42 {
+            if (ma != 0) && (mb > 9223372036854775808 / ma) {
+                fail(&mut c, view("compile-time integer overflow"));
+            }
+            m = ma * mb;
+        } else {
+            if mb == 0 {
+                fail(&mut c, view("compile-time division by zero"));
+            }
+            if k == 47 {
+                m = ma / mb;
+            } else {
+                m = ma % mb;
+                neg = sa;
+            }
+        }
+        if (m > 9223372036854775808) || ((m == 9223372036854775808) && !neg) {
+            fail(&mut c, view("compile-time integer overflow"));
+        }
+        out = m;
+        if neg {
+            out = wrapping_sub(0, m);
+        }
+    } else {
+        fail(&mut c, view("on a negative compile-time integer only + - * / % and the comparisons apply"));
+    }
+    return ct_val(out, int_type(&mut c, 64, 1));
+}
 fn ct_int<a>(c: (&a mut C), v: CVal) -> u64 {
     if (v.ty == ct_tag_ty()) || ct_is_bool(&mut c, v.ty) || is_float(&mut c, v.ty) {
         fail(&mut c, view("this compile-time operator needs integers"));
@@ -24873,13 +24944,24 @@ fn ct_primary<a>(c: (&a mut C)) -> CVal {
         return ct_val(1 - b, bt);
     }
     if eat(&mut c, view("-")) {
-        // Only floats negate here: an integer constant is unsigned, and a negative one is written
-        // with its own sign so its range is checked.
+        // A float flips its sign bit. An integer becomes a signed 64-bit value (two's complement,
+        // typed `i64`), which the constant's own type range-checks at the end: `i32(-5)`, `-3 * 4`.
         v := ct_primary(&mut c);
-        if !ct_float_ty(&mut c, v.ty) {
-            fail(&mut c, view("only a float value can be negated in a compile-time expression: integer constants are unsigned"));
+        if ct_float_ty(&mut c, v.ty) {
+            return ct_val(v.value ^ 9223372036854775808, v.ty);
         }
-        return ct_val(v.value ^ 9223372036854775808, v.ty);
+        vty := v.ty;
+        a := ct_int(&mut c, v);
+        if ct_signed(&mut c, vty) && ((a >> 63) != 0) {
+            if a == 9223372036854775808 {
+                fail(&mut c, view("compile-time integer overflow"));
+            }
+            return ct_val(wrapping_sub(0, a), int_type(&mut c, 64, 1));
+        }
+        if a > 9223372036854775808 {
+            fail(&mut c, view("compile-time integer overflow: a negative value must fit in i64"));
+        }
+        return ct_val(wrapping_sub(0, a), int_type(&mut c, 64, 1));
     }
     if eat(&mut c, view(".")) {
         name := ident(&mut c);
@@ -24988,7 +25070,7 @@ fn ct_primary<a>(c: (&a mut C)) -> CVal {
             } else if bits < 64 {
                 limit := u64(1) << (bits - 1);
                 if negative {
-                    fits = (0 - v) <= limit;
+                    fits = wrapping_sub(0, v) <= limit;
                 } else {
                     fits = v < limit;
                 }
@@ -25033,6 +25115,9 @@ fn ct_primary<a>(c: (&a mut C)) -> CVal {
                 }
                 if ct_is_bool(&mut c, ty) {
                     return ct_val(value, bt);
+                }
+                if (ty != 0) && (ty_kind(&mut c, ty) == 18) && (ty_mode(&mut c, ty) != 0) && ((value >> 63) != 0) {
+                    return ct_val(value, int_type(&mut c, 64, 1));
                 }
                 return ct_val(value, 0);
             }
@@ -25102,8 +25187,13 @@ fn ct_expr<a>(c: (&a mut C), min: u64) -> CVal {
             if ct_is_bool(&mut c, left.ty) != ct_is_bool(&mut c, right.ty) {
                 fail(&mut c, view("a compile-time comparison needs two values of the same kind"));
             }
-            a := left.value;
-            b := right.value;
+            mut a = left.value;
+            mut b = right.value;
+            // Signed order: a negative value sorts below every non-negative one.
+            if ct_signed(&mut c, left.ty) || ct_signed(&mut c, right.ty) {
+                a = ct_signed_word(&mut c, left.value, left.ty) ^ 9223372036854775808;
+                b = ct_signed_word(&mut c, right.value, right.ty) ^ 9223372036854775808;
+            }
             mut r = false;
             if k == 258 { r = a == b; }
             if k == 259 { r = a != b; }
@@ -25142,6 +25232,12 @@ fn ct_expr<a>(c: (&a mut C), min: u64) -> CVal {
             if k == 42 { f = x * y; }
             if k == 47 { f = x / y; }
             left = ct_val(ct_round_bits(&mut c, f), left.ty);
+            continue;
+        }
+        lt := left.ty;
+        rt := right.ty;
+        if ct_signed(&mut c, lt) || ct_signed(&mut c, rt) {
+            left = ct_signed_op(&mut c, k, left.value, lt, right.value, rt);
             continue;
         }
         a := ct_int(&mut c, left);
@@ -27247,7 +27343,7 @@ fn constant_declaration<a>(c: (&a mut C), pass: u64) -> unit {
         value = v.value;
     } else if k == 5 {
         fail(&mut c, view("float constant needs type f64 or f32"));
-    } else if (k == 2) & (negative != 0) {
+    } else if (k == 2) & (negative != 0) & (kind_at(&mut c, here + 1) == 59) {
         t := tok_text(&mut c, here);
         value = literal_value(&mut c, view(t));
         advance(&mut c);
@@ -27258,9 +27354,12 @@ fn constant_declaration<a>(c: (&a mut C), pass: u64) -> unit {
             fail(&mut c, view(literal_range_msg_v(&mut c, ty, value, negative)));
         }
         value = wrapping_sub(0, value);
-    } else if (k != 3) & (negative == 0) {
+    } else if k != 3 {
         // A compile-time constant expression: literals, other constants, size_of, align_of,
-        // target, arithmetic, comparisons.
+        // target, arithmetic, comparisons. A leading `-` is part of it (`-3 * 4`).
+        if negative != 0 {
+            exchange(&mut c.pos, here - 1);
+        }
         v := ct_expr(&mut c, 0);
         value = v.value;
         if is_bool(&mut c, ty) {
@@ -27279,7 +27378,14 @@ fn constant_declaration<a>(c: (&a mut C), pass: u64) -> unit {
                 exchange(&mut c.pos, here);
                 fail(&mut c, view("integer constant needs an integer value"));
             }
-            if literal_fits(&mut c, ty, value, 0) == 0 {
+            // A negative folded value (typed `i64` by its `-`) fits by its magnitude and sign.
+            mut magnitude = value;
+            mut below_zero = 0;
+            if ct_signed(&mut c, v.ty) && ((value >> 63) != 0) {
+                magnitude = wrapping_sub(0, value);
+                below_zero = 1;
+            }
+            if literal_fits(&mut c, ty, magnitude, below_zero) == 0 {
                 exchange(&mut c.pos, here);
                 fail(&mut c, view("constant value out of range for its type"));
             }
