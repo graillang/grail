@@ -11,13 +11,17 @@ as a constructor is written. A block arm needs no comma before the next one.
 `T?` is the concise spelling of `result::Option<T>`: `Some(value)` holds a value and `None` holds
 nothing. There is no null: a value that may be absent is a `T?`, and the type says so.
 Where a `T?` is expected, a plain `T` is `Some` of it: a `-> P?` function may `return p;`,
-`x: u64? = 5` holds `Some(5)`, and `&a` passes for a `(&P)?` parameter.
+`x: u64? = 5` holds `Some(5)`, and `&a` passes for a `&P?` parameter.
+
+`&T?` is an optional reference, `(&T)?` - what `v.first()` and `m.get(&k)` give, and what a lookup
+returns: `fn find(v: &Entity[], id: u64) -> &Entity?`. A reference to an optional is the rare case
+and is written `&(T?)`.
 
 Testing an optional against `None` narrows it. Where the test proves it present, its name is its
 value, with no unwrapping:
 
 ```grl
-fn hp(target: (&Entity)?) -> u64 {
+fn hp(target: &Entity?) -> u64 {
     if target == None {
         return 0;
     } // after a guard that leaves, `target` is the `&Entity`

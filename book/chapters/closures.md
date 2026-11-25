@@ -205,7 +205,7 @@ or `FnMut`:
 
 `Owned` precisely: every lifetime of every borrow the closure captured appears among the lifetimes
 of its own type - its parameters or its result. A closure that captures `&a Map` and returns
-`(&a K)?` is `Owned`, and an `Iter<(&a K)>` built from it keeps the map borrowed for as long as it
+`&a K?` is `Owned`, and an `Iter<(&a K)>` built from it keeps the map borrowed for as long as it
 lives (this is how `map.keys()` works); one that also captured `&b Other`, or any borrow of a local,
 is not. A closure that captures no borrow at all is always `Owned`.
 

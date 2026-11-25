@@ -1,5 +1,8 @@
 ## Unreleased
 
+- **Breaking:** `&T?` is an optional reference, `(&T)?` (and `&mut T?` is `(&mut T)?`), the type a lookup returns.
+  A reference to an optional is written `&(T?)`; `(&T)?` still works. `x == None` on an optional reference
+  no longer needs the reference to have a source. Migrate old `&T?` with `.work/tmp/migrate_refopt.py`.
 - A program file links the standard-library modules it names without `use`: a path (`hash::fnv1a64`,
   `math::powf`), `math` for a float method (`x.tan()`, `a.hypot(b)`, `x.tanh()`), and what `@derive(...)` needs
   (`clone`, `ops`, `hash`, `order`, `debug`).

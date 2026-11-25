@@ -1021,6 +1021,8 @@ struct C {
     last_semi_at: u64,
     last_semi_ty: u64,
     no_union: u64,
+    // Set while `&T?`'s referent is parsed: its trailing `?` is the reference's (`(&T)?`), not `T`'s.
+    no_option: u64,
     // Set while the operand of `ignore_failure(...)` is evaluated: a join outcome may be dropped
     // there and nowhere else (docs/design/task-failure-containment.md).
     ignored_failure: u64,
@@ -17367,6 +17369,8 @@ fn result_union_type<a>(c: (&a mut C), successes: u64[], failures: u64[]) -> u64
 }
 
 fn parse_type<a>(c: (&a mut C)) -> u64 {
+    // Only this level stops at `?`; types nested inside (generic arguments, parentheses) take theirs.
+    stop_at_option := exchange(&mut c.no_option, 0);
     mut t = 0;
     // Maps participate in postfix and union composition like other types.
     if is(&mut c, view("[")) {
@@ -17412,7 +17416,7 @@ fn parse_type<a>(c: (&a mut C)) -> u64 {
     }
     while true {
         t = type_suffixes(&mut c, t);
-        if !eat(&mut c, view("?")) {
+        if (stop_at_option != 0) || !eat(&mut c, view("?")) {
             break;
         }
         mut oa = u64[];
@@ -17654,6 +17658,9 @@ fn parse_reference<a>(c: (&a mut C)) -> u64 {
         return parse_slice_reference(&mut c, mode, r);
     }
     old := exchange(&mut c.no_union, 1);
+    // `&T?` is an optional reference, `(&T)?` (Rust's `Option<&T>`): the `?` is left for the type
+    // around this reference. A reference to an optional is written `&(T?)`.
+    exchange(&mut c.no_option, 1);
     mut e = parse_type(&mut c);
     exchange(&mut c.no_union, old);
     // `&Self` in an impl whose owner is a slice is the slice reference itself, exactly as `&self`
@@ -53297,6 +53304,27 @@ fn expr_rest<a>(c: (&a mut C), min: u64, expected: u64, lstart: u64, first: Val)
                             if (c.raw == 0) && is_f32(&mut c, ty) && ((k == 43) || (k == 45) || (k == 42) || (k == 47)) {
                                 rexpected = ty;
                             }
+                            // `x == None` / `x != None` on an optional reads its tag, as a `match` does: no
+                            // None is built, so an optional reference (`&T?`) needs no source for one.
+                            if (c.raw == 0) && ((k == 258) || (k == 259)) && (ty != 0) && is_option_storage(&mut c, ty)
+                                && is(&mut c, view("None")) && (next_kind(&mut c) != 40) && (next_kind(&mut c) != 46)
+                                && (next_kind(&mut c) != 260) {
+                                advance(&mut c);
+                                none_index := find_field(&mut c, ty_arg(&mut c, ty), view("None"));
+                                tag := rec_load(&mut c, t, 0, 0);
+                                get(&mut c, tag, view("%rax"));
+                                o(&mut c, view("cmpq $"));
+                                on(&mut c, none_index);
+                                if k == 258 {
+                                    o(&mut c, view(",%rax\nsete %al\nmovzbq %al,%rax\n"));
+                                } else {
+                                    o(&mut c, view(",%rax\nsetne %al\nmovzbq %al,%rax\n"));
+                                }
+                                t = save(&mut c);
+                                ty = bool_type(&mut c);
+                                left_lit = false;
+                                continue;
+                            }
                             mut right = expr_expected(&mut c, p + u64(k != 267), rexpected);
                             rend := c.pos;
                             // `x == None` / `x != None`: a bare None on the right takes the left
@@ -65426,6 +65454,7 @@ pub fn main() -> u64 {
         last_semi_at: 0,
         last_semi_ty: NO_TYPE,
         no_union: 0,
+        no_option: 0,
         ignored_failure: 0,
         parsing_input: 0,
         closure_input: 0,
