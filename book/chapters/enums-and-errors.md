@@ -5,6 +5,9 @@ enum and hands the active payload to its arm. Cover every variant.
 
 {{example:enums}}
 
+An arm names its variant bare (`Circle(r) =>`) or qualified by its enum (`Shape::Circle(r) =>`),
+as a constructor is written. A block arm needs no comma before the next one.
+
 `T?` is the concise spelling of `result::Option<T>`: `Some(value)` holds a value and `None` holds
 nothing. There is no null: a value that may be absent is a `T?`, and the type says so.
 Where a `T?` is expected, a plain `T` is `Some` of it: a `-> P?` function may `return p;`,

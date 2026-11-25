@@ -55082,6 +55082,10 @@ fn arm_body<a>(c: (&a mut C)) -> unit {
     arm_end(&mut c);
     return ();
 }
+// Whether the arm just parsed was a block body: the token before this one closes it.
+fn block_arm_ended<a>(c: (&a mut C)) -> bool {
+    return (c.pos > 0) && (kind_at(&mut c, c.pos - 1) == 125);
+}
 // An expression arm ends at `,` or at the `match`'s `}`.
 fn arm_end<a>(c: (&a mut C)) -> unit {
     if kind(&mut c) == 59 {
@@ -55690,7 +55694,8 @@ fn scalar_match<a>(c: (&a mut C), s: Val, term: u8[], scrut_at: u64) -> unit {
         }
         jump(&mut c, view("jmp"), end);
         mark(&mut c, next);
-        if !eat(&mut c, view(",")) {
+        // A block arm needs no comma before the next arm (Rust's rule): `Pat => { .. }` then `Pat`.
+        if !eat(&mut c, view(",")) && !(block_arm_ended(&mut c) && !is(&mut c, view("}"))) {
             expect(&mut c, view("}"));
             break;
         }
@@ -55860,7 +55865,7 @@ fn record_match<a>(c: (&a mut C), sslot: u64, sty: u64, x: Val, byref: u64, refm
                 bind(&mut c, binder, fty, payload, 0);
             }
         }
-        if !eat(&mut c, view(",")) {
+        if !eat(&mut c, view(",")) && !(block_arm_ended(&mut c) && !is(&mut c, view("}"))) {
             expect(&mut c, view("}"));
             break;
         }
@@ -58076,6 +58081,26 @@ fn match_statement<a>(c: (&a mut C)) -> unit {
                 pattern = parse_type(&mut c);
             } else {
                 name = ident(&mut c);
+                // `Shape::Circle(r)` (or `module::Shape::Circle`): the variant qualified by its enum,
+                // as Rust and Swift write it. The qualifier must name the enum being matched.
+                while eat(&mut c, view("::")) {
+                    qualifier := name.copy();
+                    name = ident(&mut c);
+                    if is(&mut c, view("::")) {
+                        continue;
+                    }
+                    enum_name := c.decls[d].name.copy();
+                    if !same(view(qualifier), view(enum_name)) && !same(view(qualifier), view(c.decls[d].module)) {
+                        mut msg = copy_bytes(view("this arm matches `"));
+                        push_bytes(&mut msg, view(qualifier));
+                        push_bytes(&mut msg, view("::"));
+                        push_bytes(&mut msg, view(name));
+                        push_bytes(&mut msg, view("`, but the value is a `"));
+                        push_bytes(&mut msg, view(enum_name));
+                        push_bytes(&mut msg, view("`"));
+                        fail(&mut c, view(msg));
+                    }
+                }
                 if is(&mut c, view("{")) {
                     fail(&mut c, view("a record pattern needs a record value"));
                 }
@@ -58110,7 +58135,7 @@ fn match_statement<a>(c: (&a mut C)) -> unit {
                 }
             }
             jump(&mut c, view("jmp"), end);
-            if !eat(&mut c, view(",")) {
+            if !eat(&mut c, view(",")) && !(block_arm_ended(&mut c) && !is(&mut c, view("}"))) {
                 expect(&mut c, view("}"));
                 break;
             }
@@ -58230,7 +58255,8 @@ fn match_statement<a>(c: (&a mut C)) -> unit {
         }
         jump(&mut c, view("jmp"), end);
         mark(&mut c, next);
-        if !eat(&mut c, view(",")) {
+        // A block arm needs no comma before the next arm (Rust's rule): `Pat => { .. }` then `Pat`.
+        if !eat(&mut c, view(",")) && !(block_arm_ended(&mut c) && !is(&mut c, view("}"))) {
             expect(&mut c, view("}"));
             break;
         }
