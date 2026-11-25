@@ -1,5 +1,8 @@
 ## Unreleased
 
+- Named captures in format strings: `format("x is {x}")`, `println("{p.name} at {p.x}")` read the binding or field
+  path in scope (Rust's inline form). A lone `println` literal whose braces name nothing in scope still prints
+  as written.
 - A string literal passes where `&string` is expected: `greet("hi")` for `fn greet(s: &string)`.
 - `grail build main.grl` and `grail run main.grl` find a module beside the named file (`use shapes;` reads
   `shapes.grl` in its directory) without `--module-root` or a `grail.toml`.

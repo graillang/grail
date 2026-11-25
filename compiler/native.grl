@@ -40107,8 +40107,9 @@ fn print_builtin<a>(c: (&a mut C), newline: u64) -> Val {
         invoke(&mut c, view("rt_print_newline"), u64[]);
         return val(imm(&mut c, 0), 1);
     }
-    // print("x = {}, y = {}", x, y): the literal is split at compile time; {{ and }} are braces.
-    if (kind(&mut c) == 3) & (next_kind(&mut c) == 44) {
+    // print("x = {}, y = {}", x, y): the literal is split at compile time; {{ and }} are braces. A
+    // literal alone takes this path too when it names a capture (`println("x is {x}")`).
+    if (kind(&mut c) == 3) & ((next_kind(&mut c) == 44) || ((next_kind(&mut c) == 41) && names_binding(&mut c, view(decode_literal(&mut c, c.pos))))) {
         text := decode_literal(&mut c, c.pos);
         advance(&mut c);
         mut piece = u8[];
@@ -40153,6 +40154,17 @@ fn print_builtin<a>(c: (&a mut C), newline: u64) -> Val {
                 i += 2;
                 continue;
             }
+            if b == 123 {
+                close := capture_end(view(text), i + 1);
+                if close != 0 {
+                    print_raw(&mut c, view(piece));
+                    piece = u8[];
+                    value := format_capture(&mut c, view(text[i + 1..close]));
+                    print_value(&mut c, value, 0);
+                    i = close + 1;
+                    continue;
+                }
+            }
             if (b == 123) || (b == 125) {
                 format_brace_refuse(&mut c, view(text), i);
             }
@@ -40169,63 +40181,13 @@ fn print_builtin<a>(c: (&a mut C), newline: u64) -> Val {
         }
         return val(imm(&mut c, 0), 1);
     }
-    // `println("{n}")`: a lone literal is printed as it is written, so a name in braces prints the
-    // braces - which is never what was meant when that name is a binding in scope.
-    if (kind(&mut c) == 3) & (next_kind(&mut c) == 41) {
-        lone := decode_literal(&mut c, c.pos);
-        for i in lone.len() {
-            if lone[i] == 123 {
-                inside := brace_name(view(lone), i);
-                if (inside.len() != 0) && (find_local(&mut c, view(inside)) != 0) {
-                    format_name_refuse(&mut c, view(inside));
-                }
-            }
-        }
-    }
     input := expr(&mut c, 0);
     expect(&mut c, view(")"));
     print_value(&mut c, input, newline);
     return val(imm(&mut c, 0), 1);
 }
-// The name inside `{name}` at `at`, or empty when the braces there do not hold exactly a name.
-fn brace_name<a>(text: &a [u8], at: u64) -> u8[] {
-    mut out = u8[];
-    mut i = at + 1;
-    while i < text.len() {
-        b := text[i];
-        if b == 125 {
-            return out;
-        }
-        letter := ((64 < b) && (b < 91)) || ((96 < b) && (b < 123)) || (b == 95);
-        digit := (47 < b) && (b < 58);
-        if !(letter || (digit && (out.len() != 0))) {
-            return u8[];
-        }
-        out.push(b);
-        i += 1;
-    }
-    return u8[];
-}
-// `{n}` where a placeholder was meant: Grail's placeholder is `{}` and takes its value from the
-// argument list.
-fn format_name_refuse<a, b>(c: (&a mut C), name: &b [u8]) -> unit {
-    mut msg = copy_bytes(view("`{"));
-    push_bytes(&mut msg, name);
-    push_bytes(&mut msg, view("}` is not a placeholder: write `{}` and pass `"));
-    push_bytes(&mut msg, name);
-    push_bytes(&mut msg, view("` as an argument"));
-    diag_help(&mut c, view("to print the braces themselves, write `{{` and `}}` in a string that has arguments, or pass the text as one (`println(\"{}\", \"{n}\")`)"));
-    fail(&mut c, view(msg));
-    return ();
-}
 // A brace in a format string that opens no placeholder.
 fn format_brace_refuse<a, b>(c: (&a mut C), text: &b [u8], at: u64) -> unit {
-    if text[at] == 123 {
-        inside := brace_name(text, at);
-        if inside.len() != 0 {
-            format_name_refuse(&mut c, view(inside));
-        }
-    }
     fail(&mut c, view("unmatched brace in format string (use {{ or }})"));
     return ();
 }
@@ -40245,6 +40207,84 @@ fn format_builtin<a>(c: (&a mut C)) -> Val {
 // `format(...)` builds into a fresh buffer and `out.append_format(...)` into `out`. True when an
 // argument may have written bytes that are not UTF-8 (a byte vector, a view, a record or vector
 // shown through its fields, a padded spec); numbers, bools, chars and strings never do.
+// Whether a lone format literal names a binding in scope (`println("x is {x}")`): then its braces
+// are captures. A literal whose braces name nothing in scope (`println("{json}")`) prints as written.
+fn names_binding<a, b>(c: (&a mut C), text: &b [u8]) -> bool {
+    mut i = 0;
+    while i < text.len() {
+        if (text[i] == 123) && (i + 1 < text.len()) && (text[i + 1] == 123) {
+            i += 2;
+            continue;
+        }
+        if text[i] == 123 {
+            close := capture_end(text, i + 1);
+            if close != 0 {
+                mut head = i + 1;
+                while (head < close) && (text[head] != 46) {
+                    head += 1;
+                }
+                if find_local(&mut c, view(text[i + 1..head])) != 0 {
+                    return true;
+                }
+            }
+        }
+        i += 1;
+    }
+    return false;
+}
+// The index of the `}` closing a named capture that starts at `from` (just past its `{`): a name,
+// then `.name` parts, and nothing else. 0 when the text there is not one.
+fn capture_end<a>(text: &a [u8], from: u64) -> u64 {
+    mut i = from;
+    mut start = true;
+    while i < text.len() {
+        ch := text[i];
+        letter := ((ch >= 97) && (ch <= 122)) || ((ch >= 65) && (ch <= 90)) || (ch == 95);
+        digit := (ch >= 48) && (ch <= 57);
+        if start {
+            if !letter {
+                return 0;
+            }
+            start = false;
+        } else if ch == 46 {
+            start = true;
+        } else if ch == 125 {
+            return i;
+        } else if !(letter || digit) {
+            return 0;
+        }
+        i += 1;
+    }
+    return 0;
+}
+// A named capture's value: `name` (or `p.field`) compiled from a virtual source, with the caller's
+// file and position restored afterwards, as a parameter's default is.
+fn format_capture<a, b>(c: (&a mut C), name: &b [u8]) -> Val {
+    file := virtual_source(&mut c, view("format capture"), view(name));
+    saved_file := c.file;
+    saved_pos := c.pos;
+    saved_cf_start := c.cf_start;
+    saved_cf_end := c.cf_end;
+    saved_cf_local := c.cf_local;
+    saved_none_start := c.none_start;
+    saved_none_end := c.none_end;
+    load_file(&mut c, file);
+    exchange(&mut c.file, file);
+    exchange(&mut c.pos, 0);
+    v := expr(&mut c, 0);
+    if kind(&mut c) != 0 {
+        fail(&mut c, view("a named capture in a format string is a name or a field path: `{x}`, `{p.x}`"));
+    }
+    load_file(&mut c, saved_file);
+    exchange(&mut c.file, saved_file);
+    exchange(&mut c.pos, saved_pos);
+    exchange(&mut c.cf_start, saved_cf_start);
+    exchange(&mut c.cf_end, saved_cf_end);
+    exchange(&mut c.cf_local, saved_cf_local);
+    exchange(&mut c.none_start, saved_none_start);
+    exchange(&mut c.none_end, saved_none_end);
+    return v;
+}
 fn format_pieces<a>(c: (&a mut C), acc: u64) -> bool {
     mut raw = false;
     if kind(&mut c) != 3 {
@@ -40294,6 +40334,23 @@ fn format_pieces<a>(c: (&a mut C), acc: u64) -> bool {
             format_arg(&mut c, acc, input);
             i += 2;
             continue;
+        }
+        // `{name}` or `{p.field}`: a named capture, the value of that expression in scope (Rust's
+        // inline `{x}`). The text between the braces compiles as a virtual source of its own.
+        if b == 123 {
+            close := capture_end(view(text), i + 1);
+            if close != 0 {
+                format_raw(&mut c, acc, view(piece));
+                piece = u8[];
+                input := format_capture(&mut c, view(text[i + 1..close]));
+                ak := ty_kind(&mut c, input.ty);
+                if !((input.ty == 0) || (ak == 1) || (ak == 4) || (ak == 18) || (ak == 19) || (ak == 21) || (ak == 22)) {
+                    raw = true;
+                }
+                format_arg(&mut c, acc, input);
+                i = close + 1;
+                continue;
+            }
         }
         if (b == 123) || (b == 125) {
             format_brace_refuse(&mut c, view(text), i);

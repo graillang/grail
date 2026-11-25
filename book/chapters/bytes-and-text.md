@@ -58,6 +58,10 @@ bound `&parts`. `parse_f64` reads a decimal number correctly rounded, as Rust's 
 and `out.append_format("{}:{};", a, b)` writes `format`'s text onto the end of `out` without making a
 string of its own (Rust's `write!`).
 
+A placeholder may name what it prints: `format("x is {x}")` and `println("{p.name} at {p.x}")` read
+the binding or field path in scope, and `{}` still takes the next argument. A lone `println` literal
+whose braces name nothing in scope prints as written; `{{` and `}}` are braces everywhere.
+
 **Try it:** print `clean.len()` and `line.len()` to see what `trim` removed.
 
 Also try a non-ASCII greeting and compare its byte length with the number of visible letters.
