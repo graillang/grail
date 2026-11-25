@@ -39,8 +39,8 @@ out.
 `use order::Ord;`; numbers and text already do, and here `Score` sorts by points, highest first.
 
 A vector's operations are its own methods, with no `use` line: `vecs`, where the generic ones live,
-is linked by any source that calls one (text's `split`, `trim`, `lines` and `join` come from
-`strings` the same way). They are `map`,
+is linked by a program file that calls one (text's `split`, `trim`, `lines` and `join` come from
+`strings` the same way). A file that declares `module name;` writes `use vecs;` itself. They are `map`,
 `filter`, `filter_map`, `flat_map`, `fold`, `reduce`, `for_each`, `any`, `all`, `count`, `find`,
 `position`, `get`, `first`, `last`, `into_iter`, `sort`, `sort_by`, `sort_by_key`,
 `is_sorted`, `min`, `max`, `min_by_key`, `max_by_key`, `binary_search`, `insert_sorted`, `dedup`
@@ -117,8 +117,8 @@ nothing.
 
 ## Slices
 
-`v[a:b]` borrows elements `a` up to (not including) `b` of a vector as a slice, `&[T]`; `&mut v[a:b]`
-borrows them exclusively as `&mut [T]`. Either bound may be left out (`v[2:]`, `v[:n]`, `v[:]`), and
+`v[a..b]` borrows elements `a` up to (not including) `b` of a vector as a slice, `&[T]`; `&mut v[a..b]`
+borrows them exclusively as `&mut [T]`. Either bound may be left out (`v[2..]`, `v[..n]`, `v[..]`), and
 both are checked. A slice has `len()`, indexing (`s[i]`, and `s[i] = x` through `&mut [T]`), `for x in s`
 loops, sub-slicing, `copy()` into a new vector and `{}`
 formatting; it cannot change length. `for x in s` borrows each element, as `for x in &v`

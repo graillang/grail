@@ -86,7 +86,7 @@ fn twice(f: fn(u64) -> u64, x: u64) -> u64 {
     f(f(x))
 }
 twice(|x|x + 1, 5); // 7
-table := (fn(u64) -> u64)[fn(x: u64) -> u64 { x * 2 }, |x: u64|x + 1];
+table := (fn(u64) -> u64)[fn(x: u64) -> u64 { x * 2 }, |x.. u64|x + 1];
 ```
 
 A closure that captures cannot: the pointer has nowhere to keep what it captured. The refusal names

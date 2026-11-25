@@ -854,7 +854,7 @@ pub type Token = { kind: Kind, text: Str }
 pub fn tokens(src: Str) -> Vec[Token] @src
 
 // package util, generic, compiled separately; its API file records no dependency on `xs`
-pub fn group_by[T: Copy, K: Hash + Eq](xs: Slice[T], key: fn(T) -> K) -> Map[K, Vec[T]]
+pub fn group_by[T.. Copy, K.. Hash + Eq](xs: Slice[T], key: fn(T) -> K) -> Map[K, Vec[T]]
 
 // client: provider bodies unavailable
 let src = fs.read_string(path)?

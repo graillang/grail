@@ -177,7 +177,7 @@ there is no forced arbitrary-frame destruction or guarantee of termination for a
 ## 13. Generics, one interface mechanism
 
 ```grl
-fn max[T: Ord](a: T, b: T) T {
+fn max[T.. Ord](a: T, b: T) T {
     if compare(&a, &b) >= 0 { a } else { b }
 }
 ```
@@ -188,7 +188,7 @@ instance search. The unreturned owned argument is disposed. Static specializatio
 ## 14. Staging
 
 ```grl
-fn chunk[comptime N: USize](data: &Bytes) USize {
+fn chunk[comptime N.. USize](data: &Bytes) USize {
     comptime { assert(N > 0) }
     data.len / N
 }

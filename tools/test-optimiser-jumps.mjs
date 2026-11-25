@@ -90,7 +90,7 @@ fn main() {
         y.push(0.5);
     }
     for pass in 3 {
-        scale_add(&mut x[0: 1000], &y[0: 1000], 0.5);
+        scale_add(&mut x[0..1000], &y[0..1000], 0.5);
     }
     mut sum: f64 = 0.0;
     for i in 1000 {

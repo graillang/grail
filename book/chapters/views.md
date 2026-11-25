@@ -2,13 +2,13 @@
 
 `&owner` creates a readonly view over a byte sequence, and `&[u8]` is the parameter type for such a
 view; `&[T]` is the same for any element type. The view has a descriptor but does not own the underlying byte buffer; it retains a checked
-relationship to its owner. `view[start:end]` uses a half-open range: start is included and end is
+relationship to its owner. `view[start..end]` uses a half-open range: start is included and end is
 excluded.
 
 `owner[index]` reads a byte directly; indexing borrows its source readonly for the access.
-`owner[start:end]` creates a readonly borrowed view. Omitted bounds default to zero and the source
-length: `owner[:end]`, `owner[start:]`, and `owner[:]`. The colon is Grail's spelling of Rust's
-half-open `..` range. Bounds and operands are evaluated once, left to right.
+`owner[start..end]` creates a readonly borrowed view. Omitted bounds default to zero and the source
+length: `owner[..end]`, `owner[start..]`, and `owner[..]`. `..` is the one range spelling, the same as
+in a loop header (`for i in a..b`). Bounds and operands are evaluated once, left to right.
 
 {{example:views}}
 
@@ -20,14 +20,12 @@ from copying an owning buffer, and different from duplicating an exclusive view.
 `u8[]` argument is adjusted to a `&[u8]` parameter when the expected type is already known; every
 other position writes `&` explicitly.
 
-**Try it:** slice `[0:3]` instead, then return the first byte. Do not read index 3 from that view.
+**Try it:** slice `[0..3]` instead, then return the first byte. Do not read index 3 from that view.
 
 ## Ranges that carry their slice
 
-`..` is the half-open range spelling in a loop header, and brackets accept it exactly where the colon
-is: `s[a..e]`, `s[a..]`, `s[..e]` and `s[..]` are the same slice as `s[a:e]`, `s[a:]`, `s[:e]` and
-`s[:]`, on vectors, views and strings. One spelling for one idea, and no extra cost: both forms
-compile to the same slice.
+`s[a..e]`, `s[a..]`, `s[..e]` and `s[..]` slice vectors, views, strings and fixed arrays alike. The
+older colon spelling (`s[a..e]`) is refused with the replacement, and `grail fmt` rewrites it.
 
 A range that travels - to a helper, into a comparison, across a boundary - is a `span`:
 
@@ -56,14 +54,14 @@ can be assembled from two different slices, and a span cannot.
 
 ## Slices of any vector
 
-`v[a:b]` works on every vector, not just bytes. A function that takes `&[f32]` reads part of a vector
+`v[a..b]` works on every vector, not just bytes. A function that takes `&[f32]` reads part of a vector
 without copying it, and one that takes `&mut [f32]` changes exactly the elements it was given:
 
 {{example:slices}}
 
 A slice cannot change length, cannot outlive its vector, and while it lives the vector cannot grow or
 be written elsewhere; an exclusive slice excludes every other access. These checks happen at compile
-time, so passing `&mut samples[2:]` cannot alias a live reader the way a raw pointer and length could.
+time, so passing `&mut samples[2..]` cannot alias a live reader the way a raw pointer and length could.
 A slice compares with `==` against any vector or slice of the same element type.
 
 ## Exclusive views and reborrowing

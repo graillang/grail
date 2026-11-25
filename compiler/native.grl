@@ -1734,7 +1734,7 @@ fn write_parts<a, b, d>(c: (&a mut C), path: &b [u8], text: &d [u8]) -> u64 {
             file := part_file(view(stem), files.len(), view(c.part_names[k]), view(".s"));
             mut wrote = 0;
             // A part's frames are its own functions', so it is probed on its own (see write_image).
-            mut piece = text[start: end].copy();
+            mut piece = text[start.. end].copy();
             if (c.backend == 0) && optimize::has_f32_const_ops(view(piece)) {
                 piece = optimize::f32_const_ops(view(piece));
             }
@@ -1844,8 +1844,8 @@ fn assemble_object<a, b>(c: (&a mut C), image: &b [u8]) -> asm_x86::Result {
     mut previous = u8[];
     if host::exists(view(pack_path)) != 0 {
         pack := host::read_file(view(pack_path));
-        if (pack.len() >= header.len()) && same(view(pack[0: header.len()]), view(header)) {
-            previous.append(pack[header.len(): pack.len()]);
+        if (pack.len() >= header.len()) && same(view(pack[0.. header.len()]), view(header)) {
+            previous.append(pack[header.len().. pack.len()]);
         }
     }
     mut r = asm_x86::Result { object: u8[], error: u8[], units: u8[], replayed: 0, encoded: 0 };
@@ -2869,7 +2869,7 @@ fn site_resolve<a, b>(c: (&a C), text: &b [u8]) -> u8[] {
             e += 1;
         }
         next := e + 1;
-        line := text[a: e];
+        line := text[a.. e];
         if site_at(text, a, e, view(".gbase ")) {
             site_words_into(line, &mut w);
             if w.len() == 1 {
@@ -2932,7 +2932,7 @@ fn strip_gsite<a>(text: &a [u8]) -> u8[] {
             e += 1;
         }
         if !((e - a >= 6) && (text[a] == 46) && (text[a + 1] == 103) && (text[a + 2] == 115) && (text[a + 3] == 105) && (text[a + 4] == 116) && (text[a + 5] == 101)) {
-            push_bytes(&mut out, view(text[a: e]));
+            push_bytes(&mut out, view(text[a.. e]));
             if e < text.len() {
                 out.push(10);
             }
@@ -3070,7 +3070,7 @@ fn site_relative<a, b>(path: &a [u8], cwd: &b [u8]) -> u8[] {
         }
         start += 1;
     }
-    return (path[start: path.len()]).copy();
+    return (path[start.. path.len()]).copy();
 }
 // Opens a range: the address an entry names, and the floor a frame's return address is looked up
 // against.
@@ -3874,8 +3874,8 @@ fn darwin_line<a, b>(out: (&a mut u8[]), line: &b [u8]) -> unit {
         copy_to(&mut out, line);
         return ();
     }
-    op := line[: space];
-    rest := line[space + 1:];
+    op := line[.. space];
+    rest := line[space + 1..];
     mut bare = 0;
     if rest.len() != 0 {
         if ((65 <= rest[0]) && (rest[0] <= 90)) || ((97 <= rest[0]) && (rest[0] <= 122)) {
@@ -3883,7 +3883,7 @@ fn darwin_line<a, b>(out: (&a mut u8[]), line: &b [u8]) -> unit {
         }
     }
     if (same(view(op), view("call")) || same(view(op), view("leaq"))) && bare != 0 {
-        copy_to(&mut out, line[: space + 1]);
+        copy_to(&mut out, line[.. space + 1]);
         out.push(95);
         copy_to(&mut out, rest);
         return ();
@@ -3896,7 +3896,7 @@ fn darwinify<a>(input: &a [u8]) -> u8[] {
     mut start = 0;
     for i in input.len() {
         if input[i] == 10 {
-            darwin_line(&mut out, view(input[start: i]));
+            darwin_line(&mut out, view(input[start.. i]));
             out.push(10);
             start = i + 1;
         }
@@ -3913,7 +3913,7 @@ fn symbol_literal<a>(c: (&a mut C)) -> u8[] {
     if t.len() < 3 {
         fail(&mut c, view("empty imported symbol name"));
     }
-    return (t[1: t.len() - 1]).copy();
+    return (t[1.. t.len() - 1]).copy();
 }
 
 fn fresh<a>(c: (&a mut C)) -> u64 {
@@ -16934,7 +16934,7 @@ fn split_at_mut_statement<a>(c: (&a mut C)) -> unit {
     k := ty_kind(&mut c, v.ty);
     if (c.raw != 0) || !((k == 27) || (k == 5)) || (ty_mode(&mut c, v.ty) == 0) {
         exchange(&mut c.pos, sstart);
-        fail(&mut c, view("split_at_mut takes an exclusive slice: `&mut xs[a: b]` or a `&mut [T]`"));
+        fail(&mut c, view("split_at_mut takes an exclusive slice: `&mut xs[a..b]` or a `&mut [T]`"));
     }
     elem := ty_arg(&mut c, v.ty);
     mut width = 8;
@@ -21046,7 +21046,7 @@ fn fn_key<a, b, d>(c: (&a mut C), unit: &b [u8], symbol: &d [u8], from: u64, to:
     push_bytes(&mut key, view("\ndecl "));
     decimal(&mut key, to - from);
     key.push(32);
-    key.append(c.src[from: to]);
+    key.append(c.src[from.. to]);
     push_bytes(&mut key, view("\nsig "));
     decimal(&mut key, sig.len());
     key.push(32);
@@ -21855,7 +21855,7 @@ fn dr_note<a, b, d>(c: (&a mut C), position: u64, end: u64, ord: u64, unit: &b [
     iface_wv(&mut c.dw, end - position + 1);
     iface_wv(&mut c.dw, c.toks[position].col);
     iface_wv(&mut c.dw, ord);
-    iface_ws(&mut c.dw, view(fncache::hash(c.src[from: to])));
+    iface_ws(&mut c.dw, view(fncache::hash(c.src[from.. to])));
     iface_ws(&mut c.dw, unit);
     iface_ws(&mut c.dw, name);
     iface_ws(&mut c.dw, regs);
@@ -22037,7 +22037,7 @@ fn dr_fast<a>(c: (&a mut C), position: u64, claim_alloc: u64, claim_panic: u64, 
         if (count != 0) && (position + count - 1 < c.toks.len()) && (c.toks[position].col == c.dr_col[k]) && same(view(c.dr_ctx[k]), view(c.module)) {
             if (tried_count != count) || (text_hash.len() == 0) {
                 end_at := c.toks[position + count - 1].end;
-                text_hash = fncache::hash(c.src[from: end_at]);
+                text_hash = fncache::hash(c.src[from.. end_at]);
                 tried_count = count;
             }
             if same(view(text_hash), view(c.dr_hash[k])) {
@@ -22544,7 +22544,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             from := c.toks[position].start;
             skip_braces(&mut c);
             // `index` is `c.funcs.len()` after the push, so the record is at `index - 1`.
-            exchange(&mut c.funcs[index - 1].body, (c.src[from: c.toks[c.pos - 1].end]).copy());
+            exchange(&mut c.funcs[index - 1].body, (c.src[from.. c.toks[c.pos - 1].end]).copy());
         } else {
             skip_braces(&mut c);
         }
@@ -23386,7 +23386,7 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
             skip_braces(&mut c);
             // The default's own text travels in the interface (as a generic template's does), so an
             // implementation in another module can be given it.
-            default_text = (c.src[c.toks[header].start: c.toks[c.pos - 1].end]).copy();
+            default_text = (c.src[c.toks[header].start.. c.toks[c.pos - 1].end]).copy();
         } else {
             expect(&mut c, view(";"));
         }
@@ -28368,6 +28368,15 @@ fn static_resolve<a>(c: (&a mut C), i: u64) -> unit {
 }
 // 1 when `path` is in a directory that also holds core.grl: the standard-library directory in
 // the repository (lib/) and in every installed layout (std/). Both separators are accepted.
+// Whether a source begins (after comments and an optional `unsafe`) with `module name;`.
+fn declares_module<a>(text: &a [u8]) -> bool {
+    toks := lexer::tokenize(text);
+    mut p = 0;
+    if (p < toks.len()) && lexer::token_text_is(text, &toks[p], "unsafe") {
+        p += 1;
+    }
+    return (p < toks.len()) && lexer::token_text_is(text, &toks[p], "module");
+}
 fn in_std_dir<a>(path: &a [u8]) -> u64 {
     mut cut = 0;
     mut found = 0;
@@ -28560,8 +28569,8 @@ fn unlinked_std_method<a, b>(c: (&a mut C), name: &b [u8]) -> u8[] {
     for f in c.mod_base + c.mod_files.len() {
         path := input_path(&c, f);
         n := path.len();
-        if (n >= 8) && same(path[n - 8: n], view("core.grl")) && ((n == 8) || (path[n - 9] == 47) || (path[n - 9] == 92)) {
-            dirs.push(copy_bytes(path[0: n - 8]));
+        if (n >= 8) && same(path[n - 8.. n], view("core.grl")) && ((n == 8) || (path[n - 9] == 47) || (path[n - 9] == 92)) {
+            dirs.push(copy_bytes(path[0.. n - 8]));
         }
     }
     // A module compiled on its own (a per-module build) reads the library as interfaces, so neither
@@ -28580,7 +28589,7 @@ fn unlinked_std_method<a, b>(c: (&a mut C), name: &b [u8]) -> u8[] {
                 cut = i;
             }
         }
-        mut dir = copy_bytes(exe[0: cut]);
+        mut dir = copy_bytes(exe[0.. cut]);
         for level in 6 {
             starts.push(dir.copy());
             push_bytes(&mut dir, view("/.."));
@@ -28613,10 +28622,10 @@ fn unlinked_std_method<a, b>(c: (&a mut C), name: &b [u8]) -> u8[] {
         for e in entries.len() {
             entry := view(entries[e]);
             n := entry.len();
-            if (n < 5) || !same(entry[n - 4: n], view(".grl")) {
+            if (n < 5) || !same(entry[n - 4.. n], view(".grl")) {
                 continue;
             }
-            module := copy_bytes(entry[0: n - 4]);
+            module := copy_bytes(entry[0.. n - 4]);
             if mod_known(&c, view(module)) {
                 continue;
             }
@@ -28626,7 +28635,7 @@ fn unlinked_std_method<a, b>(c: (&a mut C), name: &b [u8]) -> u8[] {
             m := needle.len();
             mut i = 0;
             while i + m < text.len() {
-                if ((i == 0) || (text[i - 1] == 10)) && same(text[i: i + m], view(needle)) {
+                if ((i == 0) || (text[i - 1] == 10)) && same(text[i.. i + m], view(needle)) {
                     after := text[i + m];
                     if (after == 40) || (after == 60) {
                         return module;
@@ -28685,12 +28694,12 @@ fn use_offset<a, b>(text: &a [u8], name: &b [u8]) -> u64 {
         while (i < text.len()) && ((text[i] == 32) || (text[i] == 9)) {
             i += 1;
         }
-        if (i + 4 + name.len() <= text.len()) && same(view(text[i: i + 4]), view("use ")) {
+        if (i + 4 + name.len() <= text.len()) && same(view(text[i.. i + 4]), view("use ")) {
             mut j = i + 4;
             while (j < text.len()) && (text[j] == 32) {
                 j += 1;
             }
-            if (j + name.len() <= text.len()) && same(view(text[j: j + name.len()]), view(name)) {
+            if (j + name.len() <= text.len()) && same(view(text[j.. j + name.len()]), view(name)) {
                 after := j + name.len();
                 if (after == text.len()) || !use_name_byte(text[after]) {
                     return j;
@@ -28866,8 +28875,11 @@ fn resolve_modules<a>(c: (&a mut C), offset: u64) -> unit {
                 lib_name = "strings";
                 names = lexer::strings_methods();
             }
-            // The program's own files only: a standard-library module names what it uses.
-            if !mod_known(&c, view(lib_name)) && !in_std_dir(view(file)) && lexer::calls_any(view(text), names[:]) {
+            // A script's own files only - those without a `module` line. A declared module (the
+            // standard library, the compiler, a package's modules) names what it uses with `use`,
+            // so what it builds against never depends on which method names its text happens to call.
+            if !mod_known(&c, view(lib_name)) && !in_std_dir(view(file)) && !declares_module(view(text))
+                && lexer::calls_any(view(text), names[..]) {
                 found := mod_find(&c, view(lib_name));
                 if found.len() != 0 {
                     c.mod_names.push(copy_bytes(view(lib_name)));
@@ -28948,7 +28960,7 @@ fn file_visit_order<a>(c: (&a mut C), files: u64) -> u64[] {
     }
     mut order = u64[];
     for i in names.len() {
-        visit_file_order(names[:], uses[:], &mut state, &mut order, i);
+        visit_file_order(names[..], uses[..], &mut state, &mut order, i);
     }
     return order;
 }
@@ -28960,7 +28972,7 @@ fn visit_file_order<a, b, d, e>(names: &a [u8[]], uses: &b [u8[][]], state: (&d 
     for u in uses[i].len() {
         for j in names.len() {
             if (j != i) && same(view(names[j]), view(uses[i][u])) {
-                visit_file_order(names[:], uses[:], &mut state, &mut order, j);
+                visit_file_order(names[..], uses[..], &mut state, &mut order, j);
             }
         }
     }
@@ -35913,7 +35925,7 @@ fn array_same_width<a>(c: (&a mut C), elem: u64) -> bool {
 fn array_subslice<a>(c: (&a mut C), value: Val, x: Val, access: u64) -> Val {
     lo := expr(&mut c, 0);
     require_type(&mut c, lo.ty, 0);
-    expect(&mut c, view(":"));
+    range_sep(&mut c);
     hi := expr(&mut c, 0);
     require_type(&mut c, hi.ty, 0);
     expect(&mut c, view("]"));
@@ -38350,7 +38362,7 @@ fn parallel_zip_builtin<a>(c: (&a mut C)) -> Val {
         sty := slices[i].ty;
         k := ty_kind(&mut c, sty);
         if (c.raw == 0) && (k != 27) && (k != 5) {
-            fail(&mut c, view("parallel_for_zip takes slices: write &mut data[a: b] or &data[a: b]"));
+            fail(&mut c, view("parallel_for_zip takes slices: write &mut data[a..b] or &data[a..b]"));
         }
         mut w = 8;
         if k == 5 {
@@ -42255,7 +42267,7 @@ fn parallel_split_builtin<a>(c: (&a mut C), data: Val) -> Val {
     k := ty_kind(&mut c, slice);
     if c.raw == 0 {
         if (k != 27) & (k != 5) {
-            fail(&mut c, view("parallel_split requires an exclusive slice: write &mut data[a: b]"));
+            fail(&mut c, view("parallel_split requires an exclusive slice: write &mut data[a..b]"));
         }
         if ty_mode(&mut c, slice) == 0 {
             fail(
@@ -46432,7 +46444,7 @@ fn replace_all<a, b, d>(text: &a [u8], from: &b [u8], to: &d [u8]) -> u8[] {
     mut out = u8[];
     mut i = 0;
     while i < text.len() {
-        if (i + from.len() <= text.len()) && same(view(text[i: i + from.len()]), view(from)) {
+        if (i + from.len() <= text.len()) && same(view(text[i.. i + from.len()]), view(from)) {
             push_bytes(&mut out, view(to));
             i += from.len();
         } else {
@@ -46557,7 +46569,7 @@ fn simd_elements<a>(c: (&a mut C), src: Val, index: u64, ty: u64, write: bool) -
         fact_seq_arg(&mut c, view(unchecked), src.t, st);
         return at;
     }
-    fail(&mut c, view("a SIMD load or store reads a slice (`&[T]`) or an array reference (`&[T; N]`); for a vector `v` write `&v[:]`"));
+    fail(&mut c, view("a SIMD load or store reads a slice (`&[T]`) or an array reference (`&[T; N]`); for a vector `v` write `&v[..]`"));
     return 0;
 }
 // `f32x4::splat(x)`, `f32x4::new(a, b, c, d)`, `f32x4::load(src, i)`; a mask has `splat(bool)`.
@@ -46916,10 +46928,10 @@ fn atomic_suffix<a, b>(name: &a [u8], base: &b [u8]) -> u64 {
     if name.len() < base.len() {
         return 5;
     }
-    if !same(view(name[: base.len()]), view(base)) {
+    if !same(view(name[.. base.len()]), view(base)) {
         return 5;
     }
-    rest := name[base.len():];
+    rest := name[base.len()..];
     if rest.len() == 0 {
         return 4;
     }
@@ -46992,10 +47004,10 @@ fn atomic_method<a, b>(c: (&a mut C), value: Val, name: &b [u8]) -> Val {
         order = weak;
     }
     if kind == 0 {
-        if (loads < 5) || ((4 <= name.len()) && same(view(name[: 4]), view("load"))) {
+        if (loads < 5) || ((4 <= name.len()) && same(view(name[.. 4]), view("load"))) {
             atomic_no_method(&mut c, value.ty, view(name), view("the loads are load, load_relaxed and load_acquire"));
         }
-        if (stores < 5) || ((5 <= name.len()) && same(view(name[: 5]), view("store"))) {
+        if (stores < 5) || ((5 <= name.len()) && same(view(name[.. 5]), view("store"))) {
             atomic_no_method(&mut c, value.ty, view(name), view("the stores are store, store_relaxed and store_release"));
         }
         atomic_no_method(
@@ -50919,7 +50931,7 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
         mut wrapping = 0;
         mut raw_bits = 0;
         if (named == 0) & starts_with(view(first), view("wrapping_")) {
-            rest := first[9:].copy();
+            rest := first[9..].copy();
             named = int_name(view(rest));
             if named != 0 {
                 wrapping = 1;
@@ -51861,18 +51873,24 @@ fn eat_dotdot<a>(c: (&a mut C)) -> bool {
     advance(&mut c);
     return true;
 }
-// The separator between a range's two ends inside brackets: `:` or `..`. One place, so the two
-// spellings cannot drift apart.
+// The separator between a range's two ends inside brackets: `..`, as in a loop header. The colon
+// spelling (`s[a:e]`) is gone; the parser still spots it so the error can say what to write.
 fn range_sep<a>(c: (&a mut C)) -> unit {
-    if eat(&mut c, view(":")) {
-        return ();
-    }
+    refuse_slice_colon(&mut c);
     if !eat_dotdot(&mut c) {
-        fail(&mut c, view("a slice's bounds are separated by `:` or `..`"));
+        fail(&mut c, view("a slice's bounds are separated by `..`: `s[a..e]`, `s[a..]`, `s[..e]`"));
     }
     return ();
 }
-// `v[a: b]` (either bound optional) on a vector or slice: a typed slice borrowing those elements,
+// `s[a:e]` was the old slice spelling. A range is `..` everywhere now (`for i in a..b`, `s[a..e]`),
+// and `grail fmt` rewrites the colon form.
+fn refuse_slice_colon<a>(c: (&a mut C)) -> unit {
+    if is(&mut c, view(":")) {
+        fail(&mut c, view("a slice is written `s[a..e]` (or `s[a..]`, `s[..e]`, `s[..]`): `..` separates its bounds, as in a loop's range; `grail fmt` rewrites `s[a:e]`"));
+    }
+    return ();
+}
+// `v[a..b]` (either bound optional) on a vector or slice: a typed slice borrowing those elements,
 // exclusive when the access writes (docs/design/typed-slices.md).
 fn vector_slice<a>(c: (&a mut C), x: Val, input: u64, access: u64) -> Val {
     xt := x.t;
@@ -51886,7 +51904,8 @@ fn vector_slice<a>(c: (&a mut C), x: Val, input: u64, access: u64) -> Val {
         require_mutable_binding(&mut c, xt, 0);
     }
     mut start = 0;
-    if is(&mut c, view(":")) || dotdot_at(&mut c) {
+    refuse_slice_colon(&mut c);
+    if dotdot_at(&mut c) {
         start = imm(&mut c, 0);
     } else {
         bstart := c.pos;
@@ -51953,7 +51972,7 @@ fn element_index_ahead<a>(c: (&a mut C)) -> bool {
 }
 // A `span_of` range carries the slice it was made from, so `s[r]` has nothing left for `s` to say
 // and would need the belong-to-this-slice check `Span` exists to remove (docs/design/range-values.md).
-// The spellings that mean something are `r.bytes()` and `s[a: b]` / `s[a..b]`.
+// The spellings that mean something are `r.bytes()` and `s[a..b]`.
 fn refuse_span_index<a>(c: (&a mut C), ty: u64) -> unit {
     mut base = ty;
     if ty_kind(&mut c, base) == 10 {
@@ -51969,7 +51988,7 @@ fn refuse_span_index<a>(c: (&a mut C), ty: u64) -> unit {
     }
     fail(
         &mut c,
-        view("a `Span` is a range over the slice it was made from, so it cannot index another sequence: write `r.bytes()` for its bytes, or `s[a: b]` / `s[a..b]` for a slice of this one")
+        view("a `Span` is a range over the slice it was made from, so it cannot index another sequence: write `r.bytes()` for its bytes, or `s[a..b]` for a slice of this one")
     );
     return ();
 }
@@ -52327,7 +52346,8 @@ fn index_view_inner<a>(c: (&a mut C), value: Val, access: u64) -> Val {
     mut start = 0;
     mut view_lo = 0;
     mut view_hi = 0;
-    if is(&mut c, view(":")) || dotdot_at(&mut c) {
+    refuse_slice_colon(&mut c);
+    if dotdot_at(&mut c) {
         start = imm(&mut c, 0);
     } else {
         bstart := c.pos;
@@ -52342,7 +52362,8 @@ fn index_view_inner<a>(c: (&a mut C), value: Val, access: u64) -> Val {
         get(&mut c, bound.t, view("%rax"));
         start = save(&mut c);
     }
-    if eat(&mut c, view(":")) || eat_dotdot(&mut c) {
+    refuse_slice_colon(&mut c);
+    if eat_dotdot(&mut c) {
         mut end = 0;
         if is(&mut c, view("]")) {
             end = apply(&mut c, view("rt_len"), one(slot));

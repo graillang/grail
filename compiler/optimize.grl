@@ -1563,7 +1563,7 @@ fn reg_read_later<a, b>(s: &a [u8], from: u64, reg: &b [u8], low: &b [u8]) -> bo
             }
             budget -= 1;
             e := line_at(view(s), a);
-            line := s[a: e].copy();
+            line := s[a..e].copy();
             n := line.len();
             if (n == 0) || (line[n - 1] == 58) || (line[0] == 46) {
                 a = e + 1;
@@ -1598,7 +1598,7 @@ fn reg_read_later<a, b>(s: &a [u8], from: u64, reg: &b [u8], low: &b [u8]) -> bo
                 if (sp + 1 >= n) || (line[sp + 1] != 46) {
                     return true;
                 }
-                target := line[sp + 1: n].copy();
+                target := line[sp + 1..n].copy();
                 mut visited = false;
                 for k in seen.len() {
                     if ir::same_range(view(seen[k]), 0, seen[k].len(), view(target)) {
@@ -1783,23 +1783,23 @@ fn scratch_fold<a>(s: &a [u8], a: u64, out: (&mut u8[])) -> u64 {
     if src_is_d && (xd != xa) && !commutes {
         return 0;
     }
-    opname := s[l: l + 6].copy();
+    opname := s[l..l + 6].copy();
     if src_is_d && (xd != xa) {
         out.append(view(opname));
-        out.append(view(s[a + 7: e1 - 6]));
+        out.append(view(s[a + 7..e1 - 6]));
     } else {
         if xd != xa {
             out.append(view("movaps "));
-            out.append(view(s[a + 7: e1 - 6]));
+            out.append(view(s[a + 7..e1 - 6]));
             out.push(44);
-            out.append(view(s[l4 + 13: e4]));
+            out.append(view(s[l4 + 13..e4]));
             out.push(10);
         }
         out.append(view(opname));
-        out.append(view(s[src_a: src_e]));
+        out.append(view(s[src_a..src_e]));
     }
     out.push(44);
-    out.append(view(s[l4 + 13: e4]));
+    out.append(view(s[l4 + 13..e4]));
     if e4 < s.len() {
         out.push(10);
     }
@@ -1827,7 +1827,7 @@ pub fn f32_const_ops<a>(s: &a [u8]) -> u8[] {
                 && ir::same_range(view(s), l3, e3, view("movq %rcx,%xmm1"))
                 && (e4 - l4 == 17) && ir::at(view(s), l4 + 3, view("sd %xmm1,%xmm0"))
                 && ir::same_range(view(s), l5, e5, view("cvtsd2ss %xmm0,%xmm0")) {
-                op := s[l4: l4 + 3].copy();
+                op := s[l4..l4 + 3].copy();
                 okop := ir::same_range(view(op), 0, 3, view("mul")) || ir::same_range(view(op), 0, 3, view("add")) || ir::same_range(view(op), 0, 3, view("sub")) || ir::same_range(view(op), 0, 3, view("div"));
                 mut bits: u64 = 0;
                 mut digits = true;
@@ -1843,14 +1843,14 @@ pub fn f32_const_ops<a>(s: &a [u8]) -> u8[] {
                     out.append(view("movl $"));
                     put_num(&mut out, f - 1);
                     out.append(view(",%ecx\nmovd %ecx,%xmm1\n"));
-                    src := s[l2 + 9: e2 - 6].copy();
+                    src := s[l2 + 9..e2 - 6].copy();
                     // The result usually goes straight on to its register (`movaps %xmm0,%xmmD`): with
                     // the scratch not read after, the operation is done in D itself.
                     l6 := e5 + 1;
                     e6 := line_at(view(s), l6);
                     mut dst = u8[];
                     if (l6 < s.len()) && (e6 - l6 >= 18) && (e6 - l6 <= 19) && ir::at(view(s), l6, view("movaps %xmm0,%xmm")) {
-                        d := s[l6 + 13: e6].copy();
+                        d := s[l6 + 13..e6].copy();
                         if !ir::same_range(view(d), 0, d.len(), view("%xmm1")) && !reg_read_later(view(s), e6 + 1, view("%xmm0"), view("")) {
                             dst = d;
                         }
@@ -1947,7 +1947,7 @@ pub fn probe_frames<a>(s: &a [u8], after: u64) -> u8[] {
             while (stop < e - 5) && (s[stop] != 43) {
                 stop += 1;
             }
-            name = s[a + 6: stop].copy();
+            name = s[a + 6..stop].copy();
             if stop < e - 5 {
                 for x in stop + 1..e - 5 {
                     if (48 <= s[x]) & (s[x] <= 57) {
@@ -1961,7 +1961,7 @@ pub fn probe_frames<a>(s: &a [u8], after: u64) -> u8[] {
             while (stop < e) && (s[stop] != 43) {
                 stop += 1;
             }
-            name = s[a + 9: stop].copy();
+            name = s[a + 9..stop].copy();
             if stop < e {
                 for x in stop + 1..e {
                     if (48 <= s[x]) & (s[x] <= 57) {
@@ -2065,13 +2065,13 @@ fn frame_scan<a>(s: &a [u8]) -> FrameScan {
                     // Every frame: the saved-register area a frame line adds (`+K`, well under 128
                     // bytes) can carry one just under a page over it.
                     if 4096 < v + 128 {
-                        f.names.push(s[a + 5: comma].copy());
+                        f.names.push(s[a + 5..comma].copy());
                         f.sizes.push(v);
                     }
                 } else if (e - a > 15) && (s[e - 1] == 58) && ir::at(view(s), a, view(".Lgrail_probe_")) {
                     mut p = u8[];
                     p.push(46);
-                    p.append(s[a + 14: e - 1]);
+                    p.append(s[a + 14..e - 1]);
                     f.probed.push(p);
                 }
             } else if s[e - 1] == 58 {
@@ -2169,7 +2169,7 @@ pub fn lower_leaf_calls<a>(s: &a [u8]) -> u8[] {
         }
         mut op = 0;
         if (e - a > 7) && ir::at(view(s), a, view("call rt_")) {
-            name := s[a + 5: e].copy();
+            name := s[a + 5..e].copy();
             op = leaf_op(view(name));
         }
         if op != 0 {
@@ -4026,9 +4026,9 @@ fn xmm_moves<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64, lsrc: (&mut u64[
 // Operand j of line i is the parsed SSE register written s[a..e].
 fn xmm_is<a, b>(o: (&a ir::Body), s: &b [u8], i: u64, j: u64, a: u64, e: u64) -> bool {
     if j == 0 {
-        return (o.k0[i] == 6) && ir::same_range(view(s), o.s0[i], o.e0[i], view(s[a: e]));
+        return (o.k0[i] == 6) && ir::same_range(view(s), o.s0[i], o.e0[i], view(s[a..e]));
     }
-    return (o.k1[i] == 6) && ir::same_range(view(s), o.s1[i], o.e1[i], view(s[a: e]));
+    return (o.k1[i] == 6) && ir::same_range(view(s), o.s1[i], o.e1[i], view(s[a..e]));
 }
 // The SSE register operand j of line i names, by number (a parsed `%xmmN` or a promoted one), or 99.
 fn xmm_no<a, b>(o: (&a ir::Body), s: &b [u8], i: u64, j: u64) -> u64 {
@@ -4506,7 +4506,7 @@ fn xmm_narrow<a, b>(o: (&a mut ir::Body), s: &b [u8], lsrc: (&u64[]), ldst: (&u6
                 }
                 mut found = loads.len();
                 for y in loads.len() {
-                    if (uses[y] == u) && ir::same_range(view(s), o.s1[loads[y]], o.e1[loads[y]], view(s[a: e])) {
+                    if (uses[y] == u) && ir::same_range(view(s), o.s1[loads[y]], o.e1[loads[y]], view(s[a..e])) {
                         found = y;
                     }
                 }
@@ -6758,7 +6758,7 @@ fn exchange_loads<a, b>(o: (&a mut ir::Body), s: &b [u8], last: u64) {
         if (j >= last) || (o.op[j] != 1) || (o.k0[j] != 1) || (o.k1[j] != 4) || (o.v0[j] == a) {
             continue;
         }
-        if !ir::same_range(view(s), o.s0[i], o.e0[i], view(s[o.s1[j]: o.e1[j]])) {
+        if !ir::same_range(view(s), o.s0[i], o.e0[i], view(s[o.s1[j]..o.e1[j]])) {
             continue;
         }
         if dead_after(&o, j, a, 6) {

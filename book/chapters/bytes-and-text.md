@@ -51,7 +51,7 @@ Methods that change text return a new value and leave the original alone. The on
 `trim`, `split`, `lines`, `split_whitespace` - copy nothing: they return views of the text (Rust's
 `&str` pieces), so `fields[1]` is the bytes after the `=` where they already are. The text has to
 outlive the views and cannot change while one is live; `split_owned` (or `piece.copy()`) is the
-copying form for a piece that must outlive it. `part[:1]` is a view of the first byte.
+copying form for a piece that must outlive it. `part[..1]` is a view of the first byte.
 
 A loop over the pieces borrows them, whether it is `for part in name.split(' ')` or a loop over a
 bound `&parts`. `parse_f64` reads a decimal number correctly rounded, as Rust's and Go's parsers do,

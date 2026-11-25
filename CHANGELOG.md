@@ -1,5 +1,8 @@
 ## Unreleased
 
+- **Breaking:** `..` is the one range spelling. Slices are `s[a..e]`, `s[a..]`, `s[..e]` and `s[..]` (as in
+  `for i in a..b`); the colon form `s[a:e]` is refused with the replacement, and `grail fmt` rewrites it.
+  `[K: V]` map types and `x: T` annotations are unchanged. Fixed arrays now accept `a[lo..hi]` too.
 - "has no method" now names the standard-library module that defines the method when the build does not
   include it: ``help: `digest` is defined in the `xxhash` module ... add `use xxhash;` ``.
 - Added `use module as alias;`: the alias names the module in that file (`use geometry_shapes as gs;` then
@@ -17,8 +20,8 @@
   order are refused), next to the `min`, `max`, `clamp` and `abs` every integer type already has.
 - A built-in vector's methods from `lib/vecs.grl` (`sort`, `sort_by`, `contains`, `position`, `sum`, `min`, `max`,
   `binary_search`, `dedup`, ...) and text's from `lib/strings.grl` (`split`, `trim`, `lines`, `join`, `parse_u64`,
-  ...) now work without a `use` line: a source that calls one links the module, as `.iter()` links `iter`, and a
-  program that calls none carries neither. Added `join(separator)` on `string[]` and byte vectors, and
+  ...) now work without a `use` line in a program file: a source with no `module` declaration that calls one links
+  the module, as `.iter()` links `iter`; a declared module (the library, a package's modules) names what it uses. Added `join(separator)` on `string[]` and byte vectors, and
   `hash::fnv1a64`.
 - Added `exp_m1`, `ln_1p` and `tanh` on `f64` and `f32` (`math::expm1`, `math::log1p`, `math::tanh`), from fdlibm:
   `expm1` and `log1p` are within 0.75 ulp and `tanh` within 2 ulp; they are not bit-identical to every host libm

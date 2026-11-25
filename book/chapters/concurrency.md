@@ -63,10 +63,10 @@ of them. The builtin underneath, `parallel_for_zip(grain, f, s1, .., sn)`, takes
 
 ```grl
 pool::zip3(&mut pos[
-    0: n
+    0.. n
 ], &vel[
-    0: n
-], &mut life[0:n], 4096, |p: &mut [f32], v: &[f32], l: &mut [u32]| -> unit { for i in p.len() {
+    0.. n
+], &mut life[0..n], 4096, |p: &mut [f32], v: &[f32], l: &mut [u32]| -> unit { for i in p.len() {
     p[i] = p[i] + v[i] * dt;
     l[i] = l[i] - 1;
 }
@@ -77,8 +77,8 @@ pool::zip3(&mut pos[
 with each piece's first index, so `s[i]` is `xs[base + i]`. `xs.par_chunks_reduce(grain, zero, leaf, merge)` is the read-only reduction: `leaf` per piece, the results folded in index order,
 so a floating-point sum has the same bits on one worker and on sixteen.
 
-`left, right := split_at_mut(s, mid)` cuts one exclusive slice into its two halves, `s[0:mid]` and
-`s[mid:len]`, and checks `mid <= s.len()` as it runs. Both halves can be used, written and passed on
+`left, right := split_at_mut(s, mid)` cuts one exclusive slice into its two halves, `s[0..mid]` and
+`s[mid..len]`, and checks `mid <= s.len()` as it runs. Both halves can be used, written and passed on
 at once - each is a disjoint piece of the same loan, which is how divide-and-conquer code (a parallel
 sort, a tree build, a hand-written chunker) gets two exclusive pieces without the compiler reasoning
 about indices. `s` and the vector behind it are out of reach until both halves end, and two

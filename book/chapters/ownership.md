@@ -12,7 +12,7 @@ be used after its move, even though the underlying object still exists under a n
 {{example:moved-value}}
 
 This is an intentional compile error. To keep data usable in two places, take a shared borrow
-with `&owner` (or `owner[a:b]` for part of it),
+with `&owner` (or `owner[a..b]` for part of it),
 or request an explicit copy such as `data.copy()` when a separate buffer is really wanted.
 
 **Try it:** repair the rejected example by printing `moved.len()` instead.
@@ -20,7 +20,7 @@ or request an explicit copy such as `data.copy()` when a separate buffer is real
 ## Borrowing and last use
 
 A shared borrow allows reads while excluding conflicting mutation, growth and movement of its
-source. Use `&owner` for a shared reference, or `owner[a:b]` for a view of part of it.
+source. Use `&owner` for a shared reference, or `owner[a..b]` for a view of part of it.
 The compiler can end a borrow at its last use, not only at the closing brace.
 
 {{example:borrows}}
@@ -171,7 +171,7 @@ can retain old guards longer than strictly necessary, and opaque local-frame wri
 retained owner witness. Opaque external writes without a recoverable invariant contract are
 rejected rather than accepted on the strength of an erased lifetime label.
 
-The mutable argument is `&mut current`: a typed reference to the stored view. `first[:]` and
-`second[:]` create the views that are exchanged through it.
+The mutable argument is `&mut current`: a typed reference to the stored view. `first[..]` and
+`second[..]` create the views that are exchanged through it.
 
 **Try it:** add `second.push(3)` before reading `current`. The live stored view should prevent it.

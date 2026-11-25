@@ -29,7 +29,7 @@ fn starts<a, b>(a: &a [u8], b: &b [u8]) -> bool {
     if a.len() < b.len() {
         return false;
     }
-    return eq(view((a[: b.len()])), view((b)));
+    return eq(view((a[..b.len()])), view((b)));
 }
 fn trim<a>(s: &a [u8]) -> &a [u8] {
     mut a = 0;
@@ -46,7 +46,7 @@ fn trim<a>(s: &a [u8]) -> &a [u8] {
         }
         b -= 1;
     }
-    return s[a: b];
+    return s[a..b];
 }
 fn bad<a>(s: &a [u8]) -> unit {
     host::print(view("machine lowering: unsupported instruction/operand: "));
@@ -97,11 +97,11 @@ fn split<a>(s: &a [u8], delimiter: u64) -> u8[][] {
             depth -= 1;
         }
         if (b == delimiter) & (depth == 0) {
-            out.push((trim(view((s[start: i])))).copy());
+            out.push((trim(view((s[start..i])))).copy());
             start = i + 1;
         }
     }
-    out.push((trim(view((s[start:])))).copy());
+    out.push((trim(view((s[start..])))).copy());
     return out;
 }
 fn reg<a>(target: u64, s: &a [u8]) -> string {
@@ -219,7 +219,7 @@ fn armword<a>(s: &a [u8]) -> string {
         return "wsp";
     }
     mut out = "w";
-    out.append(s[1:]);
+    out.append(s[1..]);
     return out;
 }
 // Recognize only small decimal literals; expressions stay assembler constants.
@@ -263,7 +263,7 @@ fn constant<a, b, c>(o: (&a mut Out), dst: &b [u8], value: &c [u8]) -> unit {
     }
     if value.len() != 0 {
         if value[0] == 45 {
-            negative := small_literal(value[1:]);
+            negative := small_literal(value[1..]);
             if 1 < negative {
                 put(&mut o, view("movn "));
                 put(&mut o, view(dst));
@@ -317,9 +317,9 @@ fn address<a, b>(o: (&a mut Out), operand: &b [u8]) -> unit {
     if open == operand.len() {
         bad(view((operand)));
     }
-    parts := split(view((operand[open + 1: operand.len() - 1])), 44);
+    parts := split(view((operand[open + 1..operand.len() - 1])), 44);
     base := parts[0].copy();
-    disp := operand[: open];
+    disp := operand[..open];
     if eq(view(base), view("%rip")) {
         if target == 1 {
             put(&mut o, view("adrp x13,"));
@@ -396,7 +396,7 @@ fn read_operand<a, b, c>(o: (&a mut Out), operand: &b [u8], dst: &c [u8], byte: 
     assert(operand.len() != 0);
     target := o.target;
     if operand[0] == 36 {
-        constant(&mut o, view((dst)), view((operand[1:])));
+        constant(&mut o, view((dst)), view((operand[1..])));
         return ();
     }
     if operand[0] == 37 {
@@ -1198,12 +1198,12 @@ fn atomic_instruction<a, b>(o: (&a mut Out), line: &b [u8]) -> bool {
 pub fn has_atomics<a>(input: &a [u8]) -> bool {
     for i in input.len() {
         if (input[i] == 97) && ((i == 0) || (input[i - 1] == 10)) {
-            if starts(view(input[i:]), view("atom.")) {
+            if starts(view(input[i..]), view("atom.")) {
                 return true;
             }
         }
         if (input[i] == 115) && ((i == 0) || (input[i - 1] == 10)) {
-            if starts(view(input[i:]), view("simd.")) {
+            if starts(view(input[i..]), view("simd.")) {
                 return true;
             }
         }
@@ -1215,7 +1215,7 @@ pub fn atomics_x86<a>(input: &a [u8]) -> u8[] {
     mut start = 0;
     for i in input.len() {
         if input[i] == 10 {
-            line := input[start: i];
+            line := input[start..i];
             start = i + 1;
             a := atom_parse(view(line));
             sv := simd_parse(view(line));
@@ -1235,7 +1235,7 @@ pub fn atomics_x86<a>(input: &a [u8]) -> u8[] {
             }
         }
     }
-    put(&mut o, view(input[start:]));
+    put(&mut o, view(input[start..]));
     return o.text;
 }
 fn atom_x86_label<a>(o: (&a mut Out), n: u64) -> unit {
@@ -1409,7 +1409,7 @@ pub fn simd_parse<a>(line: &a [u8]) -> Simd {
     if (words.len() < 2) || (3 < words.len()) {
         bad(view(line));
     }
-    name := words[0][5:].copy();
+    name := words[0][5..].copy();
     ops := simd_ops();
     for i in ops.len() {
         if eq(view(name), view(ops[i])) {
@@ -1438,8 +1438,8 @@ pub fn simd_parse<a>(line: &a [u8]) -> Simd {
     if shape[0] == 117 {
         s.elem = 4;
     }
-    s.bits = simd_number(view(shape[1: x]));
-    s.lanes = simd_number(view(shape[x + 1:]));
+    s.bits = simd_number(view(shape[1..x]));
+    s.lanes = simd_number(view(shape[x + 1..]));
     if (s.elem == 0) || ((s.bits != 8) & (s.bits != 32) & (s.bits != 64)) || ((s.bits * s.lanes != 128) & (s.bits * s.lanes != 256)) {
         bad(view(line));
     }
@@ -3678,7 +3678,7 @@ fn xmm_singles<a>(input: &a [u8], from: u64) -> u64 {
         if input[at] != 10 {
             continue;
         }
-        line := trim(view(input[start: at]));
+        line := trim(view(input[start..at]));
         start = at + 1;
         if line.len() == 0 {
             continue;
@@ -3693,16 +3693,16 @@ fn xmm_singles<a>(input: &a [u8], from: u64) -> u64 {
         if sp == line.len() {
             continue;
         }
-        op := line[: sp];
-        ops := trim(view(line[sp + 1:]));
+        op := line[..sp];
+        ops := trim(view(line[sp + 1..]));
         mut comma = 0;
         while (comma < ops.len()) && (ops[comma] != 44) {
             comma += 1;
         }
-        a := xmm_number(view(trim(view(ops[: comma]))));
+        a := xmm_number(view(trim(view(ops[..comma]))));
         mut b = 99;
         if comma < ops.len() {
-            b = xmm_number(view(trim(view(ops[comma + 1:]))));
+            b = xmm_number(view(trim(view(ops[comma + 1..]))));
         }
         // Forms that read both operands in one precision, and forms that read only the first.
         both_s := eq(view(op), view("addss")) || eq(view(op), view("subss")) || eq(view(op), view("mulss"))
@@ -3784,7 +3784,7 @@ fn float_sse<a, b, c, d>(o: (&a mut Out), op: &b [u8], src: &c [u8], dst: &d [u8
             put(&mut o, view("fmov "));
             put(&mut o, view(fd));
             put(&mut o, view(",w"));
-            put(&mut o, view(r[1:]));
+            put(&mut o, view(r[1..]));
         } else {
             put(&mut o, view("fmv.w.x "));
             put(&mut o, view(fd));
@@ -3986,10 +3986,10 @@ fn instruction<a, b>(o: (&a mut Out), line: &b [u8]) -> unit {
             break;
         }
     }
-    op := line[: space];
+    op := line[..space];
     mut rest = u8[];
     if space < line.len() {
-        rest = (trim(view((line[space + 1:])))).copy();
+        rest = (trim(view((line[space + 1..])))).copy();
     }
     if c_abi(&mut o, view((op)), view(rest)) {
         return ();
@@ -4038,7 +4038,7 @@ fn instruction<a, b>(o: (&a mut Out), line: &b [u8]) -> unit {
     if eq(view(op), view("call")) {
         if rest.len() != 0 {
             if rest[0] == 42 {
-                r := reg(target, rest[1:]);
+                r := reg(target, rest[1..]);
                 if target == 1 {
                     put(&mut o, view("blr "));
                     put(&mut o, view(r));
@@ -4441,7 +4441,7 @@ pub fn lower<a>(input: &a [u8], target: u64, plat: u64) -> u8[] {
     mut start = 0;
     for i in input.len() {
         if input[i] == 10 {
-            line := trim(view((input[start: i])));
+            line := trim(view((input[start..i])));
             if starts(view((line)), view(".set ")) {
                 put(&mut out, view((line)));
                 put(&mut out, view("\n"));
@@ -4455,7 +4455,7 @@ pub fn lower<a>(input: &a [u8], target: u64, plat: u64) -> u8[] {
     start = 0;
     for i in input.len() {
         if input[i] == 10 {
-            line := trim(view((input[start: i])));
+            line := trim(view((input[start..i])));
             start = i + 1;
             if line.len() != 0 {
                 if !starts(view((line)), view(".set ")) {
@@ -4502,17 +4502,17 @@ fn same_moves<a>(text: &a [u8], isa: u64) -> u8[] {
         if text[i] != 10 {
             continue;
         }
-        line := text[start: i];
+        line := text[start..i];
         start = i + 1;
         if starts(view(line), view(mv)) {
-            ops := line[mv.len():];
+            ops := line[mv.len()..];
             mut comma = 0;
             while (comma < ops.len()) && (ops[comma] != 44) {
                 comma += 1;
             }
             if comma < ops.len() {
-                d := reg_number(view(ops[: comma]), isa);
-                src := reg_number(view(ops[comma + 1:]), isa);
+                d := reg_number(view(ops[..comma]), isa);
+                src := reg_number(view(ops[comma + 1..]), isa);
                 // A 32-bit `mov w9,w10` zero-extends: it is not a copy of the 64-bit value.
                 wide := (isa != 1) || ((ops[0] == 120) && (comma + 1 < ops.len()) && (ops[comma + 1] == 120));
                 if (d < 64) && (src < 64) && wide {
@@ -4537,7 +4537,7 @@ fn same_moves<a>(text: &a [u8], isa: u64) -> u8[] {
         out.append(line);
         out.push(10);
     }
-    out.append(text[start:]);
+    out.append(text[start..]);
     return out;
 }
 // False for a line after which no register may be assumed: a label, or control that leaves or comes
@@ -4557,7 +4557,7 @@ fn keeps_values<a>(line: &a [u8]) -> bool {
     while (sp < line.len()) && (line[sp] != 32) {
         sp += 1;
     }
-    op := line[: sp];
+    op := line[..sp];
     return !((op[0] == 98) || (op[0] == 106) || starts(view(op), view("cb")) || starts(view(op), view("tb")) || eq(view(op), view("ret")) || eq(view(op), view("call")) || eq(view(op), view("tail")) || eq(view(op), view("svc")) || eq(view(op), view("ecall")));
 }
 // Every integer register `line` names gets a fresh value number.
@@ -4570,7 +4570,7 @@ fn forget_named<a>(line: &a [u8], isa: u64, val: (&mut u64[]), next: (&mut u64))
                 j += 1;
             }
             if j > i {
-                r := reg_number(view(line[i: j]), isa);
+                r := reg_number(view(line[i..j]), isa);
                 if r < 64 {
                     val[r] = *next;
                     *next = *next + 1;

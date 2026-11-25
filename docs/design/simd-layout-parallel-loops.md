@@ -363,9 +363,9 @@ supplies three of the four things an ECS-style loop needs:
 
 ```grl
 // builtin; lib/pool.grl wraps it as pool::zip2, zip3, zip4 with ordinary generic signatures
-parallel_for_zip(grain, f, &mut pos[0: n], &vel[0: n], &mut life[0: n]);
+parallel_for_zip(grain, f, &mut pos[0.. n], &vel[0.. n], &mut life[0.. n]);
 
-pool::zip2(&mut pos[0: n], &vel[0: n], 4096,
+pool::zip2(&mut pos[0.. n], &vel[0.. n], 4096,
     |p: &mut [f32], v: &[f32]| -> unit {
         for i in p.len() { p[i] = p[i] + v[i] * DT; }
     });
@@ -411,9 +411,9 @@ Two smaller additions with the same construction:
 
 ```grl
 // the chunk's first index, for reading captured tables or writing an owned per-chunk result
-pool::chunks_mut_at(&mut xs[0: n], 4096, |base: u64, s: &mut [f32]| -> unit { ... });
+pool::chunks_mut_at(&mut xs[0.. n], 4096, |base: u64, s: &mut [f32]| -> unit { ... });
 // read-only reduction, combined in index order, so the answer depends on (n, grain) and nothing else
-total := pool::reduce_chunks(&xs[0: n], 4096, 0.0, |s: &[f32]| -> f32 simd::sum(s), |a: f32, b: f32| -> f32 a + b);
+total := pool::reduce_chunks(&xs[0.. n], 4096, 0.0, |s: &[f32]| -> f32 simd::sum(s), |a: f32, b: f32| -> f32 a + b);
 ```
 
 The grain is always an argument, never derived from the number of cores, because float reductions
@@ -424,7 +424,7 @@ depend on the split and D4 wants the same answer on every machine. The names fol
 
 ```grl
 // builtin: one exclusive slice in, two out; run-time check mid <= s.len()
-left, right := split_at_mut(&mut xs[0: n], mid);
+left, right := split_at_mut(&mut xs[0.. n], mid);
 ```
 
 The two results are loans whose parent is the argument's loan (`reborrow` in `ownership.grl:381`
@@ -455,8 +455,8 @@ fn regen(health: (&mut [u32])) -> unit { pool::chunks_mut(health, 4096, heal); }
 fn frame(w: (&mut World)) -> unit {
     n := w.pos.len();
     // two systems at once: write sets {pos} and {health} are different fields, vel is read-shared
-    pool::scope2(|| -> unit integrate(&mut w.pos[0: n], &w.vel[0: n]),
-                 || -> unit regen(&mut w.health[0: n]));
+    pool::scope2(|| -> unit integrate(&mut w.pos[0.. n], &w.vel[0.. n]),
+                 || -> unit regen(&mut w.health[0.. n]));
 }
 ```
 
@@ -608,8 +608,8 @@ fn main() -> unit {
     for i in n { x.push(f32(i % 7) * 0.5); y.push(f32(i % 5) * 0.25); }
     a: f32 := 0.999;
     mut total: f32 = 0.0;
-    for r in REPS { scale_add(&mut x[0: n], &y[0: n], a); }
-    for r in DREPS { total = total + dot(&x[0: n], &y[0: n]); }
+    for r in REPS { scale_add(&mut x[0.. n], &y[0.. n], a); }
+    for r in DREPS { total = total + dot(&x[0.. n], &y[0.. n]); }
     print(total);
 }
 ```
@@ -619,10 +619,10 @@ so the dot call is not hoisted. `xd` is `xform.grl` with `f32` replaced by `f64`
 
 ```grl
 // p1: two disjoint exclusive slices           -> error[E0008]: borrow conflicts with active access
-fill(&mut x[0: 4], &mut x[4: 8]);
+fill(&mut x[0.. 4], &mut x[4.. 8]);
 // p2: chunk callback capturing a shared slice of another vector -> compiles, prints 3
-ys := &y[0: 8];
-pool::chunks_mut(&mut x[0: 8], 2, |s: &mut [f32]| -> unit { for i in s.len() { s[i] = s[i] + ys[i]; } });
+ys := &y[0.. 8];
+pool::chunks_mut(&mut x[0.. 8], 2, |s: &mut [f32]| -> unit { for i in s.len() { s[i] = s[i] + ys[i]; } });
 // p3: the same, capturing a slice of x itself -> error[E0008]: borrow conflicts with active access
 // p4: extern "C" record V3 { x: f32, y: f32, z: f32 }; extern "C" record M { tag: u8, v: V3, d: f64 }
 //     size_of/align_of -> 12 4 24 8

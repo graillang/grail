@@ -119,6 +119,9 @@ fn pair_kind(c: u64, d: u64) -> u64 {
 // alias` pair is dropped from the `use` line, and every `alias` that starts a path (`alias::x`) is
 // pointed at a copy of the module's name appended to the source, so every later stage reads the
 // module's own name. Line and column stay the alias's own, so a diagnostic points at what was written.
+pub fn token_text_is<a, b>(src: &a [u8], t: &Token, word: &b [u8]) -> bool {
+    return token_is(src, t, word);
+}
 fn token_is<a, b>(src: &a [u8], t: &Token, word: &b [u8]) -> bool {
     if t.end - t.start != word.len() {
         return false;
@@ -145,7 +148,7 @@ pub fn apply_use_aliases(toks: Token[], src: (&mut u8[])) -> Token[] {
     mut out = toks;
     mut i = 0;
     while i + 4 < out.len() {
-        if token_is(src[:], &out[i], "use") && token_is(src[:], &out[i + 2], "as") && token_is(src[:], &out[i + 4], ";") {
+        if token_is(src[..], &out[i], "use") && token_is(src[..], &out[i + 2], "as") && token_is(src[..], &out[i + 4], ";") {
             // The module's name, appended once: tokens may now point past the original text.
             start := src.len();
             for k in out[i + 1].end - out[i + 1].start {
@@ -159,7 +162,7 @@ pub fn apply_use_aliases(toks: Token[], src: (&mut u8[])) -> Token[] {
             out.remove(i + 2);
             mut j = 0;
             while j + 1 < out.len() {
-                if same_span_text(src[:], &out[j], alias_start, alias_end) && token_is(src[:], &out[j + 1], "::") {
+                if same_span_text(src[..], &out[j], alias_start, alias_end) && token_is(src[..], &out[j + 1], "::") {
                     out[j].start = start;
                     out[j].end = module_end;
                 }
@@ -187,6 +190,24 @@ pub fn calls_any<a, b>(text: &a [u8], names: &b [string]) -> bool {
     n := text.len();
     mut i = 0;
     while i + 1 < n {
+        // A comment or a string literal is not a call.
+        if (text[i] == 47) && (text[i + 1] == 47) {
+            while (i < n) && (text[i] != 10) {
+                i += 1;
+            }
+            continue;
+        }
+        if text[i] == 34 {
+            i += 1;
+            while (i < n) && (text[i] != 34) {
+                if text[i] == 92 {
+                    i += 1;
+                }
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
         if text[i] == 46 {
             mut j = i + 1;
             while (j < n) && (((text[j] >= 97) && (text[j] <= 122)) || ((text[j] >= 65) && (text[j] <= 90)) || ((text[j] >= 48) && (text[j] <= 57)) || (text[j] == 95)) {
@@ -197,7 +218,7 @@ pub fn calls_any<a, b>(text: &a [u8], names: &b [string]) -> bool {
                 k += 1;
             }
             if (j > i + 1) && (k < n) && (text[k] == 40) {
-                word := text[i + 1: j];
+                word := text[i + 1..j];
                 for m in names.len() {
                     name := view(names[m]);
                     if name.len() == word.len() {

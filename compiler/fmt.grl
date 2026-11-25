@@ -1071,7 +1071,24 @@ fn put<a, b>(out: (&a mut u8[]), s: &b [u8]) {
     }
 }
 fn token_width<a>(f: (&a F), i: u64) -> u64 {
+    if slice_colon(&f, i) {
+        return 2;
+    }
     return f.end[i] - f.start[i];
+}
+// The old slice spelling's colon (`s[a:e]`): written as `..`, the one range spelling (`s[a..e]`).
+fn slice_colon<a>(f: (&a F), i: u64) -> bool {
+    return (f.kind[i] == 4) && (f.code[i] == 58) && in_brackets(&f, i);
+}
+fn emit_token<a, b>(f: (&a mut F), s: &b [u8], t: u64) {
+    if slice_colon(&f, t) {
+        f.out.push(46);
+        f.out.push(46);
+        return ();
+    }
+    for m in f.end[t] - f.start[t] {
+        f.out.push(s[f.start[t] + m]);
+    }
 }
 fn range_width<a>(f: (&a F), lo: u64, hi: u64) -> u64 {
     mut w = 0;
@@ -1095,9 +1112,7 @@ fn write_range<a, b>(f: (&a mut F), s: &b [u8], lo: u64, hi: u64, indent: u64) {
             f.out.push(32);
         }
         t := f.ltoken[j];
-        for m in f.end[t] - f.start[t] {
-            f.out.push(s[f.start[t] + m]);
-        }
+        emit_token(f, view(s), t);
         j += 1;
     }
     f.out.push(10);
@@ -1222,9 +1237,7 @@ fn write_range_comma<a, b>(f: (&a mut F), s: &b [u8], lo: u64, hi: u64, indent: 
             f.out.push(32);
         }
         t := f.ltoken[j];
-        for m in f.end[t] - f.start[t] {
-            f.out.push(s[f.start[t] + m]);
-        }
+        emit_token(f, view(s), t);
         j += 1;
     }
     f.out.push(44);

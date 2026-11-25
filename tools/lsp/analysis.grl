@@ -566,7 +566,7 @@ fn tok_is<a>(text: &a [u8], tokens: (&Token[]), i: u64, word: &[u8]) -> bool {
     if tokens[i].kind != 1 {
         return false;
     }
-    return eq(text[tokens[i].start: tokens[i].end], word);
+    return eq(text[tokens[i].start..tokens[i].end], word);
 }
 // The token that closes the group opened at `open`, or the last token when it is unclosed.
 fn close_index(tokens: (&Token[]), open: u64) -> u64 {
@@ -788,7 +788,7 @@ fn doc_before(text: &[u8], offset: u64) -> u8[] {
                 end -= 1;
             }
         }
-        line := trim(text[prev: end]);
+        line := trim(text[prev..end]);
         if line.len() < 3 {
             break;
         }
@@ -1425,19 +1425,19 @@ fn strip_refs(ty: &[u8]) -> u8[] {
         again = 0;
         if 0 < t.len() {
             if t[0] == 38 {
-                mut rest = trim(t[1: t.len()]);
+                mut rest = trim(t[1..t.len()]);
                 mut more = 1;
                 while more != 0 {
                     more = 0;
                     if has_word_prefix(rest, view("mut")) {
-                        rest = trim(rest[3: rest.len()]);
+                        rest = trim(rest[3..rest.len()]);
                         more = 1;
                     } else {
                         sp := first_space(rest);
                         if sp != no_index() {
-                            w := rest[0: sp];
+                            w := rest[0..sp];
                             if word_bytes(w) {
-                                rest = trim(rest[sp: rest.len()]);
+                                rest = trim(rest[sp..rest.len()]);
                                 more = 1;
                             }
                         }
@@ -1466,7 +1466,7 @@ fn strip_refs(ty: &[u8]) -> u8[] {
                         k += 1;
                     }
                     if close == t.len() - 1 {
-                        t = trim(t[1: close]);
+                        t = trim(t[1..close]);
                         again = 1;
                     }
                 }
@@ -1481,7 +1481,7 @@ fn strip_optional(ty: &[u8]) -> u8[] {
         return t;
     }
     if t[t.len() - 1] == 63 {
-        return trim(t[0: t.len() - 1]);
+        return trim(t[0..t.len() - 1]);
     }
     return t;
 }
@@ -1577,7 +1577,7 @@ fn outer_args(ty: &[u8]) -> u8[][] {
         } else {
             if (b == 62) || (b == 41) || (b == 93) {
                 if nest == 1 && b == 62 {
-                    out.push(trim(t[start: k]));
+                    out.push(trim(t[start..k]));
                     return out;
                 }
                 if 0 < nest {
@@ -1585,7 +1585,7 @@ fn outer_args(ty: &[u8]) -> u8[][] {
                 }
             } else {
                 if b == 44 && nest == 1 {
-                    out.push(trim(t[start: k]));
+                    out.push(trim(t[start..k]));
                     start = k + 1;
                 }
             }
@@ -1615,7 +1615,7 @@ fn substitute(ty: &[u8], names: (&u8[][]), args: (&u8[][])) -> u8[] {
                 }
                 k += 1;
             }
-            word := ty[i: k];
+            word := ty[i..k];
             mut replaced = false;
             mut n = 0;
             while n < names.len() {
@@ -1659,9 +1659,9 @@ fn element_type(ty: &[u8]) -> u8[] {
                 depth -= 1;
                 if depth == 0 {
                     if k == 0 {
-                        return strip_refs(t[1: t.len() - 1]);
+                        return strip_refs(t[1..t.len() - 1]);
                     }
-                    return strip_refs(t[0: k]);
+                    return strip_refs(t[0..k]);
                 }
             }
         }
@@ -1676,7 +1676,7 @@ fn split_qualified(name: &[u8]) -> Qualified {
     mut i = 0;
     while i + 1 < name.len() {
         if (name[i] == 58) && (name[i + 1] == 58) {
-            return Qualified { module: trim(name[0: i]), name: trim(name[i + 2: name.len()]) };
+            return Qualified { module: trim(name[0..i]), name: trim(name[i + 2..name.len()]) };
         }
         i += 1;
     }
@@ -1948,7 +1948,7 @@ fn resolve_binding(s: &Source, at: u64) -> u64 {
     }
     owner := owner_of(&s.scopes, at);
     depth := s.tokens[at].depth;
-    name := s.text[s.tokens[at].start: s.tokens[at].end];
+    name := s.text[s.tokens[at].start..s.tokens[at].end];
     mut best = no_index();
     mut i = 0;
     while i < s.bindings.len() {
@@ -2012,7 +2012,7 @@ fn ident_ty(s: &Source, others: (&Item[]), at: u64, budget: u64) -> u8[] {
     if decl != no_index() {
         return binding_ty(s, others, decl, budget);
     }
-    name := s.text[s.tokens[at].start: s.tokens[at].end];
+    name := s.text[s.tokens[at].start..s.tokens[at].end];
     found := resolve_item(s, others, name, 0, 4);
     if found.kind == K_CONST {
         return copy_bytes(found.ty);
@@ -2673,7 +2673,7 @@ fn item_for(s: &Source, others: (&Item[]), at: u64) -> Item {
     if declared.kind != 0 {
         return declared;
     }
-    name := s.text[s.tokens[at].start: s.tokens[at].end];
+    name := s.text[s.tokens[at].start..s.tokens[at].end];
     if 1 < at {
         if s.tokens[at - 1].kind == 260 {
             prefix := at - 2;
@@ -3247,7 +3247,7 @@ fn parameter_completions(s: &Source, others: (&Item[]), at: u64, out: (&mut Comp
     if s.tokens[at].kind != 1 {
         return ();
     }
-    name := s.text[s.tokens[at].start: s.tokens[at].end];
+    name := s.text[s.tokens[at].start..s.tokens[at].end];
     mut found = empty_item();
     if 0 < at {
         if s.tokens[at - 1].kind == 46 {
@@ -3474,7 +3474,7 @@ pub fn definition(s: &Source, offset: u64) -> u64 {
     if binding != no_index() {
         return binding;
     }
-    name := s.text[s.tokens[at].start: s.tokens[at].end];
+    name := s.text[s.tokens[at].start..s.tokens[at].end];
     for i in s.items.len() {
         if s.items[i].kind == K_FN {
             if eq(s.items[i].name, name) {
@@ -3827,7 +3827,7 @@ pub fn item_spans(s: &Source, module: &[u8], name: &[u8], decl: u64, defining: b
     mut i = 0;
     while i < s.tokens.len() {
         if s.tokens[i].kind == 1 {
-            token_name := s.text[s.tokens[i].start: s.tokens[i].end];
+            token_name := s.text[s.tokens[i].start..s.tokens[i].end];
             if eq(token_name, name) {
                 mut use_token = true;
                 mut prev = 0;
@@ -3845,7 +3845,7 @@ pub fn item_spans(s: &Source, module: &[u8], name: &[u8], decl: u64, defining: b
                     if 1 < i {
                         qualifier := i - 2;
                         if s.tokens[qualifier].kind == 1 {
-                            qualifier_name := s.text[s.tokens[qualifier].start: s.tokens[qualifier].end];
+                            qualifier_name := s.text[s.tokens[qualifier].start..s.tokens[qualifier].end];
                             if !eq(qualifier_name, module) {
                                 use_token = false;
                             }
@@ -3900,7 +3900,7 @@ pub fn field_spans(s: &Source, others: (&Item[]), module: &[u8], record: &[u8], 
     mut i = 0;
     while i < s.tokens.len() {
         if s.tokens[i].kind == 1 {
-            token_name := s.text[s.tokens[i].start: s.tokens[i].end];
+            token_name := s.text[s.tokens[i].start..s.tokens[i].end];
             if eq(token_name, name) {
                 mut use_token = false;
                 mut prev = 0;
