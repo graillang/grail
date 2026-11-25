@@ -581,4 +581,18 @@ if (process.platform === 'linux' && process.arch === 'x64') {
     checks++;
   }
 }
+// A sibling module: `grail run sub/main.grl` resolves `use shapes;` to `sub/shapes.grl`, the named
+// file's own directory being a module root (from the directory itself and from its parent).
+{
+  const dir = join(work, 'siblings'); mkdirSync(join(dir, 'sub'), { recursive: true });
+  const env = { ...process.env, GRAIL_CACHE_DIR: join(dir, 'store') };
+  writeFileSync(join(dir, 'sub', 'shapes.grl'), 'module shapes;\npub fn area(w: u64, h: u64) -> u64 {\n    return w * h;\n}\n');
+  writeFileSync(join(dir, 'sub', 'main.grl'), 'use shapes as s;\nfn main() {\n    println(s::area(3, 4));\n}\n');
+  for (const [cwd, file] of [[join(dir, 'sub'), 'main.grl'], [dir, 'sub/main.grl']]) {
+    const ran = spawnSync(grail, ['run', file], { cwd, encoding: 'utf8', env });
+    assert.equal(ran.status, 0, `grail run ${file} in ${cwd} failed\n${ran.stdout}${ran.stderr}`);
+    assert.equal(ran.stdout, '12\n', `grail run ${file}: printed ${JSON.stringify(ran.stdout)}`);
+    checks++;
+  }
+}
 console.log(`cli: ${checks} formatter/tool checks passed`);

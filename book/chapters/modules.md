@@ -14,6 +14,9 @@ full name still works.
 Calling a method that a standard-library module defines but your program never `use`s fails with a
 help line naming that module (`add use xxhash;`).
 
+A module in the same directory as the file you build is found with no setup: `grail run main.grl`
+resolves `use shapes;` to `shapes.grl` beside it.
+
 `use arithmetic;` is enough: the compiler resolves a module it was not handed by looking for
 `arithmetic.grl` in each module root it was given, transitively, so a program says what it uses and
 not which files implement it. The roots are the `--module-root DIR` options (repeatable, tried in

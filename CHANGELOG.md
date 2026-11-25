@@ -1,5 +1,7 @@
 ## Unreleased
 
+- `grail build main.grl` and `grail run main.grl` find a module beside the named file (`use shapes;` reads
+  `shapes.grl` in its directory) without `--module-root` or a `grail.toml`.
 - A map literal or type (`["a": 1]`, `[string: u64]`, `[:]`) needs no `use hashmap;` in a program file.
 - **Breaking:** `..` is the one range spelling. Slices are `s[a..e]`, `s[a..]`, `s[..e]` and `s[..]` (as in
   `for i in a..b`); the colon form `s[a:e]` is refused with the replacement, and `grail fmt` rewrites it.

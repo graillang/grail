@@ -5452,6 +5452,33 @@ fn build<a, b>(args: (&a u8[][]), o: (&b mut Options)) -> u64 {
     for i in o.roots.len() {
         h.roots.push(item(&o.roots, i).copy());
     }
+    // The named file's own directory is a root too, after any named ones: `grail build main.grl`
+    // finds `shapes.grl` beside it for `use shapes;`, as most languages find a sibling file. It comes
+    // before the stdlib, so a file there may shadow a std module by name (the order above).
+    if o.file.len() != 0 {
+        mut cut = 0;
+        for i in o.file.len() {
+            if (o.file[i] == 47) || (o.file[i] == 92) {
+                cut = i + 1;
+            }
+        }
+        mut dir = copy(view("."));
+        if cut != 0 {
+            dir = copy(o.file[0..cut - 1]);
+            if dir.len() == 0 {
+                dir = copy(view("/"));
+            }
+        }
+        mut known = false;
+        for i in h.roots.len() {
+            if eq(view(item(&h.roots, i)), view(dir)) {
+                known = true;
+            }
+        }
+        if !known {
+            h.roots.push(dir);
+        }
+    }
     if h.runtime.len() == 0 {
         return 1;
     }
