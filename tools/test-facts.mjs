@@ -288,6 +288,28 @@ spawnSync('cc', ['-O2', '-c', join(root, 'compiler/tests/ffi_byval.c'), '-o', jo
 const byval = build('ffi-byval', 'ffi_byval.grl', { backend: 'llvm', verifyFacts: true });
 ok('ffi: a byval record argument crosses whole on the LLVM backend', run([byval.exe]).stdout === '7043\n', JSON.stringify(run([byval.exe]).stdout));
 
+// ---- noalias on exclusive &mut params, lifted rt_push* fast paths, and !DILocation metadata ----
+const noaliasPush = build('noalias-push', 'noalias_and_push.grl', { backend: 'llvm', verifyFacts: true });
+const npIr = readFileSync(noaliasPush.ll, 'utf8');
+const npFill = defined(npIr, 'f_main_fill_all');
+ok('noalias: exclusive &mut params get `ptr noalias`, shared `&` gets plain `ptr`',
+  /^define internal i64 @"f_main_update_pair"\(ptr noalias %a0, ptr %a1, ptr noalias %a2\)/m.test(npIr),
+  npIr.match(/^define.*f_main_update_pair.*$/m)?.[0]);
+ok('lifted rt_push*: fast paths use TBAA tags and fall back to cold _slow helpers',
+  !/call [^\n]*@"rt_push(4|b)?"\(/.test(npFill)
+  && /@"rt_push_slow"/.test(npFill)
+  && /@"rt_push4_slow"/.test(npFill)
+  && /@"rt_pushb_slow"/.test(npFill)
+  && /!tbaa !1/.test(npFill)
+  && /!tbaa !3/.test(npFill));
+ok('debug metadata: LLVM module emits !DICompileUnit, !DISubprogram, and !DILocation',
+  /!DICompileUnit\(/.test(npIr)
+  && /!DISubprogram\(name: "f_main_fill_all"/.test(npIr)
+  && /!DILocation\(line: /.test(npIr));
+ok('noalias + lifted rt_push* run produces exact output',
+  run([noaliasPush.exe]).stdout === '17 34\n567\n',
+  JSON.stringify(run([noaliasPush.exe]).stdout));
+
 if (failed) {
   console.log(`facts: ${failed} check(s) failed`);
   process.exit(1);

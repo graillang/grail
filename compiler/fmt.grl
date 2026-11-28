@@ -142,6 +142,26 @@ fn scan<a, b>(f: (&a mut F), s: &b [u8]) {
                 continue;
             }
         }
+        if (c == 98) && (i + 1 < n) && (s[i + 1] == 39) {
+            i += 2;
+            while i < n {
+                d := s[i];
+                if d == 92 {
+                    i += 2;
+                    continue;
+                }
+                i += 1;
+                if d == 39 {
+                    break;
+                }
+            }
+            if n < i {
+                i = n;
+            }
+            token(&mut f, 3, start, i, nl, 0);
+            nl = 0;
+            continue;
+        }
         if c == 39 {
             i += 1;
             while i < n {
@@ -336,7 +356,8 @@ fn mark_generics<a, b>(f: (&a mut F), s: &b [u8]) {
                             || c == 43
                             || c == 58
                             || c == 91
-                            || c == 93;
+                            || c == 93
+                            || ((c == 59) && (nest != 0));
                     }
                     if !ok {
                         break;
@@ -473,7 +494,7 @@ fn unary<a, b>(f: (&a F), s: &b [u8], i: u64) -> bool {
     c := f.code[i];
     // `**` and `&&` are one token each, and a pair of prefix operators where an operand starts
     // (`**pp`, `&&u64`); after an operand they are the binary operators.
-    if (c != 38) & (c != 45) & (c != 42) & (c != 267) & (c != 273) {
+    if (c != 38) & (c != 45) & (c != 42) & (c != 267) & (c != 273) & (c != 126) {
         return false;
     }
     return prefix_position(&f, view(s), i);
@@ -532,15 +553,15 @@ fn space<a, b>(f: (&a F), s: &b [u8], p: u64, i: u64, inline: u64) -> bool {
             || c == 58 {
             return false;
         }
-        if c == 33 {
-            if pk == 4 && (pc == 40 || pc == 91 || pc == 123) {
+        if (c == 33) || (c == 126) {
+            if pk == 4 && (pc == 40 || pc == 91 || pc == 123 || pc == 33 || pc == 126) {
                 return false;
             }
             return prefix_position(&f, view(s), i);
         }
     }
-    if (pk == 4) & (pc == 33) {
-        if prefix_position(&f, view(s), p) {
+    if (pk == 4) & ((pc == 33) || (pc == 126)) {
+        if (pc == 126) || prefix_position(&f, view(s), p) {
             return false;
         }
     }

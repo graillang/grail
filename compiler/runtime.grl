@@ -58,6 +58,10 @@ fn rt_abort() -> u64 {
     if rt_abort_begin() == 0 {
         rt_abort_park();
     }
+    buf := rt_report_buf();
+    mut n = rt_fail_put(buf, 0, view("error: runtime abort\n"));
+    n = rt_fail_where(buf, n);
+    rt_write_all_low(2, buf, n);
     return rt_abort_final();
 }
 // A task ran past the bottom of its stack into the guard page. The platform calls this from its
@@ -692,66 +696,97 @@ fn rt_fail_site_word() -> u64 {
     return raw_state() + 3440;
 }
 fn rt_fail_where(buf: u64, n: u64) -> u64 {
+    mut at = n;
+    mut lines = 0;
     hint := raw_load(rt_fail_site_word());
     if hint != 0 {
         raw_store(rt_fail_site_word(), 0);
         if raw_load(hint + 8) != 0 {
-            return rt_fail_line(buf, n, hint, view(" --> "));
+            at = rt_fail_line(buf, at, hint, view(" --> "));
+            lines = 1;
         }
     }
     // The program's entry stores the compiler-emitted rt_sites in state word 3400; asked for the
     // descriptor (rt_sites_fill), it fills in the tables' bounds and the caller's frame pointer. No
-    // table, a refused descriptor or zeros: no location lines.
+    // table, a refused descriptor or zeros: no location lines beyond any site hint printed above.
     // Reached only by the holder of the abort claim, so the report block's descriptor words are free.
     info := rt_report_sites();
     have := rt_sites_fill(info);
     if have < 3 {
-        return n;
+        return at;
     }
     begin := raw_load(info);
     end := raw_load(info + 8);
-    if (begin == 0) + (end <= begin) {
-        return n;
+    has_sites := (begin != 0) & (begin < end);
+    mut fbegin = 0;
+    mut fend = 0;
+    if have >= 5 {
+        fbegin = raw_load(info + 24);
+        fend = raw_load(info + 32);
+    }
+    has_funcs := (fbegin != 0) & (fbegin < fend);
+    if (has_sites == 0) & (has_funcs == 0) {
+        return at;
     }
     mut frame = raw_load(info + 16);
     mut depth = 0;
-    mut lines = 0;
-    mut at = n;
     while (frame != 0) & (depth < 64) & (lines < 32) {
         ret := raw_load(frame + 8);
-        // The statement the return address is in: the entry with the greatest address not past it.
-        // Its file is zero for code that names no place (a prologue, the runtime's own statements).
-        mut hit = 0;
-        mut hit_at = 0;
-        mut e = begin;
-        while e < end {
-            a := raw_load(e);
-            // Strictly before: a return address is the instruction *after* the call, so when the
-            // call is its statement's last instruction that address is the next statement's label.
-            mut take = a < ret;
-            if take && (hit != 0) {
-                take = hit_at < a;
-            }
-            if take {
-                hit = e;
-                hit_at = a;
-            }
-            e = e + 24;
-        }
-        if hit != 0 {
-            name := raw_load(hit + 8);
-            flags := raw_load(hit + 16);
-            // A place is named only when the entry has a file. The writer marks the runtime's own
-            // statements by leaving the file zero; a table written before that rule (the checked-in
-            // seed is one) keeps the name and sets bit 63 instead, so both shapes skip the runtime -
-            // a failure report names the program, never the runtime's frames.
-            if (name != 0) & ((flags >> 63) == 0) {
-                if lines == 0 {
-                    at = rt_fail_line(buf, at, hit, view(" --> "));
-                } else {
-                    at = rt_fail_line(buf, at, hit, view(" = called from "));
+        if has_sites != 0 {
+            // The statement the return address is in: the entry with the greatest address not past it.
+            // Its file is zero for code that names no place (a prologue, the runtime's own statements).
+            mut hit = 0;
+            mut hit_at = 0;
+            mut e = begin;
+            while e < end {
+                a := raw_load(e);
+                // Strictly before: a return address is the instruction *after* the call, so when the
+                // call is its statement's last instruction that address is the next statement's label.
+                mut take = a < ret;
+                if take && (hit != 0) {
+                    take = hit_at < a;
                 }
-                lines = lines + 1;
+                if take {
+                    hit = e;
+                    hit_at = a;
+                }
+                e = e + 24;
+            }
+            if hit != 0 {
+                name := raw_load(hit + 8);
+                flags := raw_load(hit + 16);
+                // A place is named only when the entry has a file. The writer marks the runtime's own
+                // statements by leaving the file zero; a table written before that rule (the checked-in
+                // seed is one) keeps the name and sets bit 63 instead, so both shapes skip the runtime -
+                // a failure report names the program, never the runtime's frames.
+                if (name != 0) & ((flags >> 63) == 0) {
+                    if lines == 0 {
+                        at = rt_fail_line(buf, at, hit, view(" --> "));
+                    } else {
+                        at = rt_fail_line(buf, at, hit, view(" = called from "));
+                    }
+                    lines = lines + 1;
+                }
+            }
+        } else if ret != 0 {
+            // Release (LLVM) build: no per-statement site table, so walk %rbp through grail_funcs
+            // to name each caller frame (runtime entries carry name 0 and are skipped).
+            f := rt_site_find(fbegin, fend, ret - 1, 16);
+            if f != 0 {
+                fname := raw_load(f + 8);
+                if fname != 0 {
+                    if lines == 0 {
+                        at = rt_fail_put(buf, at, view(" --> "));
+                    } else {
+                        at = rt_fail_put(buf, at, view(" = called from "));
+                    }
+                    at = rt_fail_cstr(buf, at, fname);
+                    if at < rt_fail_limit() {
+                        raw_putbyte(buf + at, 10);
+                        at = at + 1;
+                    }
+                    lines = lines + 1;
+                }
             }
         }
         frame = rt_frame_next(frame);

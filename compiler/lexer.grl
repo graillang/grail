@@ -54,6 +54,7 @@ fn punctuation(c: u64) -> bool {
         || (c == 33)
         || (c == 63)
         || (c == 124)
+        || (c == 126)
         || (c == 64);
 }
 fn pair_kind(c: u64, d: u64) -> u64 {
@@ -493,8 +494,67 @@ pub fn tokenize<a>(source: &a [u8]) -> Token[] {
         }
         start := i;
         mut kind = 0;
-        // 'a', '\n', '\u{e9}', 'é': a character literal (token kind 4).
-        if c == 39 {
+        // b'a', b'\n', b'\\', b'\xFF': a byte character literal (token kind 6, typed u8).
+        if (c == 98) && (i + 1 < size) && (source[i + 1] == 39) {
+            kind = 6;
+            i = i + 2;
+            mut body = 0;
+            if i < size {
+                body = 1;
+                if source[i] == 92 {
+                    i = i + 1;
+                    if i == size {
+                        body = 0;
+                    } else {
+                        if source[i] == 120 {
+                            i = i + 1;
+                            if (i < size) && (source[i] != 39) && (source[i] != 10) {
+                                i = i + 1;
+                            }
+                            if (i < size) && (source[i] != 39) && (source[i] != 10) {
+                                i = i + 1;
+                            }
+                        } else {
+                            i = i + 1;
+                        }
+                    }
+                } else {
+                    lead := source[i];
+                    i = i + 1;
+                    if 191 < lead {
+                        while i < size {
+                            if (source[i] & 192) != 128 {
+                                break;
+                            }
+                            i = i + 1;
+                        }
+                    }
+                }
+            }
+            mut form = 0;
+            if (body != 0) & (i < size) {
+                if source[i] == 39 {
+                    i = i + 1;
+                    form = 1;
+                } else {
+                    mut q = i;
+                    while (q < size) & (source[q] != 10) {
+                        if source[q] == 39 {
+                            i = q + 1;
+                            form = 2;
+                            break;
+                        }
+                        q = q + 1;
+                    }
+                }
+            }
+            if form != 1 {
+                kind = 998;
+                if form == 0 {
+                    i = size;
+                }
+            }
+        } else if c == 39 {
             kind = 4;
             i = i + 1;
             // 0 = nothing to scan, 1 = one character and a closing quote, 2 = more than one
@@ -646,7 +706,7 @@ pub fn tokenize<a>(source: &a [u8]) -> Token[] {
                         mut radix = 0;
                         if (c == 48) & (i < size) {
                             r := source[i];
-                            if r == 120 || r == 98 || r == 111 {
+                            if r == 120 || r == 88 || r == 98 || r == 66 || r == 111 || r == 79 {
                                 radix = 1;
                                 i = i + 1;
                             }

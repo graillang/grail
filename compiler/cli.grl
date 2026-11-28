@@ -854,6 +854,7 @@ fn build_argv<a, b, d, e, g, k>(
     mut command = u8[][host::exe_path(), copy(view("--target")), copy(view(target))];
     if release != 0 {
         command.push(copy(view("--backend=llvm")));
+        command.push(copy(view("--range-facts")));
     }
     cpu := (flags / 32768) % 4;
     if cpu != 0 {
@@ -1752,10 +1753,14 @@ fn resolved_groups<a, d>(store: (&d mut Cache), command: (&a u8[][]), at: u64, l
         // everything its own `use` lines reach, and `scalar`, which every module depends on.
         mut below = u8[][][];
         mut implicit_names = u8[][];
-        for which in 2 {
+        for which in 4 {
             mut name = "vecs";
             if which == 1 {
                 name = "strings";
+            } else if which == 2 {
+                name = "clone";
+            } else if which == 3 {
+                name = "math";
             }
             if group_of(&groups, view(name)) != 0 {
                 implicit_names.push(copy(view(name)));
@@ -3448,21 +3453,19 @@ fn info_of<a>(text: &a [u8], scan: bool) -> FileInfo {
             if lexer::calls_any(text, lexer::math_methods()[..]) {
                 info.uses.push(copy(view("math")));
             }
-            // A path's module (`hash::fnv1a64`) and the modules `@derive(...)` needs, when it is a
-            // standard-library module: `Shape::Circle` and an alias's `m::f` name none.
-            qualified := lexer::qualified_names(text);
-            if qualified.len() != 0 {
-                std := home().std;
-                for q in qualified.len() {
-                    mut file = copy(view(qualified[q]));
-                    push_bytes(&mut file, view(".grl"));
-                    if (std.len() != 0) && (host::exists(view(path_join(view(std), view(file)))) != 0) {
-                        info.uses.push(copy(view(qualified[q])));
-                    }
-                }
+        }
+        // A qualified path's module (`hash::fnv1a64`, `other_mod::f`) when it names another module
+        // in the build (readers filter through `group_of`, so enum qualifiers like `Shape::Circle`
+        // are ignored).
+        qualified := lexer::qualified_names(text);
+        for q in qualified.len() {
+            if !eq(view(info.module), view(qualified[q])) {
+                info.uses.push(copy(view(qualified[q])));
             }
-            derived := lexer::derive_modules(text);
-            for d in derived.len() {
+        }
+        derived := lexer::derive_modules(text);
+        for d in derived.len() {
+            if !eq(view(info.module), view(derived[d])) {
                 info.uses.push(copy(view(derived[d])));
             }
         }
@@ -3473,7 +3476,7 @@ fn info_of<a>(text: &a [u8], scan: bool) -> FileInfo {
 // The record: the path, the stamp, the digest, then `-` for a file read only for its digest, or the
 // module (`-` for none), the embed flag and the `use`d names, and the scan's format (fp_scan).
 fn fp_scan() -> string {
-    return "scan4";
+    return "scan6";
 }
 fn fp_write<a, b, d, e>(c: (&a mut Cache), path: &b [u8], stamp: &d [u8], info: (&e FileInfo), scan: bool) -> unit {
     if (c.root.len() == 0) || (stamp.len() == 0) {
@@ -5814,11 +5817,17 @@ fn build_pass_inner<a, b, c>(h: (&a Home), o: (&b mut Options), diag: &c [u8]) -
             stem := basename(view(o.file));
             o.output = path_join(view("target"), view(stem));
         }
-        mut none = u8[][];
+        mut extra = u8[][];
+        for i in o.paths.len() {
+            p := item(&o.paths, i);
+            if ends(view(p), view(".grl")) && !eq(view(p), view(o.file)) {
+                extra.push(p);
+            }
+        }
         return compile(
             h: &h,
             entry: view(o.file),
-            modules: &none,
+            modules: &extra,
             output: view(o.output),
             target: view(o.target),
             flags: flag_bits(&o),

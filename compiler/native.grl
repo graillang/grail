@@ -5645,6 +5645,8 @@ fn signature_fact<a>(c: (&a mut C), declared: u64) -> unit {
     }
     // The reference words among the first six (a `&T`, `&mut T` or `&dyn` parameter): the LLVM
     // backend passes them as `ptr` so the caller's slot does not escape as an integer.
+    // Bits 0..5 mark all reference parameters (`ptr`); bits 6..11 mark exclusive `&mut T`
+    // parameters (`ptr noalias`), guaranteed non-aliasing by the borrow checker in safe modules.
     mut refs = 0;
     for i in declared {
         if c.raw != 0 {
@@ -5654,6 +5656,9 @@ fn signature_fact<a>(c: (&a mut C), declared: u64) -> unit {
             pty := c.locals[i].ty;
             if ty_kind(&mut c, pty) == 7 {
                 refs = refs | (1 << i);
+                if ty_mode(&mut c, pty) == 1 {
+                    refs = refs | (1 << (i + 6));
+                }
             }
         }
     }
@@ -24887,26 +24892,95 @@ fn ct_round_bits<a>(c: (&a mut C), x: f64) -> u64 {
 // C pointers, and extern "C" records (their C layout). A Grail record or vector is a managed
 // object whose layout the language does not promise, so it is refused rather than given a number.
 fn ct_layout<a>(c: (&a mut C), align: u64) -> u64 {
-    expect(&mut c, view("("));
-    ty := parse_type(&mut c);
-    expect(&mut c, view(")"));
-    if ct_is_bool(&mut c, ty) {
+    mut ty = 0;
+    if eat(&mut c, view("<")) {
+        ty = parse_type(&mut c);
+        expect(&mut c, view(">"));
+        expect(&mut c, view("("));
+        expect(&mut c, view(")"));
+    } else {
+        expect(&mut c, view("("));
+        ty = parse_type(&mut c);
+        expect(&mut c, view(")"));
+    }
+    base := base_type(&mut c, ty);
+    if ct_is_bool(&mut c, base) {
         return 1;
     }
-    k := ty_kind(&mut c, ty);
-    if (is_c_record(&mut c, ty) != 0) & (c.ct_pass != 0) & (c.ct_pass < 3) & c.ct_in_if {
+    k := ty_kind(&mut c, base);
+    is_rec := (k == 8) && (c.decls[ty_arg(&mut c, base)].is_enum == 0);
+    if is_rec & (c.ct_pass != 0) & (c.ct_pass < 3) & c.ct_in_if {
         // A module-level @if decides which declarations exist, so it is decided in every pass,
         // before record layouts are complete: it can test scalars and target, not a record.
         fail(&mut c, view("a module-level @if cannot depend on the layout of a record; test it with @assert, or inside a function"));
     }
-    if (ty == 0) || (k == 18) || (k == 21) || (k == 23) || (k == 24) || (k == 26) || (is_c_record(&mut c, ty) != 0) {
+    if (base == 0) || (k == 18) || (k == 21) || (k == 23) || (k == 24) || (k == 26) || (is_c_record(&mut c, base) != 0) {
         if align != 0 {
-            return ffi_field_align(&mut c, ty);
+            return ffi_field_align(&mut c, base);
         }
-        return ffi_field_size(&mut c, ty);
+        return ffi_field_size(&mut c, base);
     }
-    fail(&mut c, view("size_of and align_of take a scalar, a handle or C pointer, or an extern \"C\" record: a Grail record or vector has no layout the language promises"));
+    if k == 34 {
+        return 8;
+    }
+    if k == 32 {
+        if align != 0 {
+            return member_align(&mut c, base);
+        }
+        return array_bytes(&mut c, base);
+    }
+    if is_rec {
+        if framable(&mut c, base) {
+            if align != 0 {
+                return member_align(&mut c, base);
+            }
+            return value_bytes(&mut c, base);
+        }
+        if align != 0 {
+            return 8;
+        }
+        return c.decls[ty_arg(&mut c, base)].count * 8;
+    }
+    fail(&mut c, view("size_of and align_of take a scalar, fixed array, pointer, handle, extern \"C\" record, or struct"));
     return 0;
+}
+// offset_of(T, field) / offset_of(T, a.b): compile-time byte offset of a field in an extern "C"
+// record or Grail struct.
+fn ct_offset_of<a>(c: (&a mut C)) -> u64 {
+    mut ty = 0;
+    if eat(&mut c, view("<")) {
+        ty = parse_type(&mut c);
+        expect(&mut c, view(">"));
+        expect(&mut c, view("("));
+    } else {
+        expect(&mut c, view("("));
+        ty = parse_type(&mut c);
+        expect(&mut c, view(","));
+    }
+    mut base = base_type(&mut c, ty);
+    if (c.ct_pass != 0) & (c.ct_pass < 3) & c.ct_in_if {
+        fail(&mut c, view("a module-level @if cannot depend on the layout of a record; test it with @assert, or inside a function"));
+    }
+    mut off: u64 = 0;
+    while true {
+        if (ty_kind(&mut c, base) != 8) || (c.decls[ty_arg(&mut c, base)].is_enum != 0) {
+            fail(&mut c, view("offset_of requires a struct or extern \"C\" record type"));
+        }
+        field := ident(&mut c);
+        d := ty_arg(&mut c, base);
+        idx := find_field(&mut c, d, view(field));
+        if is_c_record(&mut c, base) != 0 {
+            off = off + ffi_offset(&mut c, d, idx);
+        } else {
+            off = off + field_offset(&mut c, base, idx);
+        }
+        if !eat(&mut c, view(".")) {
+            break;
+        }
+        base = base_type(&mut c, field_type(&mut c, base, idx));
+    }
+    expect(&mut c, view(")"));
+    return off;
 }
 // The integer type an integer-conversion call names, as bits | signed << 8, or 0 when the name is
 // not one (`u8`, `i64`, `usize` is not a Grail type).
@@ -24928,6 +25002,19 @@ fn ct_primary<a>(c: (&a mut C)) -> CVal {
         t := tok_text(&mut c, here);
         v := literal_value(&mut c, view(t));
         advance(&mut c);
+        return ct_val(v, 0);
+    }
+    if k == 6 {
+        v := byte_literal(&mut c, here);
+        advance(&mut c);
+        return ct_val(v, int_type(&mut c, 8, 0));
+    }
+    if k == 4 {
+        v := char_literal(&mut c, here);
+        advance(&mut c);
+        if 127 < v {
+            return ct_val(v, char_type(&mut c));
+        }
         return ct_val(v, 0);
     }
     if k == 5 {
@@ -24955,6 +25042,20 @@ fn ct_primary<a>(c: (&a mut C)) -> CVal {
         v := ct_primary(&mut c);
         b := ct_bool(&mut c, v, view("! needs a bool"));
         return ct_val(1 - b, bt);
+    }
+    if eat(&mut c, view("~")) {
+        v := ct_primary(&mut c);
+        vty := v.ty;
+        a := ct_int(&mut c, v);
+        mut mask: u64 = 18446744073709551615;
+        if (vty != 0) && (ty_kind(&mut c, vty) == 18) {
+            bits := ty_arg(&mut c, vty);
+            signed := ty_mode(&mut c, vty);
+            if (signed == 0) && (bits < 64) {
+                mask = (1 << bits) - 1;
+            }
+        }
+        return ct_val(a ^ mask, vty);
     }
     if eat(&mut c, view("-")) {
         // A float flips its sign bit. An integer becomes a signed 64-bit value (two's complement,
@@ -24985,6 +25086,10 @@ fn ct_primary<a>(c: (&a mut C)) -> CVal {
             align := u64(is(&mut c, view("align_of")));
             advance(&mut c);
             return ct_val(ct_layout(&mut c, align), 0);
+        }
+        if is(&mut c, view("offset_of")) {
+            advance(&mut c);
+            return ct_val(ct_offset_of(&mut c), 0);
         }
         if is(&mut c, view("target")) & (next_kind(&mut c) == 46) {
             advance(&mut c);
@@ -25365,7 +25470,14 @@ fn ct_branch<a>(c: (&a mut C), pass: u64, top: u64, take: u64) -> unit {
 fn ct_assert<a>(c: (&a mut C)) -> unit {
     if c.probe_mode != 0 {
         // The program's own compile checks its assertions; a probe only computes a value.
-        while !is(&mut c, view(";")) {
+        mut depth = 0;
+        while (kind(&mut c) != 0) && ((depth != 0) || !is(&mut c, view(";"))) {
+            tk := kind(&mut c);
+            if (tk == 40) || (tk == 91) {
+                depth += 1;
+            } else if ((tk == 41) || (tk == 93)) && (depth != 0) {
+                depth -= 1;
+            }
             advance(&mut c);
         }
         advance(&mut c);
@@ -25414,10 +25526,18 @@ fn ct_form<a>(c: (&a mut C), pass: u64, top: u64) -> unit {
         if (top != 0) & (pass != 3) {
             // A module-level assertion is checked once, in the last pass, when every declaration
             // and record layout it can name is complete; earlier passes only step over it.
-            while !is(&mut c, view(";")) {
+            mut depth = 0;
+            while (kind(&mut c) != 0) && ((depth != 0) || !is(&mut c, view(";"))) {
+                tk := kind(&mut c);
+                if (tk == 40) || (tk == 91) {
+                    depth += 1;
+                } else if ((tk == 41) || (tk == 93)) && (depth != 0) {
+                    depth -= 1;
+                }
                 advance(&mut c);
             }
             advance(&mut c);
+            exchange(&mut c.ct_pass, old_pass);
             return ();
         }
         ct_assert(&mut c);
@@ -25454,7 +25574,7 @@ fn ct_call_ahead<a>(c: (&a mut C)) -> bool {
     }
     here := c.pos;
     first := tok_text(&mut c, here);
-    if same(view(first), view("size_of")) || same(view(first), view("align_of")) || same(view(first), view("target")) {
+    if same(view(first), view("size_of")) || same(view(first), view("align_of")) || same(view(first), view("offset_of")) || same(view(first), view("target")) {
         return false;
     }
     mut at = here + 1;
@@ -27401,14 +27521,61 @@ fn constants_deferred<a>(c: (&a mut C)) -> unit {
     exchange(&mut c.decl_public, saved_public);
     return ();
 }
-fn constant_declaration<a>(c: (&a mut C), pass: u64) -> unit {
-    if (pass == 1) && (c.const_replay == 0) && const_names_later(&mut c) {
-        c.const_later.push(c.pos);
-        c.const_later_public.push(c.decl_public);
-        while !is(&mut c, view(";")) {
-            advance(&mut c);
+fn skip_const_stmt<a>(c: (&a mut C)) -> unit {
+    mut depth = 0;
+    while (kind(&mut c) != 0) && ((depth != 0) || !is(&mut c, view(";"))) {
+        tk := kind(&mut c);
+        if (tk == 40) || (tk == 91) {
+            depth += 1;
+        } else if ((tk == 41) || (tk == 93)) && (depth != 0) {
+            depth -= 1;
         }
         advance(&mut c);
+    }
+    if is(&mut c, view(";")) {
+        advance(&mut c);
+    }
+    return ();
+}
+fn const_uses_layout<a>(c: (&a mut C)) -> bool {
+    mut i = c.pos;
+    mut depth = 0;
+    while (kind_at(&mut c, i) != 0) && ((depth != 0) || !is_at(&mut c, i, view(";"))) {
+        tk := kind_at(&mut c, i);
+        if (tk == 40) || (tk == 91) {
+            depth += 1;
+        } else if ((tk == 41) || (tk == 93)) && (depth != 0) {
+            depth -= 1;
+        } else if tk == 1 {
+            w := tok_text(&mut c, i);
+            if same(view(w), view("size_of")) || same(view(w), view("align_of")) || same(view(w), view("offset_of")) {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    return false;
+}
+fn constant_declaration<a>(c: (&a mut C), pass: u64) -> unit {
+    uses_layout := const_uses_layout(&mut c);
+    if (pass == 1) && (c.const_replay == 0) {
+        if uses_layout {
+            skip_const_stmt(&mut c);
+            return ();
+        }
+        if const_names_later(&mut c) {
+            c.const_later.push(c.pos);
+            c.const_later_public.push(c.decl_public);
+            skip_const_stmt(&mut c);
+            return ();
+        }
+    }
+    if (pass == 2) && (c.const_replay == 0) {
+        if uses_layout {
+            c.const_later.push(c.pos);
+            c.const_later_public.push(c.decl_public);
+        }
+        skip_const_stmt(&mut c);
         return ();
     }
     expect(&mut c, view("const"));
@@ -27416,13 +27583,9 @@ fn constant_declaration<a>(c: (&a mut C), pass: u64) -> unit {
     name := ident(&mut c);
     declared := position_text(&mut c, at_name);
     expect(&mut c, view(":"));
-    // Registered in the first pass, so a module-level `@if` and every later declaration can fold
-    // against it.
-    if pass != 1 {
-        while !is(&mut c, view(";")) {
-            advance(&mut c);
-        }
-        advance(&mut c);
+    // Registered in the first pass (or end of pass 2 for layout intrinsics once record fields exist).
+    if (pass != 1) && (c.const_replay == 0) {
+        skip_const_stmt(&mut c);
         return ();
     }
     ty := parse_type(&mut c);
@@ -40402,7 +40565,7 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
         // (site_table), called by name - a leaf, so the effect walk follows a named edge. A build
         // with no table has no helper and answers 0 words (rt_sites_fill asks only when the entry
         // stub published a table).
-        if site_table_on(&c) {
+        if sites_on(&c) {
             get(&mut c, args[0], view("%rdi"));
             get(&mut c, args[1], view("%rsi"));
             call_out(&mut c, view("rt_sites"));
@@ -44038,21 +44201,61 @@ fn char_literal<a>(c: (&a mut C), tok: u64) -> u64 {
     }
     return v;
 }
+// b'a', b'\n', b'\\', b'\xFF': the byte value (0..255) of a byte character literal token.
+fn byte_literal<a>(c: (&a mut C), tok: u64) -> u64 {
+    t := tok_text(&mut c, tok);
+    if t.len() < 4 {
+        fail(&mut c, view("invalid byte literal"));
+    }
+    b := t[2];
+    if b == 92 {
+        if t.len() < 5 {
+            fail(&mut c, view("invalid escape in byte literal"));
+        }
+        e := t[3];
+        if e == 110 {
+            return 10;
+        }
+        if e == 116 {
+            return 9;
+        }
+        if e == 114 {
+            return 13;
+        }
+        if e == 48 {
+            return 0;
+        }
+        if (e == 92) || (e == 39) || (e == 34) {
+            return e;
+        }
+        if e == 120 {
+            if (t.len() != 7) || !is_hex_digit(t[4]) || !is_hex_digit(t[5]) {
+                fail(&mut c, view("byte literal \\x escape requires two hex digits"));
+            }
+            return hex(t[4]) * 16 + hex(t[5]);
+        }
+        fail(&mut c, view("invalid escape in byte literal"));
+    }
+    if (t.len() != 4) || (127 < b) {
+        fail(&mut c, view("byte literal must be a single ASCII character or escape"));
+    }
+    return b;
+}
 fn literal_value<a, b>(c: (&a mut C), t: &b [u8]) -> u64 {
     mut radix = 10;
     mut i = 0;
     if 2 < t.len() {
         if t[0] == 48 {
             r := t[1];
-            if r == 120 {
+            if (r == 120) || (r == 88) {
                 radix = 16;
                 i = 2;
             }
-            if r == 98 {
+            if (r == 98) || (r == 66) {
                 radix = 2;
                 i = 2;
             }
-            if r == 111 {
+            if (r == 111) || (r == 79) {
                 radix = 8;
                 i = 2;
             }
@@ -46415,6 +46618,9 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
             o(&mut c, view(",%rsp\n"));
         }
         begin_result_dest(&mut c, c.result, count);
+        if c.validating == 0 {
+            llvm::fact_signature(&mut c.facts, mangle_name(&mut c, view(".closure"), view(symbol)), arg_words(&c, count), 0);
+        }
         store_params(&mut c, count);
         o(&mut c, view("leaq -"));
         fname(&mut c, frame);
@@ -50727,10 +50933,15 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
             return val(imm(&mut c, v.value), c.type_bounds[vp - 1] / 8);
         }
     }
-    if (k == 1) & (is(&mut c, view("size_of")) || is(&mut c, view("align_of"))) & (next_kind(&mut c) == 40) {
+    if (k == 1) & (is(&mut c, view("size_of")) || is(&mut c, view("align_of"))) & ((next_kind(&mut c) == 40) || (next_kind(&mut c) == 60)) {
         align := u64(is(&mut c, view("align_of")));
         advance(&mut c);
         n := ct_layout(&mut c, align);
+        return val(imm(&mut c, n), 0);
+    }
+    if (k == 1) & is(&mut c, view("offset_of")) & ((next_kind(&mut c) == 40) || (next_kind(&mut c) == 60)) {
+        advance(&mut c);
+        n := ct_offset_of(&mut c);
         return val(imm(&mut c, n), 0);
     }
     if k == 267 {
@@ -50908,6 +51119,14 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
         }
         return val(save(&mut c), ty);
     }
+    if k == 6 {
+        p := c.pos;
+        value := byte_literal(&mut c, p);
+        advance(&mut c);
+        slot := imm(&mut c, value);
+        ty := int_type(&mut c, 8, 0);
+        return val(slot, ty);
+    }
     if k == 4 {
         // ASCII character literals are untyped byte values (like Rust's b'a') that adopt char
         // contexts; any other character literal is a char.
@@ -50978,6 +51197,35 @@ fn primary<a>(c: (&a mut C), expected: u64) -> Val {
         o(&mut c, view("cmpq %rcx,%rax\nsete %al\nmovzbq %al,%rax\n"));
         ty := bool_type(&mut c);
         return val(save(&mut c), ty);
+    }
+    if k == 126 {
+        advance(&mut c);
+        op_start := c.pos;
+        mut inner = NO_TYPE;
+        if (c.raw == 0) && (expected != NO_TYPE) && ((expected == 0) || (ty_kind(&mut c, expected) == 18)) {
+            inner = expected;
+        }
+        mut operand = expr_expected(&mut c, 10, inner);
+        if (c.raw == 0) && (inner != NO_TYPE) && (operand.ty == 0) && (c.lit_start == op_start) && (c.lit_end == c.pos) {
+            operand = adopt_value(&mut c, operand, op_start, c.pos, inner);
+        }
+        ot := operand.ty;
+        if (c.raw == 0) && !((ot == 0) || (ty_kind(&mut c, ot) == 18)) {
+            fail(&mut c, view("~ needs an integer"));
+        }
+        mut mask: u64 = 18446744073709551615;
+        if (ot != 0) && (ty_kind(&mut c, ot) == 18) {
+            bits := ty_arg(&mut c, ot);
+            signed := ty_mode(&mut c, ot);
+            if (signed == 0) && (bits < 64) {
+                mask = (1 << bits) - 1;
+            }
+        }
+        get(&mut c, operand.t, view("%rax"));
+        o(&mut c, view("movabsq $"));
+        on(&mut c, mask);
+        o(&mut c, view(",%rcx\nxorq %rcx,%rax\n"));
+        return val(save(&mut c), ot);
     }
     if (k == 45) & (c.raw == 0) {
         // Unary minus: negative literals (default i64, adopt a signed context) or signed values.
@@ -56062,6 +56310,9 @@ fn scalar_match<a>(c: (&a mut C), s: Val, term: u8[], scrut_at: u64) -> unit {
                         if k == 4 {
                             value = char_literal(&mut c, here);
                             advance(&mut c);
+                        } else if k == 6 {
+                            value = byte_literal(&mut c, here);
+                            advance(&mut c);
                         } else {
                             fail(
                                 &mut c,
@@ -56096,6 +56347,9 @@ fn scalar_match<a>(c: (&a mut C), s: Val, term: u8[], scrut_at: u64) -> unit {
                     } else {
                         if hk == 4 {
                             high = char_literal(&mut c, there);
+                            advance(&mut c);
+                        } else if hk == 6 {
+                            high = byte_literal(&mut c, there);
                             advance(&mut c);
                         } else {
                             fail(&mut c, view("range pattern needs an integer upper bound"));
@@ -66311,7 +66565,7 @@ pub fn main() -> u64 {
             load_file(&mut c, i);
             exchange(&mut c.file, i);
             toplevel(&mut c, pass + 1);
-            if pass == 0 {
+            if (pass == 0) || (pass == 1) {
                 constants_deferred(&mut c);
             }
             if pass == 0 {
@@ -66571,8 +66825,8 @@ pub fn main() -> u64 {
         }
     }
     }
-    if site_table_on(&c) && (c.no_entry == 0) {
-        // Where a runtime error can find the call-site table (runtime.grl rt_fail_where).
+    if sites_on(&c) && (c.no_entry == 0) {
+        // Where a runtime error can find the call-site / function tables (runtime.grl rt_fail_where).
         o(&mut c, view("leaq rt_sites(%rip),%rax\nmovq %rax,rt_state+3400(%rip)\n"));
     }
     if tls_bridge(&mut c) {
@@ -66838,7 +67092,8 @@ pub fn main() -> u64 {
             if release_sites(&c) {
                 out = site_resolve(&c, view(out));
             }
-            lowered := llvm::lower(view(out), view("x86_64-unknown-linux-gnu"), &c.facts, c.verify_facts, c.range_facts);
+            emit_funcs := u64(release_sites(&c));
+            lowered := llvm::lower(view(out), view("x86_64-unknown-linux-gnu"), &c.facts, c.verify_facts, c.range_facts, c.cpu, emit_funcs);
             if lowered.error.len() != 0 {
                 host::print(view(lowered.error));
                 return 1;
@@ -66851,6 +67106,9 @@ pub fn main() -> u64 {
                 return written;
             }
             mut native = strip_gsite(view(lowered.native));
+            if emit_funcs != 0 {
+                push_bytes(&mut native, view("\n.text\n.weak __start_grail_sites\n.weak __stop_grail_sites\n.weak __start_grail_funcs\n.weak __stop_grail_funcs\n.weak rt_sites\nrt_sites:\ncmpq $3,%rsi\njb .Lrt_sites_none\nleaq __start_grail_sites(%rip),%rax\nmovq %rax,(%rdi)\nleaq __stop_grail_sites(%rip),%rax\nmovq %rax,8(%rdi)\nmovq %rbp,16(%rdi)\ncmpq $5,%rsi\njb .Lrt_sites_three\nleaq __start_grail_funcs(%rip),%rax\nmovq %rax,24(%rdi)\nleaq __stop_grail_funcs(%rip),%rax\nmovq %rax,32(%rdi)\nmovq $5,%rax\nret\n.Lrt_sites_three:\nmovq $3,%rax\nret\n.Lrt_sites_none:\nxorq %rax,%rax\nret\n"));
+            }
             if c.probes != 0 {
                 native = optimize::probe_frames(view(native), 0);
             }
@@ -66869,7 +67127,8 @@ pub fn main() -> u64 {
         if release_sites(&c) {
             out = site_resolve(&c, view(out));
         }
-        lowered := llvm::lower_for(view(out), target, &c.facts, c.verify_facts, c.range_facts);
+        emit_funcs := u64(release_sites(&c));
+        lowered := llvm::lower_for(view(out), target, &c.facts, c.verify_facts, c.range_facts, c.cpu, emit_funcs);
         if lowered.error.len() != 0 {
             host::print(view(lowered.error));
             return 1;
@@ -66882,6 +67141,9 @@ pub fn main() -> u64 {
             return written;
         }
         mut rest = strip_gsite(view(lowered.native));
+        if emit_funcs != 0 {
+            push_bytes(&mut rest, view("\n.text\n.weak __start_grail_sites\n.weak __stop_grail_sites\n.weak __start_grail_funcs\n.weak __stop_grail_funcs\n.weak rt_sites\nrt_sites:\ncmpq $3,%rsi\njb .Lrt_sites_none\nleaq __start_grail_sites(%rip),%rax\nmovq %rax,(%rdi)\nleaq __stop_grail_sites(%rip),%rax\nmovq %rax,8(%rdi)\nmovq %rbp,16(%rdi)\ncmpq $5,%rsi\njb .Lrt_sites_three\nleaq __start_grail_funcs(%rip),%rax\nmovq %rax,24(%rdi)\nleaq __stop_grail_funcs(%rip),%rax\nmovq %rax,32(%rdi)\nmovq $5,%rax\nret\n.Lrt_sites_three:\nmovq $3,%rax\nret\n.Lrt_sites_none:\nxorq %rax,%rax\nret\n"));
+        }
         if c.probes != 0 {
             rest = optimize::probe_frames(view(rest), u64(target == 4));
         }

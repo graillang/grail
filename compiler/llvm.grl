@@ -152,7 +152,7 @@ pub fn fact_imported_signature<a>(facts: (&a mut Facts), name: u8[], code: u64) 
 // `ptr` at the call boundary, so a frame slot passed by reference does not escape as an integer
 // and what the caller keeps there - a `&dyn` pair's vtable word - is not reloaded after the call.
 pub fn fact_signature<a>(facts: (&a mut Facts), name: u8[], words: u64, refs: u64) -> unit {
-    facts.items.push(Fact { kind: FACT_SIGNATURE, fn: name, a: words, b: refs & 63, callee: u8[], what: 0, width: 0 });
+    facts.items.push(Fact { kind: FACT_SIGNATURE, fn: name, a: words, b: refs & 4095, callee: u8[], what: 0, width: 0 });
     return ();
 }
 // The `ord`-th `call *%rax` of the body `name` passes `words` argument words (native.grl
@@ -313,9 +313,13 @@ fn dump_facts<a>(out: (&a mut u8[]), facts: (&a Facts)) -> unit {
         if f.kind == FACT_SIGNATURE {
             put(&mut out, view(" signature "));
             num(&mut out, f.a);
-            if f.b != 0 {
+            if (f.b & 63) != 0 {
                 put(&mut out, view(" refs "));
-                num(&mut out, f.b);
+                num(&mut out, f.b & 63);
+            }
+            if (f.b >> 6) != 0 {
+                put(&mut out, view(" noalias "));
+                num(&mut out, f.b >> 6);
             }
             out.push(10);
             continue;
@@ -454,6 +458,8 @@ struct L {
     sitepath: u8[],
     siteline: u64,
     sitecol: u64,
+    fn_sitepath: u8[],
+    fn_siteline: u64,
     sitedefs: u8[],
     sitecount: u64,
     // The integer constant the stream last put in %rdi in this block, or empty: a runtime helper's
@@ -598,7 +604,11 @@ struct L {
     // Vector registers written and not read since (a pending float argument), and ones not written
     // since the entry or the last call (xmm_read).
     xpend: u64,
-    xstale: u64
+    xstale: u64,
+    has_round: u64,
+    emit_funcs: u64,
+    shared_names: u8[][],
+    shared_masks: u64[]
 }
 
 fn eq<a, b>(a: &a [u8], b: &b [u8]) -> bool {
@@ -2632,7 +2642,7 @@ fn header_readonly(name: (&[u8])) -> bool {
     if eq(name, view("rt_slot")) || eq(name, view("rt_slotu")) || eq(name, view("rt_slot4")) || eq(name, view("rt_slot4u")) {
         return true;
     }
-    if eq(name, view("rt_slotb")) || eq(name, view("rt_len")) || eq(name, view("rt_view")) {
+    if eq(name, view("rt_slotb")) || eq(name, view("rt_slotw")) || eq(name, view("rt_len")) || eq(name, view("rt_view")) {
         return true;
     }
     if eq(name, view("rt_slice")) || eq(name, view("rt_vslice")) || eq(name, view("rt_write")) {
@@ -2653,7 +2663,7 @@ fn header_neutral(name: (&[u8])) -> bool {
         return true;
     }
     return starts(name, view("rt_f64_")) || starts(name, view("rt_f32_")) || eq(name, view("rt_int_from_f64"))
-        || eq(name, view("rt_div")) || eq(name, view("rt_int_cast"));
+        || eq(name, view("rt_div")) || eq(name, view("rt_int_cast")) || eq(name, view("rt_load_sized"));
 }
 // Whether the body takes the address of slot k: a `leaq` whose source is the slot.
 fn slot_addressed(l: (&L), instrs: (&u8[][]), k: u64) -> bool {
@@ -2995,7 +3005,7 @@ fn never_returns<a>(target: &a [u8]) -> bool {
 // The accessors that return an element's address: `rt_slot` and `rt_slot4` check the index against
 // `len` first, the `u` forms were handed a proven index.
 fn address_accessor(name: (&[u8])) -> bool {
-    return eq(name, view("rt_slot")) || eq(name, view("rt_slotu")) || eq(name, view("rt_slot4")) || eq(name, view("rt_slot4u"));
+    return eq(name, view("rt_slot")) || eq(name, view("rt_slotu")) || eq(name, view("rt_slot4")) || eq(name, view("rt_slot4u")) || eq(name, view("rt_slotb"));
 }
 // An element address from the fields an F1 fact hoisted: the bounds check against the hoisted `len`
 // (failing exactly as the accessor would - `rt_slot` reports the index, `rt_slot4` aborts), then a
@@ -3014,7 +3024,80 @@ fn generic_element(l: (&mut L), target: (&[u8])) -> bool {
     // `exchange(&mut slot, v)` (also behind `v[i] = x`): the old word read and the new one stored in
     // place, so a store loop is visible to the vectoriser. Tagged as element storage only when the
     // address is one the element accessors produced (l.evals), so it is known not to be a header.
-    if eq(target, view("rt_xchg")) && (l.verify == 0) && (l.proof.len() == 0) {
+    // `v.push(x)` for word (8-byte), 4-byte (`u32`/`i32`/`f32`) and byte (`u8`) vectors: inline the
+    // `len == cap` check, element store (`!tbaa !3`) and `len += 1` (`!tbaa !1`), calling the cold
+    // `rt_push*_slow` helper only when the buffer must grow. Because the header and element buffer
+    // carry distinct TBAA tags, LLVM can keep `data`/`len`/`cap` in registers across hot push loops.
+    if eq(target, view("rt_push")) || eq(target, view("rt_push4")) || eq(target, view("rt_pushb")) || eq(target, view("rt_pushb_checked")) {
+        s := get_reg(&mut l, view("rdi"));
+        v := get_reg(&mut l, view("rsi"));
+        if eq(target, view("rt_pushb_checked")) {
+            too_big := def(&mut l, view("icmp ugt i64 {}, 255"), &u8[][copy(view(v))]);
+            okb := fresh_block(&mut l);
+            badb := fresh_block(&mut l);
+            emit(&mut l, view("br i1 {}, label %{}, label %{}"), &u8[][too_big, copy(view(badb)), copy(view(okb))]);
+            begin_block(&mut l, view(badb));
+            l.calls.push(copy(view("rt_abort")));
+            site_hint(&mut l);
+            emit(&mut l, view("call {i64, i64} @\"rt_abort\"(i64 0, i64 0, i64 0, i64 0, i64 0, i64 0)"), &u8[][]);
+            emit(&mut l, view("unreachable"), &u8[][]);
+            begin_block(&mut l, view(okb));
+        }
+        mut pwidth: u64 = 8;
+        mut slow_fn = copy(view("rt_push_slow"));
+        if eq(target, view("rt_push4")) {
+            pwidth = 4;
+            slow_fn = copy(view("rt_push4_slow"));
+        } else if eq(target, view("rt_pushb")) || eq(target, view("rt_pushb_checked")) {
+            pwidth = 1;
+            slow_fn = copy(view("rt_pushb_slow"));
+        }
+        h := def(&mut l, view("inttoptr i64 {} to ptr"), &u8[][copy(view(s))]);
+        lp := def(&mut l, view("getelementptr i8, ptr {}, i64 8"), &u8[][copy(view(h))]);
+        cp := def(&mut l, view("getelementptr i8, ptr {}, i64 16"), &u8[][copy(view(h))]);
+        n := def(&mut l, view("load i64, ptr {}, align 8, !tbaa !1"), &u8[][copy(view(lp))]);
+        cap := def(&mut l, view("load i64, ptr {}, align 8, !tbaa !1"), &u8[][cp]);
+        full := def(&mut l, view("icmp eq i64 {}, {}"), &u8[][copy(view(n)), cap]);
+        fast := fresh_block(&mut l);
+        slow := fresh_block(&mut l);
+        done := fresh_block(&mut l);
+        emit(&mut l, view("br i1 {}, label %{}, label %{}"), &u8[][full, copy(view(slow)), copy(view(fast))]);
+        begin_block(&mut l, view(fast));
+        d := def(&mut l, view("load ptr, ptr {}, align 8, !tbaa !1"), &u8[][h]);
+        if pwidth == 8 {
+            off := def(&mut l, view("mul i64 {}, 8"), &u8[][copy(view(n))]);
+            ep := def(&mut l, view("getelementptr i8, ptr {}, i64 {}"), &u8[][d, off]);
+            emit(&mut l, view("store i64 {}, ptr {}, align 8, !tbaa !3"), &u8[][copy(view(v)), ep]);
+        } else if pwidth == 4 {
+            off := def(&mut l, view("mul i64 {}, 4"), &u8[][copy(view(n))]);
+            ep := def(&mut l, view("getelementptr i8, ptr {}, i64 {}"), &u8[][d, off]);
+            v32 := def(&mut l, view("trunc i64 {} to i32"), &u8[][copy(view(v))]);
+            emit(&mut l, view("store i32 {}, ptr {}, align 4, !tbaa !3"), &u8[][v32, ep]);
+        } else {
+            ep := def(&mut l, view("getelementptr i8, ptr {}, i64 {}"), &u8[][d, copy(view(n))]);
+            v8 := def(&mut l, view("trunc i64 {} to i8"), &u8[][copy(view(v))]);
+            emit(&mut l, view("store i8 {}, ptr {}, align 1, !tbaa !3"), &u8[][v8, ep]);
+        }
+        n1 := def(&mut l, view("add i64 {}, 1"), &u8[][n]);
+        emit(&mut l, view("store i64 {}, ptr {}, align 8, !tbaa !1"), &u8[][n1, lp]);
+        emit(&mut l, view("br label %{}"), &u8[][copy(view(done))]);
+        begin_block(&mut l, view(slow));
+        l.calls.push(copy(view(slow_fn)));
+        site_hint(&mut l);
+        mut sc = copy(view("call {i64, i64} @\""));
+        put(&mut sc, view(slow_fn));
+        put(&mut sc, view("\"(i64 {}, i64 {}, i64 0, i64 0, i64 0, i64 0)"));
+        emit(&mut l, view(sc), &u8[][s, v]);
+        emit(&mut l, view("br label %{}"), &u8[][copy(view(done))]);
+        begin_block(&mut l, view(done));
+        set_reg(&mut l, view("rax"), view("0"));
+        set_reg(&mut l, view("rdx"), view("0"));
+        set_chain(&mut l, reg_index(view("rax")) + 1, 0, 0, 0);
+        set_chain(&mut l, reg_index(view("rdx")) + 1, 0, 0, 0);
+        clear_args(&mut l);
+        return true;
+    }
+    if eq(target, view("rt_xchg")) && (l.verify == 0) {
         pv := get_reg(&mut l, view("rdi"));
         nv := get_reg(&mut l, view("rsi"));
         tagged := (l.evals.count != 0) && set_has(&l.evals, view(pv));
@@ -3034,7 +3117,7 @@ fn generic_element(l: (&mut L), target: (&[u8])) -> bool {
         return true;
     }
     // `v.len()`: the header's length word, tagged as a header load.
-    if eq(target, view("rt_len")) && (l.verify == 0) && (l.proof.len() == 0) {
+    if eq(target, view("rt_len")) && (l.verify == 0) {
         s := get_reg(&mut l, view("rdi"));
         h := def(&mut l, view("inttoptr i64 {} to ptr"), &u8[][s]);
         lp := def(&mut l, view("getelementptr i8, ptr {}, i64 8"), &u8[][h]);
@@ -3045,7 +3128,7 @@ fn generic_element(l: (&mut L), target: (&[u8])) -> bool {
         clear_args(&mut l);
         return true;
     }
-    if eq(target, view("rt_pop")) && (l.verify == 0) && (l.proof.len() == 0) {
+    if eq(target, view("rt_pop")) && (l.verify == 0) {
         s := get_reg(&mut l, view("rdi"));
         h := def(&mut l, view("inttoptr i64 {} to ptr"), &u8[][s]);
         lp := def(&mut l, view("getelementptr i8, ptr {}, i64 8"), &u8[][copy(view(h))]);
@@ -3056,6 +3139,7 @@ fn generic_element(l: (&mut L), target: (&[u8])) -> bool {
         emit(&mut l, view("br i1 {}, label %{}, label %{}"), &u8[][empty, copy(view(wrong)), copy(view(good))]);
         begin_block(&mut l, view(wrong));
         l.calls.push(copy(view("rt_fail")));
+        site_hint(&mut l);
         emit(&mut l, view("call {i64, i64} @\"rt_fail\"(i64 8, i64 0, i64 0, i64 0, i64 0, i64 0)"), &u8[][]);
         emit(&mut l, view("unreachable"), &u8[][]);
         begin_block(&mut l, view(good));
@@ -3074,6 +3158,7 @@ fn generic_element(l: (&mut L), target: (&[u8])) -> bool {
     mut width: u64 = 0;
     mut checked = false;
     mut value: u64 = 0;
+    mut dynamic_w = false;
     // A word vector's elements are words (a boxed value's element is the pointer to it), never a
     // header, so its element storage is as distinct from headers as a narrow vector's.
     if eq(target, view("rt_slot")) {
@@ -3095,6 +3180,24 @@ fn generic_element(l: (&mut L), target: (&[u8])) -> bool {
         checked = true;
         value = 32;
     }
+    if eq(target, view("rt_slotb")) {
+        width = 1;
+        checked = true;
+    }
+    if eq(target, view("rt_atb")) {
+        width = 1;
+        checked = true;
+        value = 8;
+    }
+    if eq(target, view("rt_atbu")) {
+        width = 1;
+        value = 8;
+    }
+    if eq(target, view("rt_slotw")) {
+        width = 1;
+        checked = true;
+        dynamic_w = true;
+    }
     if width == 0 {
         return false;
     }
@@ -3102,7 +3205,7 @@ fn generic_element(l: (&mut L), target: (&[u8])) -> bool {
     // so the call stays. Its own bounds failure cannot name the statement - lifted code has no
     // site-table entries for the runtime's return-address walk - so a checked one is preceded by
     // the same compare with a sited failure, and an index past the end reports where it is.
-    if (l.verify != 0) || (l.proof.len() != 0) {
+    if (l.verify != 0) || ((l.proof.len() != 0) && eq(target, view("rt_atb")) && !starts(view(l.fname), view("rt_")) && !starts(view(l.fname), view("f_host_"))) {
         if checked {
             s := get_reg(&mut l, view("rdi"));
             i := get_reg(&mut l, view("rsi"));
@@ -3127,6 +3230,10 @@ fn generic_element(l: (&mut L), target: (&[u8])) -> bool {
     }
     s := get_reg(&mut l, view("rdi"));
     i := get_reg(&mut l, view("rsi"));
+    mut dynw = u8[];
+    if dynamic_w {
+        dynw = get_reg(&mut l, view("rdx"));
+    }
     h := def(&mut l, view("inttoptr i64 {} to ptr"), &u8[][s]);
     // The header's fields as read at the head of a stable loop region this access is inside, else
     // read here.
@@ -3167,7 +3274,14 @@ fn generic_element(l: (&mut L), target: (&[u8])) -> bool {
     } else {
         d = def(&mut l, view("load ptr, ptr {}, align 8, !tbaa !1"), &u8[][h]);
     }
-    off := def(&mut l, view("mul i64 {}, {}"), &u8[][copy(view(i)), copy_width(width)]);
+    mut off = u8[];
+    if dynamic_w {
+        off = def(&mut l, view("mul i64 {}, {}"), &u8[][copy(view(i)), dynw]);
+    } else if width == 1 {
+        off = copy(view(i));
+    } else {
+        off = def(&mut l, view("mul i64 {}, {}"), &u8[][copy(view(i)), copy_width(width)]);
+    }
     p := def(&mut l, view("getelementptr i8, ptr {}, i64 {}"), &u8[][d, off]);
     if value != 0 {
         ty := width_type(value);
@@ -3211,6 +3325,17 @@ fn site_line(l: (&mut L), line: (&[u8])) -> unit {
     l.siteline = words[0];
     l.sitecol = words[1];
     exchange(&mut l.sitepath, copy(rest[i..rest.len()]));
+    if (l.emit_funcs != 0) && (words[0] != 0) && (l.sitepath.len() != 0) {
+        if l.fn_sitepath.len() == 0 {
+            exchange(&mut l.fn_sitepath, copy(view(l.sitepath)));
+            l.fn_siteline = words[0];
+        }
+        put(&mut l.body, view(";gsite "));
+        num(&mut l.body, words[0]);
+        l.body.push(32);
+        num(&mut l.body, words[1]);
+        l.body.push(10);
+    }
     return ();
 }
 // Before a failure call in lifted code: the statement it fails in, as a site-table-shaped record
@@ -3291,14 +3416,14 @@ fn element_address(l: (&mut L), target: (&[u8]), k: u64, width: u64) -> unit {
     if l.verify != 0 {
         verify_current(&mut l, k);
     }
-    if eq(target, view("rt_slot")) || eq(target, view("rt_slot4")) {
+    if eq(target, view("rt_slot")) || eq(target, view("rt_slot4")) || eq(target, view("rt_slotb")) {
         ok := def(&mut l, view("icmp ult i64 {}, {}"), &u8[][copy(view(i)), copy(view(l.elen[k]))]);
         good := fresh_block(&mut l);
         wrong := fresh_block(&mut l);
         emit(&mut l, view("br i1 {}, label %{}, label %{}"), &u8[][ok, copy(view(good)), copy(view(wrong))]);
         begin_block(&mut l, view(wrong));
-        // Both widths report the index and the length, as the native backend's inline check does.
-        if eq(target, view("rt_slot")) || eq(target, view("rt_slot4")) {
+        // All checked widths report the index and the length, as the native backend's inline check does.
+        if eq(target, view("rt_slot")) || eq(target, view("rt_slot4")) || eq(target, view("rt_slotb")) {
             l.calls.push(copy(view("rt_fail")));
             site_hint(&mut l);
             emit(
@@ -3339,6 +3464,7 @@ fn array_element<a, b>(l: (&a mut L), target: &b [u8]) -> unit {
         emit(&mut l, view("br i1 {}, label %{}, label %{}"), &u8[][ok, copy(view(good)), copy(view(wrong))]);
         begin_block(&mut l, view(wrong));
         l.calls.push(copy(view("rt_fail")));
+        site_hint(&mut l);
         emit(&mut l, view("call {i64, i64} @\"rt_fail\"(i64 1, i64 {}, i64 {}, i64 0, i64 0, i64 0)"), &u8[][copy(view(i)), copy(view(n))]);
         emit(&mut l, view("unreachable"), &u8[][]);
         begin_block(&mut l, view(good));
@@ -3352,6 +3478,65 @@ fn array_element<a, b>(l: (&a mut L), target: &b [u8]) -> unit {
     set_chain(&mut l, reg_index(view("rdx")) + 1, 0, 0, 0);
     clear_args(&mut l);
     return ();
+}
+// Inline exact IEEE-754 trunc on a binary64 word (matching runtime.grl rt_f64_trunc bit-for-bit,
+// used when the target CPU lacks hardware roundsd/frintz so pure Grail programs need no libm).
+fn f64_trunc_word<a>(l: (&a mut L), v: &a [u8]) -> u8[] {
+    exp_s := def(&mut l, view("lshr i64 {}, 52"), &u8[][copy(v)]);
+    e := def(&mut l, view("and i64 {}, 2047"), &u8[][exp_s]);
+    gt1074 := def(&mut l, view("icmp ugt i64 {}, 1074"), &u8[][copy(view(e))]);
+    lt1023 := def(&mut l, view("icmp ult i64 {}, 1023"), &u8[][copy(view(e))]);
+    sign := def(&mut l, view("and i64 {}, -9223372036854775808"), &u8[][copy(v)]);
+    sh := def(&mut l, view("sub i64 1075, {}"), &u8[][e]);
+    sh1 := def(&mut l, view("select i1 {}, i64 0, i64 {}"), &u8[][copy(view(lt1023)), sh]);
+    sh2 := def(&mut l, view("select i1 {}, i64 0, i64 {}"), &u8[][copy(view(gt1074)), sh1]);
+    one_sh := def(&mut l, view("shl i64 1, {}"), &u8[][sh2]);
+    frac := def(&mut l, view("sub i64 {}, 1"), &u8[][one_sh]);
+    mask := def(&mut l, view("xor i64 {}, -1"), &u8[][frac]);
+    masked := def(&mut l, view("and i64 {}, {}"), &u8[][copy(v), mask]);
+    r1 := def(&mut l, view("select i1 {}, i64 {}, i64 {}"), &u8[][lt1023, sign, masked]);
+    return def(&mut l, view("select i1 {}, i64 {}, i64 {}"), &u8[][gt1074, copy(v), r1]);
+}
+fn reg_const_text<a>(l: (&a L), name: &a [u8]) -> u8[] {
+    ri := reg_index(name);
+    if (ri < l.regconst.len()) && (l.regconst[ri].len() != 0) {
+        return copy(view(l.regconst[ri]));
+    }
+    return u8[];
+}
+fn emit_load_width<a, b>(l: (&a mut L), p: &b [u8], bytes: u64, signed_v: &b [u8], signed_const: &b [u8]) -> u8[] {
+    if bytes == 8 {
+        return def(&mut l, view("load i64, ptr {}, align 1"), &u8[][copy(p)]);
+    }
+    ty := width_type(bytes * 8);
+    raw := def(&mut l, view("load {}, ptr {}, align 1"), &u8[][copy(view(ty)), copy(p)]);
+    if eq(signed_const, view("0")) {
+        return def(&mut l, view("zext {} {} to i64"), &u8[][ty, raw]);
+    }
+    if eq(signed_const, view("1")) {
+        return def(&mut l, view("sext {} {} to i64"), &u8[][ty, raw]);
+    }
+    uz := def(&mut l, view("zext {} {} to i64"), &u8[][copy(view(ty)), copy(view(raw))]);
+    sz := def(&mut l, view("sext {} {} to i64"), &u8[][ty, raw]);
+    is_s := def(&mut l, view("icmp ne i64 {}, 0"), &u8[][copy(signed_v)]);
+    return def(&mut l, view("select i1 {}, i64 {}, i64 {}"), &u8[][is_s, sz, uz]);
+}
+fn emit_store_width<a, b>(l: (&a mut L), p: &b [u8], v: &b [u8], bytes: u64) -> unit {
+    if bytes == 8 {
+        emit(&mut l, view("store i64 {}, ptr {}, align 1"), &u8[][copy(v), copy(p)]);
+        return ();
+    }
+    ty := width_type(bytes * 8);
+    t := def(&mut l, view("trunc i64 {} to {}"), &u8[][copy(v), copy(view(ty))]);
+    emit(&mut l, view("store {} {}, ptr {}, align 1"), &u8[][ty, t, copy(p)]);
+    return ();
+}
+fn const_sized_width<a>(s: &a [u8]) -> u64 {
+    if eq(s, view("1")) { return 1; }
+    if eq(s, view("2")) { return 2; }
+    if eq(s, view("4")) { return 4; }
+    if eq(s, view("8")) { return 8; }
+    return 0;
 }
 fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> unit {
     if eq(target, view("rt_fail")) || eq(target, view("rt_trap")) || eq(target, view("rt_refine")) || eq(target, view("rt_task_fail")) {
@@ -3390,6 +3575,12 @@ fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> uni
             xmm_call(&mut l);
         }
     }
+    // `call *%rax` is a Grail-convention call through a code pointer; a C call through a `cfn`
+    // value is spelled `call *%r11` (native.grl) and, like an import thunk's, stays native.
+    if eq(target, view("*%rax")) && (l.target == 0) {
+        lower_indirect_call(&mut l, view(sub(target, 2, target.len())), &facts, loaded);
+        return ();
+    }
     if (l.areaopen != 0) && !eq(target, view("rt_foreign_lost")) && !typed_ffi {
         // Words on the stack: only a callee whose signature fact says it takes them. The foreign-call
         // marker's area is a save area: rt_foreign_lost takes nothing from it.
@@ -3399,18 +3590,13 @@ fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> uni
             return ();
         }
     }
-    // `call *%rax` is a Grail-convention call through a code pointer; a C call through a `cfn`
-    // value is spelled `call *%r11` (native.grl) and, like an import thunk's, stays native.
-    if eq(target, view("*%rax")) && (l.target == 0) {
-        lower_indirect_call(&mut l, view(sub(target, 2, target.len())), &facts, loaded);
-        return ();
-    }
     if (target.len() == 0) || (target[0] == 42) {
         bad(&mut l);
         return ();
     }
     if eq(target, view("rt_abort")) {
         // Check failures never return and are never the hot path.
+        site_hint(&mut l);
         emit(&mut l, view("call void @\"rt_abort.cold\"() #0"), &u8[][]);
         emit(&mut l, view("unreachable"), &u8[][]);
         ends_terminator(&mut l);
@@ -3445,6 +3631,255 @@ fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> uni
         w := def(&mut l, view("fpext float {} to double"), &u8[][n]);
         word := as_word(&mut l, view(w));
         set_reg(&mut l, view("rax"), view(word));
+        return ();
+    }
+    if eq(target, view("rt_f32_bits")) {
+        x := get_reg(&mut l, view("rdi"));
+        d := as_double(&mut l, view(x));
+        f := def(&mut l, view("fptrunc double {} to float"), &u8[][d]);
+        b := def(&mut l, view("bitcast float {} to i32"), &u8[][f]);
+        z := def(&mut l, view("zext i32 {} to i64"), &u8[][b]);
+        set_reg(&mut l, view("rax"), view(z));
+        set_chain(&mut l, reg_index(view("rax")) + 1, 0, 0, 0);
+        set_chain(&mut l, reg_index(view("rdx")) + 1, 0, 0, 0);
+        clear_args(&mut l);
+        return ();
+    }
+    if eq(target, view("rt_f32_from_bits")) {
+        u := get_reg(&mut l, view("rdi"));
+        b := def(&mut l, view("trunc i64 {} to i32"), &u8[][u]);
+        f := def(&mut l, view("bitcast i32 {} to float"), &u8[][b]);
+        d := def(&mut l, view("fpext float {} to double"), &u8[][f]);
+        word := as_word(&mut l, view(d));
+        set_reg(&mut l, view("rax"), view(word));
+        set_chain(&mut l, reg_index(view("rax")) + 1, 0, 0, 0);
+        set_chain(&mut l, reg_index(view("rdx")) + 1, 0, 0, 0);
+        clear_args(&mut l);
+        return ();
+    }
+    if eq(target, view("rt_f64_trunc")) {
+        x := get_reg(&mut l, view("rdi"));
+        mut word = u8[];
+        if l.has_round != 0 {
+            d := as_double(&mut l, view(x));
+            r := def(&mut l, view("call double @llvm.trunc.f64(double {})"), &u8[][d]);
+            word = as_word(&mut l, view(r));
+        } else {
+            word = f64_trunc_word(&mut l, view(x));
+        }
+        set_reg(&mut l, view("rax"), view(word));
+        set_chain(&mut l, reg_index(view("rax")) + 1, 0, 0, 0);
+        set_chain(&mut l, reg_index(view("rdx")) + 1, 0, 0, 0);
+        clear_args(&mut l);
+        return ();
+    }
+    if eq(target, view("rt_f64_floor")) {
+        x := get_reg(&mut l, view("rdi"));
+        mut word = u8[];
+        if l.has_round != 0 {
+            d := as_double(&mut l, view(x));
+            r := def(&mut l, view("call double @llvm.floor.f64(double {})"), &u8[][d]);
+            word = as_word(&mut l, view(r));
+        } else {
+            t := f64_trunc_word(&mut l, view(x));
+            dv := as_double(&mut l, view(x));
+            dt := as_double(&mut l, view(t));
+            lt := def(&mut l, view("fcmp olt double {}, {}"), &u8[][dv, copy(view(dt))]);
+            sub1 := def(&mut l, view("fsub double {}, 1.000000e+00"), &u8[][copy(view(dt))]);
+            rf := def(&mut l, view("select i1 {}, double {}, double {}"), &u8[][lt, sub1, dt]);
+            word = as_word(&mut l, view(rf));
+        }
+        set_reg(&mut l, view("rax"), view(word));
+        set_chain(&mut l, reg_index(view("rax")) + 1, 0, 0, 0);
+        set_chain(&mut l, reg_index(view("rdx")) + 1, 0, 0, 0);
+        clear_args(&mut l);
+        return ();
+    }
+    if eq(target, view("rt_f64_ceil")) {
+        x := get_reg(&mut l, view("rdi"));
+        mut word = u8[];
+        if l.has_round != 0 {
+            d := as_double(&mut l, view(x));
+            r := def(&mut l, view("call double @llvm.ceil.f64(double {})"), &u8[][d]);
+            word = as_word(&mut l, view(r));
+        } else {
+            t := f64_trunc_word(&mut l, view(x));
+            dv := as_double(&mut l, view(x));
+            dt := as_double(&mut l, view(t));
+            lt := def(&mut l, view("fcmp olt double {}, {}"), &u8[][copy(view(dt)), dv]);
+            add1 := def(&mut l, view("fadd double {}, 1.000000e+00"), &u8[][copy(view(dt))]);
+            rf := def(&mut l, view("select i1 {}, double {}, double {}"), &u8[][lt, add1, dt]);
+            word = as_word(&mut l, view(rf));
+        }
+        set_reg(&mut l, view("rax"), view(word));
+        set_chain(&mut l, reg_index(view("rax")) + 1, 0, 0, 0);
+        set_chain(&mut l, reg_index(view("rdx")) + 1, 0, 0, 0);
+        clear_args(&mut l);
+        return ();
+    }
+    if eq(target, view("rt_f64_round")) {
+        x := get_reg(&mut l, view("rdi"));
+        mut word = u8[];
+        if l.has_round != 0 {
+            d := as_double(&mut l, view(x));
+            r := def(&mut l, view("call double @llvm.round.f64(double {})"), &u8[][d]);
+            word = as_word(&mut l, view(r));
+        } else {
+            t := f64_trunc_word(&mut l, view(x));
+            dv := as_double(&mut l, view(x));
+            dt := as_double(&mut l, view(t));
+            diff := def(&mut l, view("fsub double {}, {}"), &u8[][dv, copy(view(dt))]);
+            diffw := as_word(&mut l, view(diff));
+            absw := def(&mut l, view("and i64 {}, 9223372036854775807"), &u8[][diffw]);
+            absd := as_double(&mut l, view(absw));
+            lthalf := def(&mut l, view("fcmp olt double {}, 5.000000e-01"), &u8[][absd]);
+            isneg := def(&mut l, view("icmp slt i64 {}, 0"), &u8[][copy(view(x))]);
+            sub1 := def(&mut l, view("fsub double {}, 1.000000e+00"), &u8[][copy(view(dt))]);
+            add1 := def(&mut l, view("fadd double {}, 1.000000e+00"), &u8[][copy(view(dt))]);
+            step := def(&mut l, view("select i1 {}, double {}, double {}"), &u8[][isneg, sub1, add1]);
+            rf := def(&mut l, view("select i1 {}, double {}, double {}"), &u8[][lthalf, dt, step]);
+            word = as_word(&mut l, view(rf));
+        }
+        set_reg(&mut l, view("rax"), view(word));
+        set_chain(&mut l, reg_index(view("rax")) + 1, 0, 0, 0);
+        set_chain(&mut l, reg_index(view("rdx")) + 1, 0, 0, 0);
+        clear_args(&mut l);
+        return ();
+    }
+    if eq(target, view("rt_f64_min")) || eq(target, view("rt_f64_max")) {
+        // Bit-exact with runtime.grl rt_f64_min/rt_f64_max (including NaN and signed-zero order):
+        // if a is NaN -> b; else if b is NaN -> a; else pick smaller/larger (a on tie).
+        a := get_reg(&mut l, view("rdi"));
+        b := get_reg(&mut l, view("rsi"));
+        da := as_double(&mut l, view(a));
+        db := as_double(&mut l, view(b));
+        a_uno := def(&mut l, view("fcmp uno double {}, {}"), &u8[][copy(view(da)), copy(view(da))]);
+        mut cmp = u8[];
+        if eq(target, view("rt_f64_min")) {
+            cmp = def(&mut l, view("fcmp olt double {}, {}"), &u8[][db, da]);
+        } else {
+            cmp = def(&mut l, view("fcmp olt double {}, {}"), &u8[][da, db]);
+        }
+        pick_b := def(&mut l, view("or i1 {}, {}"), &u8[][a_uno, cmp]);
+        r := def(&mut l, view("select i1 {}, i64 {}, i64 {}"), &u8[][pick_b, b, a]);
+        set_reg(&mut l, view("rax"), view(r));
+        set_chain(&mut l, reg_index(view("rax")) + 1, 0, 0, 0);
+        set_chain(&mut l, reg_index(view("rdx")) + 1, 0, 0, 0);
+        clear_args(&mut l);
+        return ();
+    }
+    if eq(target, view("rt_load_sized")) {
+        wc := reg_const_text(&l, view("rsi"));
+        sc := reg_const_text(&l, view("rdx"));
+        cw := const_sized_width(view(wc));
+        if cw != 0 {
+            a := get_reg(&mut l, view("rdi"));
+            s := get_reg(&mut l, view("rdx"));
+            p := def(&mut l, view("inttoptr i64 {} to ptr"), &u8[][a]);
+            r := emit_load_width(&mut l, view(p), cw, view(s), view(sc));
+            set_reg(&mut l, view("rax"), view(r));
+            set_chain(&mut l, reg_index(view("rax")) + 1, 0, 0, 0);
+            set_chain(&mut l, reg_index(view("rdx")) + 1, 0, 0, 0);
+            clear_args(&mut l);
+            return ();
+        }
+        // Dynamic width: fast switch for 1/2/4/8, fallback to runtime helper for any other width.
+        a := get_reg(&mut l, view("rdi"));
+        w := get_reg(&mut l, view("rsi"));
+        s := get_reg(&mut l, view("rdx"));
+        p := def(&mut l, view("inttoptr i64 {} to ptr"), &u8[][copy(view(a))]);
+        b1 := fresh_block(&mut l);
+        b2 := fresh_block(&mut l);
+        b4 := fresh_block(&mut l);
+        b8 := fresh_block(&mut l);
+        bdef := fresh_block(&mut l);
+        bdone := fresh_block(&mut l);
+        mut sw = copy(view("switch i64 {}, label %{} [ i64 1, label %{} i64 2, label %{} i64 4, label %{} i64 8, label %{} ]"));
+        emit(&mut l, view(sw), &u8[][copy(view(w)), copy(view(bdef)), copy(view(b1)), copy(view(b2)), copy(view(b4)), copy(view(b8))]);
+        begin_block(&mut l, view(b1));
+        r1 := emit_load_width(&mut l, view(p), 1, view(s), view(sc));
+        emit(&mut l, view("br label %{}"), &u8[][copy(view(bdone))]);
+        begin_block(&mut l, view(b2));
+        r2 := emit_load_width(&mut l, view(p), 2, view(s), view(sc));
+        emit(&mut l, view("br label %{}"), &u8[][copy(view(bdone))]);
+        begin_block(&mut l, view(b4));
+        r4 := emit_load_width(&mut l, view(p), 4, view(s), view(sc));
+        emit(&mut l, view("br label %{}"), &u8[][copy(view(bdone))]);
+        begin_block(&mut l, view(b8));
+        r8 := emit_load_width(&mut l, view(p), 8, view(s), view(sc));
+        emit(&mut l, view("br label %{}"), &u8[][copy(view(bdone))]);
+        begin_block(&mut l, view(bdef));
+        l.calls.push(copy(view("rt_load_sized")));
+        lsig := set_get(&l.sigs, view("rt_load_sized"));
+        mut rdef = u8[];
+        if (lsig != 0) && (lsig % 4 == 1) && (lsig / 4 == 3) {
+            rdef = def(&mut l, view("call i64 @\"rt_load_sized\"(i64 {}, i64 {}, i64 {})"), &u8[][a, w, s]);
+        } else {
+            pair := def(&mut l, view("call {i64, i64} @\"rt_load_sized\"(i64 {}, i64 {}, i64 {}, i64 0, i64 0, i64 0)"), &u8[][a, w, s]);
+            rdef = def(&mut l, view("extractvalue {i64, i64} {}, 0"), &u8[][pair]);
+        }
+        emit(&mut l, view("br label %{}"), &u8[][copy(view(bdone))]);
+        begin_block(&mut l, view(bdone));
+        r := def(&mut l, view("phi i64 [ {}, %{} ], [ {}, %{} ], [ {}, %{} ], [ {}, %{} ], [ {}, %{} ]"), &u8[][r1, b1, r2, b2, r4, b4, r8, b8, rdef, bdef]);
+        set_reg(&mut l, view("rax"), view(r));
+        set_chain(&mut l, reg_index(view("rax")) + 1, 0, 0, 0);
+        set_chain(&mut l, reg_index(view("rdx")) + 1, 0, 0, 0);
+        clear_args(&mut l);
+        return ();
+    }
+    if eq(target, view("rt_store_sized")) {
+        wc := reg_const_text(&l, view("rdx"));
+        cw := const_sized_width(view(wc));
+        a := get_reg(&mut l, view("rdi"));
+        v := get_reg(&mut l, view("rsi"));
+        w := get_reg(&mut l, view("rdx"));
+        exchange(&mut l.slotconst, u8[][]);
+        exchange(&mut l.lastload, u8[]);
+        exchange(&mut l.regconst, u8[][]);
+        invalidate_args(&mut l, view(target));
+        p := def(&mut l, view("inttoptr i64 {} to ptr"), &u8[][copy(view(a))]);
+        if cw != 0 {
+            emit_store_width(&mut l, view(p), view(v), cw);
+            set_reg(&mut l, view("rax"), view("0"));
+            set_chain(&mut l, reg_index(view("rax")) + 1, 0, 0, 0);
+            set_chain(&mut l, reg_index(view("rdx")) + 1, 0, 0, 0);
+            clear_args(&mut l);
+            return ();
+        }
+        b1 := fresh_block(&mut l);
+        b2 := fresh_block(&mut l);
+        b4 := fresh_block(&mut l);
+        b8 := fresh_block(&mut l);
+        bdef := fresh_block(&mut l);
+        bdone := fresh_block(&mut l);
+        mut sw = copy(view("switch i64 {}, label %{} [ i64 1, label %{} i64 2, label %{} i64 4, label %{} i64 8, label %{} ]"));
+        emit(&mut l, view(sw), &u8[][copy(view(w)), copy(view(bdef)), copy(view(b1)), copy(view(b2)), copy(view(b4)), copy(view(b8))]);
+        begin_block(&mut l, view(b1));
+        emit_store_width(&mut l, view(p), view(v), 1);
+        emit(&mut l, view("br label %{}"), &u8[][copy(view(bdone))]);
+        begin_block(&mut l, view(b2));
+        emit_store_width(&mut l, view(p), view(v), 2);
+        emit(&mut l, view("br label %{}"), &u8[][copy(view(bdone))]);
+        begin_block(&mut l, view(b4));
+        emit_store_width(&mut l, view(p), view(v), 4);
+        emit(&mut l, view("br label %{}"), &u8[][copy(view(bdone))]);
+        begin_block(&mut l, view(b8));
+        emit_store_width(&mut l, view(p), view(v), 8);
+        emit(&mut l, view("br label %{}"), &u8[][copy(view(bdone))]);
+        begin_block(&mut l, view(bdef));
+        l.calls.push(copy(view("rt_store_sized")));
+        ssig := set_get(&l.sigs, view("rt_store_sized"));
+        if (ssig != 0) && (ssig % 4 == 1) && (ssig / 4 == 3) {
+            emit(&mut l, view("call i64 @\"rt_store_sized\"(i64 {}, i64 {}, i64 {})"), &u8[][a, v, w]);
+        } else {
+            emit(&mut l, view("call {i64, i64} @\"rt_store_sized\"(i64 {}, i64 {}, i64 {}, i64 0, i64 0, i64 0)"), &u8[][a, v, w]);
+        }
+        emit(&mut l, view("br label %{}"), &u8[][copy(view(bdone))]);
+        begin_block(&mut l, view(bdone));
+        set_reg(&mut l, view("rax"), view("0"));
+        set_chain(&mut l, reg_index(view("rax")) + 1, 0, 0, 0);
+        set_chain(&mut l, reg_index(view("rdx")) + 1, 0, 0, 0);
+        clear_args(&mut l);
         return ();
     }
     if eq(target, view("rt_f64_op")) {
@@ -3559,6 +3994,19 @@ fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> uni
             if l.verify != 0 {
                 verify_current(&mut l, k);
             }
+            if eq(target, view("rt_atb")) && (l.sitepath.len() != 0) {
+                idx := get_reg(&mut l, view("rsi"));
+                ok := def(&mut l, view("icmp ult i64 {}, {}"), &u8[][copy(view(idx)), copy(view(l.elen[k]))]);
+                good := fresh_block(&mut l);
+                wrong := fresh_block(&mut l);
+                emit(&mut l, view("br i1 {}, label %{}, label %{}"), &u8[][ok, copy(view(good)), copy(view(wrong))]);
+                begin_block(&mut l, view(wrong));
+                l.calls.push(copy(view("rt_fail")));
+                site_hint(&mut l);
+                emit(&mut l, view("call {i64, i64} @\"rt_fail\"(i64 1, i64 {}, i64 {}, i64 0, i64 0, i64 0)"), &u8[][idx, copy(view(l.elen[k]))]);
+                emit(&mut l, view("unreachable"), &u8[][]);
+                begin_block(&mut l, view(good));
+            }
             a0 := get_reg(&mut l, view("rdi"));
             p := def(&mut l, view("inttoptr i64 {} to ptr"), &u8[][a0]);
             mut c = u8[];
@@ -3669,6 +4117,28 @@ fn lower_indirect_call<a, b, d>(l: (&a mut L), reg: &b [u8], facts: (&d Facts), 
     // checked against the argument registers written since the last call: one past its count was
     // set up for this call, so the fact is wrong (sig_wrong) and all six are passed.
     ord := callee_ordinal(&mut l, view("*%rax"));
+    if l.areaopen != 0 {
+        mut words = 6 + l.area.len();
+        for i in facts.items.len() {
+            f := &facts.items[i];
+            if (f.kind == FACT_INDIRECT) && (f.a == ord) && eq(view(f.fn), view(l.fname)) && (f.b > 6) && (f.b - 6 <= l.area.len()) {
+                words = f.b;
+            }
+        }
+        invalidate_args(&mut l, view("*"));
+        fp := get_reg(&mut l, reg);
+        p := def(&mut l, view("inttoptr i64 {} to ptr"), &u8[][fp]);
+        args := call_args_n(&mut l, words);
+        pair := def(&mut l, view("call {i64, i64} {}({})"), &u8[][p, args]);
+        r0 := def(&mut l, view("extractvalue {i64, i64} {}, 0"), &u8[][copy(view(pair))]);
+        r1 := def(&mut l, view("extractvalue {i64, i64} {}, 1"), &u8[][pair]);
+        set_reg(&mut l, view("rax"), view(r0));
+        set_reg(&mut l, view("rdx"), view(r1));
+        set_chain(&mut l, reg_index(view("rax")) + 1, 0, 0, 0);
+        set_chain(&mut l, reg_index(view("rdx")) + 1, 0, 0, 0);
+        clear_args(&mut l);
+        return ();
+    }
     mut words = 6;
     for i in facts.items.len() {
         f := &facts.items[i];
@@ -3688,10 +4158,6 @@ fn lower_indirect_call<a, b, d>(l: (&a mut L), reg: &b [u8], facts: (&d Facts), 
         put(&mut why, view(" was loaded for it"));
         fname := copy(view(l.fname));
         sig_wrong(&mut l, view(fname), view(why));
-        return ();
-    }
-    if l.areaopen != 0 {
-        bad(&mut l);
         return ();
     }
     invalidate_args(&mut l, view("*"));
@@ -5076,8 +5542,30 @@ fn set_has<a, b>(s: (&a Set), key: &b [u8]) -> bool {
     }
     return false;
 }
+fn set_grow<a>(s: (&a mut Set)) -> unit {
+    mut next = set_new(s.used.len());
+    nmask := next.used.len() - 1;
+    for k in s.used.len() {
+        if s.used[k] != 0 {
+            mut j = fnv(view(s.keys[k])) & nmask;
+            while next.used[j] != 0 {
+                j = (j + 1) & nmask;
+            }
+            next.keys[j] = exchange(&mut s.keys[k], u8[]);
+            next.used[j] = s.used[k];
+            next.count += 1;
+        }
+    }
+    exchange(&mut s.keys, next.keys);
+    exchange(&mut s.used, next.used);
+    s.count = next.count;
+    return ();
+}
 // The table as a map: `value` (non-zero) under `key`, replacing what was there.
 fn set_put<a, b>(s: (&a mut Set), key: &b [u8], value: u64) -> unit {
+    if (s.count + 1) * 2 > s.used.len() {
+        set_grow(&mut s);
+    }
     mask := s.used.len() - 1;
     mut i = fnv(key) & mask;
     while s.used[i] != 0 {
@@ -5107,6 +5595,9 @@ fn set_get<a, b>(s: (&a Set), key: &b [u8]) -> u64 {
 fn set_add<a, b>(s: (&a mut Set), key: &b [u8]) -> unit {
     if set_has(&s, key) {
         return ();
+    }
+    if (s.count + 1) * 2 > s.used.len() {
+        set_grow(&mut s);
     }
     mask := s.used.len() - 1;
     mut i = fnv(key) & mask;
@@ -5278,7 +5769,7 @@ fn callee_saved<a>(line: &a [u8]) -> bool {
 }
 // The signature facts as a map from body symbol to `words * 4 + result words`. `rt_abort` keeps
 // the six-word form: the module header calls it with six zero words.
-fn signatures<a, b>(facts: (&a Facts), taken: (&b Set)) -> Set {
+fn signatures<a, b, c>(facts: (&a Facts), taken: (&b Set), bad_sigs: (&c Set)) -> Set {
     mut n = 0;
     for i in facts.items.len() {
         if facts.items[i].kind == FACT_SIGNATURE {
@@ -5294,8 +5785,14 @@ fn signatures<a, b>(facts: (&a Facts), taken: (&b Set)) -> Set {
     mut out = set_new(n + imported + 1);
     for i in facts.items.len() {
         f := &facts.items[i];
-        if (f.kind == FACT_SIGNATURE) && !eq(view(f.fn), view("rt_abort")) && !set_has(&taken, view(f.fn)) {
-            set_put(&mut out, view(f.fn), f.a * 4 + 1);
+        if (f.kind == FACT_SIGNATURE) && !eq(view(f.fn), view("rt_abort")) && !set_has(&bad_sigs, view(f.fn)) {
+            if !set_has(&taken, view(f.fn)) {
+                set_put(&mut out, view(f.fn), f.a * 4 + 1);
+            } else if f.a > 6 {
+                // Address-taken >6-arg closures/functions keep their exact stack-arg count with
+                // a two-word {i64, i64} return so indirect callers and native code match the ABI.
+                set_put(&mut out, view(f.fn), f.a * 4 + 2);
+            }
         }
     }
     for i in facts.items.len() {
@@ -5326,7 +5823,7 @@ fn signatures<a, b>(facts: (&a Facts), taken: (&b Set)) -> Set {
     return out;
 }
 // The reference masks of the bodies `signatures` kept (fact_signature's `refs`), as mask + 1.
-fn ref_signatures<a, b>(facts: (&a Facts), sigs: (&b Set)) -> Set {
+fn ref_signatures<a, b, c>(facts: (&a Facts), sigs: (&b Set), taken: (&c Set)) -> Set {
     mut n = 0;
     for i in facts.items.len() {
         if (facts.items[i].kind == FACT_SIGNATURE) || (facts.items[i].kind == FACT_IMPORTED_SIGNATURE) {
@@ -5336,7 +5833,7 @@ fn ref_signatures<a, b>(facts: (&a Facts), sigs: (&b Set)) -> Set {
     mut out = set_new(n + 1);
     for i in facts.items.len() {
         f := &facts.items[i];
-        if (f.kind == FACT_SIGNATURE) && (f.b != 0) && (set_get(&sigs, view(f.fn)) != 0) {
+        if (f.kind == FACT_SIGNATURE) && (f.b != 0) && (f.a <= 6) && !set_has(&taken, view(f.fn)) && (set_get(&sigs, view(f.fn)) != 0) {
             set_put(&mut out, view(f.fn), f.b + 1);
         }
         // Another module's body: its reference mask came with its signature (sig_codes' high bits),
@@ -5363,7 +5860,11 @@ fn param_list_refs(n: u64, refs: u64) -> u8[] {
             put(&mut out, view(", "));
         }
         if ((refs >> i) & 1) != 0 {
-            put(&mut out, view("ptr %a"));
+            if ((refs >> (i + 6)) & 1) != 0 {
+                put(&mut out, view("ptr noalias %a"));
+            } else {
+                put(&mut out, view("ptr %a"));
+            }
         } else {
             put(&mut out, view("i64 %a"));
         }
@@ -6376,6 +6877,8 @@ fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), fact
     exchange(&mut l.ebase, u64[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     exchange(&mut l.eptrs, set_new((f.end - f.first) * 2 + 64));
     exchange(&mut l.sitepath, u8[]);
+    exchange(&mut l.fn_sitepath, u8[]);
+    l.fn_siteline = 0;
     exchange(&mut l.sitedefs, u8[]);
     l.sitecount = 0;
     exchange(&mut l.kmap, map_new(16));
@@ -6558,26 +7061,7 @@ fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), fact
         nslots = deepest + 1;
     }
     if l.ranges != 0 {
-        // Which parameters of which functions are shared references (front-end facts, kind 2).
-        mut shared_names = u8[][];
-        mut shared_masks = u64[];
-        for i in facts.items.len() {
-            q := &facts.items[i];
-            if (q.kind == 2) & (q.a < 6) {
-                mut found = shared_names.len();
-                for k in shared_names.len() {
-                    if eq(view(shared_names[k]), view(q.fn)) {
-                        found = k;
-                    }
-                }
-                if found == shared_names.len() {
-                    shared_names.push(copy(view(q.fn)));
-                    shared_masks.push(0);
-                }
-                shared_masks[found] = shared_masks[found] | (1 << q.a);
-            }
-        }
-        l.proof = range_proofs(&instrs, nslots, l.split, &shared_names, &shared_masks);
+        l.proof = range_proofs(&instrs, nslots, l.split, &l.shared_names, &l.shared_masks);
     }
     if l.split != 0 {
         // One alloca per slot; the prologue's zeroing covers the slots below the parameters.
@@ -6780,7 +7264,7 @@ fn loop_stable_heads<a, b>(facts: (&a Facts), name: &b [u8]) -> u64[] {
 // hoist itself is what that mode verifies.
 fn stable_regions<a, b>(l: (&a L), instrs: (&b u8[][]), heads: (&a u64[])) -> u64[] {
     mut out = u64[];
-    if (heads.len() == 0) || (l.proof.len() != 0) {
+    if heads.len() == 0 {
         return out;
     }
     // One pass over the body: every label's line and number, then the first and last line naming
@@ -9067,7 +9551,9 @@ fn range_proofs(instrs: (&u8[][]), nslots: u64, split: u64, shared_names: (&u8[]
     for i in n {
         out.push(0);
     }
-    if n == 0 {
+    // Bounded abstract-interpretation budget: giant dispatchers (thousands of instructions or
+    // hundreds of frame slots) would blow up per-block fixpoint state O(blocks * slots * rounds).
+    if (n == 0) || (n > 2000) || (nslots > 128) {
         return out;
     }
     // Nothing to prove in a function that reads no sequence, and nothing to prove in one that only
@@ -9156,6 +9642,9 @@ fn range_proofs(instrs: (&u8[][]), nslots: u64, split: u64, shared_names: (&u8[]
     }
     bstop.push(n);
     nblk := bstart.len();
+    if nblk > 256 {
+        return out;
+    }
     // Successors from the last line of the block: `jmp` names one, a conditional jump names the
     // target and falls through, `retq` and the non-returning `rt_abort` name none.
     mut s1 = u64[];
@@ -9342,16 +9831,20 @@ fn header<a>(out: (&a mut u8[])) -> unit {
     put(&mut out, view("declare {i64, i1} @llvm.ssub.with.overflow.i64(i64, i64)\n"));
     put(&mut out, view("declare {i64, i1} @llvm.smul.with.overflow.i64(i64, i64)\n"));
     put(&mut out, view("declare double @llvm.sqrt.f64(double)\n"));
+    put(&mut out, view("declare double @llvm.floor.f64(double)\n"));
+    put(&mut out, view("declare double @llvm.ceil.f64(double)\n"));
+    put(&mut out, view("declare double @llvm.trunc.f64(double)\n"));
+    put(&mut out, view("declare double @llvm.round.f64(double)\n"));
     // The SIMD mul_add (lift_simd): only for targets with a fused instruction, where it is one.
     put(&mut out, view("declare <4 x float> @llvm.fma.v4f32(<4 x float>, <4 x float>, <4 x float>)\n"));
     put(&mut out, view("declare <8 x float> @llvm.fma.v8f32(<8 x float>, <8 x float>, <8 x float>)\n"));
     put(&mut out, view("declare <2 x double> @llvm.fma.v2f64(<2 x double>, <2 x double>, <2 x double>)\n"));
     put(&mut out, view("declare <4 x double> @llvm.fma.v4f64(<4 x double>, <4 x double>, <4 x double>)\n"));
-    put(&mut out, view("define internal void @\"rt_abort.cold\"() noreturn cold noinline nounwind {\n  call {i64, i64} @\"rt_abort\"(i64 0, i64 0, i64 0, i64 0, i64 0, i64 0)\n  unreachable\n}\n"));
+    put(&mut out, view("define internal void @\"rt_abort.cold\"() noreturn cold noinline nounwind \"frame-pointer\"=\"non-leaf\" {\n  call {i64, i64} @\"rt_abort\"(i64 0, i64 0, i64 0, i64 0, i64 0, i64 0)\n  unreachable\n}\n"));
     // LLVM may turn copy and fill loops into these calls; Grail programs have no libc.
-    put(&mut out, view("define weak ptr @memset(ptr %d, i32 %c, i64 %n) #1 {\nentry:\n  %b = trunc i32 %c to i8\n  br label %loop\nloop:\n  %i = phi i64 [0, %entry], [%i1, %body]\n  %done = icmp eq i64 %i, %n\n  br i1 %done, label %exit, label %body\nbody:\n  %p = getelementptr i8, ptr %d, i64 %i\n  store i8 %b, ptr %p\n  %i1 = add i64 %i, 1\n  br label %loop\nexit:\n  ret ptr %d\n}\n"));
-    put(&mut out, view("define weak ptr @memcpy(ptr %d, ptr %s, i64 %n) #1 {\nentry:\n  br label %loop\nloop:\n  %i = phi i64 [0, %entry], [%i1, %body]\n  %done = icmp eq i64 %i, %n\n  br i1 %done, label %exit, label %body\nbody:\n  %q = getelementptr i8, ptr %s, i64 %i\n  %v = load i8, ptr %q\n  %p = getelementptr i8, ptr %d, i64 %i\n  store i8 %v, ptr %p\n  %i1 = add i64 %i, 1\n  br label %loop\nexit:\n  ret ptr %d\n}\n"));
-    put(&mut out, view("define weak ptr @memmove(ptr %d, ptr %s, i64 %n) #1 {\nentry:\n  %fwd = icmp ult ptr %d, %s\n  br i1 %fwd, label %f, label %b\nf:\n  %i = phi i64 [0, %entry], [%i1, %fb]\n  %fdone = icmp eq i64 %i, %n\n  br i1 %fdone, label %exit, label %fb\nfb:\n  %fq = getelementptr i8, ptr %s, i64 %i\n  %fv = load i8, ptr %fq\n  %fp = getelementptr i8, ptr %d, i64 %i\n  store i8 %fv, ptr %fp\n  %i1 = add i64 %i, 1\n  br label %f\nb:\n  %j = phi i64 [%n, %entry], [%j1, %bb]\n  %bdone = icmp eq i64 %j, 0\n  br i1 %bdone, label %exit, label %bb\nbb:\n  %j1 = sub i64 %j, 1\n  %bq = getelementptr i8, ptr %s, i64 %j1\n  %bv = load i8, ptr %bq\n  %bp = getelementptr i8, ptr %d, i64 %j1\n  store i8 %bv, ptr %bp\n  br label %b\nexit:\n  ret ptr %d\n}\n"));
+    put(&mut out, view("define weak ptr @\"memset\"(ptr %d, i32 %c, i64 %n) #1 {\nentry:\n  %b = trunc i32 %c to i8\n  br label %loop\nloop:\n  %i = phi i64 [0, %entry], [%i1, %body]\n  %done = icmp eq i64 %i, %n\n  br i1 %done, label %exit, label %body\nbody:\n  %p = getelementptr i8, ptr %d, i64 %i\n  store i8 %b, ptr %p\n  %i1 = add i64 %i, 1\n  br label %loop\nexit:\n  ret ptr %d\n}\n"));
+    put(&mut out, view("define weak ptr @\"memcpy\"(ptr %d, ptr %s, i64 %n) #1 {\nentry:\n  br label %loop\nloop:\n  %i = phi i64 [0, %entry], [%i1, %body]\n  %done = icmp eq i64 %i, %n\n  br i1 %done, label %exit, label %body\nbody:\n  %q = getelementptr i8, ptr %s, i64 %i\n  %v = load i8, ptr %q\n  %p = getelementptr i8, ptr %d, i64 %i\n  store i8 %v, ptr %p\n  %i1 = add i64 %i, 1\n  br label %loop\nexit:\n  ret ptr %d\n}\n"));
+    put(&mut out, view("define weak ptr @\"memmove\"(ptr %d, ptr %s, i64 %n) #1 {\nentry:\n  %fwd = icmp ult ptr %d, %s\n  br i1 %fwd, label %f, label %b\nf:\n  %i = phi i64 [0, %entry], [%i1, %fb]\n  %fdone = icmp eq i64 %i, %n\n  br i1 %fdone, label %exit, label %fb\nfb:\n  %fq = getelementptr i8, ptr %s, i64 %i\n  %fv = load i8, ptr %fq\n  %fp = getelementptr i8, ptr %d, i64 %i\n  store i8 %fv, ptr %fp\n  %i1 = add i64 %i, 1\n  br label %f\nb:\n  %j = phi i64 [%n, %entry], [%j1, %bb]\n  %bdone = icmp eq i64 %j, 0\n  br i1 %bdone, label %exit, label %bb\nbb:\n  %j1 = sub i64 %j, 1\n  %bq = getelementptr i8, ptr %s, i64 %j1\n  %bv = load i8, ptr %bq\n  %bp = getelementptr i8, ptr %d, i64 %j1\n  store i8 %bv, ptr %bp\n  br label %b\nexit:\n  ret ptr %d\n}\n"));
     return ();
 }
 fn pool_name<a>(label: &a [u8]) -> u8[] {
@@ -9560,7 +10053,7 @@ fn rename_calls<a, b>(line: &a [u8], lifted: (&b Set)) -> u8[] {
                 name := sub(line, i + 2, e);
                 put(&mut out, view("@\""));
                 put(&mut out, view(name));
-                if !eq(view(name), view("rt_abort.cold")) && !starts(view(name), view("llvm.")) {
+                if !eq(view(name), view("rt_abort.cold")) && !starts(view(name), view("llvm.")) && !eq(view(name), view("memset")) && !eq(view(name), view("memcpy")) && !eq(view(name), view("memmove")) {
                     if set_has(&lifted, view(name)) {
                         put(&mut out, view(".ll"));
                     } else {
@@ -9660,9 +10153,14 @@ pub fn split_part<a, b, c>(text: &a [u8], plan: (&b SplitPlan), k: u64, suffix: 
     // Part k's own functions first, then only the outside names they reach: a part's text is then
     // a function of its functions and their callees' signatures, not of the whole module.
     mut bodies = u8[];
+    mut own = set_new(plan.starts.len() * 2 + 16);
     for f in plan.starts.len() {
         if plan.part_of[f] != k {
             continue;
+        }
+        own_name := define_name_of(text, plan.starts[f]);
+        if own_name.len() != 0 {
+            set_add(&mut own, view(own_name));
         }
         mut he = plan.starts[f];
         while (he < text.len()) && (text[he] != 10) {
@@ -9676,9 +10174,38 @@ pub fn split_part<a, b, c>(text: &a [u8], plan: (&b SplitPlan), k: u64, suffix: 
     }
     mut used = set_new(bodies.len() / 16 + 64);
     note_names(&mut used, view(bodies));
+    // A global kept because `bodies` names it (such as a vtable `@".V..."`) can itself reference
+    // other symbols (slot functions, drop helpers), so close `used` over kept global initializers.
+    mut p_at: u64 = 0;
+    mut p_f: u64 = 0;
+    while p_at < text.len() {
+        if (p_f < plan.starts.len()) && (p_at == plan.starts[p_f]) {
+            p_at = plan.ends[p_f];
+            p_f += 1;
+            continue;
+        }
+        mut p_e = p_at;
+        while (p_e < text.len()) && (text[p_e] != 10) {
+            p_e += 1;
+        }
+        p_line := text[p_at..p_e];
+        if (p_line.len() != 0) && (p_line[0] == 64) {
+            p_name := line_name(p_line);
+            if (p_name.len() != 0) && set_has(&used, view(p_name)) {
+                note_names(&mut used, p_line);
+                if plan.internals != 0 {
+                    p_ren := renamed(p_line, &plan, suffix);
+                    note_names(&mut used, view(p_ren));
+                }
+            }
+        }
+        p_at = p_e + 1;
+    }
+    mut fn_used = u8[][];
     mut m = u8[];
     // The lines outside functions: those that name a global or declare a function are kept when the
-    // part uses that name; the rest (target, attribute groups, comments) always.
+    // part uses that name; per-function grail_funcs metadata follows the function's part; the rest
+    // (target, attribute groups, comments) always.
     mut at: u64 = 0;
     mut f: u64 = 0;
     while at < text.len() {
@@ -9692,7 +10219,30 @@ pub fn split_part<a, b, c>(text: &a [u8], plan: (&b SplitPlan), k: u64, suffix: 
             e += 1;
         }
         line := text[at..e];
+        if starts(line, view("@llvm.used =")) {
+            at = e + 1;
+            continue;
+        }
         name := line_name(line);
+        if starts(view(name), view("grail.fn.")) {
+            sym := sub(view(name), 9, name.len());
+            if set_has(&own, view(sym)) {
+                renamed_into(&mut m, line, &plan, suffix);
+                m.push(10);
+                fn_used.push(name);
+            }
+            at = e + 1;
+            continue;
+        }
+        if starts(view(name), view("grail.fnm.")) {
+            sym := sub(view(name), 10, name.len());
+            if set_has(&own, view(sym)) {
+                renamed_into(&mut m, line, &plan, suffix);
+                m.push(10);
+            }
+            at = e + 1;
+            continue;
+        }
         if (name.len() == 0) || set_has(&used, view(name)) {
             renamed_into(&mut m, line, &plan, suffix);
             m.push(10);
@@ -9720,6 +10270,20 @@ pub fn split_part<a, b, c>(text: &a [u8], plan: (&b SplitPlan), k: u64, suffix: 
         m.push(10);
     }
     m.append(view(bodies));
+    if fn_used.len() != 0 {
+        put(&mut m, view("@llvm.used = appending global ["));
+        num(&mut m, fn_used.len());
+        put(&mut m, view(" x ptr] ["));
+        for q in fn_used.len() {
+            if q != 0 {
+                put(&mut m, view(", "));
+            }
+            put(&mut m, view("ptr @\""));
+            put(&mut m, view(fn_used[q]));
+            m.push(34);
+        }
+        put(&mut m, view("], section \"llvm.metadata\"\n"));
+    }
     return m;
 }
 // Every `@"NAME"` and `@NAME` the text mentions.
@@ -9811,18 +10375,29 @@ fn renamed_into<a, b, c, d>(out: (&a mut u8[]), s: &b [u8], plan: (&c SplitPlan)
     }
     return ();
 }
-// The name of the function whose `define` line starts at `at`: the text between `@"` and `"`.
+// The name of the function whose `define` line starts at `at`: `@"NAME"` or unquoted `@NAME`.
 fn define_name_of<a>(text: &a [u8], at: u64) -> u8[] {
     mut i = at;
     while (i + 1 < text.len()) && (text[i] != 10) {
-        if (text[i] == 64) && (text[i + 1] == 34) {
-            mut e = i + 2;
-            while (e < text.len()) && (text[e] != 34) {
+        if text[i] == 64 {
+            if text[i + 1] == 34 {
+                mut e = i + 2;
+                while (e < text.len()) && (text[e] != 34) {
+                    e += 1;
+                }
+                mut out = u8[];
+                out.append(text[i + 2..e]);
+                return out;
+            }
+            mut e = i + 1;
+            while (e < text.len()) && (ident_char(text[e]) || (text[e] == 46) || (text[e] == 36)) {
                 e += 1;
             }
-            mut out = u8[];
-            out.append(text[i + 2..e]);
-            return out;
+            if e > i + 1 {
+                mut out = u8[];
+                out.append(text[i + 1..e]);
+                return out;
+            }
         }
         i += 1;
     }
@@ -9892,12 +10467,95 @@ fn first_at(s: (&[u8])) -> u64 {
     }
     return s.len();
 }
-pub fn lower_for<a, b>(stream: &a [u8], target: u64, facts: (&b Facts), verify: u64, ranges: u64) -> Lowered {
-    triple := target_triple(target);
-    return lower_target(stream, view(triple), target, facts, verify, ranges);
+// Escape a string for LLVM metadata (`!DIFile`, `!DISubprogram`).
+fn dbg_escape_into(out: (&mut u8[]), s: (&[u8])) -> unit {
+    for i in s.len() {
+        ch := s[i];
+        if (ch == 34) || (ch == 92) {
+            out.push(92);
+            out.push(ch);
+        } else if (ch >= 32) && (ch <= 126) {
+            out.push(ch);
+        } else {
+            out.push(92);
+            out.push(hex_digit(u64(ch) >> 4));
+            out.push(hex_digit(u64(ch) & 15));
+        }
+    }
+    return ();
 }
-pub fn lower<a, b, c>(stream: &a [u8], triple: &b [u8], facts: (&c Facts), verify: u64, ranges: u64) -> Lowered {
-    return lower_target(stream, triple, 0, facts, verify, ranges);
+// Whether a trimmed LLVM instruction line inside a function should carry `, !dbg !N`.
+// Attaches to every call (required by the LLVM verifier for inlinable calls in debug functions),
+// stores, loads, branches, switches, returns, and unreachable; skips labels, comments, allocas,
+// phi nodes, and getelementptr (keeping pointer-chain patterns clean).
+fn dbg_wants_loc(line: (&[u8])) -> bool {
+    if (line.len() == 0) || (line[0] == 59) || (line[0] == 125) || (line[line.len() - 1] == 58) {
+        return false;
+    }
+    if starts(line, view("define ")) || starts(line, view("declare ")) {
+        return false;
+    }
+    if has(line, view(" = alloca ")) || has(line, view(" = getelementptr ")) || has(line, view(" = phi ")) {
+        return false;
+    }
+    return starts(line, view("call "))
+        || starts(line, view("store "))
+        || starts(line, view("br "))
+        || starts(line, view("ret "))
+        || starts(line, view("switch "))
+        || starts(line, view("unreachable"))
+        || has(line, view(" = call "))
+        || has(line, view(" = load "));
+}
+// Append ` !dbg !SP` immediately before the trailing `{` of a `define ... {` header.
+fn put_define_with_dbg(ir: (&mut u8[]), line: (&[u8]), sp_id: u64) -> unit {
+    if (sp_id != 0) && (line.len() >= 2) && (line[line.len() - 1] == 123) {
+        put(&mut ir, line[0..line.len() - 1]);
+        put(&mut ir, view("!dbg !"));
+        num(&mut ir, sp_id);
+        put(&mut ir, view(" {\n"));
+        return ();
+    }
+    put(&mut ir, line);
+    ir.push(10);
+    return ();
+}
+// Intern a source path into a `!DIFile` metadata node id (starting from `next_id`).
+fn dbg_intern_file(fmap: (&mut Map), fdefs: (&mut u8[]), next_id: (&mut u64), path: (&[u8])) -> u64 {
+    hit := map_get(&fmap, path);
+    if hit != 0 {
+        return hit - 1;
+    }
+    id := *next_id;
+    *next_id = id + 1;
+    map_put(&mut fmap, path, id);
+    mut slash = path.len();
+    for i in path.len() {
+        if path[i] == 47 {
+            slash = i;
+        }
+    }
+    put(&mut fdefs, view("!"));
+    num(&mut fdefs, id);
+    put(&mut fdefs, view(" = !DIFile(filename: \""));
+    if slash < path.len() {
+        dbg_escape_into(&mut fdefs, path[slash + 1..path.len()]);
+        put(&mut fdefs, view("\", directory: \""));
+        dbg_escape_into(&mut fdefs, path[0..slash]);
+    } else {
+        dbg_escape_into(&mut fdefs, path);
+        put(&mut fdefs, view("\", directory: \""));
+    }
+    put(&mut fdefs, view("\")\n"));
+    return id;
+}
+
+pub fn lower_for<a, b>(stream: &a [u8], target: u64, facts: (&b Facts), verify: u64, ranges: u64, cpu: u64 = 0, emit_funcs: u64 = 1) -> Lowered {
+    triple := target_triple(target);
+    return lower_target(stream, view(triple), target, facts, verify, ranges, cpu, emit_funcs);
+}
+pub fn lower<a, b, c>(stream: &a [u8], triple: &b [u8], facts: (&c Facts), verify: u64, ranges: u64, cpu: u64 = 0, emit_funcs: u64 = 1) -> Lowered {
+    return lower_target(stream, triple, 0, facts, verify, ranges, cpu, emit_funcs);
 }
 // What lowering the functions [lo, hi) adds to the module: the lifted bodies, the native lines (and
 // which of them are a function's own body, whose tokens are its references), and the names it adds
@@ -9946,6 +10604,13 @@ fn lower_range<a, b, c, d, e, g, h>(l: (&a mut L), lines: (&b u8[][]), funcs: (&
             }
         }
         if (pinned == 0) & (l.fail == 0) {
+            if (l.emit_funcs != 0) && (l.fn_siteline != 0) && (l.fn_sitepath.len() != 0) && !starts(view(f.name), view("rt_")) && !eq(view(f.name), view("_start")) {
+                put(&mut p.functions, view(";gfn "));
+                num(&mut p.functions, l.fn_siteline);
+                p.functions.push(32);
+                put(&mut p.functions, view(l.fn_sitepath));
+                p.functions.push(10);
+            }
             put(&mut p.functions, view("define "));
             put(&mut p.functions, view(result_type(l.retw)));
             put(&mut p.functions, view(" @\""));
@@ -9953,7 +10618,7 @@ fn lower_range<a, b, c, d, e, g, h>(l: (&a mut L), lines: (&b u8[][]), funcs: (&
             // A frame over a page is probed as the native backend's is (optimize::probe_frames).
             put(&mut p.functions, view("\"("));
             put(&mut p.functions, view(param_list_refs(l.nargs, l.ownrefs)));
-            put(&mut p.functions, view(") \"probe-stack\"=\"inline-asm\""));
+            put(&mut p.functions, view(") \"probe-stack\"=\"inline-asm\" \"frame-pointer\"=\"non-leaf\""));
             // A runtime fast path stays small only if what it falls back to stays out of it: a
             // `rt_..._slow` function is cold and never inlined, and the threaded allocator paths are
             // never inlined into the one-thread wrappers (rt_alloc, rt_free), whose frame would
@@ -10254,10 +10919,10 @@ fn lift_pieces<a, b, c, d, e, g, h>(l: (&a mut L), lines: (&b u8[][]), funcs: (&
     jobs::give_all(&mut js);
     return out;
 }
-fn lower_target<a, b, c>(stream: &a [u8], triple: &b [u8], target: u64, facts: (&c Facts), verify: u64, ranges: u64) -> Lowered {
+fn lower_target<a, b, c>(stream: &a [u8], triple: &b [u8], target: u64, facts: (&c Facts), verify: u64, ranges: u64, cpu: u64, emit_funcs: u64) -> Lowered {
     mut excluded = u8[][];
     while true {
-        lowered := lower_attempt(stream, triple, target, facts, verify, ranges, &excluded);
+        lowered := lower_attempt(stream, triple, target, facts, verify, ranges, cpu, emit_funcs, &excluded);
         if (lowered.wrong.len() == 0) || (verify != 0) {
             return lowered;
         }
@@ -10265,9 +10930,9 @@ fn lower_target<a, b, c>(stream: &a [u8], triple: &b [u8], target: u64, facts: (
             excluded.push(copy(view(lowered.wrong[i])));
         }
     }
-    return lower_attempt(stream, triple, target, facts, verify, ranges, &excluded);
+    return lower_attempt(stream, triple, target, facts, verify, ranges, cpu, emit_funcs, &excluded);
 }
-fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, facts: (&c Facts), verify: u64, ranges: u64, excluded: (&d u8[][])) -> Lowered {
+fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, facts: (&c Facts), verify: u64, ranges: u64, cpu: u64, emit_funcs: u64, excluded: (&d u8[][])) -> Lowered {
     lines := split_lines(stream);
     // Names the stream declared `.weak` (content-addressed drop helpers, which two objects may
     // both define). A function kept native is re-declared below; it must keep weak binding, not
@@ -10287,7 +10952,25 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
             set_add(&mut weak, view(sub(wl, 6, wl.len())));
         }
     }
-    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, pairs: u64[], pair_widths: u64[], pair_written: u64[], fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], edptr: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], hstable: u64[], hesc: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], elo: u64[], ehi: u64[], blk: 0, body_blk: 0, r11sym: u8[], sitepath: u8[], siteline: 0, sitecol: 0, sitedefs: u8[], sitecount: 0, rdiconst: u8[], slotconst: u8[][], lastload: u8[], lastconst: u8[], regconst: u8[][], kmap: map_new(16), kvals: u8[][], ebase: u64[], eptrs: set_new(16), evals: set_new(16), eslot: u64[], dnames: u8[][], dmap: map_new(16), hmap: map_new(16), cmap: map_new(16), sl_start: u64[], sl_lines: u64[], proof: u64[], rline: 0, ranges: ranges, sigs: set_new(16), nargs: 6, retw: 2, rdxdead: 0, pvreg: u8[][], pvptr: u8[][], pvoff: i64[], asy: u8[][], asx: u8[][], rdxcallee: u8[], curline: u8[], sigerr: u8[], wrong: u8[][], area: u8[][], areaopen: 0, argwritten: 0, ffis: set_new(16), ffimem: set_new(16), entryextra: u8[], outer: u8[][], outeropen: 0, why: host::env(view("GRAIL_LLVM_WHY")), refsigs: set_new(16), takenslots: u8[][], ownrefs: 0, argptrs: u8[][], grail_bodies: set_new(16), xpend: 0, xstale: 18446744073709551615 };
+    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, pairs: u64[], pair_widths: u64[], pair_written: u64[], fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], edptr: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], hstable: u64[], hesc: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], elo: u64[], ehi: u64[], blk: 0, body_blk: 0, r11sym: u8[], sitepath: u8[], siteline: 0, sitecol: 0, fn_sitepath: u8[], fn_siteline: 0, sitedefs: u8[], sitecount: 0, rdiconst: u8[], slotconst: u8[][], lastload: u8[], lastconst: u8[], regconst: u8[][], kmap: map_new(16), kvals: u8[][], ebase: u64[], eptrs: set_new(16), evals: set_new(16), eslot: u64[], dnames: u8[][], dmap: map_new(16), hmap: map_new(16), cmap: map_new(16), sl_start: u64[], sl_lines: u64[], proof: u64[], rline: 0, ranges: ranges, sigs: set_new(16), nargs: 6, retw: 2, rdxdead: 0, pvreg: u8[][], pvptr: u8[][], pvoff: i64[], asy: u8[][], asx: u8[][], rdxcallee: u8[], curline: u8[], sigerr: u8[], wrong: u8[][], area: u8[][], areaopen: 0, argwritten: 0, ffis: set_new(16), ffimem: set_new(16), entryextra: u8[], outer: u8[][], outeropen: 0, why: host::env(view("GRAIL_LLVM_WHY")), refsigs: set_new(16), takenslots: u8[][], ownrefs: 0, argptrs: u8[][], grail_bodies: set_new(16), xpend: 0, xstale: 18446744073709551615, has_round: u64((target == 1) || ((target == 0) && (cpu >= 1))), emit_funcs: emit_funcs, shared_names: u8[][], shared_masks: u64[] };
+    if ranges != 0 {
+        for i in facts.items.len() {
+            q := &facts.items[i];
+            if (q.kind == 2) & (q.a < 6) {
+                mut found = l.shared_names.len();
+                for k in l.shared_names.len() {
+                    if eq(view(l.shared_names[k]), view(q.fn)) {
+                        found = k;
+                    }
+                }
+                if found == l.shared_names.len() {
+                    l.shared_names.push(copy(view(q.fn)));
+                    l.shared_masks.push(0);
+                }
+                l.shared_masks[found] = l.shared_masks[found] | (1 << q.a);
+            }
+        }
+    }
     // A function whose address is taken (`NAME(%rip)`, or named by data such as a vtable) is
     // called through a pointer by code that does not know its signature, so it keeps the six-word
     // form: an indirect call passes six words and reads rax:rdx, and LLVM must never see a call
@@ -10297,15 +10980,16 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
     for i in lines.len() {
         ntaken += rip_bound(view(lines[i]));
     }
-    mut taken = set_new(ntaken + excluded.len() + 1);
+    mut taken = set_new(ntaken + 1);
     for i in lines.len() {
         rip_symbols(&mut taken, view(lines[i]));
     }
+    mut bad_sigs = set_new(excluded.len() + 1);
     for i in excluded.len() {
-        set_add(&mut taken, view(excluded[i]));
+        set_add(&mut bad_sigs, view(excluded[i]));
     }
-    l.sigs = signatures(facts, &taken);
-    l.refsigs = ref_signatures(facts, &l.sigs);
+    l.sigs = signatures(facts, &taken, &bad_sigs);
+    l.refsigs = ref_signatures(facts, &l.sigs, &taken);
     l.ffis = ffi_signatures(facts);
     l.ffimem = ffi_memory(facts);
     mut nb = 0;
@@ -10384,7 +11068,7 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
     mut functions = u8[];
     mut native_lines = u8[][];
     native_lines.push(copy(view(".text")));
-    mut native_tokens = set_new(funcs.len() * 64 + 64);
+    mut native_tokens = set_new(funcs.len() * 64 + data.len() * 4 + 64);
     // The functions are lowered in pieces, one forked copy each when the build's jobserver has
     // tokens free (compiler/jobs.grl), and the pieces are put back in order: the module text is the
     // same whatever the count, because every name a function's lowering makes is its own.
@@ -10435,7 +11119,7 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
         num(&mut guard, i);
         put(&mut functions, view("define internal {i64, i64} @\""));
         put(&mut functions, view(l.sibnames[i]));
-        put(&mut functions, view("\"(ptr nocapture nofree dereferenceable(24) align 8 %a0, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5, i64 %d, i64 %l)"));
+        put(&mut functions, view("\"(ptr nocapture nofree dereferenceable(24) align 8 %a0, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5, i64 %d, i64 %l) \"frame-pointer\"=\"non-leaf\""));
         atomics_inline(&mut functions, l.target);
         put(&mut functions, view(" {\n"));
         put(&mut functions, view(l.sibbodies[i]));
@@ -10543,7 +11227,11 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
                     put(&mut ir, view(", "));
                 }
                 if (q < 6) && (((drefs >> q) & 1) != 0) {
-                    put(&mut ir, view("ptr"));
+                    if ((drefs >> (q + 6)) & 1) != 0 {
+                        put(&mut ir, view("ptr noalias"));
+                    } else {
+                        put(&mut ir, view("ptr"));
+                    }
                 } else {
                     put(&mut ir, view("i64"));
                 }
@@ -10597,6 +11285,19 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
             exported_local = true;
         }
     }
+    // DWARF line-table metadata (`LineTablesOnly`): `!4` CU, `!5`/`!6` module flags, `!8` subroutine
+    // type, `!9` empty type list, then `!10..` files/subprograms/locations.
+    mut dbg_fmap = map_new(32);
+    mut dbg_defs = u8[];
+    mut dbg_next: u64 = 10;
+    mut dbg_primary_file: u64 = 0;
+    mut dbg_has_sp: u64 = 0;
+    mut pend_fn_line: u64 = 0;
+    mut pend_fn_path = u8[];
+    mut cur_sp: u64 = 0;
+    mut cur_loc: u64 = 0;
+    mut cur_loc_line: u64 = 0;
+    mut cur_loc_col: u64 = 0;
     // The function text line by line, trimmed as split_lines trims, without copying a line unless
     // it has to change: almost every line goes straight to the module.
     mut at: u64 = 0;
@@ -10615,8 +11316,69 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
             b0 -= 1;
         }
         raw := functions[a0..b0];
+        if (emit_funcs != 0) && starts(raw, view(";gfn ")) {
+            mut p = 5;
+            mut ln: u64 = 0;
+            while (p < raw.len()) && (raw[p] >= 48) && (raw[p] <= 57) {
+                ln = ln * 10 + u64(raw[p] - 48);
+                p += 1;
+            }
+            if (p < raw.len()) && (raw[p] == 32) {
+                p += 1;
+            }
+            pend_fn_line = ln;
+            exchange(&mut pend_fn_path, copy(raw[p..raw.len()]));
+            continue;
+        }
+        if (emit_funcs != 0) && starts(raw, view(";gsite ")) {
+            if cur_sp != 0 {
+                mut p = 7;
+                mut ln: u64 = 0;
+                while (p < raw.len()) && (raw[p] >= 48) && (raw[p] <= 57) {
+                    ln = ln * 10 + u64(raw[p] - 48);
+                    p += 1;
+                }
+                if (p < raw.len()) && (raw[p] == 32) {
+                    p += 1;
+                }
+                mut cl: u64 = 0;
+                while (p < raw.len()) && (raw[p] >= 48) && (raw[p] <= 57) {
+                    cl = cl * 10 + u64(raw[p] - 48);
+                    p += 1;
+                }
+                if (ln != 0) && ((ln != cur_loc_line) || (cl != cur_loc_col)) {
+                    cur_loc = dbg_next;
+                    dbg_next += 1;
+                    cur_loc_line = ln;
+                    cur_loc_col = cl;
+                    put(&mut dbg_defs, view("!"));
+                    num(&mut dbg_defs, cur_loc);
+                    put(&mut dbg_defs, view(" = !DILocation(line: "));
+                    num(&mut dbg_defs, ln);
+                    put(&mut dbg_defs, view(", column: "));
+                    num(&mut dbg_defs, cl);
+                    put(&mut dbg_defs, view(", scope: !"));
+                    num(&mut dbg_defs, cur_sp);
+                    put(&mut dbg_defs, view(")\n"));
+                }
+            }
+            continue;
+        }
+        if (raw.len() == 1) && (raw[0] == 125) {
+            cur_sp = 0;
+            cur_loc = 0;
+            cur_loc_line = 0;
+            cur_loc_col = 0;
+            put(&mut ir, raw);
+            ir.push(10);
+            continue;
+        }
         if (target == 0) && !starts(raw, view("define ")) && (!exported_local || !has(raw, view(".L"))) {
             put(&mut ir, raw);
+            if (cur_loc != 0) && dbg_wants_loc(raw) {
+                put(&mut ir, view(", !dbg !"));
+                num(&mut ir, cur_loc);
+            }
             ir.push(10);
             continue;
         }
@@ -10626,6 +11388,56 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
         }
         line := view(renamed);
         at := define_name_at(line);
+        mut sp_for_def: u64 = 0;
+        if (at != 0) && (pend_fn_line != 0) && (pend_fn_path.len() != 0) {
+            mut e = at;
+            while (e < line.len()) && (line[e] != 34) {
+                e += 1;
+            }
+            mut disp = sub(line, at, e);
+            if (target != 0) && ends(view(disp), view(".ll")) {
+                disp = sub(view(disp), 0, disp.len() - 3);
+            }
+            fid := dbg_intern_file(&mut dbg_fmap, &mut dbg_defs, &mut dbg_next, view(pend_fn_path));
+            if dbg_primary_file == 0 {
+                dbg_primary_file = fid;
+            }
+            sp_for_def = dbg_next;
+            dbg_next += 1;
+            dbg_has_sp = 1;
+            put(&mut dbg_defs, view("!"));
+            num(&mut dbg_defs, sp_for_def);
+            put(&mut dbg_defs, view(" = distinct !DISubprogram(name: \""));
+            dbg_escape_into(&mut dbg_defs, view(disp));
+            put(&mut dbg_defs, view("\", scope: !"));
+            num(&mut dbg_defs, fid);
+            put(&mut dbg_defs, view(", file: !"));
+            num(&mut dbg_defs, fid);
+            put(&mut dbg_defs, view(", line: "));
+            num(&mut dbg_defs, pend_fn_line);
+            put(&mut dbg_defs, view(", type: !8, scopeLine: "));
+            num(&mut dbg_defs, pend_fn_line);
+            put(&mut dbg_defs, view(", spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !5)\n"));
+            cur_sp = sp_for_def;
+            cur_loc = dbg_next;
+            dbg_next += 1;
+            cur_loc_line = pend_fn_line;
+            cur_loc_col = 0;
+            put(&mut dbg_defs, view("!"));
+            num(&mut dbg_defs, cur_loc);
+            put(&mut dbg_defs, view(" = !DILocation(line: "));
+            num(&mut dbg_defs, pend_fn_line);
+            put(&mut dbg_defs, view(", column: 0, scope: !"));
+            num(&mut dbg_defs, cur_sp);
+            put(&mut dbg_defs, view(")\n"));
+            pend_fn_line = 0;
+            exchange(&mut pend_fn_path, u8[]);
+        } else if at != 0 {
+            cur_sp = 0;
+            cur_loc = 0;
+            cur_loc_line = 0;
+            cur_loc_col = 0;
+        }
         if at != 0 {
             mut e = at;
             while (e < line.len()) && (line[e] != 34) {
@@ -10636,9 +11448,9 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
                 fname = sub(view(fname), 0, fname.len() - 3);
             }
             if !set_has(&native_tokens, view(fname)) & !eq(view(fname), view("_start")) {
-                put(&mut ir, view("define internal "));
-                put(&mut ir, view(sub(line, 7, line.len())));
-                ir.push(10);
+                mut defline = copy(view("define internal "));
+                put(&mut defline, view(sub(line, 7, line.len())));
+                put_define_with_dbg(&mut ir, view(defline), sp_for_def);
                 continue;
             }
         }
@@ -10665,18 +11477,110 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
                 base = sub(view(base), 0, base.len() - 3);
             }
             if set_has(&weak, view(base)) {
-                put(&mut ir, view("define weak_odr "));
-                put(&mut ir, view(rename_line(view(sub(line, 7, line.len())), &exported)));
-                ir.push(10);
+                mut defline = copy(view("define weak_odr "));
+                put(&mut defline, view(rename_line(view(sub(line, 7, line.len())), &exported)));
+                put_define_with_dbg(&mut ir, view(defline), sp_for_def);
                 continue;
             }
         }
-        put(&mut ir, view(rename_line(line, &exported)));
-        ir.push(10);
+        rl := rename_line(line, &exported);
+        if at != 0 {
+            put_define_with_dbg(&mut ir, view(rl), sp_for_def);
+        } else {
+            put(&mut ir, view(rl));
+            if (cur_loc != 0) && dbg_wants_loc(view(rl)) {
+                put(&mut ir, view(", !dbg !"));
+                num(&mut ir, cur_loc);
+            }
+            ir.push(10);
+        }
+    }
+    if dbg_has_sp != 0 {
+        put(&mut ir, view("!llvm.dbg.cu = !{!5}\n"));
+        put(&mut ir, view("!llvm.module.flags = !{!6, !7}\n"));
+        put(&mut ir, view("!5 = distinct !DICompileUnit(language: DW_LANG_C99, file: !"));
+        num(&mut ir, dbg_primary_file);
+        put(&mut ir, view(", producer: \"grail\", isOptimized: true, runtimeVersion: 0, emissionKind: LineTablesOnly)\n"));
+        put(&mut ir, view("!6 = !{i32 7, !\"Dwarf Version\", i32 4}\n"));
+        put(&mut ir, view("!7 = !{i32 2, !\"Debug Info Version\", i32 3}\n"));
+        put(&mut ir, view("!8 = !DISubroutineType(types: !9)\n"));
+        put(&mut ir, view("!9 = !{}\n"));
+        put(&mut ir, view(dbg_defs));
+    }
+    // Function table (`grail_funcs`, 16-byte `{ptr @fn, ptr @name}` entries matching native.grl) so
+    // LLVM runtime panics walk `%rbp` and name caller frames. Runtime functions (`rt_*`) and `_start`
+    // carry `null` names so backtraces skip them without misattributing their address ranges.
+    if emit_funcs != 0 {
+        mut fn_used = u8[][];
+        mut fn_seen = set_new(l.lifted.len() * 2 + 16);
+        for i in l.lifted.len() {
+            base := view(l.lifted[i]);
+            if set_has(&fn_seen, base) {
+                continue;
+            }
+            set_add(&mut fn_seen, base);
+            mut sym = copy(base);
+            if target != 0 {
+                put(&mut sym, view(".ll"));
+            }
+            is_rt := starts(base, view("rt_")) || eq(base, view("_start"));
+            if !is_rt {
+                // Name string constant in .rodata
+                put(&mut ir, view("@\"grail.fnm."));
+                put(&mut ir, view(sym));
+                put(&mut ir, view("\" = private unnamed_addr constant ["));
+                num(&mut ir, base.len() + 1);
+                put(&mut ir, view(" x i8] c\""));
+                for k in base.len() {
+                    ch := base[k];
+                    if (ch < 32) || (ch == 34) || (ch == 92) || (ch > 126) {
+                        ir.push(92);
+                        ir.push(hex_digit(u64(ch) >> 4));
+                        ir.push(hex_digit(u64(ch) & 15));
+                    } else {
+                        ir.push(ch);
+                    }
+                }
+                put(&mut ir, view("\\00\", align 1\n"));
+                put(&mut ir, view("@\"grail.fn."));
+                put(&mut ir, view(sym));
+                put(&mut ir, view("\" = private constant {ptr, ptr} {ptr @\""));
+                put(&mut ir, view(sym));
+                put(&mut ir, view("\", ptr @\"grail.fnm."));
+                put(&mut ir, view(sym));
+                put(&mut ir, view("\"}, section \"grail_funcs\", align 8\n"));
+            } else {
+                put(&mut ir, view("@\"grail.fn."));
+                put(&mut ir, view(sym));
+                put(&mut ir, view("\" = private constant {ptr, ptr} {ptr @\""));
+                put(&mut ir, view(sym));
+                put(&mut ir, view("\", ptr null}, section \"grail_funcs\", align 8\n"));
+            }
+            mut uname = copy(view("grail.fn."));
+            put(&mut uname, view(sym));
+            fn_used.push(uname);
+        }
+        put(&mut ir, view("@\"grail.fn.rt_abort.cold\" = private constant {ptr, ptr} {ptr @\"rt_abort.cold\", ptr null}, section \"grail_funcs\", align 8\n"));
+        fn_used.push(copy(view("grail.fn.rt_abort.cold")));
+        if fn_used.len() != 0 {
+            put(&mut ir, view("@llvm.used = appending global ["));
+            num(&mut ir, fn_used.len());
+            put(&mut ir, view(" x ptr] ["));
+            for q in fn_used.len() {
+                if q != 0 {
+                    put(&mut ir, view(", "));
+                }
+                put(&mut ir, view("ptr @\""));
+                put(&mut ir, view(fn_used[q]));
+                ir.push(34);
+            }
+            put(&mut ir, view("], section \"llvm.metadata\"\n"));
+        }
     }
     // Native functions, then data: labels the IR references become hidden globals, and the
     // assembler-temporary .L ones are renamed everywhere they appear.
     mut native = u8[];
+    mut native_funcs = u8[][];
     for i in native_lines.len() {
         line := view(native_lines[i]);
         // A lifted function's `.type` line would name, in the native object, a symbol that is
@@ -10685,8 +11589,47 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
         if (starts(line, view(".type ")) || starts(line, view(".size "))) && set_has(&lifted, view(type_name(line))) {
             continue;
         }
+        if (emit_funcs != 0) && (line.len() > 1) && (line[line.len() - 1] == 58) && (line[0] != 46) && (line[0] != 32) && (line[0] != 9) {
+            native_funcs.push(sub(line, 0, line.len() - 1));
+        }
         put(&mut native, view(rename_line(line, &exported)));
         native.push(10);
+    }
+    if (emit_funcs != 0) && (native_funcs.len() != 0) {
+        mut nfuncs = u8[];
+        mut nnames = u8[];
+        mut nidx: u64 = 0;
+        for i in native_funcs.len() {
+            nf := view(native_funcs[i]);
+            is_rt := starts(nf, view("rt_")) || eq(nf, view("_start"));
+            put(&mut nfuncs, view(".quad "));
+            put(&mut nfuncs, nf);
+            nfuncs.push(10);
+            if is_rt {
+                put(&mut nfuncs, view(".quad 0\n"));
+            } else {
+                nidx += 1;
+                put(&mut nfuncs, view(".quad .Lgnf"));
+                num(&mut nfuncs, nidx);
+                nfuncs.push(10);
+                put(&mut nnames, view(".Lgnf"));
+                num(&mut nnames, nidx);
+                put(&mut nnames, view(":\n.asciz \""));
+                for k in nf.len() {
+                    ch := nf[k];
+                    if (ch == 34) || (ch == 92) {
+                        nnames.push(92);
+                    }
+                    nnames.push(ch);
+                }
+                put(&mut nnames, view("\"\n"));
+            }
+        }
+        put(&mut native, view(".section grail_funcs,\"a\"\n.p2align 3\n"));
+        put(&mut native, view(nfuncs));
+        put(&mut native, view(".section .rodata\n"));
+        put(&mut native, view(nnames));
+        put(&mut native, view(".text\n"));
     }
     for i in data.len() {
         line := view(data[i]);
@@ -10740,11 +11683,16 @@ fn lower_attempt<a, b, c, d>(stream: &a [u8], triple: &b [u8], target: u64, fact
     mut sig_codes = u64[];
     for i in facts.items.len() {
         f := &facts.items[i];
-        if (f.kind == FACT_SIGNATURE) && set_has(&lifted, view(f.fn)) {
-            code := set_get(&l.sigs, view(f.fn));
-            if code != 0 {
+        if f.kind == FACT_SIGNATURE {
+            if set_has(&lifted, view(f.fn)) {
+                code := set_get(&l.sigs, view(f.fn));
+                if code != 0 {
+                    sig_names.push(copy(view(f.fn)));
+                    sig_codes.push(code + (ref_mask(&l, view(f.fn)) << 32));
+                }
+            } else if f.a > 6 {
                 sig_names.push(copy(view(f.fn)));
-                sig_codes.push(code + (ref_mask(&l, view(f.fn)) << 32));
+                sig_codes.push(f.a * 4 + 2);
             }
         }
     }

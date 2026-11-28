@@ -25,6 +25,8 @@ export const compilerSources = ['native', 'lexer', 'ownership', 'machine', 'opti
 // every module, and a case that counts compiler runs would find none) nor leave anything in a home
 // directory. Tools started by this one inherit the same store, so one run compiles the runtime
 // once. A tool that inspects the store sets its own (tools/cache-test.mjs).
+export const externalCacheDir = process.env.GRAIL_CACHE_DIR ?? null;
+export const sharedCacheDir = join(root, '.work/build-cache/shared');
 if (!process.env.GRAIL_CACHE_DIR) {
   const stores = join(root, '.work/build-cache');
   const store = join(stores, `run-${process.pid}`);
@@ -32,7 +34,7 @@ if (!process.env.GRAIL_CACHE_DIR) {
   if (existsSync(stores)) {
     for (const name of readdirSync(stores)) {
       const pid = /^run-(\d+)$/.exec(name)?.[1];
-      if (!pid || !existsSync(`/proc/${pid}`)) rmSync(join(stores, name), { recursive: true, force: true });
+      if (pid && !existsSync(`/proc/${pid}`)) rmSync(join(stores, name), { recursive: true, force: true });
     }
   }
   process.env.GRAIL_CACHE_DIR = store;
@@ -597,7 +599,7 @@ export function buildReleaseCompiler({ log = () => {} } = {}) {
   // The lowering is always the current native compiler's: an older release binary would carry
   // an older LLVM backend, and a miscompile in it into the new compiler.
   log(`lowering with ${native}`);
-  const run = spawnSync(native, [...flags, '--backend=llvm', `${stem}.s`, ...compilerSources], { encoding: 'utf8', env: compilerEnvironment(), maxBuffer: 1 << 26 });
+  const run = spawnSync(native, [...flags, '--backend=llvm', '--range-facts', `${stem}.s`, ...compilerSources], { encoding: 'utf8', env: compilerEnvironment(), maxBuffer: 1 << 26 });
   if (run.status !== 0) throw new Error(`lowering the compiler through the LLVM backend failed (${run.signal ?? run.status}): ${(run.stderr ?? '').trim().split('\n')[0]}`);
   log('clang -O2');
   // Cut in parts and compiled in parallel (`grail llvm-compile`): one clang -O2 over the whole
@@ -667,7 +669,7 @@ export function compileOnly(compiler, inputs, directory, { target = hostTarget, 
 }
 // backend 'llvm' (or GRAIL_BACKEND=llvm) lowers through compiler/llvm.grl: the compiler writes
 // NAME.s.ll beside NAME.s, clang -O2 compiles it, and the object joins the link.
-export function compileProgram(compiler, inputs, directory, { target = hostTarget, overflow = 'checked', name = 'program', interfaces = null, runtime = join(root, 'compiler/runtime.grl'), osRuntime = join(root, 'compiler/os-linux.grl'), darwin = join(root, 'compiler/darwin.grl'), frameworks = [], sdk = process.env.GRAIL_SDK, sign = false, backend = process.env.GRAIL_BACKEND ?? 'native', verifyFacts = process.env.GRAIL_VERIFY_FACTS === '1', rangeFacts = process.env.GRAIL_RANGE_FACTS === '1', extra = [], output = null, progress = false } = {}) {
+export function compileProgram(compiler, inputs, directory, { target = hostTarget, overflow = 'checked', name = 'program', interfaces = null, runtime = join(root, 'compiler/runtime.grl'), osRuntime = join(root, 'compiler/os-linux.grl'), darwin = join(root, 'compiler/darwin.grl'), frameworks = [], sdk = process.env.GRAIL_SDK, sign = false, backend = process.env.GRAIL_BACKEND ?? 'native', verifyFacts = process.env.GRAIL_VERIFY_FACTS === '1', rangeFacts = process.env.GRAIL_RANGE_FACTS === '1', extra = [], output = null, progress = false, cacheDir = undefined } = {}) {
   targetName(target);
   const started = Date.now();
   if (!['checked', 'wrap'].includes(overflow)) throw new Error('overflow must be checked or wrap');
@@ -717,9 +719,10 @@ export function compileProgram(compiler, inputs, directory, { target = hostTarge
       // no stamp, or a half-written artifact: build it
     }
     try {
-      if (statSync(shared).size > 0) {
+      if (statSync(shared).size > 0 && (!llvm || statSync(`${shared}.ll`).size > 0)) {
         mkdirSync(dirname(executable), { recursive: true });
         copyFileSync(shared, executable);
+        if (llvm) copyFileSync(`${shared}.ll`, `${assembly}.ll`);
         if (process.platform !== 'win32') chmodSync(executable, 0o755);
         writeFileSync(stampFile, stamp);
         if (progress) status('Fresh', `${name} (from the shared build cache)`);
@@ -739,7 +742,14 @@ export function compileProgram(compiler, inputs, directory, { target = hostTarge
   const linkArgs = linkInputs(readFileSync(assembly, 'utf8'), dirname(resolve(root, inputs[0])));
   if (llvm) {
     const object = join(directory, `${name}.ll.o`);
-    command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[target]}`, ...moduleFlags(target), '-O2', '-c', `${assembly}.ll`, '-o', object]);
+    const llvmEnv = cacheDir ? { ...process.env, GRAIL_CACHE_DIR: cacheDir } : process.env;
+    command([
+      compiler, 'llvm-compile', `${assembly}.ll`, object, emulations[target],
+      process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[target]}`, ...moduleFlags(target), '-c',
+    ], { env: llvmEnv });
+    for (const part of readdirSync(directory).filter(f => f.startsWith(`${basename(assembly)}.ll.`))) {
+      rmSync(join(directory, part), { force: true });
+    }
     linkArgs.unshift(object);
   }
   const framework = machoTargets.includes(target) ? frameworkArguments(frameworks, { directory, sdk }) : { args: [] };
@@ -754,6 +764,9 @@ export function compileProgram(compiler, inputs, directory, { target = hostTarge
     if (!existsSync(shared)) {
       mkdirSync(dirname(shared), { recursive: true });
       copyFileSync(built, shared);
+    }
+    if (llvm && existsSync(`${assembly}.ll`) && !existsSync(`${shared}.ll`)) {
+      copyFileSync(`${assembly}.ll`, `${shared}.ll`);
     }
   } catch {
     // a full disk must not fail a good build; the worktree's artefact is the authority

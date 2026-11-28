@@ -1,5 +1,38 @@
 ## Unreleased
 
+- LLVM runtime performance & debug line tables:
+  - Emitted LLVM `noalias` on exclusive `&mut` pointer parameters (`ptr noalias`) for safe Grail functions (encoded in
+    `FACT_SIGNATURE` / `.iface` signatures, never on raw `CPtr` or FFI wrappers).
+  - Lifted `rt_push`, `rt_push4`, `rt_pushb`, and `rt_pushb_checked` fast paths inline in `compiler/llvm.grl` with
+    distinct header (`!tbaa !1`) and element (`!tbaa !3`) TBAA metadata and cold `rt_push*_slow` growth fallbacks.
+  - Hoisted `--range-facts` shared-parameter lookup once per module, kept `generic_element` and `FACT_LOOP_STABLE`
+    optimizations active alongside `--range-facts`, and enabled `--range-facts` by default in `--release` builds.
+  - Emitted DWARF `LineTablesOnly` metadata (`!DICompileUnit`, `!DISubprogram`, `!DILocation`) from `.gsite LINE COL PATH`
+    directives in `compiler/llvm.grl` so `--backend=llvm` / `--release` binaries carry exact `file:line:col` line tables
+    for `gdb`, `perf`, and `llvm-dwarfdump`.
+- Systems-programming language ergonomics & formatter support:
+  - Added uppercase radix prefixes (`0X`, `0B`, `0O`) alongside existing `0x`/`0b`/`0o` and `_` digit separators.
+  - Added `u8`-typed byte character literals (`b'a'`, `b'\n'`, `b'\\'`, `b'\xHH'`) in runtime expressions, comptime
+    constants, `match` patterns (including ranges), and `grail fmt`.
+  - Added unary bitwise NOT (`~x`) for signed and unsigned integer types (runtime, comptime, and `grail fmt`).
+  - Added generic `size_of<T>()` / `align_of<T>()` alongside `size_of(T)` / `align_of(T)` (extended to Grail structs,
+    fixed arrays, and raw pointers) plus compile-time `offset_of(T, field)` (with nested field paths) and balanced
+    `@assert(...)` skipping for array types like `[f32; 4]`.
+
+- Parallel and per-module incremental LLVM builds: quoted `@"memset"`/`@"memcpy"`/`@"memmove"`, taught `define_name_of`
+  and `split_part` to handle both quoted/unquoted defines and vtable/global-initializer symbol closure, added auto-growing
+  `Set` rehashing in `compiler/llvm.grl`, enabled multi-file per-module `grail build --release --cache` with implicit
+  `clone`/`math`/`@derive`/qualified module dependencies in `compiler/cli.grl`, upgraded `tools/native.mjs`
+  `compileProgram()` to parallel `grail llvm-compile` with shared cache support, and switched
+  `abundance/tools/build-ab-engine.mjs` to the cached release compiler + per-module incremental LLVM cache.
+- LLVM runtime codegen speedups: lifted >6-argument address-taken closures and cross-module native >6-argument callers
+  to LLVM `-O2` (emitting `FACT_SIGNATURE` for closures and exporting >6-arg native signatures across `.iface`), and
+  lifted `rt_load_sized`/`rt_store_sized`, `rt_atb`/`rt_atbu`/`rt_slotb`/`rt_slotw`, `rt_f32_bits`/`rt_f32_from_bits`,
+  and IEEE-754 bit-exact `rt_f64_floor`/`rt_f64_ceil`/`rt_f64_trunc`/`rt_f64_round`/`rt_f64_min`/`rt_f64_max`.
+- LLVM runtime panic locations and caller backtraces: added `"frame-pointer"="non-leaf"` to LLVM functions, emitted
+  `grail_funcs` tables and registered `rt_sites` on `--backend=llvm` builds, added missing `site_hint` calls on
+  `rt_pop`/`rt_aslot`/`rt_abort`/lifted byte accessors, continued `%rbp` caller-frame walking in `rt_fail_where` after
+  printing ` --> file:line:col`, and made direct `rt_abort()` print `error: runtime abort` with its backtrace.
 - **Breaking:** `&T?` is an optional reference, `(&T)?` (and `&mut T?` is `(&mut T)?`), the type a lookup returns.
   A reference to an optional is written `&(T?)`; `(&T)?` still works. `x == None` on an optional reference
   no longer needs the reference to have a source, and a temporary one ends at the test, so
